@@ -9,6 +9,8 @@ package runtime
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -216,6 +218,14 @@ func TestAnEarlyResolutionDoesNotBypassAnUnsatisfiedDependency(t *testing.T) {
 // report could never even carry, since it has no such member) is refused, an
 // unknown request is refused, a normal resolution succeeds, an identical
 // retry is idempotent, and a conflicting second answer is refused.
+//
+// SCOPE: this proves the one thing reachable from inside this process - that
+// Supervisor.ResolveDecision itself never accepts an unauthenticated caller,
+// and never builds an authority of any kind but "operator" for one it does
+// accept. It does NOT exercise a rejected non-owner CALLER: that proof is the
+// OS file-permission boundary of the control endpoint itself
+// (runtime/control_endpoint_ownership_test.go), which this method is reached
+// through and does not re-implement.
 func TestSupervisorResolveDecisionEnforcesAuthorityAndIdempotency(t *testing.T) {
 	fixture := newFleetFixture(t, 4)
 	supervisor := fixture.supervisorWithRealHolds()
@@ -251,5 +261,77 @@ func TestSupervisorResolveDecisionEnforcesAuthorityAndIdempotency(t *testing.T) 
 	conflicting.DecisionOutcomeValue = orchestration.DecisionDeny
 	if _, err := supervisor.ResolveDecision(conflicting); err == nil {
 		t.Fatal("expected a conflicting second answer to be refused")
+	}
+}
+
+// TestPlaceWorkUnitHoldNeverRacesActivation is #508 review B3: placing a hold
+// and activating the frontier must be ONE atomic decision, not two reads that
+// can interleave. supervisor.PlaceWorkUnitHold and activateGraphFrontier now
+// share s.orchestrationMu, so exactly one of two things is true after a Tick
+// and a PlaceWorkUnitHold call race on the SAME ready unit: the hold won,
+// and the unit is NEVER activated afterwards either; or activation won, and
+// the hold is refused with a clear reason - never both succeeding, which
+// would mean a hold attached to a unit that is already running, or an
+// already-held unit got activated anyway.
+//
+// Run with -race to also catch any unsynchronized access the lock was
+// supposed to prevent.
+func TestPlaceWorkUnitHoldNeverRacesActivation(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		fixture := newFleetFixture(t, 4)
+		supervisor := fixture.supervisorWithRealHolds()
+		view := fixture.adoptGraph(supervisor, "claude", 1, []orchestration.WorkUnit{
+			{ID: "a", Purpose: "land the schema", Role: domain.RoleImplementer, Issue: fleetFirstIssue},
+		})
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		var holdErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, holdErr = supervisor.PlaceWorkUnitHold(ControlRequest{
+				GraphID: view.GraphID, UnitID: "a", Operator: decisionOperator(), Note: "racing the activation pass",
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = supervisor.Tick(context.Background())
+		}()
+		close(start)
+		wg.Wait()
+
+		activations, err := fixture.store.WorkUnitActivations(view.GraphID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, activated := activations["a"]
+		holdPlaced := holdErr == nil
+
+		if holdPlaced && activated {
+			t.Fatalf("iteration %d: BOTH the hold and activation succeeded - a hold attached to an already-activated unit", i)
+		}
+		if holdPlaced {
+			// The hold won: it must bar activation on every LATER pass too,
+			// not just the racing one.
+			if _, err := supervisor.Tick(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			fixture.clock.advance(61 * time.Second)
+			if activations, err = fixture.store.WorkUnitActivations(view.GraphID); err != nil {
+				t.Fatal(err)
+			}
+			if _, activated := activations["a"]; activated {
+				t.Fatalf("iteration %d: a successfully placed hold did not bar a later activation", i)
+			}
+			continue
+		}
+		// Activation won: the hold must be refused for the right reason, not
+		// silently dropped or accepted as if it had been placed in time.
+		if holdErr == nil || !strings.Contains(holdErr.Error(), "already activated") {
+			t.Fatalf("iteration %d: activation won the race but the hold was not refused as already-activated: %v", i, holdErr)
+		}
 	}
 }

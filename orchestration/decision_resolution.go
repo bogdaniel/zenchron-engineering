@@ -90,6 +90,20 @@ func (o DecisionOutcome) Validate() error {
 // recognized kind, and anything else - including an empty one a worker's
 // report could never produce in the first place - is refused, closed, rather
 // than treated as probably fine.
+//
+// What this constant and its Validate() prove, precisely: a resolution is
+// REFUSED unless something upstream already stamped AuthorityKindOperator,
+// and the one caller that does so (runtime.Supervisor.ResolveDecision)
+// hardcodes it - there is no field through which any caller, worker or
+// otherwise, can request a different kind. What they do NOT prove: that the
+// caller reaching that Supervisor method really is the operator. THAT
+// guarantee is #398's control endpoint - a Unix socket, mode 0600, inside a
+// mode-0700 state directory - and it is an OS file-permission fact, not
+// something this package re-implements or re-authorizes. A worker's provider
+// process has no path to that socket in its own sandboxed invocation; see
+// runtime/control_endpoint_ownership_test.go for the first direct tests of
+// that boundary's own refusal behavior, and provider_isolation.go for the
+// separate, pre-existing claim about what a sandboxed provider can reach.
 const AuthorityKindOperator = "operator"
 
 // DecisionResolutionAuthority is who authorized a resolution. It is built
@@ -209,6 +223,19 @@ type DecisionRequestRef struct {
 	// superseded by its own author, or otherwise withdrawn. ResolveDecision
 	// refuses such a request deterministically rather than answering it.
 	Live bool
+	// ExpectedOutcomeKind, when non-empty, is the ONLY outcome kind this
+	// request's own contract permits - prescribed by the request itself, never
+	// chosen by whoever answers it. A WorkUnitHold always names one: a gate
+	// is inherently allow_deny, so nothing can resolve it with a bounded-text
+	// or selected-option answer that was never its question.
+	//
+	// Empty means the request's source does not yet prescribe one. #473's
+	// decision_request message carries no outcome-kind or option-set member
+	// today, so a message-sourced request cannot be constrained here without
+	// #473 adding one - which this package does not do on #473's behalf
+	// (docs/orchestration.md names the exact boundary). Until it does,
+	// ResolveDecision accepts any of the three bounded kinds for those.
+	ExpectedOutcomeKind string
 }
 
 // ResolveDecision validates a proposed answer against the live request and
@@ -239,6 +266,10 @@ func ResolveDecision(ref DecisionRequestRef, current *HandoffSubject, outcome De
 	}
 	if err := outcome.Validate(); err != nil {
 		return DecisionResolution{}, err
+	}
+	if ref.ExpectedOutcomeKind != "" && outcome.Kind != ref.ExpectedOutcomeKind {
+		return DecisionResolution{}, fmt.Errorf(
+			"decision request %s requires a %s outcome, not %s", ref.ID, ref.ExpectedOutcomeKind, outcome.Kind)
 	}
 	if reason != "" {
 		if err := boundedDecisionText("decision resolution reason", reason, maxDecisionReasonBytes); err != nil {

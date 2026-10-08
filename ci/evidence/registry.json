@@ -205,6 +205,19 @@
       ]
     },
     {
+      "name": "decision",
+      "why": "Durable, authorized DecisionResolution (#508): the external-authority half of the DecisionRequest lifecycle, and the WorkGraph unit hold #472's readiness-owner seam.",
+      "race": true,
+      "sources": [
+        "runtime/decision*.go",
+        "orchestration/decision_resolution.go",
+        "orchestration/workgraph_hold.go"
+      ],
+      "tests": [
+        "runtime/decision*_test.go"
+      ]
+    },
+    {
       "name": "planning",
       "why": "The Engineering Planner: plans, templates, the plan reconciler and plan store.",
       "sources": [

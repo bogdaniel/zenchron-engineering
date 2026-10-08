@@ -52,15 +52,15 @@ func (s *SQLiteOperationStore) PlaceWorkUnitHold(hold orchestration.WorkUnitHold
 	if !found {
 		return orchestration.WorkUnitHold{}, false, fmt.Errorf("work unit hold %s was neither inserted nor found", hold.ID)
 	}
-	storedDocument, err := CanonicalJSON(stored)
-	if err != nil {
-		return orchestration.WorkUnitHold{}, false, err
-	}
-	// Compared as canonical JSON, not struct equality: a decoded time.Time
-	// carries no monotonic reading and a fixed UTC location, so it is never
-	// == to the value that was encoded even when it names the identical
-	// instant.
-	if string(storedDocument) != string(document) {
+	// Compared by IDENTITY CONTENT alone - Purpose and RequestedBy, both
+	// plain strings - never by RequestedAt or a canonical-document byte
+	// comparison that would include it (#508 review B4). RequestedAt is
+	// stamped fresh by the clock on every call, including an identical
+	// retry after a lost reply; comparing it would make that retry its own
+	// conflict rather than the idempotent replay it is. Purpose and
+	// RequestedBy are the only caller-stated content a hold has, and the
+	// graph/unit/id are already proven equal by the lookup itself.
+	if stored.Purpose != hold.Purpose || stored.RequestedBy != hold.RequestedBy {
 		return orchestration.WorkUnitHold{}, false, fmt.Errorf(
 			"work unit %s of graph %s already has a hold placed with different content; a hold is placed at most once", hold.UnitID, hold.GraphID)
 	}
@@ -108,11 +108,17 @@ func (s *SQLiteOperationStore) WorkGraphHolds(graphID string) (map[string]orches
 	}
 	waits := map[string]orchestration.DecisionWait{}
 	for _, hold := range holds {
-		_, resolved, err := s.DecisionResolutionByRequestID(hold.ID)
+		resolution, resolved, err := s.DecisionResolutionByRequestID(hold.ID)
 		if err != nil {
 			return nil, err
 		}
-		if resolved {
+		// ONLY an explicit allow lifts a hold (#508 review B2). A hold's own
+		// Ref always prescribes an allow_deny outcome (orchestration.WorkUnitHold.Ref),
+		// so "resolved but not allow" means exactly one thing: an authorized
+		// deny. The unit stays held - never auto-run denied work - and an
+		// unknown/malformed stored outcome fails the same way: closed, not
+		// treated as permission.
+		if resolved && resolution.Outcome.Kind == orchestration.DecisionAllowDeny && resolution.Outcome.Value == orchestration.DecisionAllow {
 			continue
 		}
 		waits[hold.UnitID] = hold.DecisionWait()
@@ -187,4 +193,53 @@ func (s *SQLiteOperationStore) DecisionResolutionByRequestID(requestID string) (
 		return orchestration.DecisionResolution{}, false, fmt.Errorf("stored decision resolution is corrupt: %w", err)
 	}
 	return resolution, true, nil
+}
+
+// OpenDecisionRequestsForRun is #508's run-level wait eligibility: every live
+// (not superseded), not yet resolved #473 decision_request message THIS run
+// itself admitted. Reconcile holds a run with any open here - plans no
+// further operation, so it spends no provider process or scheduler slot -
+// until each one resolves. A worker cannot shorten this list: nothing it can
+// write resolves a request, and the set is read fresh every pass from durable
+// state alone.
+func (s *SQLiteOperationStore) OpenDecisionRequestsForRun(runID string) ([]orchestration.EngineeringMessage, error) {
+	rows, err := s.db.Query(`SELECT document FROM orchestration_messages WHERE run_id = ?`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var messages []orchestration.EngineeringMessage
+	for rows.Next() {
+		var document string
+		if err := rows.Scan(&document); err != nil {
+			return nil, err
+		}
+		var message orchestration.EngineeringMessage
+		if err := strictJSON([]byte(document), &message); err != nil {
+			return nil, fmt.Errorf("stored message is unreadable: %w", err)
+		}
+		if err := message.Validate(); err != nil {
+			return nil, fmt.Errorf("stored message is corrupt: %w", err)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Live is computed over THIS run's own full message set: a draft can only
+	// supersede a prior one from the same unit of the same scope, and a
+	// run's items are all one unit, so every superseding reference is already
+	// present in what was just read.
+	var open []orchestration.EngineeringMessage
+	for _, message := range orchestration.Live(messages) {
+		if message.Kind != orchestration.KindDecisionRequest {
+			continue
+		}
+		if _, resolved, err := s.DecisionResolutionByRequestID(message.ID); err != nil {
+			return nil, err
+		} else if !resolved {
+			open = append(open, message)
+		}
+	}
+	return open, nil
 }

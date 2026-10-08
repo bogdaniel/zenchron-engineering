@@ -433,84 +433,9 @@ func (s *runState) epoch() int64 {
 
 func (s *runState) epochKey() string { return "epoch-" + strconv.FormatInt(s.epoch(), 10) }
 
-// externalWaitReasons is the CLOSED set of waits that are somebody else's turn.
-//
-// An execution wall budget bounds the work this system does. It must not be
-// spent waiting for a human to read a pull request, for an operator to sign a
-// provider back in, or for a rate limit to lift: none of that is the runtime
-// working, and a budget that burns through it forces an operator to size their
-// engineering budget around how fast people answer email. A run that reached
-// its goal and sat overnight awaiting review used to die of
-// run_wall_budget_exhausted, which made the #63 review loop unusable at any
-// budget that still bounded runaway work.
-//
-// The set is closed and fail-closed: a reason that is not listed here SPENDS
-// the budget. A new wait pauses the clock only when somebody decides it should,
-// which is the safe direction for a bound whose whole job is to end things.
-// ReasonGoalStateReached is the wait a run settles into when it has done
-// everything it can: the candidate is produced, assurance has judged it, and
-// what remains is a person in the forge. It is named because a PLAN reads it -
-// a stage whose run reached its goal state has produced its output, and the
-// stages that depend on it can proceed while the run itself waits for review.
-const ReasonGoalStateReached = "goal_state_reached"
-
-// ReasonReviewBudgetExhausted retains accepted review work after its finite
-// continuation allowance is spent. Delivery does not imply remediation was published.
-const ReasonReviewBudgetExhausted = "review_wall_budget_exhausted"
-
-var externalWaitReasons = map[string]bool{
-	ReasonDeterministicFailureUnchanged: true,
-	// Waiting for a person: review, merge authority, a policy decision only an
-	// operator can make.
-	ReasonGoalStateReached:          true,
-	ReasonReviewBudgetExhausted:     true,
-	"awaiting_authority":            true,
-	"authority_blocked":             true,
-	"authority_unknown":             true,
-	"requested_privilege_expansion": true,
-	// Waiting for the operator's own accounts and tools.
-	"execution_provider_account_unavailable": true,
-	"execution_provider_quota":               true,
-	// Rate limiting is the other capacity wait. It is the provider declining to
-	// be asked yet, not the runtime working, and leaving it out charged an
-	// operator for their provider's backoff.
-	"execution_provider_rate_limited": true,
-	// The host cannot reach the provider at all. A machine with no network is
-	// not performing engineering work, and #238's whole defect was charging
-	// exactly this interval to the active-work budget - so leaving it out here
-	// would fix the detection and keep the accounting lie.
-	"execution_provider_unavailable":   true,
-	"assurance_dependency_unavailable": true,
-	// Every host verification slot is held by another run (#490). The run
-	// executes nothing while it waits, and charging it would turn the host's
-	// verification capacity into this run's run_wall_budget_exhausted - the
-	// exact conversion of capacity exhaustion into failure #490 forbids. The
-	// wait is bounded by the verifications holding the slots, each of which
-	// runs under its own physical deadline.
-	ReasonVerificationCapacity: true,
-	ReasonWorkCapacity:         true,
-	ReasonObservationCapacity:  true,
-	// The operator has to free disk before anything can proceed; the run is not
-	// working while it waits for them.
-	"state_storage_exhausted": true,
-	// The controller could not install the brokered candidate-Git boundary, so
-	// it performed no execution at all. Nothing is running and an operator has
-	// to repair the installation.
-	"candidate_guard_unavailable": true,
-	// A dead owner's process still holds the candidate (#168); nothing was
-	// dispatched and an operator has to stop it.
-	"candidate_writer_alive": true,
-	// The controller stopped. The run is not working, and it is waiting for a
-	// supervisor to exist again rather than for anything it can do itself.
-	"controller_shutdown":  true,
-	WatchWaitingGitHubAuth: true,
-	// Waiting for a human decision about the source or the pull request.
-	WatchWaitingOptInRemoved:       true,
-	"source_intent_changed":        true,
-	"source_closed":                true,
-	"pull_request_closed_unmerged": true,
-	"candidate_external_changed":   true,
-}
+// ReasonGoalStateReached, ReasonReviewBudgetExhausted, ReasonDecisionPending
+// and the externalWaitReasons closed set they belong to live in
+// external_wait_reasons.go.
 
 // activeElapsed is the time this run has been the SYSTEM'S turn, derived from
 // the durable journal rather than from a stopwatch: every interval it excludes
@@ -1780,6 +1705,25 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 			return r.settle(state, live, reason)
 		}
 		desired, wanted := state.plan()
+		if wanted {
+			// #508: a run that has itself asked a live decision - a #473
+			// decision_request this build has not yet admitted a
+			// DecisionResolution for - plans no further operation. Checked
+			// only here, once an operation is actually about to be
+			// attempted: a run with nothing left to plan anyway
+			// (goal_state_reached) is not relabeled over a question that
+			// does not block it, and #473's own OpenDecisions already makes
+			// it visible. This is the ONLY place the wait is enforced, so it
+			// holds for every caller of Reconcile, under every driver, the
+			// same way.
+			open, err := r.deps.Store.OpenDecisionRequestsForRun(runID)
+			if err != nil {
+				return Outcome{}, err
+			}
+			if len(open) > 0 {
+				return r.settle(state, Waiting, ReasonDecisionPending)
+			}
+		}
 		// No progress means PRODUCING the same failure again, not looking at it
 		// again. An observation pass changes nothing and must not spend the
 		// budget bounded remediation needs: a current-head CI or review finding

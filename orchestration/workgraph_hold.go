@@ -90,9 +90,12 @@ func WorkUnitHoldID(graphID, unitID string) (string, error) {
 // Ref normalizes this hold into the request ResolveDecision validates
 // against. A hold carries no exact-subject binding of its own - what it gates
 // is a unit's ACTIVATION, which has no subject yet - and it is always live: it
-// is placed at most once and is never superseded.
+// is placed at most once and is never superseded. ExpectedOutcomeKind is
+// always allow_deny: a gate is inherently a pass/fail question, never a
+// bounded-text or selected-option one, and nothing resolving it may answer
+// otherwise (#508 review B2/B5).
 func (h WorkUnitHold) Ref() DecisionRequestRef {
-	return DecisionRequestRef{ID: h.ID, Scope: h.GraphID + ":" + h.UnitID, Live: true}
+	return DecisionRequestRef{ID: h.ID, Scope: h.GraphID + ":" + h.UnitID, Live: true, ExpectedOutcomeKind: DecisionAllowDeny}
 }
 
 // DecisionWait renders this hold exactly as #472's seam expects it: an

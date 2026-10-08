@@ -218,8 +218,8 @@ func TestWorkUnitHoldIdentityAndRendering(t *testing.T) {
 		t.Fatalf("a well-formed hold should validate, got %v", err)
 	}
 	ref := hold.Ref()
-	if ref.ID != id || !ref.Live || ref.Subject != nil {
-		t.Fatalf("hold.Ref() is not the expected unconditionally-live, subject-free request: %+v", ref)
+	if ref.ID != id || !ref.Live || ref.Subject != nil || ref.ExpectedOutcomeKind != DecisionAllowDeny {
+		t.Fatalf("hold.Ref() is not the expected unconditionally-live, subject-free, allow_deny-only request: %+v", ref)
 	}
 	wait := hold.DecisionWait()
 	if wait.Reference != id || wait.Detail != hold.Purpose {
@@ -231,5 +231,35 @@ func TestWorkUnitHoldIdentityAndRendering(t *testing.T) {
 	bad.RequestedBy = DecisionResolutionAuthority{Actor: "issue-7", AuthorityKind: "worker", Provenance: "message_report"}
 	if err := bad.Validate(); err == nil {
 		t.Fatal("expected a hold requested by a non-operator authority to be refused")
+	}
+}
+
+// TestResolveDecisionEnforcesAPrescribedOutcomeKind is #508 review B2/B5: a
+// WorkUnitHold always prescribes allow_deny (a gate is inherently pass/fail),
+// and nothing resolving it may answer in a different shape - never
+// selected_option, never free text, however the caller asks.
+func TestResolveDecisionEnforcesAPrescribedOutcomeKind(t *testing.T) {
+	id, err := WorkUnitHoldID("graph-1", "deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold := WorkUnitHold{
+		SchemaVersion: WorkUnitHoldSchemaVersion, ID: id, GraphID: "graph-1", UnitID: "deploy",
+		Purpose: "sign-off", RequestedBy: operatorAuthority("operator-1"), RequestedAt: decisionNow,
+	}
+	ref := hold.Ref()
+	if _, err := ResolveDecision(ref, nil, allowOutcome(), "", operatorAuthority("operator-1"), nil, decisionNow); err != nil {
+		t.Fatalf("expected an allow_deny answer to a hold to succeed, got %v", err)
+	}
+	mismatched := DecisionOutcome{Kind: DecisionSelectedOption, Value: "approach-b"}
+	if _, err := ResolveDecision(ref, nil, mismatched, "", operatorAuthority("operator-1"), nil, decisionNow); err == nil {
+		t.Fatal("expected a selected_option answer to an allow_deny-only hold to be refused")
+	}
+	// A request with no prescribed kind (today, every #473 decision_request
+	// message) is unconstrained: #508 does not invent a shape #473 never
+	// stated.
+	unconstrained := DecisionRequestRef{ID: "message-1", Scope: "batch-1", Live: true}
+	if _, err := ResolveDecision(unconstrained, nil, mismatched, "", operatorAuthority("operator-1"), nil, decisionNow); err != nil {
+		t.Fatalf("expected an unconstrained request to accept any bounded outcome kind, got %v", err)
 	}
 }

@@ -16,7 +16,8 @@ import (
 
 const workgraphUsage = "usage: zenchron-engineering autonomy workgraph " +
 	"{adopt <proposal.json> --agent <id> [--repo owner/name] [--text]|status <graph> [--text]|" +
-	"hold <graph> <unit> [--note <purpose>]|resolve <request-id> <outcome> [--note <reason>]} [--config <path>]"
+	"hold <graph> <unit> [--note <purpose>]|" +
+	"resolve <request-id> <outcome> [--kind allow_deny|selected_option|text] [--note <reason>]} [--config <path>]"
 
 // autonomyWorkGraph is the WorkGraph operator surface (#472, #508): adopt a
 // proposed revision, read one graph's units, dependencies and frontier, place
@@ -34,12 +35,23 @@ func autonomyWorkGraph(args []string, stdout io.Writer) (int, error) {
 		if len(args) < 3 || strings.HasPrefix(args[2], "--") {
 			return runtime.ExitInvalid, errors.New(workgraphUsage)
 		}
-		flags, err := parseAutonomyFlags(args[3:])
+		rest := args[3:]
+		// resolve's outcome SHAPE is a control-action parameter, not an
+		// autonomyFlags member (#508 review B5): extracted here so it never
+		// needs a line added to autonomy.go's shared flag struct.
+		var kind string
+		if args[0] == "resolve" {
+			var err error
+			if kind, rest, err = extractKindFlag(rest); err != nil {
+				return runtime.ExitInvalid, err
+			}
+		}
+		flags, err := parseAutonomyFlags(rest)
 		if err != nil {
 			return runtime.ExitInvalid, err
 		}
 		if args[0] == "resolve" {
-			return resolveDecision(flags, args[1], args[2], stdout)
+			return resolveDecision(flags, args[1], args[2], kind, stdout)
 		}
 		return holdWorkUnit(flags, args[1], args[2], stdout)
 	}

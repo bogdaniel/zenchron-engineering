@@ -171,14 +171,6 @@ func (s *Supervisor) PlaceWorkUnitHold(request ControlRequest) (orchestration.Wo
 	if !named {
 		return orchestration.WorkUnitHold{}, fmt.Errorf("work graph %s names no unit %s", graphID, unitID)
 	}
-	activations, err := s.deps.Store.WorkUnitActivations(graphID)
-	if err != nil {
-		return orchestration.WorkUnitHold{}, err
-	}
-	if _, activated := activations[unitID]; activated {
-		return orchestration.WorkUnitHold{}, fmt.Errorf(
-			"work unit %s of graph %s is already activated; a hold only gates a unit before its first activation", unitID, graphID)
-	}
 	id, err := orchestration.WorkUnitHoldID(graphID, unitID)
 	if err != nil {
 		return orchestration.WorkUnitHold{}, err
@@ -191,7 +183,27 @@ func (s *Supervisor) PlaceWorkUnitHold(request ControlRequest) (orchestration.Wo
 		},
 		RequestedAt: s.deps.Clock.Now(),
 	}
-	stored, _, err := s.deps.Store.PlaceWorkUnitHold(hold)
+	// THE SAME LOCK activateGraphFrontier holds across reading holds and
+	// activating a unit (#508 review B3): checking "not yet activated" and
+	// placing the hold must be one atomic step against that section, or a
+	// Tick racing between the two could activate the unit and leave an
+	// accepted "pre-activation" hold attached to a unit that is no longer
+	// pre-activation.
+	var stored orchestration.WorkUnitHold
+	err = func() error {
+		s.orchestrationMu.Lock()
+		defer s.orchestrationMu.Unlock()
+		activations, err := s.deps.Store.WorkUnitActivations(graphID)
+		if err != nil {
+			return err
+		}
+		if _, activated := activations[unitID]; activated {
+			return fmt.Errorf(
+				"work unit %s of graph %s is already activated; a hold only gates a unit before its first activation", unitID, graphID)
+		}
+		stored, _, err = s.deps.Store.PlaceWorkUnitHold(hold)
+		return err
+	}()
 	return stored, err
 }
 

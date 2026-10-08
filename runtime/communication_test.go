@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
@@ -209,6 +210,14 @@ func TestAFindingIsRoutedToItsOwnerAndGoesStale(t *testing.T) {
 // A DecisionRequest is visible as a wait on a human; a worker's attempt to
 // answer it is refused durably, and a StateUpdate claiming completion settles
 // neither the decision nor the item.
+//
+// A now genuinely WAITS on its own question (#508: runtime/decision_store.go
+// OpenDecisionRequestsForRun, wired into Reconcile) rather than merely
+// showing it as open while otherwise proceeding - #473 deliberately left the
+// authority/wait side unimplemented for #508 to supply, and this is the exact
+// behavior that landing was for. So this test no longer drives the whole
+// batch to settlement: A does not settle while its own question stands, by
+// design, and driving it further only proves that.
 func TestADecisionWaitsForAuthorityAndAnUpdateSettlesNothing(t *testing.T) {
 	fixture, worker := newMessagingFixture(t)
 	supervisor := fixture.supervisor()
@@ -220,12 +229,37 @@ func TestADecisionWaitsForAuthorityAndAnUpdateSettlesNothing(t *testing.T) {
 	// B claims completion in a state update and writes no handoff.
 	fixture.worker.set(runB, fleetNoHandoff)
 	worker.say(runB, messageDocument(t, orchestration.MessageDraft{Kind: orchestration.KindStateUpdate, Body: "done, 100% complete"}), false)
-	settled := fixture.drive(supervisor, view.BatchID)
-	if _, err := supervisor.Tick(context.Background()); err != nil {
-		t.Fatal(err)
+
+	// Drive until B has settled on its own missing handoff AND A has been
+	// admitted onto its own decision wait - never until the whole batch
+	// settles, because A correctly never does while its question is open.
+	var runARow EngineeringRun
+	var bSettled bool
+	for range 40 {
+		if _, err := supervisor.Tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		fixture.clock.advance(61 * time.Second)
+		row, found, err := fixture.store.Run(runA)
+		if err != nil || !found {
+			t.Fatalf("run A is unreadable: found=%t err=%v", found, err)
+		}
+		runARow = row
+		bSettled = itemFor(t, fixture.status(view.BatchID), runB).State == orchestration.ItemHandoffPending
+		if bSettled && runARow.Disposition == Waiting && runARow.Reason == ReasonDecisionPending {
+			break
+		}
 	}
-	if item := itemFor(t, settled, runB); item.State != orchestration.ItemHandoffPending {
+	if !bSettled {
+		t.Fatalf("B never settled on its missing handoff")
+	}
+	if item := itemFor(t, fixture.status(view.BatchID), runB); item.State != orchestration.ItemHandoffPending {
 		t.Fatalf("a state update moved B to %s", item.State)
+	}
+	// #508: A is genuinely held on the question it asked, not merely
+	// visible-but-unenforced.
+	if runARow.Disposition != Waiting || runARow.Reason != ReasonDecisionPending {
+		t.Fatalf("A is %s/%s, want it held on its own open decision (waiting/%s)", runARow.Disposition, runARow.Reason, ReasonDecisionPending)
 	}
 	status := fixture.status(view.BatchID)
 	if len(status.OpenDecisions) != 1 || status.OpenDecisions[0].Source.RunID != runA {

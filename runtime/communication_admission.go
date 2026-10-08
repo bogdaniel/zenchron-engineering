@@ -40,12 +40,23 @@ func batchMessageScope(store *SQLiteOperationStore, batch orchestration.Batch) (
 
 // communicationView is what an orchestrated invocation is shown: its own
 // unit, every unit's latest admitted handoff (the subjects a Finding may
-// name), its inbox, and the scope's open decisions.
+// name), its inbox, the scope's STILL OPEN decisions, and the minimal fact
+// behind each one that has since been resolved (#508).
 type communicationView struct {
-	Unit      string                             `json:"unit"`
-	Handoffs  map[string]string                  `json:"latest_handoffs,omitempty"`
-	Inbox     orchestration.Inbox                `json:"inbox"`
+	Unit     string              `json:"unit"`
+	Handoffs map[string]string   `json:"latest_handoffs,omitempty"`
+	Inbox    orchestration.Inbox `json:"inbox"`
+	// Decisions are the scope's decision_request messages that are live AND
+	// still unresolved. A resolved one is never shown here - it is shown in
+	// ResolvedDecisions instead, so a unit can never read an answered
+	// question as one still waiting on it.
 	Decisions []orchestration.EngineeringMessage `json:"open_decisions,omitempty"`
+	// ResolvedDecisions is the minimal, untrusted fact for each decision this
+	// scope asked and an authorized operator has since answered: the request
+	// id, the bounded outcome, optional rationale and who authorized it. It
+	// is DATA an invocation may read, never a new instruction or permission -
+	// framed exactly like an upstream producer's own report already is.
+	ResolvedDecisions []orchestration.DecisionResolution `json:"resolved_decisions,omitempty"`
 }
 
 // communicationContext renders the view for one orchestrated run.
@@ -62,10 +73,15 @@ func communicationContext(store *SQLiteOperationStore, run EngineeringRun) (stri
 	if !ok {
 		return "", fmt.Errorf("run %s is not an item of batch %s", run.ID, batch.ID)
 	}
+	open, resolved, err := splitDecisionsByResolution(store, scope.Admitted)
+	if err != nil {
+		return "", err
+	}
 	view := communicationView{
 		Unit: unit, Handoffs: map[string]string{},
-		Inbox:     orchestration.InboxFor(unit, scope.Admitted, current[unit]),
-		Decisions: orchestration.OpenDecisions(scope.Admitted),
+		Inbox:             orchestration.InboxFor(unit, scope.Admitted, current[unit]),
+		Decisions:         open,
+		ResolvedDecisions: resolved,
 	}
 	for id, subject := range scope.Subjects {
 		if latest := current[subject.Owner]; latest != nil && *latest == subject.Revision {
@@ -74,6 +90,27 @@ func communicationContext(store *SQLiteOperationStore, run EngineeringRun) (stri
 	}
 	rendered, err := CanonicalJSON(view)
 	return string(rendered), err
+}
+
+// splitDecisionsByResolution joins the scope's decision requests against the
+// durable decision_resolutions store (#508), which #473's OpenDecisions
+// cannot do on its own - it has no resolution store to consult. A request
+// with a durable resolution moves out of "open" and into "resolved" the
+// moment that resolution lands, never a tick later.
+func splitDecisionsByResolution(store *SQLiteOperationStore, admitted []orchestration.EngineeringMessage) (
+	open []orchestration.EngineeringMessage, resolved []orchestration.DecisionResolution, err error) {
+	for _, message := range orchestration.OpenDecisions(admitted) {
+		resolution, found, err := store.DecisionResolutionByRequestID(message.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if found {
+			resolved = append(resolved, resolution)
+			continue
+		}
+		open = append(open, message)
+	}
+	return open, resolved, nil
 }
 
 func batchUnitOf(batch orchestration.Batch, runID string) (string, bool) {

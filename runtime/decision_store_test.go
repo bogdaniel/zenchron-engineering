@@ -46,6 +46,10 @@ func allowOutcomeForStore() orchestration.DecisionOutcome {
 	return orchestration.DecisionOutcome{Kind: orchestration.DecisionAllowDeny, Value: orchestration.DecisionAllow}
 }
 
+func denyOutcomeForStore() orchestration.DecisionOutcome {
+	return orchestration.DecisionOutcome{Kind: orchestration.DecisionAllowDeny, Value: orchestration.DecisionDeny}
+}
+
 // TestPlaceWorkUnitHoldIsWriteOnceAcrossHandles proves a hold is placed at
 // most once, ever: a resubmission across a SEPARATE store handle finds the
 // hold already there, and a disagreeing second placement is refused rather
@@ -107,6 +111,85 @@ func TestWorkGraphHoldsExcludesResolvedUnits(t *testing.T) {
 	}
 	if _, stillHeld := waits["deploy"]; !stillHeld {
 		t.Fatal("an unrelated unit's hold disappeared along with the resolved one")
+	}
+}
+
+// TestWorkGraphHoldsStaysHeldOnADeniedResolution is #508 review B2: a
+// resolved-but-DENIED unit must never read as released. Only an explicit
+// allow lifts a hold; a deny is a durable, authorized answer, and the correct
+// one for WorkGraphHolds is to keep reporting the hold - never to auto-run
+// work a human explicitly refused.
+func TestWorkGraphHoldsStaysHeldOnADeniedResolution(t *testing.T) {
+	_, store, _ := openPair(t)
+	// "deploy"'s other dependencies are, by construction of this test,
+	// already satisfied - the hold is the ONLY thing between it and the
+	// frontier, exactly the shape the review asked for.
+	hold := testHold(t, "graph-1", "deploy", "sign-off before production deploy", decisionStoreNow)
+	if _, _, err := store.PlaceWorkUnitHold(hold); err != nil {
+		t.Fatal(err)
+	}
+	resolution := testResolution(t, hold.ID, hold.GraphID+":"+hold.UnitID, denyOutcomeForStore(), "not ready for production", decisionStoreNow)
+	if _, inserted, err := store.InsertDecisionResolution(resolution); err != nil || !inserted {
+		t.Fatalf("insert: inserted=%t err=%v", inserted, err)
+	}
+	waits, err := store.WorkGraphHolds("graph-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, stillHeld := waits["deploy"]; !stillHeld {
+		t.Fatal("a DENIED decision released its hold; denied work must never become runnable")
+	}
+	if waits["deploy"].Reference != hold.ID {
+		t.Fatalf("the still-held unit's reference changed: %+v", waits["deploy"])
+	}
+}
+
+// TestPlaceWorkUnitHoldIsIdempotentAcrossAClockAdvanceAndRestart is #508
+// review B4: RequestedAt is stamped fresh by the clock on every call, so an
+// identical retry after a lost reply - minutes later, or after a restart -
+// must still be recognized as the SAME hold, not a disagreeing one. Only
+// Purpose and RequestedBy are the hold's actual content; RequestedAt is not.
+func TestPlaceWorkUnitHoldIsIdempotentAcrossAClockAdvanceAndRestart(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := testHold(t, "graph-1", "deploy", "sign-off", decisionStoreNow)
+	stored, placed, err := store.PlaceWorkUnitHold(first)
+	if err != nil || !placed {
+		t.Fatalf("place: placed=%t err=%v", placed, err)
+	}
+	// The identical request, stamped by the clock MUCH later - a lost reply's
+	// retry, or a client that resubmits after giving up - must find the SAME
+	// hold, not a conflict.
+	retried := testHold(t, "graph-1", "deploy", "sign-off", decisionStoreNow.Add(2*time.Hour))
+	again, placed, err := store.PlaceWorkUnitHold(retried)
+	if err != nil || placed {
+		t.Fatalf("retry across a clock advance: placed=%t err=%v (want found, not placed)", placed, err)
+	}
+	if again.ID != stored.ID || again.RequestedAt != stored.RequestedAt {
+		t.Fatalf("a retry returned a DIFFERENT hold instead of the durable original: original=%+v retry=%+v", stored, again)
+	}
+	// Across a restart too.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	afterRestart := testHold(t, "graph-1", "deploy", "sign-off", decisionStoreNow.Add(48*time.Hour))
+	again, placed, err = reopened.PlaceWorkUnitHold(afterRestart)
+	if err != nil || placed || again.RequestedAt != stored.RequestedAt {
+		t.Fatalf("retry after restart: placed=%t err=%v again=%+v, want the original %+v", placed, err, again, stored)
+	}
+	// A SUBSTANTIVELY different re-placement - a different purpose - is still
+	// a genuine conflict, clock aside.
+	disagreeing := testHold(t, "graph-1", "deploy", "a completely different purpose", decisionStoreNow.Add(48*time.Hour))
+	if _, _, err := reopened.PlaceWorkUnitHold(disagreeing); err == nil || !strings.Contains(err.Error(), "placed at most once") {
+		t.Fatalf("expected a substantively different re-placement to be refused as a conflict, got %v", err)
 	}
 }
 

@@ -247,6 +247,15 @@ recomputes on its own next read, and nothing here starts a provider or
 activates a unit directly. A resolution is bound to the exact request it
 answers (`orchestration.DecisionResolutionID`): an identical retry after a lost
 reply finds the same resolution, and a conflicting second answer is refused.
+
+A hold's own request always prescribes an `allow_deny` outcome — a gate is
+inherently pass/fail, never a bounded-text or selected-option question — and
+only an explicit **allow** lifts it. A **deny** is a durable, authorized
+answer too, but it leaves the unit held: nothing here ever auto-runs work a
+human explicitly refused. Lifting a denied hold, if that is ever wanted, is a
+deliberate second governed action, not an automatic consequence of resolving
+the first.
+
 See `docs/control-plane.md` for the authority these two actions share with
 every other governed verb.
 
