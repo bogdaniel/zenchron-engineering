@@ -1,0 +1,40 @@
+# Grandfathered file-size baseline (AGENTS.md section 4). Historical, not an exception list.
+# One path, a tab, and the frozen ceiling: the file's physical line count at the pinned revision
+#   001efd613a40b4b367c6617085e40a24286fac47 (origin/main, measured 2026-10-08 with scripts/check_file_sizes.py).
+# A listed file passes up to its ceiling and fails above it unless file-size-exceptions.tsv grants a bounded limit.
+# Never add entries or raise a ceiling here; lower or delete an entry when a file shrinks. An entry for a file now
+# at or below 1,000 lines, deleted, or untracked is stale and fails until removed. Changes require human review.
+cmd/zenchron-engineering/autonomy.go	1532
+cmd/zenchron-engineering/autonomy_test.go	2393
+cmd/zenchron-engineering/operator.go	1435
+cmd/zenchron-engineering/plan.go	1253
+cmd/zenchron-engineering/serve.go	1362
+domain/plan.go	1030
+runtime/claude_stream_test.go	1251
+runtime/cli_agent.go	1750
+runtime/config.go	1365
+runtime/connectivity_test.go	1162
+runtime/controller.go	1556
+runtime/doctor.go	1611
+runtime/event_payload.go	1573
+runtime/git.go	1193
+runtime/git_authority.go	1183
+runtime/git_authority_test.go	1766
+runtime/git_target_test.go	1395
+runtime/github_rest.go	1133
+runtime/github_test.go	1317
+runtime/operations.go	3780
+runtime/plan_closed_loop_test.go	1526
+runtime/plan_reconciler.go	2436
+runtime/plan_reconciler_test.go	2015
+runtime/plan_service.go	1868
+runtime/planner.go	1014
+runtime/provider_progress_coalescing_test.go	1112
+runtime/publication_identity_test.go	1030
+runtime/reconciler.go	2342
+runtime/reconciler_test.go	2030
+runtime/sandbox.go	1730
+runtime/supervisor.go	1178
+runtime/supervisor_test.go	2524
+runtime/watch_matrix_test.go	1167
+runtime/watch_test.go	1007
