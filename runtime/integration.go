@@ -229,6 +229,17 @@ func fetchExactCommit(dir, sourceDir, commit, tree string) error {
 // reason - a bad object, a locked index, an environment failure - is
 // aborted and its real cause is returned as an error, never mislabeled a
 // conflict.
+//
+// A merge Git itself already judged successful can still leave this
+// function unable to OBSERVE whether it advanced HEAD, if the post-merge
+// read itself fails. That is never reported as advanced=false: an unknown
+// mutation is not a proven no-op, and collapsing the two would let a caller
+// skip the destructive-cleanup path for a workspace that may genuinely be
+// mutated. It is reported as a *WorkspaceIntegrityError instead - the same
+// vocabulary every other "this package can no longer vouch for the
+// workspace" case in this file uses - so a caller routes it to the
+// runtime's existing integrity-failure recovery rather than this function
+// guessing.
 func mergeFetchedCommit(dir, commit string) (conflicted, advanced bool, paths []string, err error) {
 	before, err := gitOutput(dir, "rev-parse", "HEAD")
 	if err != nil {
@@ -249,12 +260,25 @@ func mergeFetchedCommit(dir, commit string) (conflicted, advanced bool, paths []
 		}
 		return true, false, paths, nil
 	}
+	if afterMergeBeforeHeadRead != nil {
+		afterMergeBeforeHeadRead(dir)
+	}
 	after, err := gitOutput(dir, "rev-parse", "HEAD")
 	if err != nil {
-		return false, false, nil, err
+		return false, false, nil, &WorkspaceIntegrityError{
+			Detail: fmt.Sprintf("could not observe HEAD after a merge Git already judged successful: %v", err),
+		}
 	}
 	return false, before != after, nil, nil
 }
+
+// afterMergeBeforeHeadRead is a test seam: it runs after a merge attempt has
+// already been judged successful by Git and before this function reads HEAD
+// to decide whether it actually advanced - the exact window a test needs to
+// inject an observation failure against a merge that genuinely already
+// happened, the same pattern runtime/git.go's afterCommitGates/
+// afterCommitUpdateRef already use for Commit's own post-mutation reads.
+var afterMergeBeforeHeadRead func(dir string)
 
 // statusEntry is one record of `git status --porcelain=v1 -z`: the two-
 // letter index/worktree code and the path it names.

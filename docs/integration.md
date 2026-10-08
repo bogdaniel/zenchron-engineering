@@ -178,16 +178,17 @@ record.
   repositories; it does not add an "integrator" unit kind to
   `runtime/workgraph.go`'s `activateWorkUnit`, and does not choose which role
   in #64's catalogue triggers `IntegrateInputs` instead of an ordinary
-  provider invocation. That wiring is the natural extension point once #473's
-  communication API and #480's objective-to-team compilation land; until
-  then, `IntegrateInputs` is available to be called from a run's execution
-  path the same way any other candidate operation is.
-- **No #473 Finding/DecisionRequest emission yet.** `integration.Result`'s
-  `Conflict` is already the complete typed content a Finding or
-  DecisionRequest needs (kind, bounded detail, bounded paths); translating it
-  into #473's actual message once that protocol stabilizes is a few lines at
-  the call site, not a redesign here. Until then, a caller reads `Result`
-  directly.
+  provider invocation. That wiring is the natural extension point once #480's
+  objective-to-team compilation lands; until then, `IntegrateInputs` is
+  available to be called from a run's execution path the same way any other
+  candidate operation is.
+- **No #473 message emission yet.** #473's typed communication protocol has
+  merged into main (`orchestration.EngineeringMessage`, `MessageKind`).
+  `integration.Result`'s `Conflict` is already the complete typed content a
+  finding needs (kind, bounded detail, bounded paths); translating it into a
+  real `EngineeringMessage` is a few lines at the call site, not a redesign
+  here - but those lines do not exist yet, and this ticket does not add
+  them. Until then, a caller reads `Result` directly.
 - **Semantic/uncertain classification has no automatic caller yet.** This
   ticket does not invent a second verification engine: whether a clean
   merge's combination broke something is answered by the existing

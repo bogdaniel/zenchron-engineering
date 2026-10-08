@@ -7,6 +7,7 @@ package runtime
 // each of those three fixes specifically.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -308,4 +309,58 @@ func assertWorkspaceAtRevision(t *testing.T, dir, revision string) {
 	if head = strings.TrimSpace(head); head != revision {
 		t.Fatalf("workspace is at %s, want it discarded back to %s", short12(head), short12(revision))
 	}
+}
+
+// TestIntegrateInputsTreatsPostMergeObservationFailureAsUnknownNotNoOp
+// proves the third re-review's remaining finding (C3): a merge Git itself
+// already judged successful, followed by a failure to OBSERVE whether it
+// advanced HEAD, must never be reported as "no mutation" - an unknown
+// mutation state is not a proven no-op. The injected failure happens AFTER
+// a real `git merge` has already completed, standing in for a transient
+// read failure on an otherwise-successful mutation, never for a merge that
+// did not happen.
+func TestIntegrateInputsTreatsPostMergeObservationFailureAsUnknownNotNoOp(t *testing.T) {
+	root, origin, base := integrationFixture(t)
+	a := cloneAt(t, root, "run-a", origin, base)
+	aCommit := commitFile(t, a, "a.txt", "alpha\n", "add alpha")
+	b := cloneAt(t, root, "run-b", origin, base)
+	bCommit := commitFile(t, b, "b.txt", "beta\n", "add beta")
+
+	integrationWS := cloneAt(t, root, "run-integrate", origin, base)
+	headPath := filepath.Join(integrationWS.Dir, ".git", "HEAD")
+	withAfterMergeBeforeHeadRead(t, func(dir string) {
+		if dir != integrationWS.Dir {
+			return
+		}
+		original, err := os.ReadFile(headPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(headPath); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.WriteFile(headPath, original, 0600) })
+	})
+
+	contract, err := integration.NewContract("graph-1", "integrate", base,
+		orchestration.WorkUnitInputs{workUnitInput("a", aCommit), workUnitInput("b", bCommit)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := sourcesFor(map[string]string{"a": a.Dir, "b": b.Dir})
+
+	if _, err := IntegrateInputs(&integrationWS, contract, sources); err == nil {
+		t.Fatal("a post-merge HEAD observation failure was silently treated as success or as a clean no-op")
+	} else if !errors.As(err, new(*WorkspaceIntegrityError)) {
+		t.Fatalf("expected a *WorkspaceIntegrityError for an unobservable post-merge state, got %T: %v", err, err)
+	}
+}
+
+// withAfterMergeBeforeHeadRead installs afterMergeBeforeHeadRead for the
+// duration of the test, the same seam pattern runtime/git.go's
+// afterCommitGates/afterCommitUpdateRef already establish.
+func withAfterMergeBeforeHeadRead(t *testing.T, hook func(dir string)) {
+	t.Helper()
+	afterMergeBeforeHeadRead = hook
+	t.Cleanup(func() { afterMergeBeforeHeadRead = nil })
 }
