@@ -26,11 +26,15 @@ type updaterHarness struct {
 	successor    ControllerBinding
 }
 
-func (h *updaterHarness) observe(context.Context) (RevisionRecord, error) {
+func (h *updaterHarness) observe(context.Context) (TrustedMainView, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.trusted, h.observeErr
+	return TrustedMainView{TrustedMain: h.trusted, MainHead: h.trusted.Revision}, h.observeErr
 }
+
+// harnessAncestry orders the fixture's revisions by their repeated digit: a
+// higher digit is a descendant, as runningRevision < movedRevision < movedAgain.
+func harnessAncestry(ancestor, descendant string) (bool, error) { return ancestor <= descendant, nil }
 
 func (h *updaterHarness) moveTrustedMainTo(revision, tree string) {
 	h.mu.Lock()
@@ -112,6 +116,8 @@ func newUpdater(t *testing.T, harness *updaterHarness) *ControllerUpdater {
 		ControllerUpdaterPorts{
 			ObserveTrustedMain: harness.observe, Build: harness.build,
 			Prepare: harness.prepare, Preflight: harness.preflight,
+			Floor:      RevisionRecord{Revision: runningRevision, Tree: "tree-a"},
+			IsAncestor: harnessAncestry,
 		})
 }
 
@@ -442,6 +448,8 @@ func TestAPublishedSuccessorIsAdoptedInsteadOfRebuilt(t *testing.T) {
 		ControllerUpdaterPorts{
 			ObserveTrustedMain: harness.observe, Build: harness.build,
 			Prepare: harness.prepare, Preflight: harness.preflight,
+			Floor:      RevisionRecord{Revision: runningRevision, Tree: "tree-a"},
+			IsAncestor: harnessAncestry,
 			Published: func(_ context.Context, subject RevisionRecord) (AdoptedBuildProvenance, bool, error) {
 				return AdoptedBuildProvenance{
 					Version: "main-" + shortSHA(subject.Revision), Source: published,
@@ -472,6 +480,8 @@ func TestAnUnreadablePublishedDirectoryRefusesRatherThanRebuilds(t *testing.T) {
 		ControllerUpdaterPorts{
 			ObserveTrustedMain: harness.observe, Build: harness.build,
 			Prepare: harness.prepare, Preflight: harness.preflight,
+			Floor:      RevisionRecord{Revision: runningRevision, Tree: "tree-a"},
+			IsAncestor: harnessAncestry,
 			Published: func(context.Context, RevisionRecord) (AdoptedBuildProvenance, bool, error) {
 				return AdoptedBuildProvenance{}, false, fmt.Errorf("the version directory records binary aaaa and the file measures bbbb")
 			},

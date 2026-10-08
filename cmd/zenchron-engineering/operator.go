@@ -1313,6 +1313,11 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 	sandbox := runtime.DockerSandbox{Image: config.Assurance.Image, Endpoint: runtime.DockerEndpoint{Host: config.Assurance.DockerHost}}
 	artifacts := runtime.ArtifactStore{Root: filepath.Join(config.StateDir, "artifacts")}
 	in.StateDir = config.StateDir
+	if snapshot, err := observeLiveController(config.StateDir)(); err != nil {
+		in.ControllerUpdateError = err
+	} else {
+		in.ControllerUpdate = snapshot.Update
+	}
 	in.Sandbox = sandbox
 	in.DependencyCacheDir = config.Assurance.DependencyCacheDir
 	in.SemanticAssurance = overrides.SemanticAssurance

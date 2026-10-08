@@ -811,7 +811,20 @@ func (r RepositoryGitRunner) run(args ...string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(stderr.String()))
+		return nil, &gitCommandError{message: fmt.Sprintf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(stderr.String())), cause: err}
 	}
 	return stdout.Bytes(), nil
 }
+
+// gitCommandError is a failed git command. Its message is exactly the one this
+// runner has always reported; it additionally unwraps to the process error, so
+// a caller whose command gives an exit status a defined meaning - merge-base
+// --is-ancestor's exit 1 is "no", anything else is a failure - can read it
+// with errors.As instead of parsing stderr.
+type gitCommandError struct {
+	message string
+	cause   error
+}
+
+func (e *gitCommandError) Error() string { return e.message }
+func (e *gitCommandError) Unwrap() error { return e.cause }

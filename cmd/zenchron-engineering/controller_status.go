@@ -138,6 +138,14 @@ func renderControllerStatus(stdout io.Writer, status runtime.ControllerStatus) {
 		line("running generation", snapshot.Identity.Build.Version)
 		line("role ownership", observed(string(snapshot.Role)))
 		line("work admission", observed(string(snapshot.WorkAdmission)))
+		if update := snapshot.Update; update != nil {
+			line("upgrade", update.Describe())
+			if update.Trust != nil {
+				for _, l := range update.Trust.Lines() {
+					line(l[0], l[1])
+				}
+			}
+		}
 	} else {
 		line("live controller", "unreachable: "+status.Live.Detail)
 		line("role ownership", "UNKNOWN")

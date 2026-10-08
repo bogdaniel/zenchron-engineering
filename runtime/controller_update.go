@@ -33,6 +33,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -62,6 +63,12 @@ const (
 	// UpdateBlocked is a successor that built and validated, and that the live
 	// runs cannot be handed to.
 	UpdateBlocked UpdateState = "blocked"
+	// UpdateHeld is ADR-0007's HOLD: trusted main resolved behind the floor
+	// this controller was adopted under, could not be resolved within the
+	// bound, or is not comparable with the floor. No successor is built or
+	// admitted; service continues; a forward resolution clears it on the next
+	// pass with no acknowledgement step.
+	UpdateHeld UpdateState = "held"
 )
 
 // ControllerUpdate is one attempt's durable-shaped account of itself.
@@ -74,18 +81,33 @@ type ControllerUpdate struct {
 	// Artifact is the built successor, once there is one.
 	Artifact string `json:"artifact,omitempty"`
 	// Handoff is the prepared transition, once the successor is compatible.
-	Handoff   string    `json:"handoff,omitempty"`
-	Detail    string    `json:"detail,omitempty"`
-	StartedAt time.Time `json:"started_at,omitempty"`
-	EndedAt   time.Time `json:"ended_at,omitempty"`
+	Handoff string `json:"handoff,omitempty"`
+	// Trust is the trusted-main observation behind this attempt, as an
+	// operator needs it: floor, resolved trusted main, main_head, and why
+	// newer commits are not trusted (ADR-0007 §5).
+	Trust     *TrustReport `json:"trust,omitempty"`
+	Detail    string       `json:"detail,omitempty"`
+	StartedAt time.Time    `json:"started_at,omitempty"`
+	EndedAt   time.Time    `json:"ended_at,omitempty"`
 }
 
 // ControllerUpdaterPorts are the effects, each of which already exists.
 type ControllerUpdaterPorts struct {
-	// ObserveTrustedMain reports the revision and tree trusted main is at. It
-	// is a cheap read used only to decide whether to ask for a build; the
-	// authoritative verification happens inside the build itself.
-	ObserveTrustedMain func(context.Context) (RevisionRecord, error)
+	// ObserveTrustedMain reports where trusted main is resolved to, and from
+	// which main_head. It is a read used only to decide whether to ask for a
+	// build; the authoritative verification happens inside the build itself.
+	ObserveTrustedMain func(context.Context) (TrustedMainView, error)
+	// Floor is the trusted_main the running controller was adopted under,
+	// read from its own provenance through Projected - NOT its source, which
+	// may be an older commit contained in a newer trusted main. Trust never
+	// moves behind it (ADR-0007 §5).
+	Floor RevisionRecord
+	// IsAncestor answers containment with Git. A trusted main the floor is
+	// not contained in is not a forward resolution.
+	IsAncestor func(ancestor, descendant string) (bool, error)
+	// FloorError is why Floor could not be read, kept so a hold over a corrupt
+	// or unreadable provenance says so instead of only "no floor".
+	FloorError error
 	// Build is the governed adopted build, unchanged. It observes the trust
 	// root, verifies it, re-derives the subject and refuses rather than
 	// building when any of that fails.
@@ -161,28 +183,39 @@ func (u *ControllerUpdater) Attempt(ctx context.Context, now time.Time) Controll
 			Detail: "this controller is not an adopted build, so it has no successor to prepare"}
 		return *u.current
 	}
-	observed, err := u.ports.ObserveTrustedMain(ctx)
+	view, err := u.ports.ObserveTrustedMain(ctx)
+	trust := u.trustReport(view)
+	if errors.Is(err, ErrNoTrustedMain) {
+		u.current = &ControllerUpdate{State: UpdateHeld, Trust: trust, Detail: err.Error(), EndedAt: now}
+		return *u.current
+	}
 	if err != nil {
 		// THE CONTROLLER KEEPS SERVING. An unobservable trust root is a reason
 		// not to upgrade, never a reason to stop.
-		u.current = &ControllerUpdate{State: UpdateObservationFailed, Detail: err.Error(), EndedAt: now}
+		u.current = &ControllerUpdate{State: UpdateObservationFailed, Trust: trust, Detail: err.Error(), EndedAt: now}
+		return *u.current
+	}
+	observed := view.TrustedMain
+	if reason := u.behindFloor(observed.Revision); reason != "" {
+		u.current = &ControllerUpdate{State: UpdateHeld, Subject: observed, Trust: trust, Detail: reason, EndedAt: now}
 		return *u.current
 	}
 	if observed.Revision == u.predecessor.Build.SourceRevision {
-		u.current = &ControllerUpdate{State: UpdateIdle, Subject: observed, EndedAt: now}
+		u.current = &ControllerUpdate{State: UpdateIdle, Subject: observed, Trust: trust, EndedAt: now}
 		return *u.current
 	}
-	if settled := u.settledFor(observed, now); settled != nil {
-		return *settled
+	if settled := u.settledFor(observed, now); settled == nil {
+		u.start(ctx, observed, now)
 	}
-	return u.start(ctx, observed, now)
+	u.current.Trust = trust
+	return *u.current
 }
 
 // progress answers while a build is running, and notices its subject moving.
 func (u *ControllerUpdater) progress(ctx context.Context, now time.Time) ControllerUpdate {
 	update := *u.current
-	observed, err := u.ports.ObserveTrustedMain(ctx)
-	if err == nil && observed.Revision != update.Subject.Revision {
+	view, err := u.ports.ObserveTrustedMain(ctx)
+	if observed := view.TrustedMain; err == nil && observed.Revision != update.Subject.Revision {
 		// The build will finish and its result will be refused: a successor
 		// built from a revision that is no longer trusted main is not a
 		// successor, and validating it against the newer observation would be
@@ -193,6 +226,41 @@ func (u *ControllerUpdater) progress(ctx context.Context, now time.Time) Control
 		u.current.Detail = update.Detail
 	}
 	return update
+}
+
+// behindFloor says why a resolved trusted main may not be stood on, or "" when
+// it is the floor or a descendant of it. Every answer other than a proven
+// forward resolution holds: a missing floor, a regression, and a revision the
+// floor is not comparable with all mean "no succession", never "build".
+func (u *ControllerUpdater) behindFloor(resolved string) string {
+	floor := u.ports.Floor.Revision
+	if floor == "" || u.ports.IsAncestor == nil {
+		reason := "no trusted-main floor is known for this controller, so no successor may be adopted"
+		if u.ports.FloorError != nil {
+			reason += ": " + u.ports.FloorError.Error()
+		}
+		return reason
+	}
+	if resolved == floor {
+		return ""
+	}
+	ahead, aheadErr := u.ports.IsAncestor(floor, resolved)
+	if aheadErr == nil && ahead {
+		return ""
+	}
+	behind, behindErr := u.ports.IsAncestor(resolved, floor)
+	if behindErr == nil && behind {
+		return fmt.Sprintf("trust regression: trusted main resolved to %s, behind the floor %s this controller was adopted under",
+			shortSHA(resolved), shortSHA(floor))
+	}
+	// An ancestry check that FAILED is not divergent history: saying "not
+	// comparable" would send an operator looking for a rewrite instead of a
+	// fetch or clone fault. Still a hold either way.
+	if err := errors.Join(aheadErr, behindErr); err != nil {
+		return fmt.Sprintf("trusted main %s could not be compared with the floor %s: %v", shortSHA(resolved), shortSHA(floor), err)
+	}
+	return fmt.Sprintf("trusted main %s is not comparable with the floor %s this controller was adopted under",
+		shortSHA(resolved), shortSHA(floor))
 }
 
 // settledFor reports an existing conclusion about this exact subject, so the
@@ -322,7 +390,8 @@ func (u *ControllerUpdater) finish(ctx context.Context, subject RevisionRecord, 
 	// when the answer is unknown would make "ready" mean "nobody could say
 	// otherwise", which is the fail-open shape every other decision in this
 	// stack refuses. The artifact is kept and reported; it is not prepared.
-	observed, err := u.ports.ObserveTrustedMain(ctx)
+	view, err := u.ports.ObserveTrustedMain(ctx)
+	observed := view.TrustedMain
 	switch {
 	case err != nil:
 		base.State = UpdateObservationFailed
@@ -403,7 +472,13 @@ func (u *ControllerUpdater) Prepared() (ControllerHandoff, bool) {
 func (u ControllerUpdate) Describe() string {
 	switch u.State {
 	case UpdateIdle:
-		return "trusted main is the running controller"
+		return "trusted main is the running controller" + u.describeHead()
+	case UpdateHeld:
+		line := "held"
+		if u.Subject.Revision != "" {
+			line += " at " + shortSHA(u.Subject.Revision)
+		}
+		return line + ": " + u.Detail + u.describeHead()
 	case UpdateObservationFailed:
 		return "trusted main could not be observed: " + u.Detail
 	default:
@@ -413,4 +488,14 @@ func (u ControllerUpdate) Describe() string {
 		}
 		return line
 	}
+}
+
+// describeHead says where main_head is when it is not trusted main, and why the
+// newest commit between them is not trusted.
+func (u ControllerUpdate) describeHead() string {
+	if u.Trust == nil || u.Trust.MainHead == "" || u.Trust.MainHead == u.Subject.Revision || len(u.Trust.Skipped) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (main_head %s, %d newer commit(s) not trusted; %s: %s)",
+		shortSHA(u.Trust.MainHead), u.Trust.SkippedTotal, shortSHA(u.Trust.Skipped[0].Revision), u.Trust.Skipped[0].Reason)
 }
