@@ -424,7 +424,10 @@ Before you say a task is complete:
 - Focused race / concurrency tests: `go test -race ./<package> -run '<TestPattern>'`
 - Focused acceptance checks: not applicable; there is no separate acceptance command
 - File-size check: `python3 scripts/check_file_sizes.py` (§4). Not yet run in CI.
-- CI workflow / required checks: `.github/workflows/ci.yml` (job `go`, required on `main`) and `.github/workflows/agent-kernel.yml` (nested `agentkernel/` module).
-- Trust-root protection: until #516 Stage 7 is deliberately deployed, the required `go` status check on `main` is part of Zenchron's adoption trust root, not merely a CI convenience. Do not remove, bypass or relax it to speed merges. Any ruleset change affecting required checks is a governance change and requires explicit review against ADR-0007 and the currently deployed controller semantics.
+- CI workflow / required checks: `.github/workflows/ci.yml` runs `go` (the full suite, T2) on pull requests and on every push to `main`, plus the impact-directed `evidence` and `evidence-race` jobs (T1) on pull requests; `.github/workflows/agent-kernel.yml` covers the nested `agentkernel/` module. The `main` ruleset requires a strict, up-to-date green `go` (GitHub Actions, app 15368) on every pull request.
+- Trust-root protection (ADR-0007). Two controller-adoption mechanisms depend on these checks, and they are not the same:
+  - **Legacy adoption** trusts `main` because every merge happened under the strict required PR `go` check; `VerifyTrustRoot` refuses a ruleset without it. Until #516 Stage 7 is deliberately deployed, removing, bypassing or relaxing that requirement breaks the trust root, not just a merge convenience.
+  - **Stage 5 adoption** trusts only a revision with accepted exact-SHA **post-merge T2** evidence: the `go` run on the push to `main`. Stage 7 may replace `go` as the required PR check with `evidence` (and possibly `evidence-race`), but the post-merge T2 `go` run on every push to `main` must remain.
+  - Any ruleset or workflow change that affects required PR checks, strictness, or the post-merge `go` run is a governance change: review it explicitly against ADR-0007 and the currently deployed controller semantics. Never make it to speed up merges.
 
 Do not disable, skip, lower thresholds, expand exclusions, or edit the checker to make a failing change pass. A deliberate policy change must be explicit in the task and reviewed as such. A draft PR may report checks still pending; merging must satisfy configured repository gates.
