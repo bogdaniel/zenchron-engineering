@@ -39,7 +39,13 @@ func integrationFixture(t *testing.T) (root, origin, base string) {
 	if err := os.WriteFile(filepath.Join(origin, "README.md"), []byte("base\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runGit(origin, "add", "README.md"); err != nil {
+	// A real .gitignore in base, so a test can drop ignored scratch content
+	// into a cloned workspace and prove it from both "git status" (which
+	// ignores it by default) and "git clean -fdx" (which does not).
+	if err := os.WriteFile(filepath.Join(origin, ".gitignore"), []byte("*.log\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(origin, "add", "README.md", ".gitignore"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := runGit(origin, "commit", "-m", "base"); err != nil {

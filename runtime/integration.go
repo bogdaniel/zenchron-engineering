@@ -135,7 +135,7 @@ func composeAgainstVerifiedBase(ws *CandidateWorkspace, contract integration.Con
 				"integration input %q (%s) is not a descendant of the verified base revision %s",
 				step.UnitID, short12(step.Commit), short12(contract.BaseRevision))), committed, nil
 		}
-		conflicted, paths, mergeErr := mergeFetchedCommit(ws.Dir, step.Commit)
+		conflicted, advanced, paths, mergeErr := mergeFetchedCommit(ws.Dir, step.Commit)
 		if mergeErr != nil {
 			return integration.Result{}, committed, mergeErr
 		}
@@ -157,7 +157,25 @@ func composeAgainstVerifiedBase(ws *CandidateWorkspace, contract integration.Con
 			}
 			return integration.Blocked(contract, conflict), committed, nil
 		}
-		committed = true
+		// A clean merge Git itself treats as a no-op ("Already up to
+		// date" - this step's commit was already fully contained in
+		// HEAD) succeeds without advancing anything; committed tracks
+		// whether HEAD actually moved, never merely whether a merge
+		// was attempted and did not conflict.
+		if advanced {
+			committed = true
+		}
+	}
+
+	if !committed {
+		// Every input was already fully contained in the verified base:
+		// nothing was actually composed, so there is no new subject to
+		// report integrated - reporting one here would silently hand
+		// back the base itself as if it were new (requirement: the
+		// output is a NEW exact commit/tree).
+		return integration.Result{}, committed, fmt.Errorf(
+			"integration contract for unit %q composed no new candidate: every input was already fully contained in the verified base %s",
+			contract.UnitID, short12(contract.BaseRevision))
 	}
 
 	head, err := ws.head()
@@ -201,7 +219,9 @@ func fetchExactCommit(dir, sourceDir, commit, tree string) error {
 }
 
 // mergeFetchedCommit merges one already-fetched commit into the current
-// head.
+// head, and reports whether that actually advanced HEAD: a merge Git itself
+// considers a no-op ("Already up to date", because commit was already fully
+// contained) succeeds without creating one.
 //
 // A merge failure is classified from Git's OWN repository state, not from
 // the mere presence of an error: it is a conflict only if Git left unmerged
@@ -209,23 +229,31 @@ func fetchExactCommit(dir, sourceDir, commit, tree string) error {
 // reason - a bad object, a locked index, an environment failure - is
 // aborted and its real cause is returned as an error, never mislabeled a
 // conflict.
-func mergeFetchedCommit(dir, commit string) (conflicted bool, paths []string, err error) {
+func mergeFetchedCommit(dir, commit string) (conflicted, advanced bool, paths []string, err error) {
+	before, err := gitOutput(dir, "rev-parse", "HEAD")
+	if err != nil {
+		return false, false, nil, err
+	}
 	if _, mergeErr := runGit(dir, "merge", "--no-ff", "--no-edit", commit); mergeErr != nil {
 		// Read BEFORE aborting: aborting restores the index and the
 		// unmerged markers along with it.
 		paths, err = conflictedPaths(dir)
 		if err != nil {
-			return false, nil, err
+			return false, false, nil, err
 		}
 		if len(paths) == 0 {
 			if abortErr := abortMergeInProgress(dir); abortErr != nil {
-				return false, nil, fmt.Errorf("%v (cleanup also failed: %v)", mergeErr, abortErr)
+				return false, false, nil, fmt.Errorf("%v (cleanup also failed: %v)", mergeErr, abortErr)
 			}
-			return false, nil, mergeErr
+			return false, false, nil, mergeErr
 		}
-		return true, paths, nil
+		return true, false, paths, nil
 	}
-	return false, nil, nil
+	after, err := gitOutput(dir, "rev-parse", "HEAD")
+	if err != nil {
+		return false, false, nil, err
+	}
+	return false, before != after, nil, nil
 }
 
 // statusEntry is one record of `git status --porcelain=v1 -z`: the two-
@@ -245,7 +273,12 @@ type statusEntry struct{ code, path string }
 // become the exact set VerifyRemediationScope treats as a remediation's
 // permitted scope.
 func workingTreeStatus(dir string) ([]statusEntry, error) {
-	out, err := gitOutput(dir, "status", "--porcelain=v1", "-z")
+	// --ignored: RestoreTrusted's recovery runs `git clean -fdx`, which
+	// deletes ignored content along with ordinary untracked files. Without
+	// --ignored, this read is blind to exactly the material that cleanup
+	// would still remove, so a workspace holding it would pass this check
+	// and then lose it anyway.
+	out, err := gitOutput(dir, "status", "--porcelain=v1", "--ignored", "-z")
 	if err != nil {
 		return nil, err
 	}

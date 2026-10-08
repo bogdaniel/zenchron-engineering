@@ -230,6 +230,73 @@ func TestIntegrateInputsNeverDeletesLegitimateMaterialBeforeAnyMutation(t *testi
 	}
 }
 
+// TestIntegrateInputsRefusesWorkspaceWithIgnoredContent proves the third
+// re-review's first finding: `git status` excludes ignored files by
+// default, but RestoreTrusted's recovery (`git clean -fdx`) deletes them
+// along with ordinary untracked ones. A workspace holding ignored scratch
+// content must be refused outright - the same way any other non-pristine
+// workspace already is - rather than passing the cleanliness check and
+// then losing that content if a later failure ever triggered cleanup.
+func TestIntegrateInputsRefusesWorkspaceWithIgnoredContent(t *testing.T) {
+	root, origin, base := integrationFixture(t)
+	a := cloneAt(t, root, "run-a", origin, base)
+	aCommit := commitFile(t, a, "a.txt", "alpha\n", "add alpha")
+	b := cloneAt(t, root, "run-b", origin, base)
+	bCommit := commitFile(t, b, "b.txt", "beta\n", "add beta")
+
+	integrationWS := cloneAt(t, root, "run-integrate", origin, base)
+	// integrationFixture's base commits a .gitignore matching "*.log".
+	ignored := filepath.Join(integrationWS.Dir, "scratch.log")
+	if err := os.WriteFile(ignored, []byte("ignored\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	contract, err := integration.NewContract("graph-1", "integrate", base,
+		orchestration.WorkUnitInputs{workUnitInput("a", aCommit), workUnitInput("b", bCommit)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := sourcesFor(map[string]string{"a": a.Dir, "b": b.Dir})
+
+	if _, err := IntegrateInputs(&integrationWS, contract, sources); err == nil {
+		t.Fatal("composed against a workspace holding ignored content instead of refusing it outright")
+	}
+	if _, err := os.Stat(ignored); err != nil {
+		t.Fatalf("a refused attempt deleted ignored content: %v", err)
+	}
+}
+
+// TestIntegrateInputsRefusesFullyNoOpPlan proves the third re-review's
+// second finding: a successful `git merge` does not always create a
+// commit - Git reports "Already up to date" and leaves HEAD untouched when
+// the merged commit is already fully contained. A contract whose every
+// input is already contained in the verified base therefore composes
+// nothing; IntegrateInputs must refuse rather than report StatusIntegrated
+// naming the base itself as if it were a new subject.
+func TestIntegrateInputsRefusesFullyNoOpPlan(t *testing.T) {
+	root, origin, base := integrationFixture(t)
+	baseTree, err := gitOutput(origin, "rev-parse", base+"^{tree}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseTree = strings.TrimSpace(baseTree)
+
+	integrationWS := cloneAt(t, root, "run-integrate", origin, base)
+	alreadyAtBase := func(unitID string) orchestration.WorkUnitInput {
+		return workUnitInput(unitID, CommitResult{Commit: base, Tree: baseTree})
+	}
+	contract, err := integration.NewContract("graph-1", "integrate", base,
+		orchestration.WorkUnitInputs{alreadyAtBase("a"), alreadyAtBase("b")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := sourcesFor(map[string]string{"a": origin, "b": origin})
+
+	if _, err := IntegrateInputs(&integrationWS, contract, sources); err == nil {
+		t.Fatal("reported success composing a plan where every input was already the verified base")
+	}
+}
+
 // assertWorkspaceAtRevision fails the test unless dir's HEAD is exactly
 // revision.
 func assertWorkspaceAtRevision(t *testing.T, dir, revision string) {
