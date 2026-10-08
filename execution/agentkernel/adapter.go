@@ -47,7 +47,7 @@ const (
 
 // TranscriptWriter is the host's forensic transcript for one invocation
 // (§6 gate b: a durable I/O boundary). WriteEvent appends one kernel event,
-// encoded as agentkernel.execution/v0.1 JSON, and returns only once it is
+// encoded as agentkernel.execution/v0.2 JSON, and returns only once it is
 // durable. An error means it was not recorded: the execution then settles
 // recording_failed and takes no further side effect.
 type TranscriptWriter interface {

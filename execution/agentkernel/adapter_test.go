@@ -188,22 +188,40 @@ func TestConcurrentAdmissionAdmitsOne(t *testing.T) {
 	}
 }
 
-// Contradiction evidence for #518: the host re-anchors each retry's deadline
-// at its lease, so a retry after a wait carries a later deadline, and the
-// kernel refuses a later deadline within one execution as a widening.
-func TestRetryWithALaterDeadlineIsRefusedByTheKernelEnvelope(t *testing.T) {
-	cfg := testConfig(t, scripted.New(done("first"), done("second")))
+// Kernel contract v0.2 (#518): the host re-anchors each retry's deadline at
+// its lease, so a retry (a new physical attempt of the same RunID and
+// OperationID) carries a later deadline. The kernel admits it, and it starts
+// from what the first attempt consumed. Re-running a physical attempt and
+// widening a numeric bound are still refused.
+func TestRetryWithALaterDeadlineIsAdmittedFromRecordedConsumption(t *testing.T) {
+	provider := scripted.New(done("first"), toolUse("c1", "run_command", `{"command":"go-test"}`), done("never"))
+	cfg := testConfig(t, provider)
+	cfg.Limits.MaxIterations = 2
+	tokens := int64(10_000)
 	first := testRequest(t)
-	first.Budgets.WallLimit = 10 * time.Second
+	first.Budgets.WallLimit, first.Budgets.MaxTokens = 10*time.Second, &tokens
 	if _, err := newTestAdapter(t, cfg).Execute(t.Context(), first); err != nil {
 		t.Fatal(err)
 	}
-	retry := first
-	retry.Attempt = 2
-	retry.Budgets.WallLimit = 20 * time.Second
-	_, err := newTestAdapter(t, cfg).Execute(t.Context(), retry)
-	if te := terminationOf(t, err); !strings.Contains(te.Termination.Detail, "budget widens deadline") {
-		t.Errorf("termination %+v", te.Termination)
+	again := first
+	again.Budgets.WallLimit = 20 * time.Second
+	_, err := newTestAdapter(t, cfg).Execute(t.Context(), again)
+	if te := terminationOf(t, err); !strings.Contains(te.Termination.Detail, "already admitted") {
+		t.Errorf("same attempt with a later deadline: %+v", te.Termination)
+	}
+	widened := again
+	widened.Attempt, widened.Budgets.MaxTokens = 2, nil
+	_, err = newTestAdapter(t, cfg).Execute(t.Context(), widened)
+	if te := terminationOf(t, err); !strings.Contains(te.Termination.Detail, "budget widens max_input_tokens") {
+		t.Errorf("retry widening the token bound: %+v", te.Termination)
+	}
+	retry := again
+	retry.Attempt = 3
+	_, err = newTestAdapter(t, cfg).Execute(t.Context(), retry)
+	te := terminationOf(t, err)
+	if te.Termination.Dimension != api.DimensionIterations || len(provider.Requests()) != 2 {
+		t.Errorf("retry: %+v after %d provider calls; want admitted, then out of iterations after 1 of 2 remained",
+			te.Termination, len(provider.Requests()))
 	}
 }
 

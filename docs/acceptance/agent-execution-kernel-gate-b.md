@@ -234,6 +234,13 @@ own through the `api.CredentialSource` the composition root gives it.
    are refused. Resolving it needs a decision: a kernel change (agentkernel is
    frozen), host deadline semantics, or an adapter-side clamp that reads the
    first envelope.
+   **Resolved: kernel v0.2 adopted** (#530, owner decision on #518): the
+   kernel contract is `agentkernel.execution/v0.2`, whose deadline is
+   attempt-scoped. A retry with a later deadline is admitted and starts from
+   recorded consumption; re-running a physical attempt and widening a
+   numeric bound are still refused
+   (`TestRetryWithALaterDeadlineIsAdmittedFromRecordedConsumption`). Legacy
+   v0.1 admission records fail closed until explicitly recovered.
 6. **Artifact bridge.** Tool output stays in kernel `FileArtifacts` under
    `StateDir`; `Result.Artifacts` is empty. The host artifact-store bridge is a
    Gate B obligation.
