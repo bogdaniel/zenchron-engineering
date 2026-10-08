@@ -227,7 +227,7 @@ Short version: explicit task requirements and invariants come first, engineering
 Optional setup (humans, once):
 
 - Claude Code: send `/plugin marketplace add DietrichGebert/ponytail`, then, as a separate prompt, `/plugin install ponytail@ponytail`, then `/ponytail ultra`.
-- Make ultra the default for every session: `export PONYTAIL_DEFAULT_MODE=ultra`, or put `{ "defaultMode": "ultra" }` in `~/.config/ponytail/config.json`.
+- Make ultra the default for every session: add `export PONYTAIL_DEFAULT_MODE=ultra` to your shell startup file, or put `{ "defaultMode": "ultra" }` in `~/.config/ponytail/config.json`.
 - Other hosts (Codex, Cursor, OpenCode, Gemini CLI, Copilot CLI, …): https://github.com/DietrichGebert/ponytail
 
 Agents: if `/ponytail` is available, run at ultra. This file is the authoritative policy on every host; Ponytail is an optional helper and never overrides it. §2 applies whether or not the plugin is available.
@@ -278,7 +278,7 @@ Minimalism never applies to:
 | Target | ≤ 500 | Normal. |
 | Warning | 501–700 | Allowed; consider a cohesive extraction when the next change grows this file. |
 | Review | 701–1,000 | Review cohesion and extraction opportunities; avoid splitting tightly related logic solely for the line count. |
-| Hard cap | > 1,000 | Fails unless covered by a human-approved exception in `file-size-exceptions.tsv`. Extract a cohesive unit or propose an exception when splitting would worsen cohesion. Never split solely to satisfy the number. |
+| Hard cap | > 1,000 | Fails unless the file is grandfathered in `file-size-baseline.tsv` (up to its frozen ceiling only) or covered by a human-approved exception in `file-size-exceptions.tsv`. Extract a cohesive unit or propose an exception when splitting would worsen cohesion. Never split solely to satisfy the number. |
 
 - Split along responsibilities (SRP), never by cutting a file in half. No `foo_part2`, no `misc`, `utils`, or `helpers` dumping grounds. Name the new file after the one thing it does.
 - Don't game the count: no packed statements or stripped blank lines. Follow the repository formatter's line width; use 120 characters as the default when none is configured.
@@ -287,13 +287,19 @@ Minimalism never applies to:
 - Exempt: generated code (must carry a "generated, do not edit" header), lockfiles, vendored code, fixture and snapshot data.
 - Function defaults (not laws): about 40 lines max, consider a parameter object when parameters form a coherent concept, nesting depth 3 max (use guard clauses).
 
-The checker is `scripts/check_file_sizes.py`; run `python3 scripts/check_file_sizes.py` from the repository root. It requires Python 3 and Git. It counts physical lines, including comments and blank lines, in current working-tree source and non-ignored new files. It reports `warn` for 501–700, `review` for 701–1,000, and fails above 1,000 unless an exception applies; Git, parsing, and read errors fail the check. Deleted files and symlinks are not counted as source content. A final line without a newline still counts.
+The checker is `scripts/check_file_sizes.py`; run `python3 scripts/check_file_sizes.py` from the repository root. It requires Python 3 and Git. It counts physical lines, including comments and blank lines, in current working-tree source and non-ignored new files. It reports `warn` for 501–700, `review` for 701–1,000, `baseline` or `exception` for a covered file above 1,000, and fails above 1,000 otherwise; Git, parsing, and read errors fail the check. Deleted files and symlinks are not counted as source content. A final line without a newline still counts.
 
 The checker defines the source suffixes, dependency-directory exclusions, and generated-header recognition. Fixture/snapshot data with source suffixes require explicit approved exceptions; never mark handwritten code as generated or exclude it merely to pass.
 
-Exceptions live in checked-in `file-size-exceptions.tsv`: one exact repository-relative path, a literal tab, and a non-empty one-line reason per entry. Blank lines and `#` comments are allowed; duplicate, malformed, and stale entries fail. New or changed exceptions require explicit human approval; agents may propose them but must not use unapproved entries to pass the check. A summary justification alone is not an exception.
+Exceptions live in checked-in `file-size-exceptions.tsv`: one exact repository-relative path, a literal tab, an explicit maximum line count above 1,000, a literal tab, and a non-empty one-line reason per entry. Every exception is bounded: a file passes up to that maximum and fails above it. The legacy two-column `path<TAB>reason` form is rejected as malformed. Blank lines and `#` comments are allowed; duplicate, malformed, and stale entries fail. New or changed exceptions require explicit human approval; agents may propose them but must not use unapproved entries to pass the check. A summary justification alone is not an exception.
 
-The checker verifies exception syntax and tracked paths, not human approval. Protect changes to the checker and exception file through required review (§13). Text in this file alone is not enforcement.
+The historical baseline is separate from exceptions. `file-size-baseline.tsv` lists every tracked source file that was already above 1,000 lines at the pinned revision `001efd613a40b4b367c6617085e40a24286fac47` (34 files): one path, a tab, and that file's frozen line-count ceiling. A baseline file passes up to its ceiling and fails above it; it is never a path-wide waiver. New entries are never added and ceilings are never raised: a file that is not in the baseline fails above 1,000 lines. Shrinking a file never raises its ceiling; lowering a ceiling to the new count is encouraged. An entry for a file now at or below 1,000 lines, deleted, untracked, generated, or a symlink is stale and fails until removed, which retires it. Duplicate, malformed, non-relative and non-numeric entries, and ceilings at or below 1,000, fail.
+
+A baseline file may grow above its ceiling only through an exception whose maximum exceeds that ceiling; growing it never edits the baseline. Raising an exception's maximum is a new exception and needs explicit human approval.
+
+The frozen-ceiling rule is machine-checked by `python3 scripts/check_file_sizes.py --verify-baseline`: every baseline path must have been a counted source file above 1,000 lines at the pinned revision, and every ceiling must be at most its line count there (same counting rules). Lower ceilings and removed entries pass. If the pinned commit is not available locally (for example, a shallow clone), the verification fails closed rather than reporting success. Run it whenever `file-size-baseline.tsv` changes.
+
+The checker verifies baseline and exception syntax, consistency and tracked paths, not human approval. Protect changes to the checker and exception file through required review (§13). Text in this file alone is not enforcement.
 
 ## 5. Object-oriented design
 
@@ -423,7 +429,7 @@ Before you say a task is complete:
 - Lint / format: `gofmt -l .`, `go vet ./...`, and `GOOS=windows GOARCH=amd64 go vet ./...` for build-tagged files
 - Focused race / concurrency tests: `go test -race ./<package> -run '<TestPattern>'`
 - Focused acceptance checks: not applicable; there is no separate acceptance command
-- File-size check: `python3 scripts/check_file_sizes.py` (§4). Not yet run in CI.
+- File-size check: `python3 scripts/check_file_sizes.py` (§4); add `--verify-baseline` when `file-size-baseline.tsv` changes (needs the pinned commit; fails closed without it); regression tests `python3 -m unittest discover -s scripts`. All are local checks only: none runs in CI and none is a required check. Making them required is a future, separate governance change (ADR-0007), not something this file enacts.
 - CI workflow / required checks: `.github/workflows/ci.yml` runs `go` (the full suite, T2) on pull requests and on every push to `main`, plus the impact-directed `evidence` and `evidence-race` jobs (T1) on pull requests; `.github/workflows/assurance.yml` is the T3 whole-module race sweep (nightly or on request; not a merge gate); `.github/workflows/agent-kernel.yml` covers the nested `agentkernel/` module. The `main` ruleset requires a strict, up-to-date green `go` (GitHub Actions, app 15368) on every pull request.
 - Trust-root protection (ADR-0007). Two controller-adoption mechanisms depend on these checks, and they are not the same:
   - **Legacy adoption** trusts `main` because every merge happened under the strict required PR `go` check; `VerifyTrustRoot` refuses a ruleset without it. Until #516 Stage 7 is deliberately deployed, removing, bypassing or relaxing that requirement breaks the trust root, not just a merge convenience.
