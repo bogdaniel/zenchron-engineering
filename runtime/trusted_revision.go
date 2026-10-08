@@ -33,22 +33,28 @@ import (
 // was adopted under.
 type TrustedRevisionPolicy struct {
 	Tier string `json:"tier"`
-	// Workflow, Event, Branch and Job pin the producer. A job named "go" from
-	// another workflow, from a pull-request event or on another branch is not
-	// T2 evidence about a main commit, whatever its conclusion.
-	Workflow string `json:"workflow"`
-	Event    string `json:"event"`
-	Branch   string `json:"branch"`
-	Job      string `json:"job"`
+	// IntegrationID, Workflow, Event, Branch and Job pin the producer. A job
+	// named "go" from another app, another workflow, a pull-request event or
+	// another branch is not T2 evidence about a main commit, whatever its
+	// conclusion.
+	IntegrationID int64  `json:"integration_id"`
+	Workflow      string `json:"workflow"`
+	Event         string `json:"event"`
+	Branch        string `json:"branch"`
+	Job           string `json:"job"`
 	// MaxFirstParent bounds the walk from main_head. 256 covered more than
 	// two weeks of merges at the rate observed when ADR-0007 was accepted.
 	MaxFirstParent int `json:"max_first_parent"`
 }
 
+// githubActionsIntegrationID is the GitHub Actions app: the only producer
+// whose jobs are T2 evidence.
+const githubActionsIntegrationID = 15368
+
 // DefaultTrustedRevisionPolicy is the policy ADR-0007 accepted.
 func DefaultTrustedRevisionPolicy() TrustedRevisionPolicy {
 	return TrustedRevisionPolicy{
-		Tier: "T2", Workflow: ".github/workflows/ci.yml", Event: "push", Branch: "main", Job: "go",
+		Tier: "T2", IntegrationID: githubActionsIntegrationID, Workflow: ".github/workflows/ci.yml", Event: "push", Branch: "main", Job: "go",
 		MaxFirstParent: 256,
 	}
 }
@@ -56,16 +62,19 @@ func DefaultTrustedRevisionPolicy() TrustedRevisionPolicy {
 // T2Attempt is one attempt of one producer job, exactly as the forge reported
 // it. It is a fact about a run, not yet a judgement about a revision.
 type T2Attempt struct {
-	RunID       int64     `json:"run_id"`
-	Attempt     int       `json:"attempt"`
-	Workflow    string    `json:"workflow"`
-	Event       string    `json:"event"`
-	Branch      string    `json:"branch"`
-	HeadSHA     string    `json:"head_sha"`
-	Job         string    `json:"job"`
-	Status      string    `json:"status"`
-	Conclusion  string    `json:"conclusion,omitempty"`
-	CompletedAt time.Time `json:"completed_at,omitempty"`
+	RunID   int64 `json:"run_id"`
+	Attempt int   `json:"attempt"`
+	// IntegrationID is the app that produced the job, as its check run
+	// reports it. Zero means the forge did not say, which is not evidence.
+	IntegrationID int64     `json:"integration_id"`
+	Workflow      string    `json:"workflow"`
+	Event         string    `json:"event"`
+	Branch        string    `json:"branch"`
+	HeadSHA       string    `json:"head_sha"`
+	Job           string    `json:"job"`
+	Status        string    `json:"status"`
+	Conclusion    string    `json:"conclusion,omitempty"`
+	CompletedAt   time.Time `json:"completed_at,omitempty"`
 }
 
 func (a T2Attempt) completed() bool { return a.Status == "completed" }
@@ -94,7 +103,7 @@ type T2EvidenceObservation struct {
 func EvaluateT2Evidence(policy TrustedRevisionPolicy, subject string, reported []T2Attempt) T2EvidenceObservation {
 	observation := T2EvidenceObservation{Subject: subject, Tier: policy.Tier, Attempts: []T2Attempt{}}
 	for _, a := range reported {
-		if a.HeadSHA == subject && a.Workflow == policy.Workflow && a.Event == policy.Event &&
+		if a.HeadSHA == subject && a.IntegrationID == policy.IntegrationID && a.Workflow == policy.Workflow && a.Event == policy.Event &&
 			a.Branch == policy.Branch && a.Job == policy.Job {
 			observation.Attempts = append(observation.Attempts, a)
 		}

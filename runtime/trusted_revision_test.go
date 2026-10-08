@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -86,6 +87,8 @@ func TestT2EvidenceIsExactSubjectAndPinnedProducer(t *testing.T) {
 	r := shaOf('r')
 	for name, mutate := range map[string]func(*T2Attempt){
 		"another head sha":     func(a *T2Attempt) { a.HeadSHA = shaOf('x') },
+		"another app":          func(a *T2Attempt) { a.IntegrationID = 99999 },
+		"an undisclosed app":   func(a *T2Attempt) { a.IntegrationID = 0 },
 		"another workflow":     func(a *T2Attempt) { a.Workflow = ".github/workflows/assurance.yml" },
 		"a pull request event": func(a *T2Attempt) { a.Event = "pull_request" },
 		"another branch":       func(a *T2Attempt) { a.Branch = "claude/feature" },
@@ -239,15 +242,17 @@ func TestAV1RecordProjectsToTheLegacyModel(t *testing.T) {
 	}
 }
 
-// The observer reads every attempt of every run, not only the latest, and
-// refuses anything that is not an exact commit before it reaches a URL.
+// The observer reads every attempt of every run, joins each job to the app
+// its check run names, and refuses anything that is not an exact commit
+// before it reaches a URL.
 func TestRevisionEvidenceReadsEveryAttempt(t *testing.T) {
 	r := shaOf('a')
 	doer := &fakeGitHubDoer{responses: map[string]string{
-		"GET /repos/bogdaniel/zenchron-engineering/actions/runs": `{"workflow_runs":[{"id":7,"path":".github/workflows/ci.yml","event":"push",` +
+		"GET /repos/bogdaniel/zenchron-engineering/commits/" + r + "/check-runs": `{"total_count":2,"check_runs":[{"id":71,"app":{"id":15368}},{"id":72,"app":{"id":15368}}]}`,
+		"GET /repos/bogdaniel/zenchron-engineering/actions/runs": `{"total_count":1,"workflow_runs":[{"id":7,"path":".github/workflows/ci.yml","event":"push",` +
 			`"head_branch":"main","head_sha":"` + r + `","run_attempt":2}]}`,
-		"GET /repos/bogdaniel/zenchron-engineering/actions/runs/7/attempts/1/jobs": `{"jobs":[{"name":"go","head_sha":"` + r + `","status":"completed","conclusion":"failure"}]}`,
-		"GET /repos/bogdaniel/zenchron-engineering/actions/runs/7/attempts/2/jobs": `{"jobs":[{"name":"go","head_sha":"` + r + `","status":"completed","conclusion":"success"}]}`,
+		"GET /repos/bogdaniel/zenchron-engineering/actions/runs/7/attempts/1/jobs": `{"total_count":1,"jobs":[{"id":71,"name":"go","head_sha":"` + r + `","status":"completed","conclusion":"failure"}]}`,
+		"GET /repos/bogdaniel/zenchron-engineering/actions/runs/7/attempts/2/jobs": `{"total_count":1,"jobs":[{"id":72,"name":"go","head_sha":"` + r + `","status":"completed","conclusion":"success"}]}`,
 	}}
 	observer := GitHubGovernanceObserver{HTTP: doer, Credential: testGovernanceCredential("s")}
 	attempts, err := observer.RevisionEvidence(context.Background(), governedRepo(), r)
@@ -260,5 +265,88 @@ func TestRevisionEvidenceReadsEveryAttempt(t *testing.T) {
 	}
 	if _, err := observer.RevisionEvidence(context.Background(), governedRepo(), "main&x=1"); err == nil {
 		t.Fatal("a non-commit revision reached the forge")
+	}
+}
+
+// evidenceResponses is a complete, valid forge answer for revision r: one
+// push run of ci.yml whose go job succeeded, produced by app.
+func evidenceResponses(r string, app int) map[string]string {
+	return map[string]string{
+		"GET /repos/bogdaniel/zenchron-engineering/commits/" + r + "/check-runs": fmt.Sprintf(`{"total_count":1,"check_runs":[{"id":71,"app":{"id":%d}}]}`, app),
+		"GET /repos/bogdaniel/zenchron-engineering/actions/runs": `{"total_count":1,"workflow_runs":[{"id":7,"path":".github/workflows/ci.yml","event":"push",` +
+			`"head_branch":"main","head_sha":"` + r + `","run_attempt":1}]}`,
+		"GET /repos/bogdaniel/zenchron-engineering/actions/runs/7/attempts/1/jobs": `{"total_count":1,"jobs":[{"id":71,"name":"go","head_sha":"` + r + `","status":"completed","conclusion":"success"}]}`,
+	}
+}
+
+// The producing app comes from the job's own check run: a go job whose check
+// run names another app is not T2 evidence.
+func TestRevisionEvidenceTakesTheProducerFromTheCheckRun(t *testing.T) {
+	r := shaOf('a')
+	for app, eligible := range map[int]bool{15368: true, 99999: false} {
+		observer := GitHubGovernanceObserver{HTTP: &fakeGitHubDoer{responses: evidenceResponses(r, app)}, Credential: testGovernanceCredential("s")}
+		attempts, err := observer.RevisionEvidence(context.Background(), governedRepo(), r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := EvaluateT2Evidence(DefaultTrustedRevisionPolicy(), r, attempts); got.Eligible != eligible {
+			t.Errorf("app %d: eligible = %t", app, got.Eligible)
+		}
+	}
+}
+
+// A listing is read completely or not at all: one that does not state its
+// size, ends short of it, or exceeds the page ceiling fails the observation.
+// Every other listing is valid, so only the guard under test can refuse.
+func TestEvidenceListingsAreNeverTruncated(t *testing.T) {
+	r := shaOf('a')
+	checks := "GET /repos/bogdaniel/zenchron-engineering/commits/" + r + "/check-runs"
+	for name, payload := range map[string]string{
+		"no total_count":          `{"check_runs":[{"id":71,"app":{"id":15368}}]}`,
+		"ends short of its total": `{"total_count":3,"check_runs":[]}`,
+		"exceeds the ceiling":     `{"total_count":5000,"check_runs":[{"id":71,"app":{"id":15368}}]}`,
+	} {
+		responses := evidenceResponses(r, 15368)
+		responses[checks] = payload
+		observer := GitHubGovernanceObserver{HTTP: &fakeGitHubDoer{responses: responses}, Credential: testGovernanceCredential("s")}
+		if _, err := observer.RevisionEvidence(context.Background(), governedRepo(), r); err == nil {
+			t.Errorf("%s: a truncated listing was read as evidence", name)
+		}
+	}
+}
+
+// A persisted adopted-build/2 record must prove its own trusted_main: the
+// monotonic floor will be read from it.
+func TestAV2RecordMustProveItsTrustedMain(t *testing.T) {
+	f := newAdoptedFixture(t)
+	good, err := BuildAdoptedController(context.Background(), f.request(t), f.deps, BuilderRecord{Kind: ControllerUnattested})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*AdoptedBuildProvenance){
+		"no policy": func(p *AdoptedBuildProvenance) { p.TrustedRevisionPolicy = nil },
+		"another subject": func(p *AdoptedBuildProvenance) {
+			p.TrustEvidence.Observation.Subject = shaOf('x')
+			p.TrustEvidence.Observation.Deciding.HeadSHA = shaOf('x')
+		},
+		"not eligible":      func(p *AdoptedBuildProvenance) { p.TrustEvidence.Observation.Eligible = false },
+		"another tier":      func(p *AdoptedBuildProvenance) { p.TrustEvidence.Observation.Tier = "T1" },
+		"failed deciding":   func(p *AdoptedBuildProvenance) { p.TrustEvidence.Observation.Deciding.Conclusion = "failure" },
+		"no main_head":      func(p *AdoptedBuildProvenance) { p.MainHead = nil },
+		"legacy kind in v2": func(p *AdoptedBuildProvenance) { p.TrustEvidence.Kind = TrustEvidenceLegacy },
+		"another producer":  func(p *AdoptedBuildProvenance) { p.TrustEvidence.Observation.Deciding.IntegrationID = 99999 },
+	} {
+		var record AdoptedBuildProvenance
+		raw, _ := json.Marshal(good)
+		if err := json.Unmarshal(raw, &record); err != nil {
+			t.Fatal(err)
+		}
+		mutate(&record)
+		if _, err := record.Projected(); err == nil {
+			t.Errorf("%s: an invalid adopted-build/2 record projected", name)
+		}
+	}
+	if _, err := good.Projected(); err != nil {
+		t.Fatalf("a valid record was refused: %v", err)
 	}
 }

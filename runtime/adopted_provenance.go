@@ -150,10 +150,7 @@ const legacyAdoptedBuildSchemaVersion = "adopted-build/1"
 func (p AdoptedBuildProvenance) Projected() (AdoptedBuildProvenance, error) {
 	switch p.SchemaVersion {
 	case adoptedBuildSchemaVersion:
-		if p.MainHead == nil || p.TrustEvidence == nil || p.TrustEvidence.Kind != TrustEvidenceT2 || p.TrustEvidence.Observation == nil {
-			return p, fmt.Errorf("an %s record without main_head and T2 trust evidence is incomplete", p.SchemaVersion)
-		}
-		return p, nil
+		return p, p.validateV2()
 	case legacyAdoptedBuildSchemaVersion:
 		head := p.TrustedMain
 		p.MainHead = &head
@@ -163,4 +160,35 @@ func (p AdoptedBuildProvenance) Projected() (AdoptedBuildProvenance, error) {
 	default:
 		return p, fmt.Errorf("adopted-build schema %q is not one this controller can read", p.SchemaVersion)
 	}
+}
+
+// validateV2 refuses an adopted-build/2 record whose trust evidence does not
+// prove its own trusted_main. The monotonic floor is read from persisted
+// provenance, so a record that merely has the right shape must not pass.
+func (p AdoptedBuildProvenance) validateV2() error {
+	invalid := func(format string, args ...any) error {
+		return fmt.Errorf("adopted-build/2 record for %s is invalid: %s", shortSHA(p.TrustedMain.Revision), fmt.Sprintf(format, args...))
+	}
+	if p.MainHead == nil {
+		return invalid("no main_head")
+	}
+	if p.TrustedRevisionPolicy == nil {
+		return invalid("no trusted_revision_policy")
+	}
+	if p.TrustEvidence == nil || p.TrustEvidence.Kind != TrustEvidenceT2 || p.TrustEvidence.Observation == nil {
+		return invalid("no T2 trust evidence")
+	}
+	evidence, policy := p.TrustEvidence.Observation, p.TrustedRevisionPolicy
+	switch {
+	case evidence.Subject != p.TrustedMain.Revision:
+		return invalid("its T2 evidence is about %s", shortSHA(evidence.Subject))
+	case !evidence.Eligible:
+		return invalid("its T2 evidence is not eligible")
+	case evidence.Tier != policy.Tier:
+		return invalid("evidence tier %q is not the policy's %q", evidence.Tier, policy.Tier)
+	case evidence.Deciding == nil || evidence.Deciding.Conclusion != "success" || evidence.Deciding.HeadSHA != evidence.Subject ||
+		evidence.Deciding.IntegrationID != policy.IntegrationID:
+		return invalid("its deciding T2 attempt is not a success by the pinned producer on the subject")
+	}
+	return nil
 }

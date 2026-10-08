@@ -58,7 +58,7 @@ func (s *stubGovernance) RevisionEvidence(_ context.Context, _ GitHubRepo, revis
 // t2Attempt is one completed attempt of the pinned producer against revision.
 func t2Attempt(revision string, run int64, attempt int, conclusion string) T2Attempt {
 	p := DefaultTrustedRevisionPolicy()
-	return T2Attempt{RunID: run, Attempt: attempt, Workflow: p.Workflow, Event: p.Event, Branch: p.Branch,
+	return T2Attempt{RunID: run, Attempt: attempt, IntegrationID: p.IntegrationID, Workflow: p.Workflow, Event: p.Event, Branch: p.Branch,
 		HeadSHA: revision, Job: p.Job, Status: "completed", Conclusion: conclusion}
 }
 
