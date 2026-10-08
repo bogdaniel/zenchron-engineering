@@ -60,26 +60,31 @@ type Conflict struct {
 	Paths  []string     `json:"paths,omitempty"`
 }
 
-// NewConflict builds a bounded Conflict. Oversized input is truncated at a
-// fixed bound rather than refused outright: a conflict report is the
-// runtime's own diagnostic text, not untrusted worker input, and a diagnostic
-// too long to render fully is still worth showing in part.
-func NewConflict(kind ConflictKind, detail string, paths []string) Conflict {
+// NewConflict builds a bounded Conflict, refusing anything over bound rather
+// than truncating it.
+//
+// Paths is never a diagnostic to show "in part": VerifyRemediationScope
+// reuses it as the EXACT set of material a remediation may touch, so a
+// silently truncated list would silently narrow a producer's real, in-scope
+// material and reject a legitimate fix - or, read the other way, would claim
+// a conflict was fully described when paths past the cut were quietly
+// dropped from the record. A conflict this large is refused outright instead.
+func NewConflict(kind ConflictKind, detail string, paths []string) (Conflict, error) {
 	detail = strings.TrimSpace(detail)
 	if len(detail) > maxConflictDetailBytes {
-		detail = detail[:maxConflictDetailBytes]
+		return Conflict{}, fmt.Errorf("conflict detail is %d bytes, above the %d byte bound", len(detail), maxConflictDetailBytes)
 	}
 	if len(paths) > maxConflictPaths {
-		paths = paths[:maxConflictPaths]
+		return Conflict{}, fmt.Errorf("conflict names %d paths, above the %d path bound", len(paths), maxConflictPaths)
 	}
 	bounded := make([]string, len(paths))
 	for i, p := range paths {
 		if len(p) > maxConflictPathBytes {
-			p = p[:maxConflictPathBytes]
+			return Conflict{}, fmt.Errorf("conflict path %q is %d bytes, above the %d byte bound", p, len(p), maxConflictPathBytes)
 		}
 		bounded[i] = p
 	}
-	return Conflict{Kind: kind, Detail: detail, Paths: bounded}
+	return Conflict{Kind: kind, Detail: detail, Paths: bounded}, nil
 }
 
 // IntegratedCandidate is a new exact subject. It is never one of the inputs'
@@ -145,7 +150,10 @@ func ClassifyAssuranceFailure(contract Contract, candidate IntegratedCandidate, 
 	if strings.TrimSpace(detail) == "" {
 		detail = "independent assurance failed against the integrated candidate"
 	}
-	conflict := NewConflict(kind, detail, nil)
+	conflict, err := NewConflict(kind, detail, nil)
+	if err != nil {
+		return Result{}, err
+	}
 	return Result{Status: StatusBlocked, Contract: contract, Candidate: &candidate, Conflict: &conflict}, nil
 }
 

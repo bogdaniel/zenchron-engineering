@@ -39,10 +39,15 @@ upstream WorkUnit B -> admitted handoff B
   performs no Git operation this repository did not already have:
   `CreateCandidateClone`'s local, credential-free fetch between two
   runtime-owned workspaces (the same transfer `MaterializeCandidate` already
-  uses for an upstream candidate reference), the merge/`ConflictError`
-  vocabulary `IntegrateBase`/`Rebase` already use, and `RestoreTrusted`'s
-  existing hard-reset recovery. There is no second Git engine and no second
-  candidate/commit path.
+  uses for an upstream candidate reference) and `AssertIntegrity`. There is no
+  second Git engine and no second candidate/commit path.
+- **The `FailureWorkspaceIntegrity` recovery route.** `RestoreTrusted` is the
+  runtime's existing, operation-provenance-gated recovery for a workspace
+  whose Git metadata no longer matches its trusted baseline
+  (`runtime/operations.go`'s `restore`). `IntegrateInputs` never calls it on
+  an unexplained divergence itself - see "What is new" below - so a workspace
+  a crash left mid-plan is refused, and recovered only through that existing
+  route, exactly like any other candidate operation's integrity violation.
 - **Admission, assurance and review.** An integration attempt runs inside an
   ordinary governed `EngineeringRun`. Nothing here bypasses or duplicates
   handoff admission, reassessment or review: a clean composition is a new
@@ -68,29 +73,50 @@ order - by consumed unit id, independent of arrival order, matching
 `runtime.IntegrateInputs(ws, contract, sources)` performs that plan inside a
 candidate workspace the caller already cloned at the contract's base:
 
-1. Proves `ws` was actually created at the contract's base revision, then
-   unconditionally returns it there (aborting any leftover merge first) -
-   before the first step, and after every blocked one. A crash anywhere in a
-   multi-input plan, or a conflict on any step but the first, is cleaned up
-   the same way, so a restarted attempt always recomposes the whole plan from
-   one clean base rather than compounding an abandoned one.
-2. For each input in canonical order: fetches the exact committed object from
-   the producer's own runtime-owned workspace and proves its tree matches
-   what was admitted; proves the contract's base is actually an ancestor of
-   it (the base is **verified**, not merely stated); merges it.
-3. A Git conflict is read from Git itself (`git diff --name-only
-   --diff-filter=U`) before the merge is aborted, and reported as a bounded
-   `integration.Conflict{Kind: ConflictTextual}` naming exactly the
-   conflicted paths - never guessed at, and never auto-resolved: composition
-   never edits a conflicted hunk itself, so no producer's admitted output is
-   silently changed to make another's fit.
+1. Proves `ws` was actually created at the contract's base revision, aborts
+   any leftover **conflicted** merge (which never moves HEAD, refs or
+   config, so this alone can never hide a real divergence), and then checks
+   `ws.AssertIntegrity()`. Anything else that moved HEAD, refs or config away
+   from the trusted baseline - a crash after an earlier plan step already
+   committed, or genuine tampering - is **refused**, not silently restored:
+   `IntegrateInputs` never calls `RestoreTrusted` on an unexplained
+   divergence itself. Recovery is the runtime's existing
+   `FailureWorkspaceIntegrity` route, with real operation provenance; once
+   that has run, a fresh attempt proceeds and is not a second, competing
+   integration of the same input set.
+2. For each input in canonical order: re-verifies, against a LIVE lookup
+   (`IntegrationSources`, never the contract itself), that the unit's
+   currently admitted handoff still matches the one the contract recorded. A
+   superseded commit can remain perfectly fetchable; only this comparison
+   proves it is still current. Then it fetches the exact committed object
+   from the producer's own runtime-owned workspace, proves its tree matches
+   what was admitted, and proves the contract's base is actually an ancestor
+   of it (the base is **verified**, not merely stated - and "not an
+   ancestor" is never guessed at: a Git failure here is not silently
+   collapsed into "no," it is returned as a real error unless Git's own
+   documented, silent "no" exit is what happened).
+3. The commit is merged. A merge failure is classified from Git's OWN
+   repository state, not from the mere presence of an error: it is a
+   conflict only if Git left unmerged paths (`git diff --name-only
+   --diff-filter=U`, read before the merge is aborted) - that is what a
+   conflict IS. A merge that failed for any other reason (a dirty working
+   tree, a bad object, an environment failure) is aborted and its real cause
+   returned as an error, never mislabeled a conflict. A real conflict
+   discards everything THIS call composed so far, not merely the failing
+   step: the workspace returns to the verified base it started at, so a
+   blocked attempt is never read as having partly applied an earlier input.
+   The reported `integration.Conflict{Kind: ConflictTextual}` names exactly
+   the conflicted paths - never guessed at, and never auto-resolved:
+   composition never edits a conflicted hunk itself, so no producer's
+   admitted output is silently changed to make another's fit.
 4. A clean result is `integration.Integrated`, a `Result` naming the new
    exact `Revision`, `Tree` and the consumed input set's digest - never one
    of the inputs' own commits.
 5. An input this attempt cannot read at its admitted subject - an unknown
-   unit, an unreadable or tree-mismatched object, or a commit that is not a
-   descendant of the verified base (a replaced upstream subject) - is
-   `integration.Invalidated`, never silently skipped or guessed at.
+   unit, a superseded handoff, an unreadable or tree-mismatched object, or a
+   commit that is not a descendant of the verified base (a replaced upstream
+   subject) - is `integration.Invalidated`, never silently skipped or
+   guessed at.
 
 `integration.ClassifyAssuranceFailure` is the typed vocabulary for the other
 kind of conflict this package can observe but not detect by itself: a clean
@@ -103,7 +129,13 @@ uncertain result to "correct" on its own.
 
 `integration.VerifyRemediationScope` refuses a remediation that changes a
 path a textual conflict did not name, so a worker directed to resolve a
-conflict cannot use that opening to touch unrelated material.
+conflict cannot use that opening to touch unrelated material. `Conflict`'s
+paths are never truncated to fit a bound: `NewConflict` **refuses** a
+conflict shaped larger than the bound outright, because `VerifyRemediationScope`
+reuses `Paths` as the exact in-scope set - a silently truncated list would
+silently narrow a producer's real, legitimate material or silently claim a
+conflict was fully described when part of it had been dropped from the
+record.
 
 ## Known limitations and follow-ups
 

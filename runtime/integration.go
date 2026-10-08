@@ -27,73 +27,112 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/integration"
 )
 
-// IntegrationSources resolves one consumed unit id to the runtime-owned
-// directory holding its producer's candidate workspace, so the exact commit
-// an integration.Contract names can be fetched locally - the same local
-// transfer MaterializeCandidate already performs for an upstream candidate
-// reference.
-type IntegrationSources func(unitID string) (dir string, ok bool)
+// IntegrationSource is what a LIVE resolution of one consumed unit answers:
+// where its producer's candidate workspace is, and which handoff is
+// currently admitted for it. Both are read fresh by the caller for every
+// call - never taken from the contract itself - so a contract built a
+// moment earlier is proved still current rather than trusted. A commit that
+// remains fetchable from some workspace is not evidence that it is still
+// the WorkGraph's current admitted output; the HandoffID comparison below
+// is.
+type IntegrationSource struct {
+	Dir       string
+	HandoffID string
+}
+
+// IntegrationSources resolves one consumed unit id to its live
+// IntegrationSource, so the exact commit an integration.Contract names can
+// be fetched locally - the same local transfer MaterializeCandidate already
+// performs for an upstream candidate reference - and proved still current.
+type IntegrationSources func(unitID string) (IntegrationSource, bool)
 
 // IntegrateInputs composes one integration.Contract inside ws.
 //
 // The caller must already have created ws at the contract's exact
 // BaseRevision (CreateCandidateClone) - this function proves that and
-// refuses otherwise, it does not choose or clone the base itself. On
-// StatusIntegrated, ws's HEAD is the new candidate. On every other outcome,
-// and before every attempt begins, ws is unconditionally returned to its
-// verified base: a merge this call could not complete, a merge a prior
-// crashed attempt left mid-flight, and a commit a crashed attempt already
-// made for an earlier step of a multi-input plan are all cleaned up the same
-// way, so a restarted attempt always recomposes the whole plan from the same
-// clean base rather than compounding an abandoned one or leaving two
-// competing partial integrations behind.
+// refuses otherwise, it does not choose or clone the base itself.
+//
+// Before anything is merged, ws's integrity is checked: a leftover conflict
+// from a prior crashed attempt never moved HEAD, so it cannot trip this, and
+// is cleaned up unconditionally; anything else that moved HEAD, refs or
+// config away from the trusted baseline - a crash after an earlier step of
+// a multi-input plan already committed, or genuine tampering - is refused
+// rather than silently absorbed. This function never calls the runtime's
+// RestoreTrusted recovery on an UNEXPLAINED divergence; only the existing
+// FailureWorkspaceIntegrity route, with real operation provenance, decides
+// whether and when that recovery runs. It is used here only to undo
+// progress THIS SAME CALL made moments earlier for an attempt that must now
+// discard it entirely - see the conflict path below.
+//
+// On StatusIntegrated, ws's HEAD is the new candidate. On StatusBlocked, ws
+// is returned to exactly the base it started this call at: an input that
+// merged cleanly earlier in this same call is discarded along with the one
+// that then conflicted, so a blocked attempt is never read as having partly
+// applied.
 func IntegrateInputs(ws *CandidateWorkspace, contract integration.Contract, sources IntegrationSources) (integration.Result, error) {
 	if err := contract.Validate(); err != nil {
 		return integration.Result{}, err
 	}
-	// The workspace's OWN construction-time base, not wherever a crashed
-	// attempt last left its HEAD, is what proves this is the right
-	// workspace for this contract. resetToVerifiedBase below then makes the
-	// Git state agree with it unconditionally.
 	if ws.BaseRevision != contract.BaseRevision {
 		return integration.Result{}, fmt.Errorf(
 			"integration workspace was created at base %s, not the contract's verified base %s",
 			short12(ws.BaseRevision), short12(contract.BaseRevision))
 	}
-	if err := resetToVerifiedBase(ws); err != nil {
+	// Safe unconditionally: a conflicted merge never moves HEAD, refs or
+	// config, so aborting one cannot discard committed progress and cannot
+	// change what AssertIntegrity below is about to decide.
+	if err := abortLeftoverMerge(ws.Dir); err != nil {
+		return integration.Result{}, err
+	}
+	if err := ws.AssertIntegrity(); err != nil {
 		return integration.Result{}, err
 	}
 
 	for _, step := range contract.Plan() {
-		dir, ok := sources(step.UnitID)
+		source, ok := sources(step.UnitID)
 		if !ok {
 			return integration.Invalidated(contract,
-				fmt.Sprintf("integration input %q names no readable producer workspace", step.UnitID)), nil
+				fmt.Sprintf("integration input %q names no live producer workspace", step.UnitID)), nil
 		}
-		if err := fetchExactCommit(ws.Dir, dir, step.Commit, step.Tree); err != nil {
+		if source.HandoffID != step.HandoffID {
+			return integration.Invalidated(contract, fmt.Sprintf(
+				"integration input %q names admitted handoff %s, which is no longer current (current: %s)",
+				step.UnitID, short12(step.HandoffID), short12(source.HandoffID))), nil
+		}
+		if err := fetchExactCommit(ws.Dir, source.Dir, step.Commit, step.Tree); err != nil {
 			return integration.Invalidated(contract,
 				fmt.Sprintf("integration input %q could not be read at its admitted subject: %v", step.UnitID, err)), nil
 		}
-		if !isAncestor(ws.Dir, contract.BaseRevision, step.Commit) {
+		ancestor, err := isAncestor(ws.Dir, contract.BaseRevision, step.Commit)
+		if err != nil {
+			return integration.Result{}, fmt.Errorf("verifying integration input %q descends from the verified base: %w", step.UnitID, err)
+		}
+		if !ancestor {
 			return integration.Invalidated(contract, fmt.Sprintf(
 				"integration input %q (%s) is not a descendant of the verified base revision %s",
 				step.UnitID, short12(step.Commit), short12(contract.BaseRevision))), nil
 		}
-		conflicted, err := mergeFetchedCommit(ws.Dir, step.Commit)
+		conflicted, paths, err := mergeFetchedCommit(ws.Dir, step.Commit)
 		if err != nil {
 			return integration.Result{}, err
 		}
 		if conflicted {
-			paths, err := conflictedPaths(ws.Dir)
-			if err != nil {
-				return integration.Result{}, err
-			}
-			if err := resetToVerifiedBase(ws); err != nil {
+			// Discards everything this call composed so far, not merely
+			// this step's own attempt: a blocked result reports back to its
+			// verified base, never a partial multi-input merge. Provenance
+			// for this reset is the call itself - every commit being
+			// undone was made a few lines above, in this same invocation,
+			// with nothing else able to have touched ws in between.
+			if err := resetProgressMadeThisCall(ws); err != nil {
 				return integration.Result{}, err
 			}
 			detail := fmt.Sprintf("merging %q (%s) conflicts with material already composed from this attempt's earlier inputs",
 				step.UnitID, short12(step.Commit))
-			return integration.Blocked(contract, integration.NewConflict(integration.ConflictTextual, detail, paths)), nil
+			conflict, err := integration.NewConflict(integration.ConflictTextual, detail, paths)
+			if err != nil {
+				return integration.Result{}, fmt.Errorf("integration input %q: %w", step.UnitID, err)
+			}
+			return integration.Blocked(contract, conflict), nil
 		}
 	}
 
@@ -138,28 +177,54 @@ func fetchExactCommit(dir, sourceDir, commit, tree string) error {
 }
 
 // isAncestor proves base precedes commit, so the contract's base revision is
-// VERIFIED rather than merely stated: an input that does not descend from it
-// did not actually start from the base this attempt claims to compose on top
-// of.
-func isAncestor(dir, base, commit string) bool {
+// VERIFIED rather than merely stated.
+//
+// `merge-base --is-ancestor`'s exit code alone does not distinguish "no" from
+// "Git could not answer": both commits are already proven individually
+// resolvable by the time this runs (fetchExactCommit, and ws's own checked
+// base), so the only Git-documented non-ancestor exit (1) prints nothing,
+// while every other failure prints a "fatal:" diagnostic. That is an unknown
+// fact, never collapsed into "not an ancestor" - it is returned as an error.
+func isAncestor(dir, base, commit string) (bool, error) {
 	_, err := runGit(dir, "merge-base", "--is-ancestor", base, commit)
-	return err == nil
-}
-
-// mergeFetchedCommit merges one already-fetched commit into the current
-// head and reports whether Git itself refused it as a conflict - the same
-// classification IntegrateBase already uses, reused here rather than
-// reinvented as a second conflict path.
-func mergeFetchedCommit(dir, commit string) (conflicted bool, err error) {
-	if _, err := runGit(dir, "merge", "--no-ff", "--no-edit", commit); err != nil {
+	if err == nil {
 		return true, nil
+	}
+	if strings.Contains(err.Error(), "fatal:") {
+		return false, err
 	}
 	return false, nil
 }
 
-// conflictedPaths reads which paths Git itself reports as unmerged. It must
-// be read BEFORE the merge is aborted: aborting restores the index and the
-// unmerged markers along with it.
+// mergeFetchedCommit merges one already-fetched commit into the current
+// head.
+//
+// A merge failure is classified from Git's OWN repository state, not from
+// the mere presence of an error: it is a conflict only if Git left unmerged
+// paths, which is what a conflict IS. A merge that failed for any other
+// reason - a bad object, a locked index, an environment failure - is
+// aborted and its real cause is returned as an error, never mislabeled a
+// conflict.
+func mergeFetchedCommit(dir, commit string) (conflicted bool, paths []string, err error) {
+	if _, mergeErr := runGit(dir, "merge", "--no-ff", "--no-edit", commit); mergeErr != nil {
+		// Read BEFORE aborting: aborting restores the index and the
+		// unmerged markers along with it.
+		paths, err = conflictedPaths(dir)
+		if err != nil {
+			return false, nil, err
+		}
+		if len(paths) == 0 {
+			if abortErr := abortLeftoverMerge(dir); abortErr != nil {
+				return false, nil, fmt.Errorf("%v (cleanup also failed: %v)", mergeErr, abortErr)
+			}
+			return false, nil, mergeErr
+		}
+		return true, paths, nil
+	}
+	return false, nil, nil
+}
+
+// conflictedPaths reads which paths Git itself reports as unmerged.
 func conflictedPaths(dir string) ([]string, error) {
 	out, err := gitOutput(dir, "diff", "--name-only", "--diff-filter=U")
 	if err != nil {
@@ -175,24 +240,25 @@ func conflictedPaths(dir string) ([]string, error) {
 	return paths, nil
 }
 
-// resetToVerifiedBase unconditionally returns ws to its verified base
-// revision, aborting any merge left in progress first. Called before every
-// attempt and after every blocked one, so neither a crash between two steps
-// of a multi-input plan nor a conflict on any step but the first ever leaves
-// a later attempt composing on top of another attempt's abandoned partial
-// progress. It reuses RestoreTrusted, the runtime's existing hard-reset
+// resetProgressMadeThisCall unconditionally returns ws to its verified base,
+// aborting any merge left in progress first. It is called only from within
+// one IntegrateInputs call, to discard commits that SAME call made for
+// earlier plan steps once a later step conflicts - provenance this function
+// has directly, since nothing else runs between those commits and this
+// reset. It reuses RestoreTrusted, the runtime's existing hard-reset
 // recovery, rather than a second reset path.
-func resetToVerifiedBase(ws *CandidateWorkspace) error {
+func resetProgressMadeThisCall(ws *CandidateWorkspace) error {
 	if err := abortLeftoverMerge(ws.Dir); err != nil {
 		return err
 	}
 	return ws.RestoreTrusted()
 }
 
-// abortLeftoverMerge cleans up a merge a prior attempt left mid-flight -
-// after a crash, or after this file's own conflict path above - so
-// RestoreTrusted's hard reset is never attempted while Git still considers a
-// merge in progress.
+// abortLeftoverMerge cleans up a merge left in progress - after a crash, or
+// after this file's own conflict path above - so neither AssertIntegrity nor
+// a hard reset is ever attempted while Git still considers a merge
+// unresolved. A conflicted merge never moves HEAD, refs or config, so this
+// alone never changes what AssertIntegrity decides.
 func abortLeftoverMerge(dir string) error {
 	if _, err := os.Stat(filepath.Join(dir, ".git", "MERGE_HEAD")); errors.Is(err, os.ErrNotExist) {
 		return nil

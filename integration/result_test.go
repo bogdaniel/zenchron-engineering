@@ -2,6 +2,7 @@ package integration
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -12,6 +13,15 @@ func fixtureContract(t *testing.T) Contract {
 	t.Helper()
 	c, err := NewContract("graph-1", "integrate", "base-rev",
 		orchestration.WorkUnitInputs{input("a", "rev-a"), input("b", "rev-b")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func mustConflict(t *testing.T, kind ConflictKind, detail string, paths []string) Conflict {
+	t.Helper()
+	c, err := NewConflict(kind, detail, paths)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,36 +64,46 @@ func TestClassifyAssuranceFailureUncertainDefaultsDetail(t *testing.T) {
 }
 
 func TestVerifyRemediationScope(t *testing.T) {
-	conflict := NewConflict(ConflictTextual, "merge conflict", []string{"a.go", "b.go"})
+	conflict := mustConflict(t, ConflictTextual, "merge conflict", []string{"a.go", "b.go"})
 	if err := VerifyRemediationScope(conflict, []string{"a.go"}); err != nil {
 		t.Fatalf("refused an in-scope remediation: %v", err)
 	}
 	if err := VerifyRemediationScope(conflict, []string{"a.go", "unrelated.go"}); err == nil {
 		t.Fatal("accepted a remediation touching a path outside the conflict")
 	}
-	semantic := NewConflict(ConflictSemantic, "assurance failed", nil)
+	semantic := mustConflict(t, ConflictSemantic, "assurance failed", nil)
 	if err := VerifyRemediationScope(semantic, []string{"a.go"}); err == nil {
 		t.Fatal("checked remediation scope against a non-textual conflict")
 	}
 }
 
-func TestNewConflictBoundsDetailAndPaths(t *testing.T) {
-	longDetail := strings.Repeat("x", maxConflictDetailBytes+100)
+// TestNewConflictRefusesOverBoundRatherThanTruncating is a regression guard:
+// Paths is reused by VerifyRemediationScope as the EXACT in-scope material a
+// remediation may touch, so silently dropping entries past a bound would
+// silently narrow that scope and reject a legitimate fix, or silently claim
+// a conflict was fully described when it was not. Over-bound input must be
+// refused, never cut down and returned as if it were complete.
+func TestNewConflictRefusesOverBoundRatherThanTruncating(t *testing.T) {
+	if _, err := NewConflict(ConflictTextual, strings.Repeat("x", maxConflictDetailBytes+100), nil); err == nil {
+		t.Fatal("accepted an over-bound detail")
+	}
 	manyPaths := make([]string, maxConflictPaths+10)
 	for i := range manyPaths {
-		manyPaths[i] = strings.Repeat("p", maxConflictPathBytes+10)
+		manyPaths[i] = fmt.Sprintf("path-%d.go", i)
 	}
-	conflict := NewConflict(ConflictTextual, longDetail, manyPaths)
-	if len(conflict.Detail) > maxConflictDetailBytes {
-		t.Fatalf("detail not bounded: %d bytes", len(conflict.Detail))
+	if _, err := NewConflict(ConflictTextual, "conflict", manyPaths); err == nil {
+		t.Fatal("accepted a conflict with more paths than the bound")
 	}
-	if len(conflict.Paths) > maxConflictPaths {
-		t.Fatalf("paths not bounded: %d entries", len(conflict.Paths))
+	if _, err := NewConflict(ConflictTextual, "conflict", []string{strings.Repeat("p", maxConflictPathBytes+10)}); err == nil {
+		t.Fatal("accepted an over-bound path")
 	}
-	for _, p := range conflict.Paths {
-		if len(p) > maxConflictPathBytes {
-			t.Fatalf("path not bounded: %d bytes", len(p))
-		}
+	// Within bound, every path is kept verbatim - none silently dropped.
+	ok, err := NewConflict(ConflictTextual, "conflict", []string{"a.go", "b.go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ok.Paths) != 2 || ok.Paths[0] != "a.go" || ok.Paths[1] != "b.go" {
+		t.Fatalf("paths within bound were altered: %v", ok.Paths)
 	}
 }
 
@@ -110,7 +130,7 @@ func TestResultConstructorsSetExactlyOneOutcome(t *testing.T) {
 	if integrated.Status != StatusIntegrated || integrated.Candidate == nil || integrated.Conflict != nil || integrated.Reason != "" {
 		t.Fatalf("Integrated() result is malformed: %+v", integrated)
 	}
-	blocked := Blocked(contract, NewConflict(ConflictTextual, "conflict", []string{"a.go"}))
+	blocked := Blocked(contract, mustConflict(t, ConflictTextual, "conflict", []string{"a.go"}))
 	if blocked.Status != StatusBlocked || blocked.Conflict == nil || blocked.Candidate != nil || blocked.Reason != "" {
 		t.Fatalf("Blocked() result is malformed: %+v", blocked)
 	}

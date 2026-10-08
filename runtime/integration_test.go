@@ -77,14 +77,36 @@ func commitFile(t *testing.T, w CandidateWorkspace, name, body, message string) 
 	return result
 }
 
+// handoffIDFor is the fixture's one consistent mapping from a unit id to the
+// handoff identity its admitted output carries, shared between
+// workUnitInput (what a contract records) and sourcesFor (what a live
+// lookup currently reports) so the two agree unless a test deliberately
+// diverges them.
+func handoffIDFor(unitID string) string { return "handoff-" + unitID }
+
 func workUnitInput(unitID string, c CommitResult) orchestration.WorkUnitInput {
 	return orchestration.WorkUnitInput{
 		UnitID: unitID,
 		UnitOutput: orchestration.UnitOutput{
-			HandoffID: "handoff-" + unitID, RunID: "run-" + unitID,
+			HandoffID: handoffIDFor(unitID), RunID: "run-" + unitID,
 			CandidateRevision: c.Commit, CandidateTree: c.Tree,
 			Outcome: "completed", Summary: "did the thing",
 		},
+	}
+}
+
+// sourcesFor builds an IntegrationSources from a unit id -> producer
+// workspace directory map, reporting each unit's CURRENT handoff id as
+// handoffIDFor(unitID) - agreeing with workUnitInput, so ordinary tests
+// exercise a live lookup that confirms currency rather than one that always
+// trivially passes it.
+func sourcesFor(dirs map[string]string) IntegrationSources {
+	return func(unitID string) (IntegrationSource, bool) {
+		dir, ok := dirs[unitID]
+		if !ok {
+			return IntegrationSource{}, false
+		}
+		return IntegrationSource{Dir: dir, HandoffID: handoffIDFor(unitID)}, true
 	}
 }
 
@@ -103,16 +125,7 @@ func TestIntegrateInputsCleanMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sources := func(unitID string) (string, bool) {
-		switch unitID {
-		case "a":
-			return a.Dir, true
-		case "b":
-			return b.Dir, true
-		default:
-			return "", false
-		}
-	}
+	sources := sourcesFor(map[string]string{"a": a.Dir, "b": b.Dir})
 
 	result, err := IntegrateInputs(&integrationWS, contract, sources)
 	if err != nil {
@@ -140,7 +153,9 @@ func TestIntegrateInputsCleanMerge(t *testing.T) {
 
 // TestIntegrateInputsTextualConflict proves scenario B: a textual conflict
 // produces a bounded, deterministic blocked result, and leaves the
-// workspace clean at its base.
+// workspace clean at its base - including discarding the FIRST input's
+// clean merge once the second one conflicts (finding: partial integration
+// must never be retained).
 func TestIntegrateInputsTextualConflict(t *testing.T) {
 	root, origin, base := integrationFixture(t)
 	a := cloneAt(t, root, "run-a", origin, base)
@@ -154,12 +169,7 @@ func TestIntegrateInputsTextualConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sources := func(unitID string) (string, bool) {
-		if unitID == "a" {
-			return a.Dir, true
-		}
-		return b.Dir, true
-	}
+	sources := sourcesFor(map[string]string{"a": a.Dir, "b": b.Dir})
 
 	result, err := IntegrateInputs(&integrationWS, contract, sources)
 	if err != nil {
@@ -174,7 +184,9 @@ func TestIntegrateInputsTextualConflict(t *testing.T) {
 	if len(result.Conflict.Paths) != 1 || result.Conflict.Paths[0] != "shared.txt" {
 		t.Fatalf("conflict paths = %v, want [shared.txt]", result.Conflict.Paths)
 	}
-	// Left clean: no leftover merge state, and HEAD is still the base.
+	// Left clean: no leftover merge state, and HEAD is back at the base -
+	// "a"'s own clean merge (the first plan step) was discarded too, not
+	// only "b"'s conflicting attempt.
 	if _, err := os.Stat(filepath.Join(integrationWS.Dir, ".git", "MERGE_HEAD")); !os.IsNotExist(err) {
 		t.Fatalf("a blocked attempt left a merge in progress: %v", err)
 	}
@@ -187,11 +199,15 @@ func TestIntegrateInputsTextualConflict(t *testing.T) {
 	}
 }
 
-// TestIntegrateInputsResumesAfterLeftoverMerge proves scenario E: a merge a
-// prior attempt left mid-flight - standing in for a crash between detecting
-// the conflict and aborting it - does not block or duplicate a later,
-// successful attempt.
-func TestIntegrateInputsResumesAfterLeftoverMerge(t *testing.T) {
+// TestIntegrateInputsSucceedsAfterExplicitRecovery proves scenario E
+// end-to-end, consistent with finding 1's fix: a workspace a crash left mid
+// plan (an earlier step's merge already committed) is refused by
+// IntegrateInputs itself - see TestIntegrateInputsRefusesDivergedWorkspace -
+// never silently composed over. Only once the runtime's EXISTING
+// FailureWorkspaceIntegrity recovery (RestoreTrusted) has explicitly
+// restored it does a fresh attempt proceed, and it composes cleanly rather
+// than producing a second, competing integration of the same input set.
+func TestIntegrateInputsSucceedsAfterExplicitRecovery(t *testing.T) {
 	root, origin, base := integrationFixture(t)
 	a := cloneAt(t, root, "run-a", origin, base)
 	aCommit := commitFile(t, a, "a.txt", "alpha\n", "add alpha")
@@ -199,29 +215,13 @@ func TestIntegrateInputsResumesAfterLeftoverMerge(t *testing.T) {
 	bCommit := commitFile(t, b, "b.txt", "beta\n", "add beta")
 
 	integrationWS := cloneAt(t, root, "run-integrate", origin, base)
-
-	// Simulate the leftover: a real conflicting merge, left exactly where a
-	// crash between detection and abort would leave it.
-	conflicting := cloneAt(t, root, "run-conflict", origin, base)
-	commitFile(t, conflicting, "a.txt", "conflicting\n", "conflicting change")
+	// Simulate the crash: an earlier attempt's first plan step already
+	// committed, then nothing recorded it.
 	if _, err := runGit(integrationWS.Dir, "fetch", "--no-tags", a.Dir, aCommit.Commit); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := runGit(integrationWS.Dir, "merge", "--no-ff", "--no-edit", aCommit.Commit); err != nil {
 		t.Fatal(err)
-	}
-	conflictCommit, err := gitOutput(conflicting.Dir, "rev-parse", "HEAD")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runGit(integrationWS.Dir, "fetch", "--no-tags", conflicting.Dir, strings.TrimSpace(conflictCommit)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runGit(integrationWS.Dir, "merge", "--no-ff", "--no-edit", strings.TrimSpace(conflictCommit)); err == nil {
-		t.Fatal("expected the staged collision to conflict")
-	}
-	if _, err := os.Stat(filepath.Join(integrationWS.Dir, ".git", "MERGE_HEAD")); err != nil {
-		t.Fatalf("fixture did not leave a merge in progress: %v", err)
 	}
 
 	contract, err := integration.NewContract("graph-1", "integrate", base,
@@ -229,11 +229,15 @@ func TestIntegrateInputsResumesAfterLeftoverMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sources := func(unitID string) (string, bool) {
-		if unitID == "a" {
-			return a.Dir, true
-		}
-		return b.Dir, true
+	sources := sourcesFor(map[string]string{"a": a.Dir, "b": b.Dir})
+
+	if _, err := IntegrateInputs(&integrationWS, contract, sources); err == nil {
+		t.Fatal("expected the crash-diverged workspace to be refused before explicit recovery")
+	}
+
+	// The explicit recovery route: never called by IntegrateInputs itself.
+	if err := integrationWS.RestoreTrusted(); err != nil {
+		t.Fatal(err)
 	}
 
 	result, err := IntegrateInputs(&integrationWS, contract, sources)
@@ -243,8 +247,44 @@ func TestIntegrateInputsResumesAfterLeftoverMerge(t *testing.T) {
 	if result.Status != integration.StatusIntegrated {
 		t.Fatalf("status = %s, want %s (reason=%q conflict=%+v)", result.Status, integration.StatusIntegrated, result.Reason, result.Conflict)
 	}
-	if _, err := os.Stat(filepath.Join(integrationWS.Dir, ".git", "MERGE_HEAD")); !os.IsNotExist(err) {
-		t.Fatalf("resumed attempt left a merge in progress: %v", err)
+}
+
+// TestIntegrateInputsRefusesDivergedWorkspace proves finding 1: a workspace
+// whose Git metadata no longer matches its trusted baseline for a reason
+// other than a leftover (non-head-moving) conflict - standing in for a crash
+// after an earlier plan step already committed, or genuine tampering - is
+// refused rather than silently restored and composed over. This function
+// must never call RestoreTrusted on an unexplained divergence; only the
+// runtime's existing FailureWorkspaceIntegrity route does, with real
+// operation provenance.
+func TestIntegrateInputsRefusesDivergedWorkspace(t *testing.T) {
+	root, origin, base := integrationFixture(t)
+	a := cloneAt(t, root, "run-a", origin, base)
+	aCommit := commitFile(t, a, "a.txt", "alpha\n", "add alpha")
+	b := cloneAt(t, root, "run-b", origin, base)
+	bCommit := commitFile(t, b, "b.txt", "beta\n", "add beta")
+
+	integrationWS := cloneAt(t, root, "run-integrate", origin, base)
+	// Advance HEAD past base WITHOUT going through IntegrateInputs - standing
+	// in for an earlier crashed attempt's own successful intermediate merge
+	// commit, which IS a Git-metadata divergence (unlike a mere leftover
+	// conflict).
+	if _, err := runGit(integrationWS.Dir, "fetch", "--no-tags", a.Dir, aCommit.Commit); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(integrationWS.Dir, "merge", "--no-ff", "--no-edit", aCommit.Commit); err != nil {
+		t.Fatal(err)
+	}
+
+	contract, err := integration.NewContract("graph-1", "integrate", base,
+		orchestration.WorkUnitInputs{workUnitInput("a", aCommit), workUnitInput("b", bCommit)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := sourcesFor(map[string]string{"a": a.Dir, "b": b.Dir})
+
+	if _, err := IntegrateInputs(&integrationWS, contract, sources); err == nil {
+		t.Fatal("silently composed over a workspace whose Git metadata had diverged from its trusted baseline")
 	}
 }
 
@@ -267,12 +307,7 @@ func TestIntegrateInputsInvalidatesUnreadableInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sources := func(unitID string) (string, bool) {
-		if unitID == "a" {
-			return a.Dir, true
-		}
-		return b.Dir, true
-	}
+	sources := sourcesFor(map[string]string{"a": a.Dir, "b": b.Dir})
 
 	result, err := IntegrateInputs(&integrationWS, contract, sources)
 	if err != nil {
@@ -310,11 +345,48 @@ func TestIntegrateInputsInvalidatesStaleUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sources := func(unitID string) (string, bool) {
-		if unitID == "a" {
-			return a.Dir, true
+	sources := sourcesFor(map[string]string{"a": a.Dir, "b": bNew.Dir})
+
+	result, err := IntegrateInputs(&integrationWS, contract, sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != integration.StatusInvalidated {
+		t.Fatalf("status = %s, want %s", result.Status, integration.StatusInvalidated)
+	}
+}
+
+// TestIntegrateInputsInvalidatesSupersededHandoff proves finding 4: an input
+// whose named commit remains perfectly fetchable is still invalidated once
+// the live source reports a DIFFERENT current handoff id for that unit -
+// standing in for #472 having admitted a newer handoff after this contract
+// was built. Fetchability alone never establishes currency.
+func TestIntegrateInputsInvalidatesSupersededHandoff(t *testing.T) {
+	root, origin, base := integrationFixture(t)
+	a := cloneAt(t, root, "run-a", origin, base)
+	aCommit := commitFile(t, a, "a.txt", "alpha\n", "add alpha")
+	b := cloneAt(t, root, "run-b", origin, base)
+	bCommit := commitFile(t, b, "b.txt", "beta\n", "add beta")
+
+	integrationWS := cloneAt(t, root, "run-integrate", origin, base)
+	contract, err := integration.NewContract("graph-1", "integrate", base,
+		orchestration.WorkUnitInputs{workUnitInput("a", aCommit), workUnitInput("b", bCommit)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirs := map[string]string{"a": a.Dir, "b": b.Dir}
+	sources := func(unitID string) (IntegrationSource, bool) {
+		dir, ok := dirs[unitID]
+		if !ok {
+			return IntegrationSource{}, false
 		}
-		return bNew.Dir, true
+		handoff := handoffIDFor(unitID)
+		if unitID == "b" {
+			// b's commit is perfectly fetchable from this very directory -
+			// only the live handoff identity says it is no longer current.
+			handoff = "handoff-b-superseding"
+		}
+		return IntegrationSource{Dir: dir, HandoffID: handoff}, true
 	}
 
 	result, err := IntegrateInputs(&integrationWS, contract, sources)
@@ -323,6 +395,41 @@ func TestIntegrateInputsInvalidatesStaleUpstream(t *testing.T) {
 	}
 	if result.Status != integration.StatusInvalidated {
 		t.Fatalf("status = %s, want %s", result.Status, integration.StatusInvalidated)
+	}
+	if !strings.Contains(result.Reason, "\"b\"") {
+		t.Fatalf("invalidation reason does not name the superseded input: %q", result.Reason)
+	}
+}
+
+// TestIntegrateInputsPropagatesNonConflictMergeFailure proves finding 3: a
+// Git merge failure that leaves no unmerged path is not a conflict and must
+// not be reported as StatusBlocked; it is a real failure this build cannot
+// explain away.
+func TestIntegrateInputsPropagatesNonConflictMergeFailure(t *testing.T) {
+	root, origin, base := integrationFixture(t)
+	a := cloneAt(t, root, "run-a", origin, base)
+	aCommit := commitFile(t, a, "a.txt", "alpha\n", "add alpha")
+	b := cloneAt(t, root, "run-b", origin, base)
+	bCommit := commitFile(t, b, "b.txt", "beta\n", "add beta")
+
+	integrationWS := cloneAt(t, root, "run-integrate", origin, base)
+	// An uncommitted, unstaged local change to a path the first merge step
+	// also touches: Git refuses the merge outright ("local changes would be
+	// overwritten"), before it ever gets far enough to leave an unmerged
+	// path - the hallmark that distinguishes this from a real conflict.
+	if err := os.WriteFile(filepath.Join(integrationWS.Dir, "a.txt"), []byte("dirty\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	contract, err := integration.NewContract("graph-1", "integrate", base,
+		orchestration.WorkUnitInputs{workUnitInput("a", aCommit), workUnitInput("b", bCommit)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := sourcesFor(map[string]string{"a": a.Dir, "b": b.Dir})
+
+	if _, err := IntegrateInputs(&integrationWS, contract, sources); err == nil {
+		t.Fatal("a non-conflict merge failure was silently accepted or classified as a conflict")
 	}
 }
 
@@ -344,12 +451,7 @@ func TestIntegrateInputsRefusesNonCanonicalBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sources := func(unitID string) (string, bool) {
-		if unitID == "a" {
-			return a.Dir, true
-		}
-		return b.Dir, true
-	}
+	sources := sourcesFor(map[string]string{"a": a.Dir, "b": b.Dir})
 
 	if _, err := IntegrateInputs(&integrationWS, contract, sources); err == nil {
 		t.Fatal("accepted an integration workspace that was not at the contract's verified base")
@@ -364,12 +466,7 @@ func TestIntegrateInputsIsOrderIndependent(t *testing.T) {
 	aCommit := commitFile(t, a, "a.txt", "alpha\n", "add alpha")
 	b := cloneAt(t, root, "run-b", origin, base)
 	bCommit := commitFile(t, b, "b.txt", "beta\n", "add beta")
-	sources := func(unitID string) (string, bool) {
-		if unitID == "a" {
-			return a.Dir, true
-		}
-		return b.Dir, true
-	}
+	sources := sourcesFor(map[string]string{"a": a.Dir, "b": b.Dir})
 
 	forward := cloneAt(t, root, "run-integrate-forward", origin, base)
 	forwardContract, err := integration.NewContract("graph-1", "integrate", base,

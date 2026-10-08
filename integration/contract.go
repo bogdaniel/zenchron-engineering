@@ -114,6 +114,12 @@ type MergeStep struct {
 	UnitID string `json:"unit_id"`
 	Commit string `json:"commit"`
 	Tree   string `json:"tree"`
+	// HandoffID is the admitted handoff this step's commit and tree were
+	// recorded against. A caller re-verifies it against the unit's LIVE
+	// current admitted handoff before fetching the commit at all: a commit
+	// that remains fetchable is not evidence that it is still current, and
+	// a mismatch here is what proves it is not.
+	HandoffID string `json:"handoff_id"`
 }
 
 // Plan is the deterministic composition order: by consumed unit id, which is
@@ -128,7 +134,7 @@ func (c Contract) Plan() []MergeStep {
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].UnitID < ordered[j].UnitID })
 	steps := make([]MergeStep, len(ordered))
 	for i, in := range ordered {
-		steps[i] = MergeStep{UnitID: in.UnitID, Commit: in.CandidateRevision, Tree: in.CandidateTree}
+		steps[i] = MergeStep{UnitID: in.UnitID, Commit: in.CandidateRevision, Tree: in.CandidateTree, HandoffID: in.HandoffID}
 	}
 	return steps
 }
