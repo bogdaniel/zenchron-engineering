@@ -312,6 +312,7 @@ that `runtime/` projects for it, never over a provider's name.
 - [`../ROADMAP.md`](../ROADMAP.md) — where this sits, and what each milestone adds
 - [`supervisor.md`](supervisor.md) — what `serve` owns and refuses
 - [`agents.md`](agents.md) — the workers, their trust modes and provenance
+- [`review.md`](review.md) — first-class independent PR review
 - [`planning.md`](planning.md) — profiles, templates, plans and approval
 - [`spec/planning-v0.1.md`](spec/planning-v0.1.md) — the normative planning artifacts
 - [`architecture.md`](architecture.md) — the Authorization Kernel

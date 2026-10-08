@@ -99,6 +99,7 @@ requires protected execution" - see the known limitations in `ROADMAP.md`.
 | [`docs/running-multiple-tasks.md`](docs/running-multiple-tasks.md) | several at once, and what happens when one merges first |
 | [`docs/orchestration.md`](docs/orchestration.md) | an explicit issue batch with mandatory typed handoffs - not a planner or a scheduler |
 | [`docs/github-feedback.md`](docs/github-feedback.md) | the review loop, and who is allowed to direct a worker |
+| [`docs/review.md`](docs/review.md) | first-class independent PR review: context packet, decision, publication |
 | [`docs/agents.md`](docs/agents.md) | the workers, trust modes, provenance |
 | [`docs/planning.md`](docs/planning.md) | agent profiles, plan templates, and the approval boundary |
 | [`docs/supervisor.md`](docs/supervisor.md) | `serve`, its control endpoint, drain/shutdown/stop-all |
@@ -436,6 +437,7 @@ docs/running-work.md            One issue end to end
 docs/running-multiple-tasks.md  Several at once, and base drift between them
 docs/orchestration.md           An explicit issue batch, its handoffs and aggregate status
 docs/github-feedback.md         The review loop and its admission gate
+docs/review.md                  First-class independent PR review: packet, decision, publication
 docs/agents.md                  Execution agents, trust modes, provenance
 docs/supervisor.md              serve, its control endpoint and lifecycle
 docs/configuration.md           Every configuration member and its layer
