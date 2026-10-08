@@ -9,6 +9,8 @@ REVIEW_THRESHOLD = 700
 HARD_CAP = 1000
 EXCEPTIONS = "file-size-exceptions.tsv"
 BASELINE = "file-size-baseline.tsv"
+BASELINE_PIN = "001efd613a40b4b367c6617085e40a24286fac47"
+VERIFY_FLAG = "--verify-baseline"
 
 
 def git(*args):
@@ -19,27 +21,60 @@ def paths(*args):
     return {os.fsdecode(p) for p in git("ls-files", "-z", *args).split(b"\0") if p}
 
 
-def count_sources(current):
-    suffixes = {
+SUFFIXES = {
         ".go", ".rs", ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
         ".java", ".kt", ".cs", ".php", ".rb", ".swift", ".c", ".h", ".cc",
-        ".cpp", ".hpp", ".vue", ".svelte", ".css", ".scss", ".html", ".sql", ".sh",
-    }
+    ".cpp", ".hpp", ".vue", ".svelte", ".css", ".scss", ".html", ".sql", ".sh",
+}
+
+
+def is_counted_path(name):
+    path = PurePosixPath(name)
+    return path.suffix in SUFFIXES and not set(path.parts) & {"vendor", "node_modules", ".venv"}
+
+
+def count_lines(data):
+    """Physical line count, or None for generated content."""
+    if re.search(
+        rb"(?im)^[ \t]*(?://|#|/\*+|\*|<!--|--)[ \t]*(?:code[ \t]+)?"
+        rb"generated\b[^\r\n]*\bdo not edit\b", data[:2048]
+    ):
+        return None
+    return data.count(b"\n") + int(bool(data) and not data.endswith(b"\n"))
+
+
+def count_sources(current):
     counts = {}
     for name in sorted(current):
-        path = Path(name)
-        if path.suffix not in suffixes or set(path.parts) & {"vendor", "node_modules", ".venv"}:
+        if not is_counted_path(name) or Path(name).is_symlink():
             continue
-        if path.is_symlink():
-            continue
-        data = path.read_bytes()
-        if re.search(
-            rb"(?im)^[ \t]*(?://|#|/\*+|\*|<!--|--)[ \t]*(?:code[ \t]+)?"
-            rb"generated\b[^\r\n]*\bdo not edit\b", data[:2048]
-        ):
-            continue
-        counts[name] = data.count(b"\n") + int(bool(data) and not data.endswith(b"\n"))
+        count = count_lines(Path(name).read_bytes())
+        if count is not None:
+            counts[name] = count
     return counts
+
+
+def pinned_count(name):
+    """Line count of a regular source file at BASELINE_PIN, or None if it was not one."""
+    entry = git("ls-tree", "-z", BASELINE_PIN, "--", name).split(b"\0")[0]
+    if not is_counted_path(name) or not entry.startswith((b"100644 blob ", b"100755 blob ")):
+        return None
+    return count_lines(git("cat-file", "blob", entry.split()[2].decode()))
+
+
+def verify_baseline(ceilings):
+    """Fail closed unless every ceiling is at most the file's line count at BASELINE_PIN."""
+    if subprocess.run(
+        ["git", "cat-file", "-e", f"{BASELINE_PIN}^{{commit}}"], capture_output=True
+    ).returncode:
+        raise ValueError(f"baseline pin {BASELINE_PIN} is unavailable (shallow clone?); not verified")
+    for name, ceiling in ceilings.items():
+        historical = pinned_count(name)
+        if historical is None or historical <= HARD_CAP:
+            raise ValueError(f"baseline path was not over {HARD_CAP} lines at the pin: {name!r}")
+        if ceiling > historical:
+            raise ValueError(f"baseline ceiling {ceiling} exceeds {historical} at the pin: {name!r}")
+    print(f"baseline verified against {BASELINE_PIN}: {len(ceilings)} entries")
 
 
 def read_manifest(file_name, tracked, column_counts):
@@ -91,12 +126,11 @@ def load_baseline(tracked, counts):
 
 def load_exceptions(tracked, counts, ceilings):
     exceptions = {}
-    for number, fields in read_manifest(EXCEPTIONS, tracked, {2, 3}):
-        name, reason = fields[0], fields[-1]
-        limit = parse_limit(fields[1], EXCEPTIONS, number) if len(fields) == 3 else None
+    for number, (name, limit, reason) in read_manifest(EXCEPTIONS, tracked, {3}):
+        limit = parse_limit(limit, EXCEPTIONS, number)
         if is_stale(name, tracked, counts):
             raise ValueError(f"stale or untracked exception: {name!r}")
-        if name in ceilings and (limit is None or limit <= ceilings[name]):
+        if name in ceilings and limit <= ceilings[name]:
             raise ValueError(f"exception for a baseline file must state a limit above its ceiling: {name!r}")
         exceptions[name] = (limit, reason)
     return exceptions
@@ -111,7 +145,7 @@ def classify(name, count, ceilings, exceptions):
     if count <= HARD_CAP:
         return f"review {count} {name!r}", False
     limit, reason = exceptions.get(name, (None, None))
-    if reason is not None and (limit is None or count <= limit):
+    if reason is not None and count <= limit:
         return f"exception {count} {name!r}: {reason}", False
     if name in ceilings and count <= ceilings[name]:
         return f"baseline {count}/{ceilings[name]} {name!r}", False
@@ -122,12 +156,16 @@ def classify(name, count, ceilings, exceptions):
     return f"FAIL {count} {name!r}", True
 
 
-def main():
+def main(args):
+    if set(args) - {VERIFY_FLAG}:
+        raise ValueError(f"usage: check_file_sizes.py [{VERIFY_FLAG}]")
     os.chdir(os.fsdecode(git("rev-parse", "--show-toplevel")).rstrip("\n"))
     tracked = paths("--cached")
     current = (tracked | paths("--others", "--exclude-standard")) - paths("--deleted")
     counts = count_sources(current)
     ceilings = load_baseline(tracked, counts)
+    if VERIFY_FLAG in args:
+        verify_baseline(ceilings)
     exceptions = load_exceptions(tracked, counts, ceilings)
     failed = False
     for name, count in counts.items():
@@ -140,7 +178,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        sys.exit(main(sys.argv[1:]))
     except (OSError, UnicodeError, ValueError, subprocess.CalledProcessError) as error:
         print(f"FAIL file-size check: {error}", file=sys.stderr)
         sys.exit(1)

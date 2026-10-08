@@ -29,19 +29,19 @@ class FileSizeCheckerTest(unittest.TestCase):
     def manifest(self, name, *entries):
         self.write(name, "# comment\n" + "".join("\t".join(map(str, e)) + "\n" for e in entries))
 
-    def check(self):
+    def check(self, *args):
         result = subprocess.run(
-            [sys.executable, "check.py"], cwd=self.repo, capture_output=True, text=True
+            [sys.executable, "check.py", *args], cwd=self.repo, capture_output=True, text=True
         )
         return result.returncode, result.stdout + result.stderr
 
-    def assertPasses(self):
-        code, output = self.check()
+    def assertPasses(self, *args):
+        code, output = self.check(*args)
         self.assertEqual(code, 0, output)
         return output
 
-    def assertFails(self, expected):
-        code, output = self.check()
+    def assertFails(self, expected, *args):
+        code, output = self.check(*args)
         self.assertEqual(code, 1, output)
         self.assertIn(expected, output)
 
@@ -113,17 +113,24 @@ class FileSizeCheckerTest(unittest.TestCase):
         self.manifest("file-size-baseline.tsv", ("gen.go", 1201))
         self.assertFails("stale baseline entry")
 
-    def test_unbounded_exception_still_covers_non_baseline_file(self):
+    def test_unbounded_exception_on_new_over_cap_file_is_rejected(self):
         self.source("a.go", 1500)
         self.manifest("file-size-exceptions.tsv", ("a.go", "approved reason"))
+        self.assertFails("malformed file-size-exceptions.tsv entry")
+
+    def test_bounded_exception_on_non_baseline_file(self):
+        self.source("a.go", 1500)
+        self.manifest("file-size-exceptions.tsv", ("a.go", 1500, "approved reason"))
         self.assertIn("exception 1500 'a.go'", self.assertPasses())
+        self.source("a.go", 1501)
+        self.assertFails("exceeds exception limit 1500")
 
     def test_unbounded_exception_on_baseline_file_is_rejected(self):
         # The #537 shape: a two-column exception for a file already in the baseline.
         self.source("runtime/doctor.go", 1620)
         self.manifest("file-size-baseline.tsv", ("runtime/doctor.go", 1611))
         self.manifest("file-size-exceptions.tsv", ("runtime/doctor.go", "approved for #537"))
-        self.assertFails("must state a limit above its ceiling")
+        self.assertFails("malformed file-size-exceptions.tsv entry")
 
     def test_bounded_exception_allows_growth_up_to_its_limit_only(self):
         self.source("a.go", 1210)
@@ -139,6 +146,49 @@ class FileSizeCheckerTest(unittest.TestCase):
         self.manifest("file-size-exceptions.tsv", ("a.go", 1200, "reason"))
         self.assertFails("must state a limit above its ceiling")
 
+
+    def pin(self, lines):
+        """Commit a.go at the given size and point the copied checker's pin at that commit."""
+        self.source("a.go", lines)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@t",
+                        "commit", "-qm", "pin"], check=True)
+        sha = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
+        script = self.repo / "check.py"
+        text = script.read_text(encoding="utf-8")
+        self.assertIn(PIN, text)
+        script.write_text(text.replace(PIN, sha), encoding="utf-8")
+
+    def test_verified_baseline_at_or_below_pinned_count_passes(self):
+        self.pin(1611)
+        for ceiling in (1611, 1500):
+            with self.subTest(ceiling=ceiling):
+                self.source("a.go", 1400)
+                self.manifest("file-size-baseline.tsv", ("a.go", ceiling))
+                self.assertIn("baseline verified", self.assertPasses(VERIFY))
+
+    def test_raised_baseline_ceiling_fails_verification(self):
+        self.pin(1611)
+        self.manifest("file-size-baseline.tsv", ("a.go", 9999))
+        self.assertPasses()
+        self.assertFails("exceeds 1611 at the pin", VERIFY)
+
+    def test_new_baseline_path_fails_verification(self):
+        self.pin(1611)
+        self.source("b.go", 1200)
+        self.manifest("file-size-baseline.tsv", ("b.go", 1200))
+        self.assertFails("was not over 1000 lines at the pin", VERIFY)
+
+    def test_unavailable_pin_fails_closed(self):
+        self.source("a.go", 1200)
+        self.manifest("file-size-baseline.tsv", ("a.go", 1200))
+        self.assertFails("is unavailable", VERIFY)
+
+    def test_unknown_argument_is_rejected(self):
+        self.assertFails("usage", "--verify")
+
+
+PIN = "001efd613a40b4b367c6617085e40a24286fac47"
+VERIFY = "--verify-baseline"
 
 if __name__ == "__main__":
     unittest.main()
