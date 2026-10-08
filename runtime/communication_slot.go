@@ -75,7 +75,7 @@ func (r *EngineeringRuntime) prepareMessages(state *runState, operationID string
 	if err := clearResultSlot(path); err != nil {
 		return "", "", err
 	}
-	communication, err = communicationContext(r.deps.Store, r.deps.StateDir, r.deps.Clock.Now(), state.run)
+	communication, err = communicationContext(r.deps.Store, state.run)
 	return path, communication, err
 }
 

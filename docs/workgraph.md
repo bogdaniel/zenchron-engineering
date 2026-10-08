@@ -235,14 +235,10 @@ collaboration messages, findings or decision requests (#473); and no changes to
 the handoff protocol itself (#492).
 
 #473's typed messages are scoped to a **batch**, and a graph unit's batch is that
-one unit execution's, so this ticket's own units never shared a message scope.
+one unit execution's, so units of one graph do not share a message scope.
 Dependencies deliver through the admitted handoff described above — that is the
-#472 channel. **#474 adds the cross-unit scope**: a WorkGraph-activated batch's
-messages admit against the whole graph instead of that one unit's batch, so a
-Finding one unit writes can name a sibling unit's admitted handoff as its
-subject and route to it. #474 still owns no review trigger, no remediation and
-no re-performance of invalidated work — only that a typed message already
-admitted anywhere in this graph is visible and routed correctly across it.
+#472 channel. Cross-unit messaging would change #473's scoping and belongs with
+whoever owns that question, not here.
 
 A `decision_request` message (#473) is a worker **asking** for a decision. The
 `awaiting_decision` hold above is the authority that owns a decision saying the
