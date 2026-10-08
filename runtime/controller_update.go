@@ -244,12 +244,20 @@ func (u *ControllerUpdater) behindFloor(resolved string) string {
 	if resolved == floor {
 		return ""
 	}
-	if ahead, err := u.ports.IsAncestor(floor, resolved); err == nil && ahead {
+	ahead, aheadErr := u.ports.IsAncestor(floor, resolved)
+	if aheadErr == nil && ahead {
 		return ""
 	}
-	if behind, err := u.ports.IsAncestor(resolved, floor); err == nil && behind {
+	behind, behindErr := u.ports.IsAncestor(resolved, floor)
+	if behindErr == nil && behind {
 		return fmt.Sprintf("trust regression: trusted main resolved to %s, behind the floor %s this controller was adopted under",
 			shortSHA(resolved), shortSHA(floor))
+	}
+	// An ancestry check that FAILED is not divergent history: saying "not
+	// comparable" would send an operator looking for a rewrite instead of a
+	// fetch or clone fault. Still a hold either way.
+	if err := errors.Join(aheadErr, behindErr); err != nil {
+		return fmt.Sprintf("trusted main %s could not be compared with the floor %s: %v", shortSHA(resolved), shortSHA(floor), err)
 	}
 	return fmt.Sprintf("trusted main %s is not comparable with the floor %s this controller was adopted under",
 		shortSHA(resolved), shortSHA(floor))

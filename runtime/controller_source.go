@@ -53,14 +53,23 @@ func EnsureControllerSource(stateDir string, remote RemoteIdentity, credentials 
 // LocalGitAncestry answers the lineage question from a local clone.
 //
 // It is the same `merge-base --is-ancestor` the adopted build proves
-// containment with, and an exit status is the whole answer: there is no output
-// to misread and no third outcome. Both controllers in a transition use this
-// one definition - the predecessor to screen a successor before spending a
-// build, the successor to decide the transition - so a disagreement between
-// them can never be a disagreement about how ancestry is computed.
+// containment with. Both controllers in a transition use this one definition -
+// the predecessor to screen a successor before spending a build, the successor
+// to decide the transition - so a disagreement between them can never be a
+// disagreement about how ancestry is computed.
+//
+// THERE IS A THIRD OUTCOME, and it is not "no". merge-base fails the same way
+// whether the answer is no or a commit is missing from the clone, so both
+// commits are proven present first: a missing one is an error to report, not
+// divergent history to diagnose.
 func LocalGitAncestry(dir string) func(ancestor, descendant string) (bool, error) {
 	git := AdoptedBuildDeps{}.withDefaults().Git
 	return func(ancestor, descendant string) (bool, error) {
+		for _, commit := range []string{ancestor, descendant} {
+			if _, err := git(dir, "cat-file", "-e", commit+"^{commit}"); err != nil {
+				return false, fmt.Errorf("commit %s is not in the controller source clone: %w", shortSHA(commit), err)
+			}
+		}
 		_, err := git(dir, "merge-base", "--is-ancestor", ancestor, descendant)
 		return err == nil, nil
 	}

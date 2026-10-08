@@ -259,6 +259,9 @@ It names one of these reasons:
   `main`.
 - **`not comparable`:** the resolved trusted main and the floor are not on one
   line of history.
+- **`could not be compared`:** the ancestry check itself failed, for example
+  because a commit is missing from the controller's source clone. This is a
+  fetch or clone fault, not divergent history.
 - **no floor:** this controller's own provenance could not be read.
 
 `controller status` and `doctor` also show the trust floor, together with the

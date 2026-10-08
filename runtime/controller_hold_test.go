@@ -216,3 +216,35 @@ func TestDoctorReportsTheTrustedMainHold(t *testing.T) {
 		}
 	}
 }
+
+// A failed ancestry check is reported as the failure it is, never as divergent
+// history, and it still holds.
+func TestAnAncestryFailureHoldsWithItsCause(t *testing.T) {
+	harness := &updaterHarness{trusted: RevisionRecord{Revision: movedRevision, Tree: "tree-b"}}
+	updater := heldUpdater(t, harness, runningRevision, runningRevision)
+	updater.ports.IsAncestor = func(string, string) (bool, error) {
+		return false, errors.New("commit 1111111 is not in the controller source clone")
+	}
+	update := attemptOnce(updater)
+	if update.State != UpdateHeld || !strings.Contains(update.Detail, "could not be compared") ||
+		!strings.Contains(update.Detail, "not in the controller source clone") || strings.Contains(update.Detail, "not comparable") {
+		t.Fatalf("state = %q (%s)", update.State, update.Detail)
+	}
+}
+
+// LocalGitAncestry answers yes, no, and "a commit is missing" as three
+// different answers against a real repository.
+func TestLocalGitAncestryTellsMissingFromNo(t *testing.T) {
+	f := newAdoptedFixture(t)
+	parent := adoptedGit(t, f.dir, "rev-parse", f.head+"^")
+	ancestry := LocalGitAncestry(f.dir)
+	if yes, err := ancestry(parent, f.head); err != nil || !yes {
+		t.Fatalf("parent -> head = %t, %v", yes, err)
+	}
+	if no, err := ancestry(f.head, parent); err != nil || no {
+		t.Fatalf("head -> parent = %t, %v", no, err)
+	}
+	if _, err := ancestry(shaOf('e'), f.head); err == nil {
+		t.Fatal("a missing commit was answered as a plain no")
+	}
+}
