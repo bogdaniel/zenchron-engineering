@@ -9,6 +9,10 @@ from pathlib import Path
 
 CHECKER = Path(__file__).with_name("check_file_sizes.py")
 
+# A caller's Git location (e.g. a pre-commit hook) must not leak into the fixture repos.
+for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"):
+    os.environ.pop(var, None)
+
 
 class FileSizeCheckerTest(unittest.TestCase):
     def setUp(self):

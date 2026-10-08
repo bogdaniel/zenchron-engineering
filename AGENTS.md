@@ -227,7 +227,7 @@ Short version: explicit task requirements and invariants come first, engineering
 Optional setup (humans, once):
 
 - Claude Code: send `/plugin marketplace add DietrichGebert/ponytail`, then, as a separate prompt, `/plugin install ponytail@ponytail`, then `/ponytail ultra`.
-- Make ultra the default for every session: `export PONYTAIL_DEFAULT_MODE=ultra`, or put `{ "defaultMode": "ultra" }` in `~/.config/ponytail/config.json`.
+- Make ultra the default for every session: add `export PONYTAIL_DEFAULT_MODE=ultra` to your shell startup file, or put `{ "defaultMode": "ultra" }` in `~/.config/ponytail/config.json`.
 - Other hosts (Codex, Cursor, OpenCode, Gemini CLI, Copilot CLI, …): https://github.com/DietrichGebert/ponytail
 
 Agents: if `/ponytail` is available, run at ultra. This file is the authoritative policy on every host; Ponytail is an optional helper and never overrides it. §2 applies whether or not the plugin is available.
