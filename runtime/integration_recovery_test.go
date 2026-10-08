@@ -153,6 +153,83 @@ func TestIntegrateInputsTextualConflictPreservesUnusualFilenames(t *testing.T) {
 	}
 }
 
+// TestIntegrateInputsRefusesLegitimatelyAdvancedWorkspace proves finding 2
+// from the second re-review: ws.BaseRevision and AssertIntegrity alone
+// cannot prove a workspace is still at the contract's base. An AUTHORIZED
+// commit - not a crash, not tampering - correctly refreshes TrustedMetadata
+// along with HEAD, so AssertIntegrity alone would pass; IntegrateInputs
+// must still refuse once it checks live HEAD against the contract's base
+// directly.
+func TestIntegrateInputsRefusesLegitimatelyAdvancedWorkspace(t *testing.T) {
+	root, origin, base := integrationFixture(t)
+	a := cloneAt(t, root, "run-a", origin, base)
+	aCommit := commitFile(t, a, "a.txt", "alpha\n", "add alpha")
+	b := cloneAt(t, root, "run-b", origin, base)
+	bCommit := commitFile(t, b, "b.txt", "beta\n", "add beta")
+
+	integrationWS := cloneAt(t, root, "run-integrate", origin, base)
+	// Commit directly on &integrationWS, not through the commitFile helper:
+	// that helper takes its workspace BY VALUE, so a commit through it never
+	// updates the caller's own TrustedMetadata - fine for a producer
+	// workspace this suite only ever reads Dir from afterward, but this test
+	// specifically needs integrationWS's own TrustedMetadata refreshed, to
+	// prove AssertIntegrity alone is insufficient.
+	if err := os.WriteFile(filepath.Join(integrationWS.Dir, "unrelated.txt"), []byte("legitimate\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := integrationWS.Commit("authorized unrelated commit", 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := integrationWS.AssertIntegrity(); err != nil {
+		t.Fatalf("fixture's own authorized commit should pass AssertIntegrity: %v", err)
+	}
+
+	contract, err := integration.NewContract("graph-1", "integrate", base,
+		orchestration.WorkUnitInputs{workUnitInput("a", aCommit), workUnitInput("b", bCommit)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := sourcesFor(map[string]string{"a": a.Dir, "b": b.Dir})
+
+	if _, err := IntegrateInputs(&integrationWS, contract, sources); err == nil {
+		t.Fatal("composed on top of a workspace a legitimate commit had already advanced past the contract's base")
+	}
+}
+
+// TestIntegrateInputsNeverDeletesLegitimateMaterialBeforeAnyMutation proves
+// finding 1 from the second re-review: a workspace that already holds
+// legitimate untracked material unrelated to this attempt is refused
+// outright, before anything this call does could ever put that material at
+// risk - never silently discarded by the destructive RestoreTrusted path a
+// later failure might otherwise trigger.
+func TestIntegrateInputsNeverDeletesLegitimateMaterialBeforeAnyMutation(t *testing.T) {
+	root, origin, base := integrationFixture(t)
+	a := cloneAt(t, root, "run-a", origin, base)
+	aCommit := commitFile(t, a, "a.txt", "alpha\n", "add alpha")
+	b := cloneAt(t, root, "run-b", origin, base)
+	bCommit := commitFile(t, b, "b.txt", "beta\n", "add beta")
+
+	integrationWS := cloneAt(t, root, "run-integrate", origin, base)
+	legitimate := filepath.Join(integrationWS.Dir, "legitimate-scratch.txt")
+	if err := os.WriteFile(legitimate, []byte("do not delete\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	contract, err := integration.NewContract("graph-1", "integrate", base,
+		orchestration.WorkUnitInputs{workUnitInput("a", aCommit), workUnitInput("b", bCommit)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := sourcesFor(map[string]string{"a": a.Dir, "b": b.Dir})
+
+	if _, err := IntegrateInputs(&integrationWS, contract, sources); err == nil {
+		t.Fatal("composed against a dirty workspace instead of refusing it outright")
+	}
+	if _, err := os.Stat(legitimate); err != nil {
+		t.Fatalf("a refused attempt deleted pre-existing material: %v", err)
+	}
+}
+
 // assertWorkspaceAtRevision fails the test unless dir's HEAD is exactly
 // revision.
 func assertWorkspaceAtRevision(t *testing.T, dir, revision string) {
