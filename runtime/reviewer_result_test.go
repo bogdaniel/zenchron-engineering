@@ -196,7 +196,7 @@ func TestReviewerEnvelopeMembersMatchTheProtocolStructFields(t *testing.T) {
 	if got := reviewerResultStatedMembers(); !reflect.DeepEqual(got, wantStated) {
 		t.Fatalf("reviewerResultStatedMembers() = %v, want %v", got, wantStated)
 	}
-	wantFinding := []string{"signature", "detail"}
+	wantFinding := []string{"signature", "detail", "severity"}
 	if got := ReviewerFindingMembers(); !reflect.DeepEqual(got, wantFinding) {
 		t.Fatalf("ReviewerFinding JSON members = %v, want %v", got, wantFinding)
 	}
@@ -223,6 +223,8 @@ func TestTheEnvelopesStatedMembersRoundTripThroughTheStrictDecoder(t *testing.T)
 					finding[member] = "review:defect"
 				case "detail":
 					finding[member] = "the change is wrong"
+				case "severity":
+					finding[member] = ReviewSeverityBlocking
 				default:
 					t.Fatalf("unhandled finding member %q - extend this test alongside ReviewerFinding", member)
 				}
@@ -247,7 +249,8 @@ func TestTheEnvelopesStatedMembersRoundTripThroughTheStrictDecoder(t *testing.T)
 		t.Fatalf("a document built from exactly the envelope's stated members was refused: %v (document: %s)", err, raw)
 	}
 	if result.Verdict != StageReviewBlocked || len(result.Findings) != 1 ||
-		result.Findings[0].Signature != "review:defect" || result.Findings[0].Detail != "the change is wrong" {
+		result.Findings[0].Signature != "review:defect" || result.Findings[0].Detail != "the change is wrong" ||
+		result.Findings[0].Severity != ReviewSeverityBlocking {
 		t.Fatalf("round trip lost content: %#v", result)
 	}
 }

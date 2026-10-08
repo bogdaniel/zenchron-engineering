@@ -24,7 +24,7 @@ func testReviewPacket() ReviewPacket {
 
 func TestIndependentReviewEnvelopeStatesTheRequiredResultContract(t *testing.T) {
 	request := ExecutionRequest{
-		RunID: "review-1", ControllerID: "c1", CandidateDir: "/workspace",
+		RunID: "review-1", ControllerID: "c1", CandidateDir: "/workspace", Attempt: 1,
 		Base: Ref{Revision: testOtherSHA}, Candidate: Candidate{Revision: testHeadSHA, Tree: "tree1"},
 		Contract: Ref{ID: "contract", Revision: "1"},
 		Purpose:  InvocationIndependentReview, ReviewerResultPath: "/state/result.json",
@@ -63,7 +63,7 @@ func TestReviewObjectiveNeutralizesInjectedFrameMarkers(t *testing.T) {
 
 func TestProviderEnvelopeDispatchesIndependentReviewBeforePlanningFallback(t *testing.T) {
 	request := ExecutionRequest{
-		RunID: "review-1", ControllerID: "c1", CandidateDir: "/workspace",
+		RunID: "review-1", ControllerID: "c1", CandidateDir: "/workspace", Attempt: 1,
 		Purpose: InvocationIndependentReview, ReviewerResultPath: "/state/result.json",
 		Mode: domain.InvocationModeNonMutatingPlanning,
 	}

@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -182,5 +185,41 @@ func TestBuildReviewPacketFailsClosedWhenCIObservationFails(t *testing.T) {
 	}
 	if _, err := BuildReviewPacket(context.Background(), ReviewPacketDeps{Store: store, GitHub: fake}, testRepo, 7, nil); err == nil {
 		t.Fatal("expected a CI observation failure to fail packet assembly closed")
+	}
+}
+
+// Mutation check (#233 B3): a diff that cannot be verified must fail the
+// whole packet closed, never silently resolve to an empty, unflagged diff.
+// Removing verifiedReviewDiff's error propagation (or BuildReviewPacket's use
+// of it) must make this test fail by returning a packet with Diff == "".
+func TestBuildReviewPacketFailsClosedWhenTheDiffCannotBeVerified(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteOperationStore: %v", err)
+	}
+	defer store.Close()
+	run := newJournalRun("run-a")
+	run.Repository = testRepo.String()
+	if err := store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	appendPRObserved(t, store, run.ID, 7, run.Candidate.Revision)
+
+	// A real checkout with exactly one commit: HeadSHA is real, BaseSHA is an
+	// object this workspace's history can never reach.
+	workspaceDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspaceDir, "a.go"), []byte("package a\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	headCommit, _ := commitSource(t, workspaceDir)
+	bogusBase := strings.Repeat("f", 40)
+
+	fake := NewFakeGitHubAdapter()
+	fake.PullRequests[7] = GitHubPullRequest{Number: 7, HeadSHA: headCommit, BaseSHA: bogusBase, BaseRef: "main", State: GitHubOpen}
+	workspace := &PlanningWorkspace{Dir: workspaceDir, Commit: headCommit, Tree: "ignored"}
+
+	_, err = BuildReviewPacket(context.Background(), ReviewPacketDeps{Store: store, GitHub: fake}, testRepo, 7, workspace)
+	if err == nil {
+		t.Fatal("expected an unverifiable base commit to fail packet assembly closed, not silently drop the diff")
 	}
 }

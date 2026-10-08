@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // The review context packet (#233).
@@ -152,13 +153,10 @@ func BuildReviewPacket(ctx context.Context, deps ReviewPacketDeps, repo GitHubRe
 	}
 	var diff string
 	var truncated bool
-	if workspace != nil && pr.BaseSHA != "" && pr.HeadSHA != "" {
-		out, err := gitOutput(workspace.Dir, "diff", pr.BaseSHA+".."+pr.HeadSHA)
-		if err == nil {
-			diff, truncated = out, false
-			if len(diff) > maxUpstreamDiffBytes {
-				diff, truncated = boundedTo(diff, maxUpstreamDiffBytes), true
-			}
+	if workspace != nil {
+		diff, truncated, err = verifiedReviewDiff(workspace.Dir, pr.BaseSHA, pr.HeadSHA)
+		if err != nil {
+			return ReviewPacket{}, fmt.Errorf("establishing the verified diff for exact head %s: %w", short12(pr.HeadSHA), err)
 		}
 	}
 	return ReviewPacket{
@@ -248,4 +246,37 @@ func resolveRunForPullRequest(store *SQLiteOperationStore, repository string, pr
 		return EngineeringRun{}, false, nil
 	}
 	return *matched, true, nil
+}
+
+// verifiedReviewDiff reads the exact base..head diff from the content-verified
+// subject store (#437), never from the review workspace directly: after a
+// runtime commit a workspace directory is not a content authority, because
+// Git does not re-hash a loose object it reads and a process that outlived
+// its invocation could swap the bytes behind a recorded name. Both commits
+// are independently fetched into the store - base is not assumed to be an
+// ancestor head's own fetch would carry along - and each fetch re-hashes
+// every object it receives, refusing any that does not match its name.
+//
+// A failure here is returned, never swallowed into an empty, unflagged diff
+// (#233 B3): a review packet must never silently claim "no changes" when the
+// actual fact is "the change could not be verified".
+func verifiedReviewDiff(workspaceDir, base, head string) (diff string, truncated bool, err error) {
+	if strings.TrimSpace(base) == "" || strings.TrimSpace(head) == "" {
+		return "", false, fmt.Errorf("a review diff requires both the base and head commits")
+	}
+	if _, err := subjectStore(workspaceDir, base); err != nil {
+		return "", false, fmt.Errorf("verifying base %s: %w", short12(base), err)
+	}
+	store, err := subjectStore(workspaceDir, head)
+	if err != nil {
+		return "", false, fmt.Errorf("verifying head %s: %w", short12(head), err)
+	}
+	out, err := gitOutput(store, "diff", base+".."+head)
+	if err != nil {
+		return "", false, fmt.Errorf("computing the verified diff: %w", err)
+	}
+	if len(out) <= maxUpstreamDiffBytes {
+		return out, false, nil
+	}
+	return boundedTo(out, maxUpstreamDiffBytes), true, nil
 }
