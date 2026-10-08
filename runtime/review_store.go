@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -163,21 +164,52 @@ func (s *SQLiteOperationStore) ReviewPublication(decisionID string) (review.Publ
 // ClaimReview atomically claims claimKey for owner (#233 B4), stealing a
 // claim older than staleAfter. It reports true iff the caller now owns the
 // claim - via a fresh insert, or by reclaiming an abandoned one - and false
-// when another, still-active claimant holds it.
+// when another, still-active claimant holds it. On success it also returns a
+// fresh, unique FENCING TOKEN that must accompany every later
+// Renew/ReleaseReviewClaim call for this claim.
+//
+// The token is what makes a steal safe. Without one, a claimant whose own
+// claim was already stolen for running past staleAfter would still delete
+// BY KEY ALONE on its eventual (stale) completion - deleting the NEW owner's
+// live claim out from under it and letting a third caller start while the
+// second is still active. A release or renewal naming the wrong (superseded)
+// token is a correctly-ignored no-op instead.
 //
 // The insert and the steal are ONE statement: SQLite serializes it against
 // every other writer on this database, so two concurrent callers can never
 // both observe "unclaimed" and both proceed, the way a separate read-then-write
 // would allow.
-func (s *SQLiteOperationStore) ClaimReview(claimKey, owner string, now time.Time, staleAfter time.Duration) (bool, error) {
+func (s *SQLiteOperationStore) ClaimReview(claimKey, owner string, now time.Time, staleAfter time.Duration) (claimed bool, token string, err error) {
 	if claimKey == "" || owner == "" {
-		return false, fmt.Errorf("a review claim requires its key and owner")
+		return false, "", fmt.Errorf("a review claim requires its key and owner")
 	}
+	token = rand.Text()
 	threshold := now.Add(-staleAfter).UnixNano()
-	result, err := s.db.Exec(`INSERT INTO review_claims (claim_key, claimed_unix_nano, owner) VALUES (?, ?, ?)
-		ON CONFLICT(claim_key) DO UPDATE SET claimed_unix_nano = excluded.claimed_unix_nano, owner = excluded.owner
+	result, err := s.db.Exec(`INSERT INTO review_claims (claim_key, claimed_unix_nano, owner, token) VALUES (?, ?, ?, ?)
+		ON CONFLICT(claim_key) DO UPDATE SET claimed_unix_nano = excluded.claimed_unix_nano, owner = excluded.owner, token = excluded.token
 		WHERE review_claims.claimed_unix_nano < ?`,
-		claimKey, now.UnixNano(), owner, threshold)
+		claimKey, now.UnixNano(), owner, token, threshold)
+	if err != nil {
+		return false, "", err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected != 1 {
+		return false, "", err
+	}
+	return true, token, nil
+}
+
+// RenewReviewClaim extends claimKey's staleness clock to now, PROVIDED the
+// caller still holds it (its token still matches). A genuinely long-running
+// but still-alive holder renews periodically so a generous but finite
+// staleAfter cannot steal an active claim out from under it; a holder whose
+// claim was already stolen gets false back rather than silently believing it
+// still owns an operation someone else now owns.
+func (s *SQLiteOperationStore) RenewReviewClaim(claimKey, token string, now time.Time) (bool, error) {
+	if claimKey == "" || token == "" {
+		return false, fmt.Errorf("renewing a review claim requires its key and token")
+	}
+	result, err := s.db.Exec(`UPDATE review_claims SET claimed_unix_nano = ? WHERE claim_key = ? AND token = ?`, now.UnixNano(), claimKey, token)
 	if err != nil {
 		return false, err
 	}
@@ -185,12 +217,15 @@ func (s *SQLiteOperationStore) ClaimReview(claimKey, owner string, now time.Time
 	return affected == 1, err
 }
 
-// ReleaseReviewClaim drops claimKey, so an ordinary completion (success or a
-// clean, non-crash failure) lets the NEXT caller proceed immediately rather
-// than waiting out the staleness bound. It is best-effort cleanup, never
-// itself a correctness boundary: a release that never runs (the process
-// crashed) is exactly the case ClaimReview's staleness reclaim covers.
-func (s *SQLiteOperationStore) ReleaseReviewClaim(claimKey string) error {
-	_, err := s.db.Exec(`DELETE FROM review_claims WHERE claim_key = ?`, claimKey)
+// ReleaseReviewClaim drops claimKey, PROVIDED token still names its current
+// holder, so an ordinary completion (success or a clean, non-crash failure)
+// lets the NEXT caller proceed immediately rather than waiting out the
+// staleness bound. It is best-effort cleanup, never itself the sole
+// correctness boundary: a release that never runs (the process crashed) is
+// exactly the case ClaimReview's staleness reclaim covers, and a release
+// naming a superseded token is correctly a no-op rather than deleting
+// whichever caller holds the claim now.
+func (s *SQLiteOperationStore) ReleaseReviewClaim(claimKey, token string) error {
+	_, err := s.db.Exec(`DELETE FROM review_claims WHERE claim_key = ? AND token = ?`, claimKey, token)
 	return err
 }

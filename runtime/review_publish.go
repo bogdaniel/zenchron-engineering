@@ -13,6 +13,9 @@ import (
 type ReviewPublicationDeps struct {
 	Store  *SQLiteOperationStore
 	GitHub GitHubAdapter
+	// Clock is the claim's time source; nil reads the real wall clock
+	// (clockNow's default), which is what every caller outside a test wants.
+	Clock Clock
 }
 
 // PublishReview publishes a durable review.Decision to GitHub exactly once
@@ -20,6 +23,12 @@ type ReviewPublicationDeps struct {
 // already recorded as published is a no-op, and a publication failure never
 // touches the durable decision it failed to publish - RecordReviewPublication
 // writes a wholly separate row.
+//
+// Exclusivity lives HERE, not in a wrapper a caller might forget to use
+// (#233 B4-3): the whole body below runs under an exclusive claim on
+// "publish:"+decision.ID, so two direct callers of this exported function -
+// not just two callers of some other entry point - can never both observe
+// "not yet published" and both reach GitHub.
 //
 // repo and number are the decision's own subject restated by the caller as a
 // GitHubRepo/int rather than re-parsed here, because this file has no business
@@ -31,6 +40,16 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 	if err := decision.Validate(); err != nil {
 		return review.Publication{}, err
 	}
+	claimKey := "publish:" + decision.ID
+	claimed, token, err := deps.Store.ClaimReview(claimKey, "publish", clockNow(deps.Clock), reviewClaimStaleAfter)
+	if err != nil {
+		return review.Publication{}, err
+	}
+	if !claimed {
+		return review.Publication{}, &ReviewClaimConflictError{ClaimKey: claimKey}
+	}
+	defer deps.Store.ReleaseReviewClaim(claimKey, token)
+
 	if existing, found, err := deps.Store.ReviewPublication(decision.ID); err != nil {
 		return review.Publication{}, err
 	} else if found && existing.Published {

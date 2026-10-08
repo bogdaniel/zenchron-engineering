@@ -36,22 +36,28 @@ func clockNow(clock Clock) time.Time {
 	return clock.Now()
 }
 
-// publishReviewClaimed wraps PublishReview with the same exclusive-claim
-// discipline RunIndependentReview uses for performing the review itself
-// (#233 B4): two concurrent callers publishing the same decision must never
-// both reach GitHub, regardless of which one started first or already found
-// the decision durable.
-func publishReviewClaimed(ctx context.Context, store *SQLiteOperationStore, deps ReviewPublicationDeps, repo GitHubRepo, decision review.Decision, clock Clock) (review.Publication, error) {
-	key := "publish:" + decision.ID
-	claimed, err := store.ClaimReview(key, "publish", clockNow(clock), reviewClaimStaleAfter)
-	if err != nil {
-		return review.Publication{}, err
+// reviewClaimRenewalInterval is how often a still-active holder of a review
+// claim renews it during the one potentially long-running step (the reviewer
+// invocation) so a merely-slow-but-alive operation is never stolen out from
+// under it (#233 B4-2). A third of the staleness bound leaves two missed
+// renewals of margin before a genuinely abandoned claim is reclaimed.
+const reviewClaimRenewalInterval = reviewClaimStaleAfter / 3
+
+// renewReviewClaimWhile renews claimKey/token every reviewClaimRenewalInterval
+// until stop is closed. Renewal failures are not fatal here - they mean the
+// claim was already superseded, which the caller's own next claimed operation
+// will discover on its own terms - so this never returns an error, only stops.
+func renewReviewClaimWhile(store *SQLiteOperationStore, claimKey, token string, clock Clock, stop <-chan struct{}) {
+	ticker := time.NewTicker(reviewClaimRenewalInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			store.RenewReviewClaim(claimKey, token, clockNow(clock))
+		case <-stop:
+			return
+		}
 	}
-	if !claimed {
-		return review.Publication{}, &ReviewClaimConflictError{ClaimKey: key}
-	}
-	defer store.ReleaseReviewClaim(key)
-	return PublishReview(ctx, deps, repo, decision)
 }
 
 // RunIndependentReviewInput is everything `review pr <n> --agent <id>` needs
@@ -103,6 +109,29 @@ type RunIndependentReviewOutput struct {
 	Publication *review.Publication
 }
 
+// reviewClaimTestHook runs, if set, immediately after RunIndependentReview
+// observes no existing decision and immediately before it attempts the
+// review claim. It exists ONLY so a test can construct the exact interleaving
+// B4-1's regression proves is now handled - a second caller's pre-claim read
+// genuinely racing the first caller's entire claimed section - without which
+// that interleaving cannot be forced deterministically. Nil (and therefore
+// free) outside that one test.
+var reviewClaimTestHook func()
+
+// publishDecision publishes decision when requested, through the one
+// exclusive entry point (PublishReview itself now claims "publish:"+ID -
+// #233 B4-3) - never a second, bypassable wrapper around it.
+func publishDecision(ctx context.Context, in RunIndependentReviewInput, decision review.Decision) (*review.Publication, error) {
+	if !in.Publish {
+		return nil, nil
+	}
+	publication, err := PublishReview(ctx, ReviewPublicationDeps{Store: in.Store, GitHub: in.GitHub, Clock: in.Clock}, in.Repo, decision)
+	if err != nil {
+		return nil, err
+	}
+	return &publication, nil
+}
+
 // RunIndependentReview performs one independent PR review end to end:
 // resolve the producing run, check independence, materialize a read-only
 // exact-head workspace, invoke the reviewer through the execution Port,
@@ -131,33 +160,33 @@ func RunIndependentReview(ctx context.Context, in RunIndependentReviewInput) (Ru
 	if err := CheckReviewIndependence(producer, in.Reviewer); err != nil {
 		return RunIndependentReviewOutput{}, err
 	}
-	// If a decision for this EXACT subject and reviewer already exists, this
-	// call is a retry (or a redundant concurrent request): return it rather
-	// than performing a second independent review of work already judged.
 	subject := review.Subject{Repository: in.Repo.String(), PRNumber: in.PRNumber, HeadSHA: pr.HeadSHA}
 	decisionID, err := review.DecisionID(subject, in.Reviewer.ID)
 	if err != nil {
 		return RunIndependentReviewOutput{}, err
 	}
+	existingOutcome := func(existing review.Decision) (RunIndependentReviewOutput, error) {
+		out := RunIndependentReviewOutput{Decision: existing, Created: false}
+		// The decision already exists, but this invocation may be exactly the
+		// retry that recovers from a crash between the decision committing
+		// and its publication - requirement: a restart must be able to
+		// complete publication, not merely discover there was nothing left to
+		// decide. PublishReview is itself idempotent and itself exclusive, so
+		// this is always safe to attempt.
+		publication, err := publishDecision(ctx, in, existing)
+		out.Publication = publication
+		return out, err
+	}
+	// If a decision for this EXACT subject and reviewer already exists, this
+	// call is a retry (or a redundant concurrent request): return it rather
+	// than performing a second independent review of work already judged.
 	if existing, found, err := in.Store.ReviewDecision(decisionID); err != nil {
 		return RunIndependentReviewOutput{}, err
 	} else if found {
-		out := RunIndependentReviewOutput{Decision: existing, Created: false}
-		if in.Publish {
-			// The decision already exists, but this invocation may be exactly
-			// the retry that recovers from a crash between the decision
-			// committing and its publication - requirement: a restart must be
-			// able to complete publication, not merely discover there was
-			// nothing left to decide. PublishReview is itself idempotent, so
-			// this is always safe to attempt; the claim only guards against a
-			// SECOND concurrent caller also reaching GitHub for it.
-			publication, err := publishReviewClaimed(ctx, in.Store, ReviewPublicationDeps{Store: in.Store, GitHub: in.GitHub}, in.Repo, existing, in.Clock)
-			if err != nil {
-				return out, err
-			}
-			out.Publication = &publication
-		}
-		return out, nil
+		return existingOutcome(existing)
+	}
+	if reviewClaimTestHook != nil {
+		reviewClaimTestHook()
 	}
 	// Claimed BEFORE any expensive or externally-visible work (#233 B4): two
 	// concurrent callers for the same exact (subject, reviewer) identity must
@@ -165,14 +194,25 @@ func RunIndependentReview(ctx context.Context, in RunIndependentReviewInput) (Ru
 	// released on every return path below; a crash leaves it for
 	// reviewClaimStaleAfter, never forever.
 	reviewID := decisionID
-	claimed, err := in.Store.ClaimReview(reviewID, in.ControllerID, clockNow(in.Clock), reviewClaimStaleAfter)
+	claimed, token, err := in.Store.ClaimReview(reviewID, in.ControllerID, clockNow(in.Clock), reviewClaimStaleAfter)
 	if err != nil {
 		return RunIndependentReviewOutput{}, err
 	}
 	if !claimed {
 		return RunIndependentReviewOutput{}, &ReviewClaimConflictError{ClaimKey: reviewID}
 	}
-	defer in.Store.ReleaseReviewClaim(reviewID)
+	defer in.Store.ReleaseReviewClaim(reviewID, token)
+
+	// #233 B4-1: the read above can be stale by the time the claim is won - a
+	// concurrent caller may have created the decision and released the claim
+	// in between. Re-checking INSIDE the claim is what makes the two
+	// checks together exclusive rather than racy: whichever caller is inside
+	// the claim always sees the current truth before doing anything further.
+	if existing, found, err := in.Store.ReviewDecision(decisionID); err != nil {
+		return RunIndependentReviewOutput{}, err
+	} else if found {
+		return existingOutcome(existing)
+	}
 
 	workspace, err := CreatePlanningWorkspace(in.StateDir, reviewID, in.Source, pr.HeadSHA, "")
 	if err != nil {
@@ -194,12 +234,18 @@ func RunIndependentReview(ctx context.Context, in RunIndependentReviewInput) (Ru
 			in.PRNumber, short12(workspace.Commit), short12(packet.Trusted.HeadSHA))
 	}
 
+	// #233 B4-2: renewed periodically for exactly as long as the one
+	// potentially long-running step runs, so a merely-slow-but-alive
+	// invocation is never stolen out from under it.
+	renewalStop := make(chan struct{})
+	go renewReviewClaimWhile(in.Store, reviewID, token, in.Clock, renewalStop)
 	invocation, err := InvokeReviewer(ctx, ReviewInvocationInput{
 		ReviewID: reviewID, Packet: packet, Workspace: workspace,
 		Agent: in.Reviewer, Provider: in.Provider, Artifacts: ArtifactStore{Root: in.StateDir},
 		StateDir: in.StateDir, ControllerID: in.ControllerID, Model: in.Model,
 		Instructions: in.Instructions, Budgets: in.Budgets,
 	})
+	close(renewalStop)
 	if err != nil {
 		return RunIndependentReviewOutput{}, err
 	}
@@ -214,12 +260,10 @@ func RunIndependentReview(ctx context.Context, in RunIndependentReviewInput) (Ru
 		return RunIndependentReviewOutput{}, err
 	}
 	out := RunIndependentReviewOutput{Decision: stored, Created: created}
-	if in.Publish {
-		publication, err := publishReviewClaimed(ctx, in.Store, ReviewPublicationDeps{Store: in.Store, GitHub: in.GitHub}, in.Repo, stored, in.Clock)
-		if err != nil {
-			return out, err
-		}
-		out.Publication = &publication
+	publication, err := publishDecision(ctx, in, stored)
+	out.Publication = publication
+	if err != nil {
+		return out, err
 	}
 	return out, nil
 }

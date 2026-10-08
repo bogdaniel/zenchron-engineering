@@ -123,22 +123,22 @@ func TestClaimReviewIsExclusiveUntilReleasedOrStale(t *testing.T) {
 	defer store.Close()
 
 	now := time.Unix(1700000000, 0).UTC()
-	claimed, err := store.ClaimReview("key-1", "owner-a", now, time.Minute)
-	if err != nil || !claimed {
-		t.Fatalf("first claim: claimed=%v err=%v", claimed, err)
+	claimed, tokenA, err := store.ClaimReview("key-1", "owner-a", now, time.Minute)
+	if err != nil || !claimed || tokenA == "" {
+		t.Fatalf("first claim: claimed=%v token=%q err=%v", claimed, tokenA, err)
 	}
 	// A second owner, same instant: must NOT also claim it.
-	claimed, err = store.ClaimReview("key-1", "owner-b", now, time.Minute)
+	claimed, _, err = store.ClaimReview("key-1", "owner-b", now, time.Minute)
 	if err != nil || claimed {
 		t.Fatalf("expected the second concurrent claim to be refused, got claimed=%v err=%v", claimed, err)
 	}
 	// Released, so a new claimant may proceed immediately.
-	if err := store.ReleaseReviewClaim("key-1"); err != nil {
+	if err := store.ReleaseReviewClaim("key-1", tokenA); err != nil {
 		t.Fatalf("ReleaseReviewClaim: %v", err)
 	}
-	claimed, err = store.ClaimReview("key-1", "owner-b", now, time.Minute)
-	if err != nil || !claimed {
-		t.Fatalf("expected a released claim to be immediately claimable, got claimed=%v err=%v", claimed, err)
+	claimed, tokenB, err := store.ClaimReview("key-1", "owner-b", now, time.Minute)
+	if err != nil || !claimed || tokenB == "" || tokenB == tokenA {
+		t.Fatalf("expected a released claim to be immediately claimable with a fresh token, got claimed=%v token=%q err=%v", claimed, tokenB, err)
 	}
 }
 
@@ -153,16 +153,67 @@ func TestClaimReviewReclaimsAStaleClaim(t *testing.T) {
 	defer store.Close()
 
 	start := time.Unix(1700000000, 0).UTC()
-	if claimed, err := store.ClaimReview("key-1", "owner-a", start, time.Minute); err != nil || !claimed {
+	if claimed, _, err := store.ClaimReview("key-1", "owner-a", start, time.Minute); err != nil || !claimed {
 		t.Fatalf("first claim: claimed=%v err=%v", claimed, err)
 	}
 	// Still within the staleness window: not reclaimable.
-	if claimed, err := store.ClaimReview("key-1", "owner-b", start.Add(30*time.Second), time.Minute); err != nil || claimed {
+	if claimed, _, err := store.ClaimReview("key-1", "owner-b", start.Add(30*time.Second), time.Minute); err != nil || claimed {
 		t.Fatalf("expected the claim to still be active, got claimed=%v err=%v", claimed, err)
 	}
 	// Past the staleness window: the abandoned claim is reclaimed.
-	claimed, err := store.ClaimReview("key-1", "owner-b", start.Add(2*time.Minute), time.Minute)
+	claimed, _, err := store.ClaimReview("key-1", "owner-b", start.Add(2*time.Minute), time.Minute)
 	if err != nil || !claimed {
 		t.Fatalf("expected the stale claim to be reclaimed, got claimed=%v err=%v", claimed, err)
+	}
+}
+
+// Mutation check (#233 B4-2): a claim stolen for staleness must not be
+// deletable or extendable by the superseded owner's old token. Without the
+// fencing token, a stale owner A finishing after B's steal would delete B's
+// LIVE claim by key alone, letting a third caller C start while B is still
+// active - exactly the exclusivity violation B4-2 reported. Removing the
+// token match from ReleaseReviewClaim/RenewReviewClaim's WHERE clause must
+// make this test fail.
+func TestClaimReviewFencingTokenPreventsASupersededOwnerFromActing(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteOperationStore: %v", err)
+	}
+	defer store.Close()
+
+	start := time.Unix(1700000000, 0).UTC()
+	_, tokenA, err := store.ClaimReview("key-1", "owner-a", start, time.Minute)
+	if err != nil {
+		t.Fatalf("A's claim: %v", err)
+	}
+	// B steals it after A goes stale.
+	claimedB, tokenB, err := store.ClaimReview("key-1", "owner-b", start.Add(2*time.Minute), time.Minute)
+	if err != nil || !claimedB || tokenB == tokenA {
+		t.Fatalf("B's steal: claimed=%v tokenB=%q tokenA=%q err=%v", claimedB, tokenB, tokenA, err)
+	}
+
+	// A's old token can neither renew nor release B's now-live claim.
+	if renewed, err := store.RenewReviewClaim("key-1", tokenA, start.Add(2*time.Minute+time.Second)); err != nil || renewed {
+		t.Fatalf("expected A's superseded token to fail to renew, got renewed=%v err=%v", renewed, err)
+	}
+	if err := store.ReleaseReviewClaim("key-1", tokenA); err != nil {
+		t.Fatalf("ReleaseReviewClaim(stale token): %v", err)
+	}
+	// B's claim must still be in force - a THIRD caller must still be refused.
+	claimedC, _, err := store.ClaimReview("key-1", "owner-c", start.Add(2*time.Minute+2*time.Second), time.Minute)
+	if err != nil || claimedC {
+		t.Fatalf("expected B's claim to survive A's stale release, but C claimed=%v err=%v", claimedC, err)
+	}
+
+	// B's own token DOES renew and release it.
+	if renewed, err := store.RenewReviewClaim("key-1", tokenB, start.Add(2*time.Minute+3*time.Second)); err != nil || !renewed {
+		t.Fatalf("expected B's own token to renew, got renewed=%v err=%v", renewed, err)
+	}
+	if err := store.ReleaseReviewClaim("key-1", tokenB); err != nil {
+		t.Fatalf("ReleaseReviewClaim(B's token): %v", err)
+	}
+	claimedD, _, err := store.ClaimReview("key-1", "owner-d", start.Add(2*time.Minute+4*time.Second), time.Minute)
+	if err != nil || !claimedD {
+		t.Fatalf("expected the claim to be free after B's own release, got claimed=%v err=%v", claimedD, err)
 	}
 }

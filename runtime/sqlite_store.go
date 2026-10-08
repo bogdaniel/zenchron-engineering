@@ -541,7 +541,12 @@ CREATE TABLE review_publications (
 CREATE TABLE review_claims (
 	claim_key         TEXT PRIMARY KEY,
 	claimed_unix_nano INTEGER NOT NULL,
-	owner             TEXT NOT NULL
+	owner             TEXT NOT NULL,
+	-- token is the fencing token ClaimReview mints on every successful claim
+	-- or steal. A release or renewal naming any other token is a no-op: it
+	-- names a claim that has already been superseded, so acting on it would
+	-- let a stale holder delete or extend a claim it no longer owns.
+	token             TEXT NOT NULL
 );
 `}
 
