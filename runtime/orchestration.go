@@ -163,11 +163,21 @@ func (s *Supervisor) reconcileOrchestration(ctx context.Context) []string {
 			}
 		}
 		// Messages after handoffs: a Finding names an admitted handoff.
-		if err := admitOrchestratedMessages(s.deps.Store, s.deps.StateDir, batch, now); err != nil {
-			problems = append(problems, boundedDetail(batch.ID+" messages: "+err.Error()))
+		//
+		// A WorkGraph-activated batch (#472) is skipped here: its messages are
+		// admitted once, against the whole graph's scope, by
+		// reconcileWorkGraphMessages (#474) - never against this one-unit batch,
+		// which would make a message id of the same invocation collide across
+		// two scopes.
+		if batch.Origin == nil {
+			if err := admitOrchestratedMessages(s.deps.Store, s.deps.StateDir, batch, now); err != nil {
+				problems = append(problems, boundedDetail(batch.ID+" messages: "+err.Error()))
+			}
 		}
 	}
-	return problems
+	// A WorkGraph-activated batch's messages are admitted here instead,
+	// against their graph's own scope (#474): see reconcileWorkGraphMessages.
+	return append(problems, s.reconcileWorkGraphMessages()...)
 }
 
 // planOrchestrationBatch decides every item's child run identity BEFORE the

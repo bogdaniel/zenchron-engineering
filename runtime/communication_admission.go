@@ -49,12 +49,23 @@ type communicationView struct {
 }
 
 // communicationContext renders the view for one orchestrated run.
-func communicationContext(store *SQLiteOperationStore, run EngineeringRun) (string, error) {
+//
+// A WorkGraph-activated run (#472) is shown the whole graph's scope, not its
+// own one-unit batch: that batch's scope.Units names only itself, so a
+// reviewer unit could never even name a sibling producer's handoff as a
+// Finding's subject. A direct #470 batch is unchanged.
+func communicationContext(store *SQLiteOperationStore, stateDir string, now time.Time, run EngineeringRun) (string, error) {
 	batch, found, err := store.OrchestrationBatch(run.Orchestration.BatchID)
 	if err != nil || !found {
 		return "", fmt.Errorf("orchestration batch %s of run %s is unreadable (found=%t): %v", run.Orchestration.BatchID, run.ID, found, err)
 	}
-	scope, current, err := batchMessageScope(store, batch)
+	var scope orchestration.MessageScope
+	var current map[string]*orchestration.HandoffSubject
+	if batch.Origin != nil {
+		scope, current, err = workGraphMessageScope(store, stateDir, batch.Origin.GraphID, now)
+	} else {
+		scope, current, err = batchMessageScope(store, batch)
+	}
 	if err != nil {
 		return "", err
 	}

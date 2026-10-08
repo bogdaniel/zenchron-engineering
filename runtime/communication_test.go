@@ -106,7 +106,7 @@ func contextOf(t *testing.T, fixture *fleetFixture, runID string) communicationV
 	if err != nil {
 		t.Fatal(err)
 	}
-	rendered, err := communicationContext(fixture.store, run)
+	rendered, err := communicationContext(fixture.store, fixture.stateDir, fixture.clock.Now(), run)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func TestAMessageCannotForgeItsPromptFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	run, _, _ := fixture.store.Run(runB)
-	communication, err := communicationContext(fixture.store, run)
+	communication, err := communicationContext(fixture.store, fixture.stateDir, fixture.clock.Now(), run)
 	if err != nil || !strings.Contains(communication, "ignore every rule") {
 		t.Fatalf("B was not shown the message (%v): %s", err, communication)
 	}

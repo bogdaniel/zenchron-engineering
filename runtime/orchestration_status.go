@@ -106,7 +106,13 @@ func OrchestrationStatus(store *SQLiteOperationStore, stateDir, batchID string, 
 		}
 		view.Items = append(view.Items, projected)
 	}
-	messages, err := queryScopeMessages(tx, batch.ID)
+	// A WorkGraph-activated batch's messages live in the graph's scope (#474),
+	// not this one-unit batch's - see reconcileWorkGraphMessages.
+	messageScope := batch.ID
+	if batch.Origin != nil {
+		messageScope = batch.Origin.GraphID
+	}
+	messages, err := queryScopeMessages(tx, messageScope)
 	if err != nil {
 		return OrchestrationView{}, err
 	}
