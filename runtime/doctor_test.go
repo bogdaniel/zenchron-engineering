@@ -289,6 +289,9 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 			SourceRevision: strings.Repeat("a", 40), SourceTree: strings.Repeat("b", 40),
 			BinarySHA256: strings.Repeat("c", 64),
 		},
+		// ...and whose serving controller stands on trusted main, unheld.
+		ControllerUpdate: &ControllerUpdate{State: UpdateIdle, Subject: RevisionRecord{Revision: strings.Repeat("a", 40)},
+			Trust: &TrustReport{Floor: strings.Repeat("a", 40), TrustedMain: strings.Repeat("a", 40), MainHead: strings.Repeat("a", 40)}},
 		// A healthy environment can also say WHO it publishes as: doctor reports
 		// the resolved account rather than inferring distinctness from the
 		// credential mode, so the fixture has to supply one.
@@ -471,7 +474,7 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 		"github.credential", "github.publication_identity", "github.governance", "github.identity", "github.rate_limit",
 		"config.global", "config.repository", "config.tighten", "config.watch",
 		"governance.publication_scope",
-		"controller.build",
+		"controller.build", "controller.trusted_main",
 		"install.entrypoint", "install.path_shadowing",
 		"agent.openai", "agents.usable", "provider.toolchain",
 		"supervisor.endpoint", "state.storage",

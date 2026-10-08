@@ -392,9 +392,10 @@ func ObserveTrustedMainRevision(ctx context.Context, deps AdoptedBuildDeps, repo
 // where main is, and which revision on it is trusted, with the reason every
 // newer commit is not.
 type TrustedMainView struct {
-	TrustedMain RevisionRecord    `json:"trusted_main"`
-	MainHead    string            `json:"main_head"`
-	Skipped     []SkippedRevision `json:"skipped"`
+	TrustedMain RevisionRecord        `json:"trusted_main"`
+	MainHead    string                `json:"main_head"`
+	Skipped     []SkippedRevision     `json:"skipped"`
+	Evidence    T2EvidenceObservation `json:"evidence"`
 }
 
 // ObserveTrustedMain is ObserveTrustedMainRevision with the whole answer.
@@ -409,7 +410,7 @@ func ObserveTrustedMain(ctx context.Context, deps AdoptedBuildDeps, repo GitHubR
 	}
 	branch := strings.TrimPrefix(policy.Ref, "refs/heads/")
 	resolution, err := resolveTrustedMain(ctx, deps, repo, repositoryDir, branch)
-	view := TrustedMainView{MainHead: resolution.MainHead, Skipped: resolution.Skipped}
+	view := TrustedMainView{MainHead: resolution.MainHead, Skipped: resolution.Skipped, Evidence: resolution.Evidence}
 	if err != nil {
 		return view, err
 	}

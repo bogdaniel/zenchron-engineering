@@ -131,7 +131,9 @@ type LiveControllerSnapshot struct {
 	Role          RoleObservation    `json:"role,omitempty"`
 	WorkAdmission WorkAdmissionState `json:"work_admission,omitempty"`
 	HandoffID     string             `json:"handoff_id,omitempty"`
-	ObservedAt    time.Time          `json:"observed_at"`
+	// Update is the trusted-main upgrade's latest answer, HOLD included.
+	Update     *ControllerUpdate `json:"update,omitempty"`
+	ObservedAt time.Time         `json:"observed_at"`
 }
 
 // DurableActive is the generation the durable record says is active.

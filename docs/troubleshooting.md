@@ -246,7 +246,8 @@ enrolled, so there is nothing to watch`.** `autonomy watch` needs enrolment.
 `serve` does not: with no enrolment it governs the repository the invocation
 targets and takes explicit submissions only.
 
-**`held at <sha>: …`** on the `serve` upgrade line. The controller will not
+**`held at <sha>: …`** on the `serve` upgrade line, the `upgrade` line of
+`controller status`, and the `controller.trusted_main` WARN in `autonomy doctor`. The controller will not
 build or adopt a successor, and it keeps serving everything else (ADR-0007 §5).
 It names one of these reasons:
 
@@ -260,8 +261,12 @@ It names one of these reasons:
   line of history.
 - **no floor:** this controller's own provenance could not be read.
 
-The line also shows `main_head` and why the newest commit past trusted main is
-not trusted (`T2 pending`, or `T2 failure (run N attempt M)`). Nothing needs to
+`controller status` and `doctor` also show the trust floor, together with the
+reason when no floor could be read (for example a provenance record whose T2
+evidence does not prove its own trusted main). They show the resolved trusted
+main, `main_head`, the deciding T2 attempt, and the newest ten commits that
+were not trusted, with the reason for each (`T2 pending`, or
+`T2 failure (run N attempt M)`). Nothing needs to
 be acknowledged. The hold clears on the next pass after trusted main resolves
 to the floor or past it, typically once a newer merge's `go` passes on `main`.
 Fix the failing commit forward; do not revert or rewrite `main`.

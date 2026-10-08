@@ -212,22 +212,23 @@ func TestAdoptionWithNoTrustedMainRefuses(t *testing.T) {
 	assertNothingInstalled(t, request.OutputRoot)
 }
 
+const v1AdoptedRecord = `{"schema_version":"adopted-build/1","repository":"acme/widgets","trust_root":{"ruleset_id":1,"name":"n","digest":"d",` +
+	`"policy":{"ref":"refs/heads/main","required_check":{"context":"go","integration_id":15368},"allowed_merge_methods":["merge"],"require_strict_checks":true},` +
+	`"enforcement":"active","observed_by":{"role":"governance-observation","method":"gh"},"bypass":{"observed":true,"count":0,"detail":"x"}},` +
+	`"trusted_main":{"revision":"` + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" + `","tree":"t"},"source":{"revision":"s","tree":"t"},"containment_proof":"c",` +
+	`"controller_kind":"adopted","version":"v","goos":"linux","goarch":"amd64","build_flags":null,"build_environment":{"kind":"","image":"","toolchain":"",` +
+	`"network":"","source_mount":"","cache_mount":"","environment":null,"digest":""},"binary_sha256":"b","built_at":"t","builder":{"version":"",` +
+	`"source_revision":"","kind":""},"output_path":"o","self_probe":{"kind":"","version":"","source_revision":"","source_tree":"","binary_sha256":"","matched":false}}`
+
 // Break 12: a v1 record projects to main_head == trusted_main with legacy
 // trust evidence, synthesizes no T2 observation, and re-encodes byte for byte.
 func TestAV1RecordProjectsToTheLegacyModel(t *testing.T) {
-	const v1 = `{"schema_version":"adopted-build/1","repository":"acme/widgets","trust_root":{"ruleset_id":1,"name":"n","digest":"d",` +
-		`"policy":{"ref":"refs/heads/main","required_check":{"context":"go","integration_id":15368},"allowed_merge_methods":["merge"],"require_strict_checks":true},` +
-		`"enforcement":"active","observed_by":{"role":"governance-observation","method":"gh"},"bypass":{"observed":true,"count":0,"detail":"x"}},` +
-		`"trusted_main":{"revision":"` + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" + `","tree":"t"},"source":{"revision":"s","tree":"t"},"containment_proof":"c",` +
-		`"controller_kind":"adopted","version":"v","goos":"linux","goarch":"amd64","build_flags":null,"build_environment":{"kind":"","image":"","toolchain":"",` +
-		`"network":"","source_mount":"","cache_mount":"","environment":null,"digest":""},"binary_sha256":"b","built_at":"t","builder":{"version":"",` +
-		`"source_revision":"","kind":""},"output_path":"o","self_probe":{"kind":"","version":"","source_revision":"","source_tree":"","binary_sha256":"","matched":false}}`
 	var record AdoptedBuildProvenance
-	if err := json.Unmarshal([]byte(v1), &record); err != nil {
+	if err := json.Unmarshal([]byte(v1AdoptedRecord), &record); err != nil {
 		t.Fatal(err)
 	}
-	if again, _ := json.Marshal(record); string(again) != v1 {
-		t.Fatalf("a v1 record does not re-encode byte for byte:\n%s\n%s", again, v1)
+	if again, _ := json.Marshal(record); string(again) != v1AdoptedRecord {
+		t.Fatalf("a v1 record does not re-encode byte for byte:\n%s\n%s", again, v1AdoptedRecord)
 	}
 	projected, err := record.Projected()
 	if err != nil {

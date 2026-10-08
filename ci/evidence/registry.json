@@ -87,7 +87,8 @@
         "runtime/watch*.go",
         "runtime/connectivity.go",
         "runtime/fleet.go",
-        "runtime/gc.go"
+        "runtime/gc.go",
+        "runtime/doctor_trust.go"
       ],
       "tests": [
         "runtime/supervisor*_test.go",

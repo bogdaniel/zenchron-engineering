@@ -171,6 +171,10 @@ type DoctorInput struct {
 	// failure as a deliberate design choice.
 	ControllerBuild      ControllerBuild
 	ControllerBuildError error
+	// ControllerUpdate is the serving controller's latest trusted-main update,
+	// read from its live snapshot; ControllerUpdateError is why none could be.
+	ControllerUpdate      *ControllerUpdate
+	ControllerUpdateError error
 
 	// ControllerRoot is where adopted generations and the "current" stable
 	// projection live - the same value `controller status`, `controller
@@ -203,6 +207,7 @@ func Doctor(ctx context.Context, in DoctorInput) DoctorReport {
 	checks = append(checks, doctorConfig(in)...)
 	checks = append(checks, doctorGovernance(in))
 	checks = append(checks, doctorController(in))
+	checks = append(checks, doctorTrust(in))
 	checks = append(checks, doctorEntrypoint(in)...)
 	checks = append(checks, doctorAgents(in)...)
 	checks = append(checks, doctorControlEndpoint(in))

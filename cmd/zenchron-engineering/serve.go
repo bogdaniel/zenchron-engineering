@@ -1349,6 +1349,11 @@ func (c *composition) controllerSnapshot(supervisor *runtime.Supervisor) runtime
 	default:
 		snapshot.WorkAdmission = runtime.AdmissionClosed
 	}
+	if supervisor != nil {
+		if update, ok := supervisor.ControllerUpdate(); ok {
+			snapshot.Update = &update
+		}
+	}
 	return snapshot
 }
 
