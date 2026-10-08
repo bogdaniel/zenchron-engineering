@@ -160,7 +160,7 @@ failure never rewrites the termination owner.
 
 ### Evidence binding
 
-EVIDENCE_HEAD: `4dd82dfc402efb24fd073aedaf1a33d38637062b` (branch
+EVIDENCE_HEAD: `a179c2ae225f793b7e88006163d81d10838f73b3` (branch
 `claude/518-progress-writer`, base `c0bc2e9`, main after #531). This record's
 binding lands in the next commit, which changes only this file.
 
@@ -283,7 +283,7 @@ own through the `api.CredentialSource` the composition root gives it.
 ## 3. Missing seams and obligations carried
 
 1. **Progress recording has no error channel.** *Closed by stage 2 (§1b) on
-   EVIDENCE_HEAD `4dd82df`; the text below is the original finding.* `execution/progress.go:37`
+   EVIDENCE_HEAD `a179c2a`; the text below is the original finding.* `execution/progress.go:37`
    (`WithProgressRecorder(ctx, record func(Progress))`) and `:46` return no
    error, and the host callback discards the write's result
    (`runtime/operations.go:921`,
