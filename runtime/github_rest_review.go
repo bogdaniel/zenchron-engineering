@@ -5,9 +5,11 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // reviewEvent maps the closed GitHubReviewState vocabulary to the wire value
@@ -59,6 +61,13 @@ func (a GitHubRESTAdapter) SubmitReview(ctx context.Context, repo GitHubRepo, nu
 		Event    string          `json:"event"`
 		Comments []reviewComment `json:"comments,omitempty"`
 	}{CommitID: submission.CommitSHA, Body: submission.Body.Body(), Event: event, Comments: comments}
+	status, raw, err := a.do(ctx, repo, http.MethodPost, repoPath(repo)+"/pulls/"+strconv.Itoa(number)+"/reviews", nil, payload)
+	if err != nil {
+		return GitHubReview{}, err
+	}
+	if status < 200 || status > 299 {
+		return GitHubReview{}, classifyReviewSubmissionStatus(status, raw)
+	}
 	var created struct {
 		ID          int64    `json:"id"`
 		User        *ghActor `json:"user"`
@@ -67,8 +76,8 @@ func (a GitHubRESTAdapter) SubmitReview(ctx context.Context, repo GitHubRepo, nu
 		CommitID    string   `json:"commit_id"`
 		SubmittedAt string   `json:"submitted_at"`
 	}
-	if err := a.call(ctx, repo, http.MethodPost, repoPath(repo)+"/pulls/"+strconv.Itoa(number)+"/reviews", nil, payload, &created); err != nil {
-		return GitHubReview{}, err
+	if err := json.Unmarshal(raw, &created); err != nil {
+		return GitHubReview{}, fmt.Errorf("github review submission returned an unexpected payload")
 	}
 	review := GitHubReview{
 		ID: created.ID, Author: created.User.normalize(), State: normalizeReview(created.State),
@@ -78,4 +87,52 @@ func (a GitHubRESTAdapter) SubmitReview(ctx context.Context, repo GitHubRepo, nu
 		review.SubmittedAt = at
 	}
 	return review, nil
+}
+
+// GitHubSelfApprovalRejectedError is the ONE error PublishReview is permitted
+// to downgrade an APPROVE into a COMMENT_ONLY publication for (#233 B2):
+// GitHub's own, definitive refusal of a self-approval. Every other outcome -
+// a timeout, a 5xx, a rate limit, an auth failure, a response lost after the
+// original request may have already landed, or any OTHER 422 - must be
+// preserved for replay rather than silently read as "cannot approve".
+type GitHubSelfApprovalRejectedError struct{ Detail string }
+
+func (e *GitHubSelfApprovalRejectedError) Error() string {
+	return "github_self_approval_rejected: " + e.Detail
+}
+
+// selfApprovalRejectionPhrases are substrings GitHub's own 422 response body
+// uses for this specific refusal. Matched case-insensitively against the
+// response body only - never against a locally constructed message - so a
+// different 422 (a malformed payload, an already-dismissed review, a review
+// of a non-existent commit) is never mistaken for this one case.
+var selfApprovalRejectionPhrases = []string{"own pull request", "own commit"}
+
+func isSelfApprovalRejection(body []byte) bool {
+	lower := strings.ToLower(string(body))
+	for _, phrase := range selfApprovalRejectionPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyReviewSubmissionStatus classifies a non-2xx review-submission
+// response by status AND body, unlike the shared call() path other GitHubAdapter
+// writes use: a review's identity-sensitive APPROVE/REQUEST_CHANGES/COMMENT
+// distinction needs the one narrow self-approval case distinguished from every
+// other failure, which the body text - not the status alone - is what proves.
+func classifyReviewSubmissionStatus(status int, body []byte) error {
+	detail := fmt.Sprintf("review submission returned status %d", status)
+	switch {
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return &GitHubAuthError{Detail: "github rejected the credential with status " + strconv.Itoa(status)}
+	case status == http.StatusTooManyRequests || status >= 500:
+		return &GitHubTransientError{Status: status, Detail: detail}
+	case status == http.StatusUnprocessableEntity && isSelfApprovalRejection(body):
+		return &GitHubSelfApprovalRejectedError{Detail: boundedTo(string(body), 500)}
+	default:
+		return &GitHubAPIError{Status: status, Detail: detail + ": " + boundedTo(string(body), 500)}
+	}
 }

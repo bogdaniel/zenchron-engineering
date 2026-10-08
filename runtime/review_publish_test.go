@@ -92,7 +92,8 @@ func TestPublishReviewReconcilesAnAlreadyObservedReviewWithoutDuplicating(t *tes
 	store, fake := newReviewPublishFixture(t)
 	decision := publishableDecision(t, store, review.VerdictApprove)
 	fake.ReviewsByHead[testHeadSHA] = GitHubReviewObservation{
-		Reviews: []GitHubReview{{ID: 555, Author: fake.ViewerActor, State: GitHubReviewApproved, CommitSHA: testHeadSHA}},
+		Reviews: []GitHubReview{{ID: 555, Author: fake.ViewerActor, State: GitHubReviewApproved, CommitSHA: testHeadSHA,
+			Body: UntrustedText("looks good\n\n" + reviewDecisionMarker(decision.ID))}},
 	}
 
 	publication, err := PublishReview(context.Background(), ReviewPublicationDeps{Store: store, GitHub: fake}, testRepo, decision)
@@ -120,7 +121,7 @@ func TestPublishReviewFallsBackToCommentOnlyWhenApprovalIsRefused(t *testing.T) 
 		}
 		attempts++
 		if attempts == 1 {
-			return &GitHubAPIError{Status: 422, Detail: "Review cannot be submitted as approval by the author of the pull request"}
+			return &GitHubSelfApprovalRejectedError{Detail: "Review cannot be submitted as approval by the author of the pull request"}
 		}
 		return nil
 	}
@@ -135,4 +136,116 @@ func TestPublishReviewFallsBackToCommentOnlyWhenApprovalIsRefused(t *testing.T) 
 	if attempts != 2 {
 		t.Fatalf("expected exactly one retry after the refused approval, got %d attempts", attempts)
 	}
+}
+
+// Mutation check (#233 B2): only GitHub's OWN definitive self-approval
+// rejection may be downgraded to COMMENT_ONLY. Any other failure - a
+// transient 5xx here - must be preserved for replay. Removing the
+// errors.As(*GitHubSelfApprovalRejectedError) narrowing in PublishReview
+// (reverting to "any error during APPROVE falls back") must make this test
+// fail by returning a COMMENT_ONLY publication instead of propagating the
+// error.
+func TestPublishReviewNeverFallsBackOnATransientFailure(t *testing.T) {
+	store, fake := newReviewPublishFixture(t)
+	decision := publishableDecision(t, store, review.VerdictApprove)
+	fake.Fail = func(call GitHubCall) error {
+		if call.Method != "SubmitReview" {
+			return nil
+		}
+		return &GitHubTransientError{Status: 503, Detail: "server error"}
+	}
+
+	_, err := PublishReview(context.Background(), ReviewPublicationDeps{Store: store, GitHub: fake}, testRepo, decision)
+	if err == nil {
+		t.Fatal("expected a transient failure to propagate rather than fall back to COMMENT_ONLY")
+	}
+	if published, found, _ := store.ReviewPublication(decision.ID); found && published.Published {
+		t.Fatal("a failed publish must not record a durable publication")
+	}
+}
+
+// A SubmitReview client-side error (e.g. a lost reply) must not be treated as
+// failure when GitHub's own state, read back through the decision marker,
+// shows the review already landed.
+func TestPublishReviewReconcilesAfterASubmitErrorWhenGitHubAlreadyShowsIt(t *testing.T) {
+	store, fake := newReviewPublishFixture(t)
+	decision := publishableDecision(t, store, review.VerdictApprove)
+	attempts := 0
+	fake.Fail = func(call GitHubCall) error {
+		if call.Method != "SubmitReview" {
+			return nil
+		}
+		attempts++
+		if attempts == 1 {
+			// The client never saw the (successful) response, but GitHub's
+			// own state - scripted below - already carries the review.
+			fake.ReviewsByHead[testHeadSHA] = GitHubReviewObservation{
+				Reviews: []GitHubReview{{ID: 777, Author: fake.ViewerActor, State: GitHubReviewApproved, CommitSHA: testHeadSHA,
+					Body: UntrustedText("looks good\n\n" + reviewDecisionMarker(decision.ID))}},
+			}
+			return &GitHubTransientError{Status: 0, Detail: "connection reset"}
+		}
+		return nil
+	}
+
+	publication, err := PublishReview(context.Background(), ReviewPublicationDeps{Store: store, GitHub: fake}, testRepo, decision)
+	if err != nil || !publication.Published || publication.GitHubReviewID != 777 {
+		t.Fatalf("expected reconciliation from GitHub's own state after a lost reply, got %+v %v", publication, err)
+	}
+}
+
+// Mutation check (#233 B1): two DIFFERENT decisions on the same exact head,
+// both published by this runtime's identity, must never be confused with one
+// another. Removing the marker-based match (or the ambiguity refusal) in
+// observeOwnPublishedReview must make this test fail by letting an unrelated
+// review satisfy a decision it was never proof of.
+func TestPublishReviewRefusesAnUnrelatedOwnReviewOnTheSameHead(t *testing.T) {
+	store, fake := newReviewPublishFixture(t)
+	// A DIFFERENT reviewer already published an APPROVE on this exact head.
+	other := publishableDecisionForReviewer(t, store, review.VerdictApprove, "codex")
+	if _, err := PublishReview(context.Background(), ReviewPublicationDeps{Store: store, GitHub: fake}, testRepo, other); err != nil {
+		t.Fatalf("publishing the other decision: %v", err)
+	}
+
+	// This decision (a DIFFERENT reviewer, REQUEST_CHANGES) must still be
+	// published for real, not silently satisfied by the unrelated review
+	// already on the head.
+	blocking := publishableDecision(t, store, review.VerdictRequestChanges)
+	publication, err := PublishReview(context.Background(), ReviewPublicationDeps{Store: store, GitHub: fake}, testRepo, blocking)
+	if err != nil {
+		t.Fatalf("PublishReview: %v", err)
+	}
+	if publication.PublishedVerdict != review.VerdictRequestChanges {
+		t.Fatalf("expected the blocking decision's own REQUEST_CHANGES to be published, got %q", publication.PublishedVerdict)
+	}
+	submits := 0
+	for _, call := range fake.Methods() {
+		if call == "SubmitReview" {
+			submits++
+		}
+	}
+	if submits != 2 {
+		t.Fatalf("expected both decisions to each submit their own review, got %d SubmitReview calls", submits)
+	}
+}
+
+func publishableDecisionForReviewer(t *testing.T, store *SQLiteOperationStore, verdict review.Verdict, reviewerAgentID string) review.Decision {
+	t.Helper()
+	subject := review.Subject{Repository: testRepo.String(), PRNumber: 7, HeadSHA: testHeadSHA}
+	id, err := review.DecisionID(subject, reviewerAgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := review.Decision{
+		SchemaVersion: review.SchemaVersion, ID: id, Subject: subject,
+		RunID: "run-1", ReviewerAgentID: reviewerAgentID, Verdict: verdict, CreatedAt: time.Unix(1700000000, 0).UTC(),
+	}
+	if verdict == review.VerdictRequestChanges {
+		d.Findings = []review.Finding{{Severity: review.SeverityBlocking, Signature: "real defect"}}
+	}
+	stored, _, err := store.CreateReviewDecision(d)
+	if err != nil {
+		t.Fatalf("CreateReviewDecision: %v", err)
+	}
+	return stored
 }

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -67,5 +68,47 @@ func TestGitHubRESTAdapterSubmitReviewRefusesAnUnsafeSHA(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected an unsafe commit SHA to be refused before any request is made")
+	}
+}
+
+func TestClassifyReviewSubmissionStatusDistinguishesSelfApprovalFromOtherFailures(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		body     string
+		wantType any
+	}{
+		{"self approval rejected", 422, `{"message":"Unprocessable Entity","errors":[{"message":"Can not approve your own pull request"}]}`, &GitHubSelfApprovalRejectedError{}},
+		{"other 422", 422, `{"message":"Validation Failed","errors":[{"message":"commit_id is invalid"}]}`, &GitHubAPIError{}},
+		{"rate limited", 429, `{"message":"rate limited"}`, &GitHubTransientError{}},
+		{"server error", 503, `{"message":"boom"}`, &GitHubTransientError{}},
+		{"unauthorized", 401, `{"message":"Bad credentials"}`, &GitHubAuthError{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := classifyReviewSubmissionStatus(tc.status, []byte(tc.body))
+			switch tc.wantType.(type) {
+			case *GitHubSelfApprovalRejectedError:
+				var target *GitHubSelfApprovalRejectedError
+				if !errors.As(err, &target) {
+					t.Fatalf("expected *GitHubSelfApprovalRejectedError, got %T: %v", err, err)
+				}
+			case *GitHubAPIError:
+				var target *GitHubAPIError
+				if !errors.As(err, &target) {
+					t.Fatalf("expected *GitHubAPIError, got %T: %v", err, err)
+				}
+			case *GitHubTransientError:
+				var target *GitHubTransientError
+				if !errors.As(err, &target) {
+					t.Fatalf("expected *GitHubTransientError, got %T: %v", err, err)
+				}
+			case *GitHubAuthError:
+				var target *GitHubAuthError
+				if !errors.As(err, &target) {
+					t.Fatalf("expected *GitHubAuthError, got %T: %v", err, err)
+				}
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -70,19 +71,32 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 		return review.Publication{}, err
 	}
 	submission := GitHubReviewSubmission{CommitSHA: decision.Subject.HeadSHA, Event: event, Body: body}
-	created, err := deps.GitHub.SubmitReview(ctx, repo, decision.Subject.PRNumber, submission)
+	created, submitErr := deps.GitHub.SubmitReview(ctx, repo, decision.Subject.PRNumber, submission)
 	publishedVerdict := decision.Verdict
-	if err != nil && wantApprove {
-		// #233 requirement 13: when the configured identity cannot submit an
-		// approval (GitHub refuses self-approval of one's own pull request),
-		// fall back to an explicit COMMENT_ONLY rather than pretending GitHub
-		// approved, or silently failing a decision that IS otherwise durable.
+	var selfRejected *GitHubSelfApprovalRejectedError
+	if submitErr != nil && wantApprove && errors.As(submitErr, &selfRejected) {
+		// #233 requirement 13: GitHub's own DEFINITIVE refusal of this
+		// identity's self-approval - and only that, never a timeout, a 5xx, a
+		// rate limit, an auth failure or any other 422 - is the one permitted
+		// downgrade to an explicit COMMENT_ONLY, rather than pretending GitHub
+		// approved or silently failing a decision that is otherwise durable.
 		submission.Event = GitHubReviewCommented
-		created, err = deps.GitHub.SubmitReview(ctx, repo, decision.Subject.PRNumber, submission)
+		created, submitErr = deps.GitHub.SubmitReview(ctx, repo, decision.Subject.PRNumber, submission)
 		publishedVerdict = review.VerdictCommentOnly
 	}
-	if err != nil {
-		return review.Publication{}, fmt.Errorf("publishing review %s: %w", decision.ID, err)
+	if submitErr != nil {
+		// The failure may describe OUR client, not GitHub's outcome: a
+		// timeout or a dropped connection can lose the reply to a request
+		// GitHub already processed. One more marker-based observation
+		// distinguishes "nothing landed" from "it landed and we only lost the
+		// reply", without ever submitting a second review to find out.
+		if observed, ok, obsErr := observeOwnPublishedReview(ctx, deps, repo, decision); obsErr == nil && ok {
+			if _, err := deps.Store.RecordReviewPublication(observed); err != nil {
+				return review.Publication{}, err
+			}
+			return observed, nil
+		}
+		return review.Publication{}, fmt.Errorf("publishing review %s: %w", decision.ID, submitErr)
 	}
 	publication := review.Publication{
 		DecisionID: decision.ID, Published: true, GitHubReviewID: created.ID,
@@ -94,13 +108,22 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 	return publication, nil
 }
 
-// observeOwnPublishedReview asks GitHub itself whether this exact decision
-// was already published, for the crash window between SubmitReview
-// succeeding and RecordReviewPublication committing. It requires a forge that
-// can answer "who am I" (ForgeViewer); an adapter that cannot is not asked -
-// which is also why a configuration lacking it must rely on
-// RecordReviewPublication's insert-once guarantee alone, exactly as feedback
-// admission already depends on ForgeViewer for its own self-identity guard.
+// observeOwnPublishedReview asks GitHub itself whether THIS EXACT decision was
+// already published, for the crash window between SubmitReview succeeding and
+// RecordReviewPublication committing. It requires a forge that can answer
+// "who am I" (ForgeViewer); an adapter that cannot is not asked - which is
+// also why a configuration lacking it must rely on RecordReviewPublication's
+// insert-once guarantee alone, exactly as feedback admission already depends
+// on ForgeViewer for its own self-identity guard.
+//
+// Matching is by decision-ID MARKER (#233 B1), never by identity alone: the
+// self identity narrows to "a review this runtime published", and the marker
+// - embedded in the body every publication writes, see reviewPublicationBody
+// - narrows that to "the review THIS decision published". Without the marker,
+// reviewer A's own earlier APPROVE/COMMENT on this exact head would be
+// mistaken for proof that reviewer B's unrelated REQUEST_CHANGES decision was
+// published, silently suppressing B's blocking feedback. More than one match
+// is an authority question this function refuses to guess at.
 func observeOwnPublishedReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubRepo, decision review.Decision) (review.Publication, bool, error) {
 	viewer, ok := deps.GitHub.(ForgeViewer)
 	if !ok {
@@ -114,15 +137,60 @@ func observeOwnPublishedReview(ctx context.Context, deps ReviewPublicationDeps, 
 	if err != nil {
 		return review.Publication{}, false, err
 	}
+	var matches []GitHubReview
 	for _, observed := range observation.Reviews {
-		if observed.Author.Login != "" && strings.EqualFold(observed.Author.Login, self.Login) {
-			return review.Publication{
-				DecisionID: decision.ID, Published: true, GitHubReviewID: observed.ID,
-				PublishedVerdict: verdictFor(observed.State), PublishedAt: observed.SubmittedAt,
-			}, true, nil
+		if observed.Author.Login == "" || !strings.EqualFold(observed.Author.Login, self.Login) {
+			continue
 		}
+		if id, ok := reviewDecisionIDFromBody(string(observed.Body)); !ok || id != decision.ID {
+			continue
+		}
+		matches = append(matches, observed)
 	}
-	return review.Publication{}, false, nil
+	switch len(matches) {
+	case 0:
+		return review.Publication{}, false, nil
+	case 1:
+		observed := matches[0]
+		return review.Publication{
+			DecisionID: decision.ID, Published: true, GitHubReviewID: observed.ID,
+			PublishedVerdict: verdictFor(observed.State), PublishedAt: observed.SubmittedAt,
+		}, true, nil
+	default:
+		return review.Publication{}, false, fmt.Errorf(
+			"%d reviews by %s on exact head %s carry decision marker %s; refusing to guess which is authoritative",
+			len(matches), self.Login, short12(decision.Subject.HeadSHA), decision.ID)
+	}
+}
+
+// reviewDecisionMarker is the immutable, machine-readable identity a
+// published review body carries: an HTML comment, invisible in GitHub's
+// rendered markdown, naming the EXACT decision it is proof of publishing.
+// Matching on this - never on a human name, a disposition alone, or "the
+// first review by this identity" - is what makes reconciliation specific to
+// one decision among however many this identity has ever published to one PR.
+const (
+	reviewDecisionMarkerPrefix = "<!-- zenchron-review-decision: "
+	reviewDecisionMarkerSuffix = " -->"
+)
+
+func reviewDecisionMarker(id string) string {
+	return reviewDecisionMarkerPrefix + id + reviewDecisionMarkerSuffix
+}
+
+// reviewDecisionIDFromBody extracts the decision id a review body's marker
+// names, or false if the body carries none.
+func reviewDecisionIDFromBody(body string) (string, bool) {
+	start := strings.Index(body, reviewDecisionMarkerPrefix)
+	if start < 0 {
+		return "", false
+	}
+	rest := body[start+len(reviewDecisionMarkerPrefix):]
+	end := strings.Index(rest, reviewDecisionMarkerSuffix)
+	if end < 0 {
+		return "", false
+	}
+	return rest[:end], true
 }
 
 // reviewStateFor maps a durable decision to the GitHub event to submit, and
@@ -163,15 +231,16 @@ func reviewPublicationBody(decision review.Decision) string {
 	}
 	if len(decision.Findings) == 0 {
 		out.WriteString("No findings.\n")
-		return out.String()
-	}
-	out.WriteString("Findings:\n")
-	for _, finding := range decision.Findings {
-		fmt.Fprintf(&out, "- [%s] %s", finding.Severity, finding.Signature)
-		if finding.Detail != "" {
-			fmt.Fprintf(&out, ": %s", finding.Detail)
+	} else {
+		out.WriteString("Findings:\n")
+		for _, finding := range decision.Findings {
+			fmt.Fprintf(&out, "- [%s] %s", finding.Severity, finding.Signature)
+			if finding.Detail != "" {
+				fmt.Fprintf(&out, ": %s", finding.Detail)
+			}
+			out.WriteString("\n")
 		}
-		out.WriteString("\n")
 	}
+	out.WriteString("\n" + reviewDecisionMarker(decision.ID) + "\n")
 	return out.String()
 }
