@@ -7,30 +7,37 @@ package runtime
 // invocation is given reflects the resolution, never the open question.
 //
 // What this file does NOT claim: that resolving a decision automatically
-// produces a SECOND provider invocation of the SAME run through today's
-// existing continuation machinery. It cannot, for a structural reason proven
-// empirically while building this: a message report is only ever observed
-// (TestEveryFocusedSourceIsClassified et al. aside, see
-// appendMessageObservation's call site in operations.go) from an invocation
-// the engine already treats as COMPLETING - Outcome succeeded, not a
-// checkpoint stop, not a feedback/review/continuation-unresolved attempt. The
-// ONLY existing mechanism that re-invokes a run without a brand new
-// EngineeringRun is the #489 checkpoint-then-continue pair, and a checkpoint
-// STOP is a FAILED outcome specifically so the engine does not treat it as
-// finished - which means its message slot is never read at all. So the one
-// invocation whose message CAN be observed (a completing one) is, by the same
-// stroke, the one invocation after which this engine's own planner considers
-// the engineering operation done and schedules no automatic continuation -
-// with or without #508. Composing "ask and keep going" into one automatic
-// run would need a genuine extension to state.plan()'s continuation model
-// (reconciler.go), which is both out of #508's scope and too large a change
-// to make safely inside this review-fix pass. #508 holds up its own half
-// completely: nothing is invoked while a question is open, and the fact is
-// correctly compiled the moment it resolves (TestResumedContextCarries...
-// below proves exactly that, directly). What closes the loop for a run that
-// needs to keep doing engineering work after a decision is an explicit
-// operator action (`autonomy resume`) or a fresh run, exactly as a goal-state
-// -reached run already requires today for any other kind of human answer.
+// produces a SECOND provider invocation of the SAME run (#508 review P4b,
+// not yet built). #508 review P4a closed two defects this file's own history
+// found along the way, but neither one is automatic continuation:
+//
+//   - A decision_request written by a CHECKPOINTING attempt (the producer
+//     mutated but was cut off, #489's shape) is now observed and, once the
+//     runtime's own candidate.commit durably journals that exact checkpoint,
+//     admitted for its decision_request content alone - see
+//     decision_checkpoint_admission_test.go. Before P4a, that message was
+//     silently discarded: appendMessageObservation ran only on the
+//     COMPLETING path, and a checkpoint is a producer the runtime cut off,
+//     never that path.
+//   - The wait itself is unconditional now: Reconcile reads
+//     OpenDecisionRequestsForRun on EVERY pass, not only when state.plan()
+//     happens to want some operation that exact pass. Before P4a, a run with
+//     truly nothing else to plan (the shape this file exercises - ask, change
+//     nothing) could flip from Waiting/ReasonDecisionPending back to
+//     Waiting/ReasonGoalStateReached once whatever UNRELATED binding
+//     incidentally kept re-triggering (bindSourceObserve's epoch key, bumped
+//     by the message-observed event itself) stopped re-triggering -
+//     TestADecisionPendingWaitNeverFlipsToGoalStateReached below proves it no
+//     longer can, by ticking far past the point the old code would have
+//     flipped.
+//
+// Composing "ask and keep going" into one automatic resumed invocation is
+// #508 review P4b, a separate, reviewed extension to state.plan()'s binding
+// derivation (reconciler.go) - deliberately not in this file. What closes the
+// loop for a run that still needs to do engineering work after a decision,
+// until P4b ships, is an explicit operator action (`autonomy resume`) or a
+// fresh run, exactly as a goal-state-reached run already requires today for
+// any other kind of human answer.
 
 import (
 	"context"
@@ -129,16 +136,23 @@ func TestAWorkerEmittedDecisionRequestParksItsRunWithZeroCapacity(t *testing.T) 
 	}
 	requestID := open[0].ID
 
-	// ZERO CAPACITY WHILE WAITING: several more passes must not invoke the
-	// worker again or change the run's disposition.
-	for range 5 {
+	// ZERO CAPACITY WHILE WAITING, FAR PAST THE POINT ANY UNRELATED BINDING
+	// COULD STILL BE RE-TRIGGERING (#508 review P4a, D4): before the fix, this
+	// wait was checked only inside "if state.plan() wants an operation", so it
+	// depended on bindSourceObserve's own epoch-keyed binding happening to be
+	// unsatisfied - which it is, once, right when EventMessagesObserved bumps
+	// the epoch, and never again once that one re-observation runs and
+	// nothing else changes. 30 ticks is comfortably past that one-time churn;
+	// the run must still read Waiting/ReasonDecisionPending here, never having
+	// flipped to Waiting/ReasonGoalStateReached in between.
+	for range 30 {
 		tick()
 	}
 	if n := engineeringInvocations(); n != 1 {
 		t.Fatalf("the worker was invoked %d times while its question stood open, want 1 (zero capacity consumed)", n)
 	}
 	if run := runRow(); run.Disposition != Waiting || run.Reason != ReasonDecisionPending {
-		t.Fatalf("run moved to %s/%s while its own question was still open", run.Disposition, run.Reason)
+		t.Fatalf("run moved to %s/%s while its own question was still open - the wait must hold even once every unrelated binding has stopped re-triggering", run.Disposition, run.Reason)
 	}
 	worker.say(runID, "", false)
 
@@ -270,4 +284,53 @@ func runRowFor(t *testing.T, fixture *fleetFixture, runID string) EngineeringRun
 		t.Fatalf("run %s is unreadable: found=%t err=%v", runID, found, err)
 	}
 	return run
+}
+
+// TestDecisionWaitPermitsOnlyObservationAndCandidateCommit is #508 review
+// P4a's R2-B proof at the unit level: while a decision is open, EVERY other
+// operation kind is deferred, and candidate.commit is let through only when
+// something was actually wanted (never fabricated).
+func TestDecisionWaitPermitsOnlyObservationAndCandidateCommit(t *testing.T) {
+	cases := []struct {
+		name   string
+		wanted bool
+		kind   string
+		want   bool
+	}{
+		{"nothing wanted at all", false, OpCandidateCommit, false},
+		{"nothing wanted, observation kind named anyway", false, OpSourceObserve, false},
+		{"observation is permitted", true, OpSourceObserve, true},
+		{"github observation is permitted", true, OpGitHubObserve, true},
+		{"candidate.commit is permitted", true, OpCandidateCommit, true},
+		{"execution.invoke is deferred", true, OpExecutionInvoke, false},
+		{"assurance is deferred", true, OpAssuranceGo, false},
+		{"authority evaluation is deferred", true, OpAuthorityEvaluate, false},
+		{"candidate push is deferred", true, OpCandidatePush, false},
+		{"handoff repair is deferred", true, OpHandoffRepair, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := decisionWaitPermits(c.wanted, c.kind); got != c.want {
+				t.Fatalf("decisionWaitPermits(%t, %q) = %t, want %t", c.wanted, c.kind, got, c.want)
+			}
+		})
+	}
+}
+
+// TestAnUnreadableDecisionStoreNeverAuthorizesDispatch is #508 review P4a's
+// R2-E proof: "unknown is not permission." An OpenDecisionRequestsForRun
+// error must end the Reconcile pass in error, never fall through as though
+// no decision were open.
+func TestAnUnreadableDecisionStoreNeverAuthorizesDispatch(t *testing.T) {
+	fixture, _, runID := newLinearizabilityFixture(t)
+	engine, err := fixture.supervisor().engine("acme/repo", "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Reconcile(context.Background(), runID); err == nil {
+		t.Fatal("Reconcile must fail, not silently proceed, when its decision store is unreadable")
+	}
 }

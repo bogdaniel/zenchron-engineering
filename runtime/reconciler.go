@@ -1705,24 +1705,29 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 			return r.settle(state, live, reason)
 		}
 		desired, wanted := state.plan()
-		if wanted {
-			// #508: a run that has itself asked a live decision - a #473
-			// decision_request this build has not yet admitted a
-			// DecisionResolution for - plans no further operation. Checked
-			// only here, once an operation is actually about to be
-			// attempted: a run with nothing left to plan anyway
-			// (goal_state_reached) is not relabeled over a question that
-			// does not block it, and #473's own OpenDecisions already makes
-			// it visible. This is the ONLY place the wait is enforced, so it
-			// holds for every caller of Reconcile, under every driver, the
-			// same way.
-			open, err := r.deps.Store.OpenDecisionRequestsForRun(runID)
-			if err != nil {
-				return Outcome{}, err
-			}
-			if len(open) > 0 {
-				return r.settle(state, Waiting, ReasonDecisionPending)
-			}
+		// #508 (review P4a, D4/R2-E): a run that has itself asked a live
+		// decision - a #473 decision_request this build has not yet admitted a
+		// DecisionResolution for - performs no new provider-facing or mutating
+		// work (decisionWaitPermits decides the narrow exceptions). Checked on
+		// EVERY pass, regardless of wanted, so a run with nothing else to plan
+		// this exact pass does not read as goal_state_reached while its own
+		// question stands open; the earlier shape of this check ran only
+		// inside "if wanted", which left exactly that case unprotected and
+		// depended on an unrelated binding (bindSourceObserve's epoch key)
+		// happening to be wanted to ever run at all. #473's own OpenDecisions
+		// already makes the question visible; this is the ONLY place the wait
+		// is enforced, so it holds for every caller of Reconcile, under every
+		// driver, the same way.
+		//
+		// An unreadable decision store never authorizes dispatch: unknown is
+		// not permission (R2-E), so the pass ends in error here, before
+		// anything is validated or run.
+		open, err := r.deps.Store.OpenDecisionRequestsForRun(runID)
+		if err != nil {
+			return Outcome{}, err
+		}
+		if len(open) > 0 && !decisionWaitPermits(wanted, desired.kind) {
+			return r.settle(state, Waiting, ReasonDecisionPending)
 		}
 		// No progress means PRODUCING the same failure again, not looking at it
 		// again. An observation pass changes nothing and must not spend the
@@ -1787,6 +1792,19 @@ func (r *EngineeringRuntime) drivenElsewhere(runID string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// decisionWaitPermits answers, for #508's decision-pending wait, whether the
+// one desired operation this pass computed may still run while a decision
+// this run itself asked stands open. Only observation (reads external state,
+// invokes no provider, mutates nothing governed - the same exemption
+// `validate` already grants every other Waiting disposition) and
+// candidate.commit for an already-succeeded, already-proven checkpoint are
+// permitted (#508 review P4a, R2-B): refusing to durably finalize work the
+// run has already produced would strand that work, not protect anything.
+// Nothing is permitted when nothing was wanted in the first place.
+func decisionWaitPermits(wanted bool, kind string) bool {
+	return wanted && (OperationCapacityClass(kind) == CapacityObservation || kind == OpCandidateCommit)
 }
 
 func waitingOr(live, fallback Disposition) Disposition {
