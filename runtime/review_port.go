@@ -20,9 +20,13 @@ import (
 // principal that opened the producer PR (the common case absent a
 // deliberately distinct reviewer-publishing identity), a published review
 // would be refused by that very guard and never reach the ordinary feedback
-// path at all. Decision.Verdict, read directly off this outcome, IS the
-// authorized, producer-routable signal; GitHub publication is for human
-// visibility and is never the channel #474 consumes decisions through.
+// path at all. Decision.Verdict, read directly off this outcome, is the
+// independently reached FACT #474 routes on - never itself the authority to
+// act on it: #233 establishes what was decided, #474 remains the sole owner
+// of deciding whether and how that fact becomes an authorized remediation
+// invocation (docs/review.md, "The #474 interface"). GitHub publication is
+// for human visibility and is never the channel #474 consumes decisions
+// through.
 type ReviewOutcome struct {
 	Decision review.Decision
 	// Published reports whether a GitHub review was submitted for Decision.

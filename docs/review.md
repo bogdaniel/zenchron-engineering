@@ -95,11 +95,26 @@ replay.
 
 Concurrency is exclusive, not advisory: performing a review, and separately
 publishing one, each claim a durable key before any expensive or
-externally-visible work, so two concurrent callers for the same exact
-subject and reviewer can never both invoke a provider or both reach GitHub.
-A losing caller is refused immediately with a typed conflict rather than
-blocking; a claim is released on ordinary completion and reclaimed after a
-bounded staleness window if its owner crashed.
+externally-visible work. An ordinary concurrent caller - one that never
+crashes - is refused immediately with a typed conflict rather than blocking,
+and never both invokes a provider or both reaches GitHub for the same exact
+subject and reviewer. The claim is renewed for as long as that one step runs,
+so a merely slow-but-alive caller is never stolen out from under; it is only
+reclaimed after a bounded staleness window once its owner has genuinely
+stopped renewing.
+
+What this does NOT claim: if an owner is stolen from WHILE still alive (a
+missed renewal, or a steal that outran the renewal interval), a second caller
+can start its own provider invocation or its own GitHub submission before the
+first one has finished - this runtime never promises at most one *live*
+invocation across that narrow window. What it does still guarantee, and what
+actually matters, is admission: a review's durable decision is written only
+if the write itself still holds the exact claim token it started with (#233
+B4-A), and a publication's external submission is the one step genuinely
+protected by continuous renewal for its whole duration (#233 B4-B) - so a
+stolen-but-still-running invocation can produce output, but that output is
+either refused at admission or was never allowed to reach GitHub a second
+time in the first place.
 
 ## The #474 interface
 

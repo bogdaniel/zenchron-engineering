@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/bogdaniel/zenchron-engineering/review"
 )
@@ -49,6 +50,22 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 		return review.Publication{}, &ReviewClaimConflictError{ClaimKey: claimKey}
 	}
 	defer deps.Store.ReleaseReviewClaim(claimKey, token)
+
+	// #233 B4-B: renewed for as long as this claimed section runs, including
+	// the external GitHub reads and the SubmitReview call itself. Without
+	// this, a merely-slow-but-alive publication (a delayed HTTP response, not
+	// a crash) could have its claim stolen mid-flight, letting a second
+	// caller submit the SAME decision while the first's request may still be
+	// accepted - two externally visible reviews for one decision. claimLost
+	// is not acted on here the way #233 B4-A's review-decision admission
+	// acts on it: recording a publication this function itself observed (or
+	// reconciled from GitHub) is always a true fact about what GitHub holds,
+	// never a second external action, so a late write under a lost claim is
+	// harmless rather than requiring refusal.
+	renewalStop := make(chan struct{})
+	var claimLost atomic.Bool
+	go renewReviewClaimWhile(deps.Store, claimKey, token, deps.Clock, renewalStop, &claimLost)
+	defer close(renewalStop)
 
 	if existing, found, err := deps.Store.ReviewPublication(decision.ID); err != nil {
 		return review.Publication{}, err

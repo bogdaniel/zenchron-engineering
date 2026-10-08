@@ -48,6 +48,56 @@ func (s *SQLiteOperationStore) CreateReviewDecision(decision review.Decision) (r
 	return stored, false, nil
 }
 
+// CreateReviewDecisionFenced is CreateReviewDecision, but the insert only
+// lands if claimKey is STILL held by token at the moment the write executes
+// (#233 B4-A). A renewal loop checked just before this call cannot close the
+// window between "we last confirmed we still own the claim" and "we write
+// the decision" - a steal can land in between. Gating the INSERT on the
+// current claim row, in the SAME statement, closes that window: this
+// statement and a concurrent ClaimReview steal are both single writes
+// against this database, and SQLite serializes them, so there is no
+// interleaving in which both observe the claim as still held.
+//
+// found=false with a *ReviewClaimLostError means neither case above applies:
+// the row was not already present AND the WHERE EXISTS guard refused the
+// write, which only happens when claimKey no longer names token as its
+// holder. Admitting the decision anyway would let a superseded caller's
+// verdict become durable truth after another caller has already taken over
+// the same review.
+func (s *SQLiteOperationStore) CreateReviewDecisionFenced(decision review.Decision, claimKey, token string) (review.Decision, bool, error) {
+	if err := decision.Validate(); err != nil {
+		return review.Decision{}, false, err
+	}
+	document, err := CanonicalJSON(decision)
+	if err != nil {
+		return review.Decision{}, false, err
+	}
+	result, err := s.db.Exec(`INSERT INTO review_decisions (id, repository, pr_number, head_sha, run_id, created_unix_nano, document)
+		SELECT ?, ?, ?, ?, ?, ?, ?
+		WHERE EXISTS (SELECT 1 FROM review_claims WHERE claim_key = ? AND token = ?)
+		ON CONFLICT(id) DO NOTHING`,
+		decision.ID, decision.Subject.Repository, decision.Subject.PRNumber, decision.Subject.HeadSHA,
+		decision.RunID, decision.CreatedAt.UnixNano(), string(document), claimKey, token)
+	if err != nil {
+		return review.Decision{}, false, err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return review.Decision{}, false, err
+	}
+	if inserted == 1 {
+		return decision, true, nil
+	}
+	stored, found, err := s.ReviewDecision(decision.ID)
+	if err != nil {
+		return review.Decision{}, false, err
+	}
+	if found {
+		return stored, false, nil
+	}
+	return review.Decision{}, false, &ReviewClaimLostError{ClaimKey: claimKey}
+}
+
 // ReviewDecision reads one decision by its exact identity.
 func (s *SQLiteOperationStore) ReviewDecision(id string) (review.Decision, bool, error) {
 	var document string

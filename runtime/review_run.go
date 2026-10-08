@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/review"
@@ -27,6 +28,19 @@ func (e *ReviewClaimConflictError) Error() string {
 	return fmt.Sprintf("another caller is already performing %q; retry once it completes", e.ClaimKey)
 }
 
+// ReviewClaimLostError reports that this caller's exclusive claim over a
+// review or publication was observed to be evicted - renewed by another
+// owner - WHILE this caller still had work in flight under it (#233 B4-A).
+// Unlike ReviewClaimConflictError, which refuses before any work starts,
+// this is raised after an invocation already ran: its result is refused
+// rather than durably admitted, because this caller can no longer prove it
+// is still the one authorized to decide for this key.
+type ReviewClaimLostError struct{ ClaimKey string }
+
+func (e *ReviewClaimLostError) Error() string {
+	return fmt.Sprintf("the exclusive claim over %q was lost to another caller before this invocation's result could be admitted", e.ClaimKey)
+}
+
 // clockNow is Clock's nil-safe default: a nil Clock (the ordinary case
 // outside tests) reads the real wall clock.
 func clockNow(clock Clock) time.Time {
@@ -37,23 +51,41 @@ func clockNow(clock Clock) time.Time {
 }
 
 // reviewClaimRenewalInterval is how often a still-active holder of a review
-// claim renews it during the one potentially long-running step (the reviewer
-// invocation) so a merely-slow-but-alive operation is never stolen out from
-// under it (#233 B4-2). A third of the staleness bound leaves two missed
-// renewals of margin before a genuinely abandoned claim is reclaimed.
-const reviewClaimRenewalInterval = reviewClaimStaleAfter / 3
+// or publication claim renews it during the one potentially long-running step
+// under that claim (the reviewer invocation, or the external GitHub calls a
+// publication makes) so a merely-slow-but-alive operation is never stolen out
+// from under it (#233 B4-2, B4-B). A third of the staleness bound leaves two
+// missed renewals of margin before a genuinely abandoned claim is reclaimed.
+//
+// A var, not a const: a test that must prove the renewal itself defeats a
+// staleness-window steal - without actually waiting out reviewClaimStaleAfter
+// in real time - shrinks this for its own duration and restores it after.
+var reviewClaimRenewalInterval = reviewClaimStaleAfter / 3
 
 // renewReviewClaimWhile renews claimKey/token every reviewClaimRenewalInterval
-// until stop is closed. Renewal failures are not fatal here - they mean the
-// claim was already superseded, which the caller's own next claimed operation
-// will discover on its own terms - so this never returns an error, only stops.
-func renewReviewClaimWhile(store *SQLiteOperationStore, claimKey, token string, clock Clock, stop <-chan struct{}) {
+// until stop is closed, or until a renewal confirms the claim is no longer
+// held by token - at which point it sets lost and stops renewing rather than
+// continuing to tick pointlessly (#233 B4-A). lost is this loss's ONE
+// observable signal: the caller checks it before admitting anything reached
+// while this goroutine was running, so a lease lost mid-invocation is
+// discovered and refused rather than silently treated as still held. A
+// transient store error alone does not set lost - only a renewal that
+// EXECUTED and reported renewed=false is proof the claim moved to another
+// owner, and that is retried on the next tick instead.
+func renewReviewClaimWhile(store *SQLiteOperationStore, claimKey, token string, clock Clock, stop <-chan struct{}, lost *atomic.Bool) {
 	ticker := time.NewTicker(reviewClaimRenewalInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			store.RenewReviewClaim(claimKey, token, clockNow(clock))
+			renewed, err := store.RenewReviewClaim(claimKey, token, clockNow(clock))
+			if reviewClaimRenewedTestHook != nil {
+				reviewClaimRenewedTestHook()
+			}
+			if err == nil && !renewed {
+				lost.Store(true)
+				return
+			}
 		case <-stop:
 			return
 		}
@@ -117,6 +149,15 @@ type RunIndependentReviewOutput struct {
 // that interleaving cannot be forced deterministically. Nil (and therefore
 // free) outside that one test.
 var reviewClaimTestHook func()
+
+// reviewClaimRenewedTestHook runs, if set, immediately after every renewal
+// attempt renewReviewClaimWhile makes (success, no-op, or failure). It exists
+// ONLY so a test can deterministically wait for "a renewal has just executed
+// against the current clock" - needed to prove #233 B4-B's publish-claim
+// renewal defeats a staleness-window steal without actually waiting out
+// reviewClaimStaleAfter in real time - instead of sleeping and hoping a
+// shortened ticker has fired. Nil (and therefore free) outside that one test.
+var reviewClaimRenewedTestHook func()
 
 // publishDecision publishes decision when requested, through the one
 // exclusive entry point (PublishReview itself now claims "publish:"+ID -
@@ -236,9 +277,15 @@ func RunIndependentReview(ctx context.Context, in RunIndependentReviewInput) (Ru
 
 	// #233 B4-2: renewed periodically for exactly as long as the one
 	// potentially long-running step runs, so a merely-slow-but-alive
-	// invocation is never stolen out from under it.
+	// invocation is never stolen out from under it. #233 B4-A: claimLost is
+	// this renewal loop's one observable signal that ownership was lost
+	// anyway (a steal that outran renewal, or a renewal failure that is
+	// itself proof another owner already holds the key) - checked below
+	// before anything is admitted, so a lease lost mid-invocation is
+	// discovered rather than silently treated as still held.
 	renewalStop := make(chan struct{})
-	go renewReviewClaimWhile(in.Store, reviewID, token, in.Clock, renewalStop)
+	var claimLost atomic.Bool
+	go renewReviewClaimWhile(in.Store, reviewID, token, in.Clock, renewalStop, &claimLost)
 	invocation, err := InvokeReviewer(ctx, ReviewInvocationInput{
 		ReviewID: reviewID, Packet: packet, Workspace: workspace,
 		Agent: in.Reviewer, Provider: in.Provider, Artifacts: ArtifactStore{Root: in.StateDir},
@@ -249,13 +296,19 @@ func RunIndependentReview(ctx context.Context, in RunIndependentReviewInput) (Ru
 	if err != nil {
 		return RunIndependentReviewOutput{}, err
 	}
+	if claimLost.Load() {
+		return RunIndependentReviewOutput{}, &ReviewClaimLostError{ClaimKey: reviewID}
+	}
 	decision, err := AdmitPRReview(ReviewInvocationInput{
 		ReviewID: reviewID, Packet: packet, Workspace: workspace, Agent: in.Reviewer,
 	}, invocation, in.Clock)
 	if err != nil {
 		return RunIndependentReviewOutput{}, err
 	}
-	stored, created, err := in.Store.CreateReviewDecision(decision)
+	// #233 B4-A: the admission write itself is fenced on reviewID/token, not
+	// only guarded by the checks above - closing the window between the
+	// check and this write, which a steal could otherwise still land in.
+	stored, created, err := in.Store.CreateReviewDecisionFenced(decision, reviewID, token)
 	if err != nil {
 		return RunIndependentReviewOutput{}, err
 	}

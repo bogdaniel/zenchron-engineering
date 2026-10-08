@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/execution"
 )
@@ -147,6 +148,79 @@ func TestRunIndependentReviewRereadsTheDecisionAfterWinningAStaleClaim(t *testin
 	if got := atomic.LoadInt32(&invocations); got != 0 {
 		t.Fatalf("expected B to find A's decision and never invoke its own provider, got %d invocations", got)
 	}
+}
+
+// Mutation check (#233 B4-A): a claim stolen WHILE the original owner is
+// still blocked inside the provider must fence that owner's own decision
+// admission - the steal makes the owner's eventual verdict unfenced, not
+// merely late. A's own claim is stolen (by directly manipulating the store,
+// the same deterministic staleness-forcing pattern review_store_test.go
+// already uses, rather than waiting out the real staleness window) while A
+// is parked in the provider; A is then released and must refuse to admit a
+// decision rather than writing one under a token it no longer holds.
+// Reverting CreateReviewDecisionFenced to the unfenced CreateReviewDecision
+// in RunIndependentReview must make this test fail by letting A's decision
+// land anyway.
+func TestRunIndependentReviewRefusesAdmissionAfterItsClaimIsStolenMidInvocation(t *testing.T) {
+	in, _, store := reviewRunFixture(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	var invocations int32
+	in.Provider = blockingReviewProvider{started: started, release: release, invocations: &invocations}
+
+	aDone := make(chan error, 1)
+	go func() {
+		_, err := RunIndependentReview(context.Background(), in)
+		aDone <- err
+	}()
+	<-started // A has claimed the review and is now blocked inside the provider.
+
+	// Steal A's claim exactly the way TestClaimReviewReclaimsAStaleClaim does:
+	// pass an artificial "now" far enough past A's claim time that it reads
+	// as abandoned, with no real waiting. The claim key is every live row in
+	// review_claims at this point - there is exactly one, A's own.
+	claimKey := onlyReviewClaimKey(t, store)
+	stolenAt := clockNow(in.Clock).Add(reviewClaimStaleAfter + time.Minute)
+	stolen, _, err := store.ClaimReview(claimKey, "attacker", stolenAt, reviewClaimStaleAfter)
+	if err != nil || !stolen {
+		t.Fatalf("stealing A's claim: stolen=%v err=%v", stolen, err)
+	}
+
+	close(release) // let A finish its (now unfenced) provider invocation.
+	aErr := <-aDone
+	var lost *ReviewClaimLostError
+	if !errors.As(aErr, &lost) {
+		t.Fatalf("expected A to be refused admission with a lost-claim error, got %v", aErr)
+	}
+	if _, found, err := store.ReviewDecision(claimKey); err != nil || found {
+		t.Fatalf("expected no durable decision to have been admitted, found=%v err=%v", found, err)
+	}
+}
+
+// onlyReviewClaimKey reads back the single claim key review_claims currently
+// holds, for a test that needs to steal "whichever key A is using" without
+// independently recomputing review.DecisionID itself.
+func onlyReviewClaimKey(t *testing.T, store *SQLiteOperationStore) string {
+	t.Helper()
+	rows, err := store.db.Query(`SELECT claim_key FROM review_claims`)
+	if err != nil {
+		t.Fatalf("querying review_claims: %v", err)
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			t.Fatalf("scanning claim_key: %v", err)
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating review_claims: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected exactly one live claim, found %d: %v", len(keys), keys)
+	}
+	return keys[0]
 }
 
 // countingExecuteProvider counts invocations rather than blocking, so

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -280,4 +281,140 @@ type viewerErrorForge struct{ *FakeGitHubAdapter }
 
 func (v *viewerErrorForge) Viewer(context.Context, GitHubRepo) (GitHubActor, error) {
 	return GitHubActor{}, fmt.Errorf("could not resolve viewer identity")
+}
+
+// barrierSubmitReviewAdapter wraps FakeGitHubAdapter and blocks SubmitReview
+// on a real channel until the test releases it, standing in for a GitHub
+// response delayed well past the publish claim's staleness window - exactly
+// the #233 B4-B scenario: "the first attempt's response may still be
+// accepted" while a second caller considers stealing the claim.
+type barrierSubmitReviewAdapter struct {
+	*FakeGitHubAdapter
+	reached chan struct{}
+	release chan struct{}
+}
+
+func (a barrierSubmitReviewAdapter) SubmitReview(ctx context.Context, repo GitHubRepo, number int, submission GitHubReviewSubmission) (GitHubReview, error) {
+	close(a.reached)
+	<-a.release
+	return a.FakeGitHubAdapter.SubmitReview(ctx, repo, number, submission)
+}
+
+// lockedClock is a concurrency-safe Clock a test can advance from one
+// goroutine while another reads it via clockNow - unlike the package's plain
+// fakeClock, safe here because the publish-claim renewal goroutine reads it
+// concurrently with the test advancing it.
+type lockedClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *lockedClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *lockedClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// waitForClaimRenewedPast blocks until a renewal has landed a
+// claimed_unix_nano timestamp at or after "after" - proof that at least one
+// renewal has executed against the clock AFTER the test advanced it, rather
+// than one still reflecting the time before. It never sleeps blindly: each
+// iteration only proceeds on an actual renewal signal from
+// reviewClaimRenewedTestHook, bounded by an overall timeout.
+func waitForClaimRenewedPast(t *testing.T, store *SQLiteOperationStore, claimKey string, after time.Time, renewed <-chan struct{}) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case <-renewed:
+			var claimedNano int64
+			if err := store.db.QueryRow(`SELECT claimed_unix_nano FROM review_claims WHERE claim_key = ?`, claimKey).Scan(&claimedNano); err != nil {
+				t.Fatalf("reading review_claims row: %v", err)
+			}
+			if !time.Unix(0, claimedNano).UTC().Before(after) {
+				return
+			}
+		case <-deadline.C:
+			t.Fatal("timed out waiting for a publish-claim renewal reflecting the advanced clock")
+		}
+	}
+}
+
+// Mutation check (#233 B4-B): a publication claim must be renewed for as
+// long as the external SubmitReview call is in flight, so a caller that is
+// merely slow - not crashed - can never have its claim stolen and have a
+// second caller submit the SAME decision while the first's request may
+// still be accepted by GitHub. The clock is advanced well past
+// reviewClaimStaleAfter WHILE A is blocked inside SubmitReview; a steal
+// attempt at that point must still fail, because A's renewal (proven via
+// waitForClaimRenewedPast) has already carried the claim's timestamp past
+// the attacker's own threshold. Removing PublishReview's renewal goroutine
+// must make this test fail by letting the steal attempt succeed.
+func TestPublishReviewRenewsItsClaimAcrossASlowSubmitReviewAndDefeatsASteal(t *testing.T) {
+	store, fake := newReviewPublishFixture(t)
+	decision := publishableDecision(t, store, review.VerdictApprove)
+
+	reached, release := make(chan struct{}), make(chan struct{})
+	adapter := barrierSubmitReviewAdapter{FakeGitHubAdapter: fake, reached: reached, release: release}
+	clock := &lockedClock{now: time.Unix(1700000000, 0).UTC()}
+
+	originalInterval := reviewClaimRenewalInterval
+	reviewClaimRenewalInterval = 5 * time.Millisecond
+	defer func() { reviewClaimRenewalInterval = originalInterval }()
+
+	renewed := make(chan struct{}, 64)
+	reviewClaimRenewedTestHook = func() {
+		select {
+		case renewed <- struct{}{}:
+		default:
+		}
+	}
+	defer func() { reviewClaimRenewedTestHook = nil }()
+
+	deps := ReviewPublicationDeps{Store: store, GitHub: adapter, Clock: clock}
+	done := make(chan error, 1)
+	go func() {
+		_, err := PublishReview(context.Background(), deps, testRepo, decision)
+		done <- err
+	}()
+
+	<-reached // A is now blocked inside SubmitReview, its claim held.
+
+	claimKey := "publish:" + decision.ID
+	advancedTo := clock.Now().Add(reviewClaimStaleAfter + time.Minute)
+	clock.Advance(reviewClaimStaleAfter + time.Minute)
+	waitForClaimRenewedPast(t, store, claimKey, advancedTo, renewed)
+
+	// B attempts to steal using a "now" far enough past the ALREADY RENEWED
+	// timestamp to be stale relative to it - the same staleness-forcing
+	// pattern used elsewhere, proving the renewal (not mere luck in timing)
+	// is what defeats this steal.
+	stolen, _, err := store.ClaimReview(claimKey, "attacker", advancedTo.Add(time.Second), reviewClaimStaleAfter)
+	if err != nil {
+		t.Fatalf("attacker's steal attempt: %v", err)
+	}
+	if stolen {
+		t.Fatal("expected A's actively-renewed publish claim to survive a steal attempt, but it was stolen")
+	}
+
+	close(release) // let A's SubmitReview finally return.
+	if err := <-done; err != nil {
+		t.Fatalf("PublishReview: %v", err)
+	}
+	submitCalls := 0
+	for _, call := range fake.Methods() {
+		if call == "SubmitReview" {
+			submitCalls++
+		}
+	}
+	if submitCalls != 1 {
+		t.Fatalf("expected exactly one SubmitReview call, got %d", submitCalls)
+	}
 }

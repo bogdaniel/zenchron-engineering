@@ -106,9 +106,14 @@ type ReviewPacketDeps struct {
 // BuildReviewPacket assembles the complete review context for one pull
 // request. workspace is the already-materialized, exact-head checkout the
 // caller built for the review invocation itself (see InvokeReviewer); it is
-// read here only to produce the diff, and may be nil, which answers Diff as
-// empty with Truncated false - "the runtime could not read it", stated rather
-// than silently hidden, mirroring readCandidateDiff's own convention.
+// read here only to produce the diff.
+//
+// workspace is REQUIRED (#233 B3 residual): a nil workspace used to answer
+// Diff as empty with Truncated false, which is indistinguishable from a
+// verified empty diff to anything that reads the resulting packet. A packet
+// this incomplete is never safe to hand a reviewer for admission, so this
+// function fails closed instead - the caller must supply a materialized
+// workspace or not call this at all.
 func BuildReviewPacket(ctx context.Context, deps ReviewPacketDeps, repo GitHubRepo, prNumber int, workspace *PlanningWorkspace) (ReviewPacket, error) {
 	if deps.Store == nil || deps.GitHub == nil {
 		return ReviewPacket{}, fmt.Errorf("a review packet requires a store and a forge adapter")
@@ -157,13 +162,14 @@ func BuildReviewPacket(ctx context.Context, deps ReviewPacketDeps, repo GitHubRe
 			issue = observed
 		}
 	}
-	var diff string
-	var truncated bool
-	if workspace != nil {
-		diff, truncated, err = verifiedReviewDiff(workspace.Dir, pr.BaseSHA, pr.HeadSHA)
-		if err != nil {
-			return ReviewPacket{}, fmt.Errorf("establishing the verified diff for exact head %s: %w", short12(pr.HeadSHA), err)
-		}
+	if workspace == nil {
+		return ReviewPacket{}, fmt.Errorf(
+			"a review packet for exact head %s requires a materialized review workspace to produce a verified diff; "+
+				"refusing rather than returning a packet with an unflagged empty diff", short12(pr.HeadSHA))
+	}
+	diff, truncated, err := verifiedReviewDiff(workspace.Dir, pr.BaseSHA, pr.HeadSHA)
+	if err != nil {
+		return ReviewPacket{}, fmt.Errorf("establishing the verified diff for exact head %s: %w", short12(pr.HeadSHA), err)
 	}
 	return ReviewPacket{
 		Trusted: ReviewTrustedFacts{
