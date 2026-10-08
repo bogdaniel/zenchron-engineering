@@ -3,6 +3,8 @@ package runtime
 import (
 	"fmt"
 	"strings"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // reviewContextFrameMarker delimits the untrusted issue/PR/review-comment text
@@ -111,4 +113,22 @@ func reviewObjective(packet ReviewPacket) string {
 	}
 	out.WriteString(reviewContextFrameMarker)
 	return out.String()
+}
+
+// validateIndependentReviewBinding is the independent-review half of
+// validateExecutionBinding's purpose switch, kept here rather than inline so
+// that file - already at its frozen file-size ceiling - gains only the one
+// line its switch statement needs.
+//
+// Same boundary as planning, for the same reason: a reviewer's restriction is
+// PROVEN by the runtime re-measuring the workspace afterward, never trusted
+// from what the provider or its output claims.
+func validateIndependentReviewBinding(request ExecutionRequest) error {
+	if request.Mode != domain.InvocationModeNonMutatingPlanning {
+		return fmt.Errorf("purpose %q requires the %q mode", request.Purpose, domain.InvocationModeNonMutatingPlanning)
+	}
+	if request.ReviewerResultPath == "" {
+		return fmt.Errorf("purpose %q requires its runtime-owned verdict slot", request.Purpose)
+	}
+	return nil
 }

@@ -1105,18 +1105,6 @@ func artifact(path string, sanitized, publishable bool) (Artifact, error) {
 	return Artifact{Path: path, SHA256: hex.EncodeToString(sum[:]), MediaType: "text/plain", LocalOnly: !sanitized, Sanitized: sanitized, Publishable: publishable}, nil
 }
 
-// ClassifyProviderFailure preserves the existing narrow capacity semantics:
-// only recognizable transient-capacity diagnostics may consume retry/fallback
-// budget. Every other provider failure is diagnosable and bounded as unknown.
-func ClassifyProviderFailure(stdout, stderr []byte) FailureClass {
-	diagnostic := strings.ToLower(string(stdout) + "\n" + string(stderr))
-	for _, signal := range []string{"model is at capacity", "selected model is at capacity", "capacity. please try", "temporarily unavailable"} {
-		if strings.Contains(diagnostic, signal) {
-			return FailureTransientProvider
-		}
-	}
-	return FailureUnknown
-}
 func providerPrompt(r ExecutionRequest) string {
 	return providerEnvelope(r) + upstreamBlock(r.Upstream) + feedbackBlock(r.Feedback) + feedbackResolutionEnvelope(r) + handoffEnvelope(r) + messageEnvelope(r)
 }
@@ -1241,10 +1229,6 @@ func reviewerEnvelope(r ExecutionRequest) string {
 }
 
 func providerEnvelope(r ExecutionRequest) string {
-	// An independent review shares planning's non-mutating Mode but owns a
-	// self-contained envelope, so it is checked BEFORE the Mode-based
-	// fallback below - otherwise it would fall into planningEnvelope's
-	// generic text instead of its own reviewer contract.
 	if r.Purpose == InvocationIndependentReview {
 		return independentReviewEnvelope(r)
 	}
