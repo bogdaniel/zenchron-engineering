@@ -11,26 +11,51 @@ package runtime
 // transaction the database schedules first - BEGIN IMMEDIATE (sqlite_store.go)
 // decides that, not this test - rather than asserting a specific winner.
 //
-// #508 review P4a (mandatory Phase 1 follow-up): co-starting two goroutines
-// at a single barrier, as the two tests above do, exercises REAL concurrency
-// but does not FORCE the dangerous read-to-insert window open - the database
-// is free to schedule the second transaction entirely before or entirely
-// after the first, and a fast machine routinely does exactly that, never
-// actually interleaving a write between a resolve's own read and its own
-// insert.
-// TestResolveDecisionRequestBlocksConcurrentSupersessionAcrossStoreHandles
-// and TestResolveDecisionRequestBlocksConcurrentSubjectDriftAcrossStoreHandles,
-// below, strengthen exactly those two scenarios: they hold the SAME read
-// ResolveDecisionRequest performs, inside an explicitly held transaction, and
-// prove - across two DISTINCT *SQLiteOperationStore handles on the same
-// database, never one handle racing itself - that the conflicting write
-// cannot land until that transaction ends. BEGIN IMMEDIATE's own locking is
-// what makes this true; the test demonstrates the guarantee #508 relies on
-// directly, rather than hoping a co-started goroutine happens to land inside
-// the window.
+// #508 review P4a (mandatory Phase 1 follow-up, round 2): co-starting two
+// goroutines at a single barrier, as the two tests above do, exercises REAL
+// concurrency but does not FORCE the dangerous read-to-insert window open -
+// the database is free to schedule the second transaction entirely before or
+// entirely after the first, and a fast machine routinely does exactly that,
+// never actually interleaving a write between a resolve's own read and its
+// own insert. A first attempt at strengthening this held only the READ
+// (findDecisionRequestTx) and then launched a SECOND, distinct writer after
+// release without awaiting the first one's own outcome - proving the read
+// transaction's own locking, never the actual resolution insert, and never
+// confirming the originally-attempted contender did anything at all.
+//
+// The four tests below fix this: resolveUnderHeldTx replicates
+// ResolveDecisionRequest's own four steps - find, check existing, validate,
+// insert - using its own production helpers (decision_store.go), inside a
+// transaction the TEST opens and controls the commit of. Holding that
+// transaction open past its insert, but before its commit, is the actual
+// window #508 means to prove nothing can interleave: a SINGLE contender is
+// given a ready-to-attempt signal, proven blocked for a bound, then released
+// by the SAME transaction's commit, and its own completion is awaited on the
+// SAME channel afterward - never a second, duplicate writer, never a
+// fire-and-forget drain. Each scenario is proved in BOTH serial orderings:
+// resolution-first (this forced-interleaving test) and contender-first (a
+// plain sequential companion test calling the REAL, unmodified
+// ResolveDecisionRequest after the conflicting write has already fully
+// landed, asserting the stale refusal).
+//
+// What this proves, precisely: SQLite's own write-lock promotion - acquired
+// by BEGIN IMMEDIATE at BEGIN, or by the ordinary deferred rule at the first
+// write statement otherwise, either way before resolveUnderHeldTx returns -
+// blocks a second connection's conflicting write for as long as the holding
+// transaction stays open, uncommitted. ResolveDecisionRequest relies on
+// exactly that: its own read, validate and insert run inside ONE
+// transaction, using these SAME helpers. A regression that split
+// ResolveDecisionRequest's read from its insert across two SEPARATE
+// transactions would not itself be caught by these tests, which hold their
+// OWN transaction rather than instrumenting the production method directly
+// (the narrower of the two options this review named as acceptable); it
+// would be caught by TestResolveDecisionRequestLinearizesAgainstSupersession
+// and ...SubjectDrift above, which race the REAL method and assert the
+// outcome invariant regardless of ordering.
 
 import (
 	"context"
+	"database/sql"
 	"strconv"
 	"strings"
 	"sync"
@@ -256,34 +281,44 @@ func TestResolveDecisionRequestLinearizesAgainstSubjectDrift(t *testing.T) {
 	}
 }
 
-// blockedWrite launches a conflicting write and reports whether it landed
-// within the bound - never by sleeping and hoping, but by racing a timeout
-// against a done channel only the write itself closes.
-func blockedWrite(t *testing.T, write func() error, bound time.Duration) (landed bool, err error) {
-	t.Helper()
-	done := make(chan error, 1)
-	go func() { done <- write() }()
-	select {
-	case err = <-done:
-		return true, err
-	case <-time.After(bound):
-		go func() {
-			// Drain whenever the write eventually does land, so the
-			// goroutine above is never leaked past the test.
-			<-done
-		}()
-		return false, nil
+// resolveUnderHeldTx replicates ResolveDecisionRequest's own four steps -
+// find the live request, read any existing resolution, validate, insert -
+// using its own production helpers (decision_store.go), inside a
+// transaction the CALLER opened and controls the commit of. It exists so a
+// test can hold the exact window between a resolve's own insert and its own
+// commit open for an externally observed duration.
+func resolveUnderHeldTx(tx *sql.Tx, decisionID string, outcome orchestration.DecisionOutcome, reason string,
+	authority orchestration.DecisionResolutionAuthority, now time.Time) (orchestration.DecisionResolution, error) {
+	ref, current, err := findDecisionRequestTx(tx, decisionID)
+	if err != nil {
+		return orchestration.DecisionResolution{}, err
 	}
+	existing, found, err := decisionResolutionByRequestID(tx, ref.ID)
+	if err != nil {
+		return orchestration.DecisionResolution{}, err
+	}
+	var existingPtr *orchestration.DecisionResolution
+	if found {
+		existingPtr = &existing
+	}
+	proposed, err := orchestration.ResolveDecision(ref, current, outcome, reason, authority, existingPtr, now)
+	if err != nil {
+		return orchestration.DecisionResolution{}, err
+	}
+	stored, _, err := insertDecisionResolution(tx, proposed)
+	return stored, err
 }
 
-// TestResolveDecisionRequestBlocksConcurrentSupersessionAcrossStoreHandles is
-// #508 review P4a's strengthening of scenario 1: rather than co-starting two
-// goroutines and trusting the scheduler to interleave them, this test FORCES
-// the dangerous window open - a transaction performing the EXACT read
-// ResolveDecisionRequest performs, held past that read - and proves, across
-// two DISTINCT *SQLiteOperationStore handles on the same database, that a
-// concurrent supersession cannot land until that transaction ends.
-func TestResolveDecisionRequestBlocksConcurrentSupersessionAcrossStoreHandles(t *testing.T) {
+// TestResolveDecisionRequestResolutionCommitsBeforeAConcurrentSupersession is
+// #508 review P4a's T1 fix, the RESOLUTION-FIRST ordering: the resolution's
+// own read-validate-insert is held open (resolveUnderHeldTx) past its
+// insert, a SINGLE contender's supersession is given a ready-to-attempt
+// signal and proven blocked for a bound, the transaction then commits, and
+// the SAME contender's own completion is awaited afterward on the SAME
+// channel - never a second, duplicate writer, never a fire-and-forget drain.
+// The supersession can only ever land AFTER the resolution has already
+// committed, so it has no intervening effect on it.
+func TestResolveDecisionRequestResolutionCommitsBeforeAConcurrentSupersession(t *testing.T) {
 	fixture, batch, runID := newLinearizabilityFixture(t)
 	store := fixture.store
 	second, err := OpenSQLiteOperationStore(fixture.stateDir)
@@ -293,44 +328,86 @@ func TestResolveDecisionRequestBlocksConcurrentSupersessionAcrossStoreHandles(t 
 	defer second.Close()
 	now := fixture.clock.Now()
 	d1 := admitTestDecisionRequest(t, store, batch, runID, "op-1", nil, now)
+	authority := testHoldAuthority("operator-1")
 
 	tx, err := store.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := findDecisionRequestTx(tx, d1.ID); err != nil {
+	resolved, err := resolveUnderHeldTx(tx, d1.ID, allowOutcomeForStore(), "go ahead", authority, now)
+	if err != nil {
 		t.Fatal(err)
 	}
-	// tx now holds the write lock BEGIN IMMEDIATE acquires - exactly the
-	// window between ResolveDecisionRequest's own read and its own insert.
-	landed, writeErr := blockedWrite(t, func() error {
+	// tx now holds the write lock BEGIN IMMEDIATE acquires, with the
+	// resolution's own INSERT already executed but not yet committed -
+	// exactly the window between ResolveDecisionRequest's own insert and its
+	// commit.
+	ready := make(chan struct{})
+	completed := make(chan error, 1)
+	go func() {
+		close(ready) // READY-TO-ATTEMPT: about to issue the conflicting write, now.
 		_, err := admitTestMessage(second, batch, runID, "op-2",
 			orchestration.MessageDraft{Kind: orchestration.KindDecisionRequest, Purpose: "revised", Body: "pick one, revised", Supersedes: d1.ID}, now)
-		return err
-	}, 150*time.Millisecond)
-	if landed {
-		t.Fatalf("a conflicting supersession landed while the read-side transaction was still open (err=%v)", writeErr)
+		completed <- err
+	}()
+	<-ready
+	select {
+	case err := <-completed:
+		t.Fatalf("the ONE contender's supersession landed while the resolution's own transaction was still open (err=%v)", err)
+	case <-time.After(150 * time.Millisecond):
+		// still blocked, as required.
 	}
-	if err := tx.Rollback(); err != nil {
+	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	// Released: the SAME write must now succeed promptly.
-	if landed, writeErr := blockedWrite(t, func() error {
-		_, err := admitTestMessage(second, batch, runID, "op-3",
-			orchestration.MessageDraft{Kind: orchestration.KindDecisionRequest, Purpose: "revised", Body: "pick one, revised", Supersedes: d1.ID}, now)
-		return err
-	}, time.Second); !landed {
-		t.Fatal("the supersession never landed after the blocking transaction released its lock")
-	} else if writeErr != nil {
-		t.Fatal(writeErr)
+	select { // awaited AFTER release, on the SAME channel.
+	case err := <-completed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the contender's supersession never completed after the resolution's transaction committed")
+	}
+
+	stored, found, err := store.DecisionResolutionByRequestID(d1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || stored != resolved {
+		t.Fatalf("the resolution did not stand exactly as committed: found=%t stored=%+v resolved=%+v", found, stored, resolved)
 	}
 }
 
-// TestResolveDecisionRequestBlocksConcurrentSubjectDriftAcrossStoreHandles is
-// #508 review P4a's strengthening of scenario 2: the same forced-window proof
-// for a second handoff moving the owner's subject, across two distinct store
-// handles.
-func TestResolveDecisionRequestBlocksConcurrentSubjectDriftAcrossStoreHandles(t *testing.T) {
+// TestResolveDecisionRequestRefusesAfterASupersessionAlreadyLanded is the
+// opposite, CONTENDER-FIRST ordering: a supersession that has already fully
+// landed before ResolveDecisionRequest is ever called makes the real,
+// unmodified method refuse the request as no longer live, durably writing
+// nothing. No concurrency is needed to prove this ordering; it is the
+// method's own validation, exercised after the fact.
+func TestResolveDecisionRequestRefusesAfterASupersessionAlreadyLanded(t *testing.T) {
+	fixture, batch, runID := newLinearizabilityFixture(t)
+	store := fixture.store
+	now := fixture.clock.Now()
+	d1 := admitTestDecisionRequest(t, store, batch, runID, "op-1", nil, now)
+	if _, err := admitTestMessage(store, batch, runID, "op-2",
+		orchestration.MessageDraft{Kind: orchestration.KindDecisionRequest, Purpose: "revised", Body: "pick one, revised", Supersedes: d1.ID}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := store.ResolveDecisionRequest(d1.ID, allowOutcomeForStore(), "go ahead", testHoldAuthority("operator-1"), now)
+	if err == nil || !strings.Contains(err.Error(), "no longer live") {
+		t.Fatalf("resolving a request superseded before the call must refuse as no longer live, got: %v", err)
+	}
+	if _, found, err := store.DecisionResolutionByRequestID(d1.ID); err != nil || found {
+		t.Fatalf("a refused (superseded) resolve must leave no durable row: found=%t err=%v", found, err)
+	}
+}
+
+// TestResolveDecisionRequestResolutionCommitsBeforeAConcurrentSubjectDrift is
+// the subject-drift companion of the supersession test above: the same
+// forced, held-transaction proof that a second handoff attempted during the
+// resolution's own transaction cannot land until it commits.
+func TestResolveDecisionRequestResolutionCommitsBeforeAConcurrentSubjectDrift(t *testing.T) {
 	fixture, batch, runID := newLinearizabilityFixture(t)
 	store := fixture.store
 	second, err := OpenSQLiteOperationStore(fixture.stateDir)
@@ -341,29 +418,68 @@ func TestResolveDecisionRequestBlocksConcurrentSubjectDriftAcrossStoreHandles(t 
 	now := fixture.clock.Now()
 	h1 := admitTestHandoff(t, store, batch, runID, "op-1", "commit-1", now)
 	d1 := admitTestDecisionRequest(t, store, batch, runID, "op-2", &h1, now)
+	authority := testHoldAuthority("operator-1")
 
 	tx, err := store.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := findDecisionRequestTx(tx, d1.ID); err != nil {
+	resolved, err := resolveUnderHeldTx(tx, d1.ID, allowOutcomeForStore(), "go ahead", authority, now)
+	if err != nil {
 		t.Fatal(err)
 	}
-	landed, writeErr := blockedWrite(t, func() error {
-		return admitTestHandoffNoFatal(second, batch, runID, "op-3", "commit-2", now.Add(time.Second))
-	}, 150*time.Millisecond)
-	if landed {
-		t.Fatalf("a conflicting second handoff landed while the read-side transaction was still open (err=%v)", writeErr)
+	ready := make(chan struct{})
+	completed := make(chan error, 1)
+	go func() {
+		close(ready)
+		completed <- admitTestHandoffNoFatal(second, batch, runID, "op-3", "commit-2", now.Add(time.Second))
+	}()
+	<-ready
+	select {
+	case err := <-completed:
+		t.Fatalf("the ONE contender's second handoff landed while the resolution's own transaction was still open (err=%v)", err)
+	case <-time.After(150 * time.Millisecond):
 	}
-	if err := tx.Rollback(); err != nil {
+	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if landed, writeErr := blockedWrite(t, func() error {
-		return admitTestHandoffNoFatal(second, batch, runID, "op-4", "commit-3", now.Add(2*time.Second))
-	}, time.Second); !landed {
-		t.Fatal("the second handoff never landed after the blocking transaction released its lock")
-	} else if writeErr != nil {
-		t.Fatal(writeErr)
+	select {
+	case err := <-completed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the second handoff never completed after the resolution's transaction committed")
+	}
+
+	stored, found, err := store.DecisionResolutionByRequestID(d1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || stored.RequestID != resolved.RequestID || stored.Outcome != resolved.Outcome ||
+		stored.Subject == nil || stored.Subject.Revision.CandidateRevision != "commit-1" {
+		t.Fatalf("the resolution did not stand bound to the subject it validated against: found=%t stored=%+v resolved=%+v", found, stored, resolved)
+	}
+}
+
+// TestResolveDecisionRequestRefusesAfterSubjectDriftAlreadyLanded is the
+// opposite, CONTENDER-FIRST ordering: a second handoff that has already
+// moved the owner's subject before ResolveDecisionRequest is ever called
+// makes the real, unmodified method refuse as no longer current.
+func TestResolveDecisionRequestRefusesAfterSubjectDriftAlreadyLanded(t *testing.T) {
+	fixture, batch, runID := newLinearizabilityFixture(t)
+	store := fixture.store
+	now := fixture.clock.Now()
+	h1 := admitTestHandoff(t, store, batch, runID, "op-1", "commit-1", now)
+	d1 := admitTestDecisionRequest(t, store, batch, runID, "op-2", &h1, now)
+	admitTestHandoff(t, store, batch, runID, "op-3", "commit-2", now.Add(time.Second))
+
+	_, err := store.ResolveDecisionRequest(d1.ID, allowOutcomeForStore(), "go ahead", testHoldAuthority("operator-1"), now)
+	if err == nil || !strings.Contains(err.Error(), "no longer current") {
+		t.Fatalf("resolving a request whose subject already moved must refuse as no longer current, got: %v", err)
+	}
+	if _, found, err := store.DecisionResolutionByRequestID(d1.ID); err != nil || found {
+		t.Fatalf("a refused (stale-subject) resolve must leave no durable row: found=%t err=%v", found, err)
 	}
 }
 

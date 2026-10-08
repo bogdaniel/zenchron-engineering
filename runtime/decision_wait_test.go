@@ -321,16 +321,60 @@ func TestDecisionWaitPermitsOnlyObservationAndCandidateCommit(t *testing.T) {
 // R2-E proof: "unknown is not permission." An OpenDecisionRequestsForRun
 // error must end the Reconcile pass in error, never fall through as though
 // no decision were open.
+//
+// Closing the whole store (the first version of this test) does not isolate
+// that claim: r.load's own Store.Run/Events calls fail first, so Reconcile
+// errors regardless of whether the new decision-read guard does anything at
+// all. Run and Events are kept perfectly readable here; only the decision
+// document itself - corrupted directly in the database, the same technique
+// TestEventsPageDoesNotDecodeUnboundedTail already uses for a journal row -
+// is unreadable, isolating the guard this test actually means to prove.
 func TestAnUnreadableDecisionStoreNeverAuthorizesDispatch(t *testing.T) {
-	fixture, _, runID := newLinearizabilityFixture(t)
+	// Precondition, proved on an otherwise-identical, UNCORRUPTED run: this
+	// run shape genuinely has an operation state.plan() would select on its
+	// first pass - the corrupted case below is refusing real work, not
+	// coincidentally testing a run with nothing to do anyway.
+	baseline, _, baselineRunID := newLinearizabilityFixture(t)
+	baselineEngine, err := baseline.supervisor().engine("acme/repo", "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := baselineEngine.Reconcile(context.Background(), baselineRunID); err != nil {
+		t.Fatal(err)
+	}
+	baselineOps, err := baseline.store.Operations(baselineRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(baselineOps) == 0 {
+		t.Fatal("test precondition violated: an uncorrupted run's first Reconcile pass created no operation at all")
+	}
+
+	fixture, batch, runID := newLinearizabilityFixture(t)
+	store := fixture.store
+	d1 := admitTestDecisionRequest(t, store, batch, runID, "op-1", nil, fixture.clock.Now())
+	if _, err := store.db.Exec(`UPDATE orchestration_messages SET document = '{}' WHERE id = ?`, d1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Run(runID); err != nil || !found {
+		t.Fatalf("precondition: Run must still read fine despite the corrupt message: found=%t err=%v", found, err)
+	}
+	if _, err := store.Events(runID); err != nil {
+		t.Fatalf("precondition: Events must still read fine despite the corrupt message: %v", err)
+	}
+
 	engine, err := fixture.supervisor().engine("acme/repo", "claude")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.store.Close(); err != nil {
+	if _, err := engine.Reconcile(context.Background(), runID); err == nil {
+		t.Fatal("Reconcile must fail, not silently proceed, when its own decision read is corrupt")
+	}
+	ops, err := store.Operations(runID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.Reconcile(context.Background(), runID); err == nil {
-		t.Fatal("Reconcile must fail, not silently proceed, when its decision store is unreadable")
+	if len(ops) != 0 {
+		t.Fatalf("an operation was dispatched despite the corrupt decision read: %+v", ops)
 	}
 }

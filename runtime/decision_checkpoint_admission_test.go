@@ -48,7 +48,13 @@ func TestCheckpointCommittedRequiresAMatchingDurableCommit(t *testing.T) {
 		{"a checkpoint for a DIFFERENT binding", []EngineeringEvent{checkpointEvent(t, EventCandidateCheckpointed, "initial|other")}, "initial|a", false},
 		{"an empty binding never matches, even a real checkpoint", []EngineeringEvent{checkpointEvent(t, EventCandidateCheckpointed, "initial|a")}, "", false},
 		{"a matching checkpoint", []EngineeringEvent{checkpointEvent(t, EventCandidateCheckpointed, "initial|a")}, "initial|a", true},
-		{"a matching ordinary commit (also durable)", []EngineeringEvent{checkpointEvent(t, EventCandidateCommitted, "initial|a")}, "initial|a", true},
+		// An ORDINARY commit for the same id is deliberately NOT sufficient:
+		// a FromCheckpoint observation's own producing attempt is, by
+		// construction, the one shape commitCandidate only ever journals
+		// Checkpointed for, never Committed - that event answers a different
+		// question (an attempt that completed cleanly) and must not stand in
+		// for proof this one was actually cut off.
+		{"a matching ORDINARY commit does not count", []EngineeringEvent{checkpointEvent(t, EventCandidateCommitted, "initial|a")}, "initial|a", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -154,6 +160,114 @@ func TestAdmitObservedMessagesFromCheckpointAcceptsDecisionRequestOnly(t *testin
 	}
 	if len(admitted3) != 2 {
 		t.Fatalf("expected both messages of the ordinary report admitted, got %+v", admitted3)
+	}
+}
+
+// TestACheckpointOriginReportStaysUnadmittedBeforeItsCommitEventAndIsIdempotent
+// is #508 review P4a's T3 proof at the real admission-PASS level
+// (admitOrchestratedMessages, not admitObservedMessages called directly): a
+// FromCheckpoint observation with no matching EventCandidateCheckpointed yet
+// stays unadmitted across a REPLAYED admission pass, not merely on the first
+// attempt, and becomes admitted - exactly once, never duplicated by a later
+// replay - the moment that event lands.
+func TestACheckpointOriginReportStaysUnadmittedBeforeItsCommitEventAndIsIdempotent(t *testing.T) {
+	fixture, batch, runID := newLinearizabilityFixture(t)
+	store := fixture.store
+	operationID := "op-checkpoint-pass"
+	document := messageDocument(t, orchestration.MessageDraft{Kind: orchestration.KindDecisionRequest, Purpose: "which way?", Body: "pick one"})
+	path := writeMessageReportFile(t, fixture.stateDir, runID, operationID, 1, document)
+	_, digest, present, err := readMessageReport(path)
+	if err != nil || !present {
+		t.Fatalf("test report unreadable: present=%t err=%v", present, err)
+	}
+	journalEvent(t, store, fixture.clock, runID, EventMessagesObserved, MessagesObservedPayload{
+		OperationID: operationID, Attempt: 1, DocumentSHA256: digest, Count: 1, FromCheckpoint: true,
+	})
+
+	admitPass := func() {
+		t.Helper()
+		if err := admitOrchestratedMessages(store, fixture.stateDir, batch, fixture.clock.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertOpenCount := func(want int) {
+		t.Helper()
+		open, err := store.OpenDecisionRequestsForRun(runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(open) != want {
+			t.Fatalf("open decision requests = %d, want %d", len(open), want)
+		}
+	}
+
+	admitPass()
+	assertOpenCount(0)
+	admitPass() // replay before the commit exists: still unadmitted
+	assertOpenCount(0)
+
+	journalEvent(t, store, fixture.clock, runID, EventCandidateCheckpointed, CandidateCommittedPayload{
+		Commit: "c", Tree: "t", PathsDigest: "d", Producing: operationID,
+	})
+	admitPass()
+	assertOpenCount(1)
+	admitPass() // replay after admission: still exactly one, never duplicated
+	assertOpenCount(1)
+}
+
+// TestAMixedKindCheckpointReportIsADurableReplayIdempotentRefusal is #508
+// review P4a's T3 proof that a mixed-kind checkpoint report's refusal is a
+// DURABLE, RECORDED fact (ScopeMessageRefusals), not merely a reason string
+// admitObservedMessages happened to return once, and that replaying the
+// admission pass never later admits it.
+func TestAMixedKindCheckpointReportIsADurableReplayIdempotentRefusal(t *testing.T) {
+	fixture, batch, runID := newLinearizabilityFixture(t)
+	store := fixture.store
+	operationID := "op-checkpoint-mixed"
+	document := messageDocument(t,
+		orchestration.MessageDraft{Kind: orchestration.KindDecisionRequest, Purpose: "which way?", Body: "pick one"},
+		orchestration.MessageDraft{Kind: orchestration.KindStateUpdate, Body: "a progress note"},
+	)
+	path := writeMessageReportFile(t, fixture.stateDir, runID, operationID, 1, document)
+	_, digest, present, err := readMessageReport(path)
+	if err != nil || !present {
+		t.Fatalf("test report unreadable: present=%t err=%v", present, err)
+	}
+	journalEvent(t, store, fixture.clock, runID, EventMessagesObserved, MessagesObservedPayload{
+		OperationID: operationID, Attempt: 1, DocumentSHA256: digest, Count: 2, FromCheckpoint: true,
+	})
+	journalEvent(t, store, fixture.clock, runID, EventCandidateCheckpointed, CandidateCommittedPayload{
+		Commit: "c", Tree: "t", PathsDigest: "d", Producing: operationID,
+	})
+
+	if err := admitOrchestratedMessages(store, fixture.stateDir, batch, fixture.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	key := messageInvocationKey(runID, operationID, 1)
+	refusals, err := store.ScopeMessageRefusals(batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason, refused := refusals[key]
+	if !refused || reason == "" {
+		t.Fatalf("the mixed-kind checkpoint report was not a durably recorded refusal: refusals=%v", refusals)
+	}
+	if open, err := store.OpenDecisionRequestsForRun(runID); err != nil || len(open) != 0 {
+		t.Fatalf("a wholly-refused report must admit nothing: open=%v err=%v", open, err)
+	}
+
+	if err := admitOrchestratedMessages(store, fixture.stateDir, batch, fixture.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := store.ScopeMessageRefusals(batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed[key] != reason {
+		t.Fatalf("the refusal was not replay-idempotent: first=%q replay=%q", reason, replayed[key])
+	}
+	if open, err := store.OpenDecisionRequestsForRun(runID); err != nil || len(open) != 0 {
+		t.Fatalf("a replayed refusal must still admit nothing: open=%v err=%v", open, err)
 	}
 }
 

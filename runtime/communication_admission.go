@@ -257,21 +257,27 @@ func admitObservedMessages(stateDir string, scope orchestration.MessageScope, so
 	return admitted, "", nil
 }
 
-// checkpointCommitted reports whether a durable candidate commit or
-// checkpoint exists for the exact execution-invoke OPERATION ID named (the
-// same id bindCandidateCommit/CandidateCommittedPayload.Producing carries,
-// never a bare binding string) - i.e. that THIS attempt's work, if any, was
-// actually preserved by the runtime's own candidate.commit operation -
-// before its message report may be trusted (#508 review P4a, R2-B/R2-C). An
-// empty operation id, or no matching event yet, answers false: not a defect,
-// simply not yet provable, so the caller leaves the observation undecided
-// and retries it on a later pass.
+// checkpointCommitted reports whether a durable CHECKPOINT commit exists for
+// the exact execution-invoke OPERATION ID named (the same id
+// bindCandidateCommit/CandidateCommittedPayload.Producing carries, never a
+// bare binding string) - i.e. that THIS attempt's work, if any, was actually
+// preserved by the runtime's own candidate.commit operation - before its
+// message report may be trusted (#508 review P4a, R2-B/R2-C). Only
+// EventCandidateCheckpointed counts: a FromCheckpoint observation's own
+// producing attempt is, by construction (operations.go's execution.Checkpoint
+// classification), the ONE shape commitCandidate ever journals Checkpointed
+// for, never an ordinary EventCandidateCommitted - that event answers a
+// DIFFERENT question (an attempt that completed cleanly), and accepting it
+// here would admit a checkpoint-sourced report on evidence that attempt was
+// never actually cut off. An empty operation id, or no matching event yet,
+// answers false: not a defect, simply not yet provable, so the caller leaves
+// the observation undecided and retries it on a later pass.
 func checkpointCommitted(events []EngineeringEvent, operationID string) (bool, error) {
 	if operationID == "" {
 		return false, nil
 	}
 	for _, event := range events {
-		if event.Type != EventCandidateCheckpointed && event.Type != EventCandidateCommitted {
+		if event.Type != EventCandidateCheckpointed {
 			continue
 		}
 		payload, err := decodePayload[CandidateCommittedPayload](event.Payload)
