@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/review"
 )
@@ -157,4 +158,39 @@ func (s *SQLiteOperationStore) ReviewPublication(decisionID string) (review.Publ
 		return review.Publication{}, false, fmt.Errorf("stored review publication is unreadable: %w", err)
 	}
 	return pub, true, nil
+}
+
+// ClaimReview atomically claims claimKey for owner (#233 B4), stealing a
+// claim older than staleAfter. It reports true iff the caller now owns the
+// claim - via a fresh insert, or by reclaiming an abandoned one - and false
+// when another, still-active claimant holds it.
+//
+// The insert and the steal are ONE statement: SQLite serializes it against
+// every other writer on this database, so two concurrent callers can never
+// both observe "unclaimed" and both proceed, the way a separate read-then-write
+// would allow.
+func (s *SQLiteOperationStore) ClaimReview(claimKey, owner string, now time.Time, staleAfter time.Duration) (bool, error) {
+	if claimKey == "" || owner == "" {
+		return false, fmt.Errorf("a review claim requires its key and owner")
+	}
+	threshold := now.Add(-staleAfter).UnixNano()
+	result, err := s.db.Exec(`INSERT INTO review_claims (claim_key, claimed_unix_nano, owner) VALUES (?, ?, ?)
+		ON CONFLICT(claim_key) DO UPDATE SET claimed_unix_nano = excluded.claimed_unix_nano, owner = excluded.owner
+		WHERE review_claims.claimed_unix_nano < ?`,
+		claimKey, now.UnixNano(), owner, threshold)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	return affected == 1, err
+}
+
+// ReleaseReviewClaim drops claimKey, so an ordinary completion (success or a
+// clean, non-crash failure) lets the NEXT caller proceed immediately rather
+// than waiting out the staleness bound. It is best-effort cleanup, never
+// itself a correctness boundary: a release that never runs (the process
+// crashed) is exactly the case ClaimReview's staleness reclaim covers.
+func (s *SQLiteOperationStore) ReleaseReviewClaim(claimKey string) error {
+	_, err := s.db.Exec(`DELETE FROM review_claims WHERE claim_key = ?`, claimKey)
+	return err
 }

@@ -114,3 +114,55 @@ func TestRecordReviewPublicationIsInsertOnly(t *testing.T) {
 		t.Fatalf("expected the FIRST publication to stand, got %+v found=%v err=%v", stored, found, err)
 	}
 }
+
+func TestClaimReviewIsExclusiveUntilReleasedOrStale(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteOperationStore: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Unix(1700000000, 0).UTC()
+	claimed, err := store.ClaimReview("key-1", "owner-a", now, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("first claim: claimed=%v err=%v", claimed, err)
+	}
+	// A second owner, same instant: must NOT also claim it.
+	claimed, err = store.ClaimReview("key-1", "owner-b", now, time.Minute)
+	if err != nil || claimed {
+		t.Fatalf("expected the second concurrent claim to be refused, got claimed=%v err=%v", claimed, err)
+	}
+	// Released, so a new claimant may proceed immediately.
+	if err := store.ReleaseReviewClaim("key-1"); err != nil {
+		t.Fatalf("ReleaseReviewClaim: %v", err)
+	}
+	claimed, err = store.ClaimReview("key-1", "owner-b", now, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("expected a released claim to be immediately claimable, got claimed=%v err=%v", claimed, err)
+	}
+}
+
+// Mutation check: an abandoned claim (the owning process crashed) must
+// eventually be reclaimable, never stuck forever. Removing the staleness
+// WHERE clause in ClaimReview's upsert must make this test fail.
+func TestClaimReviewReclaimsAStaleClaim(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteOperationStore: %v", err)
+	}
+	defer store.Close()
+
+	start := time.Unix(1700000000, 0).UTC()
+	if claimed, err := store.ClaimReview("key-1", "owner-a", start, time.Minute); err != nil || !claimed {
+		t.Fatalf("first claim: claimed=%v err=%v", claimed, err)
+	}
+	// Still within the staleness window: not reclaimable.
+	if claimed, err := store.ClaimReview("key-1", "owner-b", start.Add(30*time.Second), time.Minute); err != nil || claimed {
+		t.Fatalf("expected the claim to still be active, got claimed=%v err=%v", claimed, err)
+	}
+	// Past the staleness window: the abandoned claim is reclaimed.
+	claimed, err := store.ClaimReview("key-1", "owner-b", start.Add(2*time.Minute), time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("expected the stale claim to be reclaimed, got claimed=%v err=%v", claimed, err)
+	}
+}

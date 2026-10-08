@@ -528,6 +528,21 @@ CREATE TABLE review_publications (
 	decision_id TEXT PRIMARY KEY REFERENCES review_decisions(id),
 	document    TEXT NOT NULL
 );
+`, `
+-- A durable, atomic claim over one bounded review operation (#233 B4):
+-- performing an independent review, or publishing one decision, each claim
+-- exactly one key before doing any expensive or externally-visible work, so
+-- two concurrent callers for the same exact subject/reviewer cannot both
+-- invoke a provider or both submit a GitHub review. A claim is released by
+-- its owner on ordinary completion (success or a clean failure); one left
+-- behind by a crashed process is reclaimed once it is older than the
+-- caller's staleness bound - see ClaimReview - so a dead claimant can never
+-- strand the operation forever.
+CREATE TABLE review_claims (
+	claim_key         TEXT PRIMARY KEY,
+	claimed_unix_nano INTEGER NOT NULL,
+	owner             TEXT NOT NULL
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

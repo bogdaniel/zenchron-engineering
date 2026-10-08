@@ -3,9 +3,56 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/review"
 )
+
+// reviewClaimStaleAfter bounds how long a crashed claimant can strand a
+// review or publication claim (#233 B4). It is generous enough to cover one
+// ordinary bounded reviewer invocation plus publication, and finite so a
+// genuinely abandoned claim is always eventually reclaimable rather than
+// stuck forever - the same shape the review-continuation wall allowance
+// (docs/github-feedback.md) already uses for a related bound.
+const reviewClaimStaleAfter = 30 * time.Minute
+
+// ReviewClaimConflictError reports that another caller already owns the
+// exclusive claim over this exact review or publication operation (#233 B4).
+// It is never a correctness failure: the caller that lost the race should
+// simply retry once the winner finishes, which - on success - releases the
+// claim immediately, and - on a crash - is reclaimed after reviewClaimStaleAfter.
+type ReviewClaimConflictError struct{ ClaimKey string }
+
+func (e *ReviewClaimConflictError) Error() string {
+	return fmt.Sprintf("another caller is already performing %q; retry once it completes", e.ClaimKey)
+}
+
+// clockNow is Clock's nil-safe default: a nil Clock (the ordinary case
+// outside tests) reads the real wall clock.
+func clockNow(clock Clock) time.Time {
+	if clock == nil {
+		return time.Now().UTC()
+	}
+	return clock.Now()
+}
+
+// publishReviewClaimed wraps PublishReview with the same exclusive-claim
+// discipline RunIndependentReview uses for performing the review itself
+// (#233 B4): two concurrent callers publishing the same decision must never
+// both reach GitHub, regardless of which one started first or already found
+// the decision durable.
+func publishReviewClaimed(ctx context.Context, store *SQLiteOperationStore, deps ReviewPublicationDeps, repo GitHubRepo, decision review.Decision, clock Clock) (review.Publication, error) {
+	key := "publish:" + decision.ID
+	claimed, err := store.ClaimReview(key, "publish", clockNow(clock), reviewClaimStaleAfter)
+	if err != nil {
+		return review.Publication{}, err
+	}
+	if !claimed {
+		return review.Publication{}, &ReviewClaimConflictError{ClaimKey: key}
+	}
+	defer store.ReleaseReviewClaim(key)
+	return PublishReview(ctx, deps, repo, decision)
+}
 
 // RunIndependentReviewInput is everything `review pr <n> --agent <id>` needs
 // to perform one independent review end to end. The CLI composition root
@@ -102,8 +149,9 @@ func RunIndependentReview(ctx context.Context, in RunIndependentReviewInput) (Ru
 			// committing and its publication - requirement: a restart must be
 			// able to complete publication, not merely discover there was
 			// nothing left to decide. PublishReview is itself idempotent, so
-			// this is always safe to attempt.
-			publication, err := PublishReview(ctx, ReviewPublicationDeps{Store: in.Store, GitHub: in.GitHub}, in.Repo, existing)
+			// this is always safe to attempt; the claim only guards against a
+			// SECOND concurrent caller also reaching GitHub for it.
+			publication, err := publishReviewClaimed(ctx, in.Store, ReviewPublicationDeps{Store: in.Store, GitHub: in.GitHub}, in.Repo, existing, in.Clock)
 			if err != nil {
 				return out, err
 			}
@@ -111,7 +159,21 @@ func RunIndependentReview(ctx context.Context, in RunIndependentReviewInput) (Ru
 		}
 		return out, nil
 	}
+	// Claimed BEFORE any expensive or externally-visible work (#233 B4): two
+	// concurrent callers for the same exact (subject, reviewer) identity must
+	// never both materialize a workspace and invoke a provider. The claim is
+	// released on every return path below; a crash leaves it for
+	// reviewClaimStaleAfter, never forever.
 	reviewID := decisionID
+	claimed, err := in.Store.ClaimReview(reviewID, in.ControllerID, clockNow(in.Clock), reviewClaimStaleAfter)
+	if err != nil {
+		return RunIndependentReviewOutput{}, err
+	}
+	if !claimed {
+		return RunIndependentReviewOutput{}, &ReviewClaimConflictError{ClaimKey: reviewID}
+	}
+	defer in.Store.ReleaseReviewClaim(reviewID)
+
 	workspace, err := CreatePlanningWorkspace(in.StateDir, reviewID, in.Source, pr.HeadSHA, "")
 	if err != nil {
 		return RunIndependentReviewOutput{}, err
@@ -153,7 +215,7 @@ func RunIndependentReview(ctx context.Context, in RunIndependentReviewInput) (Ru
 	}
 	out := RunIndependentReviewOutput{Decision: stored, Created: created}
 	if in.Publish {
-		publication, err := PublishReview(ctx, ReviewPublicationDeps{Store: in.Store, GitHub: in.GitHub}, in.Repo, stored)
+		publication, err := publishReviewClaimed(ctx, in.Store, ReviewPublicationDeps{Store: in.Store, GitHub: in.GitHub}, in.Repo, stored, in.Clock)
 		if err != nil {
 			return out, err
 		}
