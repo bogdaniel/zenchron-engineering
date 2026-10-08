@@ -136,7 +136,7 @@ failure never rewrites the termination owner.
 | `execution/progress.go` | `ProgressWriter func(Progress) error`, `WithProgressWriter`, `ProgressWriterFrom`; `ProgressRecorder` unchanged |
 | `runtime/operations.go` | installs the writer, returning `RecordProviderProgress`'s error (3778 → 3780 lines; PR-specific #495 override needed) |
 | `execution/agentkernel/{adapter,workers,result}.go` | the adapter writes progress through the fallible writer |
-| `execution/progress_test.go`, `runtime/progress_writer_test.go`, `execution/agentkernel/progress_test.go` (new) | focused tests |
+| `execution/progress_test.go`, `runtime/provider_progress_writer_test.go`, `execution/agentkernel/progress_test.go` (new) | focused tests |
 
 ### Semantics
 
@@ -160,7 +160,7 @@ failure never rewrites the termination owner.
 
 ### Evidence binding
 
-EVIDENCE_HEAD: `a179c2ae225f793b7e88006163d81d10838f73b3` (branch
+EVIDENCE_HEAD: `5b9b9a8e790241101441643c0112d25e2a642ba9` (branch
 `claude/518-progress-writer`, base `c0bc2e9`, main after #531). This record's
 binding lands in the next commit, which changes only this file.
 
@@ -195,9 +195,9 @@ restored.
 | Break | Caught by |
 | --- | --- |
 | writer installs no recorder | `progress_test.go:24: installing a writer left no best-effort recorder` |
-| runtime writer swallows the error | `progress_writer_test.go:64: RecordProviderProgress failed and the writer reported success` |
-| runtime installs only a recorder | `progress_writer_test.go:61: the runtime installed no fallible progress writer` |
-| derived recorder writes nothing | `progress_writer_test.go:67: progress key "": the native recorder path must still write the row` |
+| runtime writer swallows the error | `provider_progress_writer_test.go:64: RecordProviderProgress failed and the writer reported success` |
+| runtime installs only a recorder | `provider_progress_writer_test.go:61: the runtime installed no fallible progress writer` |
+| derived recorder writes nothing | `provider_progress_writer_test.go:67: progress key "": the native recorder path must still write the row` |
 | in-flight progress error ignored | `agentkernel/progress_test.go:50: error <nil> is not a *TerminationError` |
 | final write error dropped | `agentkernel/progress_test.go:66: error <nil>, want the final write's failure` |
 | final failure rewrites the owner | `agentkernel/progress_test.go:73: invocation … TerminationCause: …: a recording failure after settlement must not rewrite why the provider ended` |
@@ -283,7 +283,7 @@ own through the `api.CredentialSource` the composition root gives it.
 ## 3. Missing seams and obligations carried
 
 1. **Progress recording has no error channel.** *Closed by stage 2 (§1b) on
-   EVIDENCE_HEAD `a179c2a`; the text below is the original finding.* `execution/progress.go:37`
+   EVIDENCE_HEAD `5b9b9a8`; the text below is the original finding.* `execution/progress.go:37`
    (`WithProgressRecorder(ctx, record func(Progress))`) and `:46` return no
    error, and the host callback discards the write's result
    (`runtime/operations.go:921`,
