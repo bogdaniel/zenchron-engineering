@@ -1,6 +1,9 @@
 package runtime
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // AdoptedBuildProvenance is the deterministic record. It is the artifact, and
 // it is also the return value: a caller that wants to know what was built asks
@@ -205,9 +208,10 @@ func (p AdoptedBuildProvenance) validateV2() error {
 	return nil
 }
 
-// sameAttempt compares the identity and outcome of two attempts. Times are not
-// compared: they are reported values, not part of the decision.
+// sameAttempt compares every field of two attempts except the completion
+// time, which is a reported value and not part of the decision. A field added
+// to T2Attempt is compared by default rather than forgotten.
 func sameAttempt(a, b T2Attempt) bool {
-	return a.RunID == b.RunID && a.Attempt == b.Attempt && a.IntegrationID == b.IntegrationID &&
-		a.HeadSHA == b.HeadSHA && a.Job == b.Job && a.Status == b.Status && a.Conclusion == b.Conclusion
+	a.CompletedAt, b.CompletedAt = time.Time{}, time.Time{}
+	return a == b
 }
