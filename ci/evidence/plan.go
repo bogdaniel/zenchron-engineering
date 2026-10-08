@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -132,13 +133,11 @@ func matchesAny(patterns []string, p string) bool {
 	return false
 }
 
+// under reports whether p is a file of one of the package directories dirs.
+// A Go file belongs to the package of its own directory, so the match is on
+// the exact directory: execution/agentkernel/x.go is not a file of execution.
 func under(dirs []string, p string) bool {
-	for _, dir := range dirs {
-		if strings.HasPrefix(p, dir+"/") {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(dirs, path.Dir(p))
 }
 
 // PlanEvidence computes the T1 evidence for a set of changed paths.
