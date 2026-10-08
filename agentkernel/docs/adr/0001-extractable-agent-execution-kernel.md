@@ -84,7 +84,7 @@ cache internals do not appear in `api/`.
 ## 5. Requirements carried (summary; specs are normative)
 
 - Versioned request/result/event contract (`api/`, `schemas/`,
-  `docs/spec/execution-v0.1.md`); unknown versions, invalid identifiers,
+  `docs/spec/execution-v0.2.md`); unknown versions, invalid identifiers,
   duplicates, conflicts and unsupported mandatory features are refused before
   any side effect.
 - Finite explicit budgets (deadline, iterations, tool calls, input/output
@@ -169,6 +169,16 @@ the principle forbids (no learned selection, no eligibility creation).
 4. **ExecutionRequest naming.** The root `runtime` package already has an
    `ExecutionRequest`. This module's type lives in its own namespace
    (`agentkernel/api`); only the Gate B host adapter imports both vocabularies.
+5. **Retry deadlines (#518).** Gate B showed that the host re-anchors each
+   retry's deadline at its lease, which v0.1 refused as a widening. The
+   contract was corrected to `agentkernel.execution/v0.2` under #518 with the
+   repository owner's approval (comment 6047604378, item 1; scope
+   `agentkernel/**` for this purpose only): the deadline is attempt-scoped,
+   every other bound stays execution-scoped and cumulative, v0.1 requests
+   are refused, and admission records are versioned so legacy v0.1 records
+   fail closed pending explicit recovery; `api.KernelVersion` is
+   `agentkernel/0.2.0` (execution spec §11.2). Gate A's acceptance record stays bound
+   to the v0.1 commit it measured.
 
 ## 9. Alternatives considered
 

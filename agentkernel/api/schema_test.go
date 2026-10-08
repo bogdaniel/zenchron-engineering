@@ -17,11 +17,14 @@ import (
 
 const (
 	schemaDir    = "../schemas"
-	requestFile  = "execution-request.v0.1.schema.json"
-	resultFile   = "execution-result.v0.1.schema.json"
-	eventFile    = "event.v0.1.schema.json"
-	commonFile   = "common.v0.1.schema.json"
-	examplesDir  = "../schemas/examples"
+	currentGlob  = "*.v0.2.schema.json"
+	historyGlob  = "*.v0.1.schema.json"
+	requestFile  = "execution-request.v0.2.schema.json"
+	resultFile   = "execution-result.v0.2.schema.json"
+	eventFile    = "event.v0.2.schema.json"
+	commonFile   = "common.v0.2.schema.json"
+	examplesDir  = "../schemas/examples/v0.2"
+	historyDir   = "../schemas/examples"
 	validDir     = examplesDir + "/valid"
 	invalidDir   = examplesDir + "/invalid"
 	rootPointer  = ""
@@ -37,6 +40,7 @@ var fixedNow = time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC)
 // be refused with. Every invalid fixture must appear here and vice versa.
 var invalidRequestField = map[string]string{
 	"request-unknown-version.json":            "version",
+	"request-v0.1-version.json":               "version",
 	"request-unknown-field.json":              "$",
 	"request-duplicate-key.json":              "objective",
 	"request-invalid-identifier.json":         "execution_id",
@@ -137,7 +141,13 @@ func TestValidRequestExamplesDecodeValidateAndRoundTrip(t *testing.T) {
 func TestValidResultAndEventExamplesDecodeStrictlyAndRoundTrip(t *testing.T) {
 	for _, path := range glob(t, filepath.Join(validDir, "result-*.json")) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
-			assertRoundTrip(t, readFile(t, path), strictDecode[api.ExecutionResult])
+			data := readFile(t, path)
+			assertRoundTrip(t, data, strictDecode[api.ExecutionResult])
+			res, _ := strictDecode[api.ExecutionResult](data)
+			if res.Version != api.ExecutionVersion || res.Provenance.KernelVersion != api.KernelVersion {
+				t.Fatalf("example is %s / %s, want current %s / %s",
+					res.Version, res.Provenance.KernelVersion, api.ExecutionVersion, api.KernelVersion)
+			}
 		})
 	}
 	for _, path := range glob(t, filepath.Join(validDir, "event-*.json")) {
@@ -189,7 +199,7 @@ type schemaSet map[string]map[string]any
 func loadSchemas(t *testing.T) schemaSet {
 	t.Helper()
 	set := schemaSet{}
-	for _, path := range glob(t, filepath.Join(schemaDir, "*.schema.json")) {
+	for _, path := range glob(t, filepath.Join(schemaDir, currentGlob)) {
 		var doc map[string]any
 		if err := json.Unmarshal(readFile(t, path), &doc); err != nil {
 			t.Fatalf("parse %s: %v", path, err)
@@ -229,4 +239,18 @@ func (s schemaSet) resolve(t *testing.T, file, ref string) (string, string) {
 	}
 	s.node(t, target, pointer)
 	return target, pointer
+}
+
+// TestHistoricalArtifactsParse: the v0.1 schemas and examples are kept,
+// unchanged, as the contract Gate A evidence was produced under. They must
+// stay valid JSON; they are not checked against the current Go types.
+func TestHistoricalArtifactsParse(t *testing.T) {
+	paths := glob(t, filepath.Join(schemaDir, historyGlob))
+	paths = append(paths, glob(t, filepath.Join(historyDir, "valid", "*.json"))...)
+	paths = append(paths, glob(t, filepath.Join(historyDir, "invalid", "*.json"))...)
+	for _, path := range paths {
+		if !json.Valid(readFile(t, path)) {
+			t.Errorf("%s is not valid JSON", path)
+		}
+	}
 }

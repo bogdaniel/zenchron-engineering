@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "agentkernel.execution/v0.2 ExecutionResult",
+  "description": "Mirrors api.ExecutionResult, emitted by the kernel. Observation only: there is no acceptance, merge or authorization field. execution_id and attempt_id are echoed from the request and are not pattern-checked, because a refused request may carry an invalid identifier. Not expressed here: the expected outcome for each cause (documented beside api.Cause), monotonic observation seq, and that Go encodes a nil slice as null (emitters must encode empty arrays as []).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "execution_id", "attempt_id", "termination", "observations", "artifacts", "usage", "provenance", "event_count"],
+  "properties": {
+    "version": {"$ref": "common.v0.2.schema.json#/$defs/version"},
+    "execution_id": {"type": "string"},
+    "attempt_id": {"type": "string"},
+    "termination": {"$ref": "#/$defs/termination"},
+    "final_text": {"type": "string"},
+    "observations": {"type": "array", "items": {"$ref": "#/$defs/observation"}},
+    "artifacts": {"type": "array", "items": {"$ref": "common.v0.2.schema.json#/$defs/artifact_ref"}},
+    "usage": {"$ref": "#/$defs/usage"},
+    "context": {"$ref": "#/$defs/context_manifest"},
+    "routing": {"$ref": "#/$defs/routing_decision"},
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "event_count": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {
+    "outcome": {"description": "api.Outcome. completed never means the objective was satisfied.", "enum": ["completed", "failed", "blocked", "cancelled", "exhausted", "incomplete"]},
+    "cause": {
+      "description": "api.Cause.",
+      "enum": [
+        "loop_completed", "budget_exhausted", "provider_failed", "provider_refused", "provider_unavailable",
+        "tool_failed", "host_cancelled", "invalid_request", "insufficient_capacity", "no_eligible_provider", "recording_failed"
+      ]
+    },
+    "budget_dimension": {
+      "description": "api.BudgetDimension.",
+      "enum": ["deadline", "iterations", "tool_calls", "input_tokens", "output_tokens", "artifact_bytes", "provider_retries", "money"]
+    },
+    "cancellation_provenance": {
+      "description": "api.CancellationProvenance. Unknown stays explicit.",
+      "enum": ["unknown", "operator_stop", "controller_shutdown", "deadline"]
+    },
+    "termination": {
+      "description": "api.Termination: the single settled observation.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "cause", "observed_at"],
+      "properties": {
+        "outcome": {"$ref": "#/$defs/outcome"},
+        "cause": {"$ref": "#/$defs/cause"},
+        "dimension": {"$ref": "#/$defs/budget_dimension"},
+        "cancellation": {"$ref": "#/$defs/cancellation_provenance"},
+        "detail": {"type": "string"},
+        "observed_at": {"$ref": "common.v0.2.schema.json#/$defs/timestamp"}
+      }
+    },
+    "observation": {
+      "description": "api.Observation.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "kind"],
+      "properties": {
+        "seq": {"type": "integer", "minimum": 0},
+        "kind": {"$ref": "common.v0.2.schema.json#/$defs/event_kind"},
+        "detail": {"type": "string"},
+        "tool_call": {"type": "string"},
+        "grant": {"type": "string"},
+        "ref": {"$ref": "common.v0.2.schema.json#/$defs/artifact_ref"}
+      }
+    },
+    "usage": {
+      "description": "api.Usage. Reported and estimated counts are kept apart and never summed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reported", "estimated", "provider_calls", "tool_calls", "iterations", "retries", "artifact_bytes", "latency_millis", "cost"],
+      "properties": {
+        "reported": {"$ref": "common.v0.2.schema.json#/$defs/token_usage"},
+        "estimated": {"$ref": "common.v0.2.schema.json#/$defs/token_usage"},
+        "provider_calls": {"type": "integer", "minimum": 0},
+        "tool_calls": {"type": "integer", "minimum": 0},
+        "iterations": {"type": "integer", "minimum": 0},
+        "retries": {"type": "integer", "minimum": 0},
+        "artifact_bytes": {"type": "integer", "minimum": 0},
+        "latency_millis": {"type": "integer", "minimum": 0},
+        "cost": {"$ref": "#/$defs/cost"},
+        "unknowns": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "cost": {
+      "description": "api.Cost. known is false whenever any contributing call lacked trusted pricing or reported usage; micros is then a lower bound.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["known", "micros"],
+      "properties": {
+        "known": {"type": "boolean"},
+        "micros": {"type": "integer", "minimum": 0},
+        "currency": {"type": "string"},
+        "rate_source": {"type": "string"},
+        "rate_version": {"type": "string"}
+      }
+    },
+    "context_manifest": {
+      "description": "api.ContextManifest.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "entries", "capacity"],
+      "properties": {
+        "digest": {"$ref": "common.v0.2.schema.json#/$defs/sha256_digest"},
+        "entries": {"type": "array", "items": {"$ref": "#/$defs/manifest_entry"}},
+        "capacity": {"$ref": "#/$defs/capacity"}
+      }
+    },
+    "manifest_entry": {
+      "description": "api.ManifestEntry.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item_id", "kind", "trust", "required", "selected", "reason", "content_digest", "tokens"],
+      "properties": {
+        "item_id": {"type": "string"},
+        "kind": {"$ref": "common.v0.2.schema.json#/$defs/context_kind"},
+        "trust": {"$ref": "common.v0.2.schema.json#/$defs/trust"},
+        "required": {"type": "boolean"},
+        "selected": {"type": "boolean"},
+        "reason": {"type": "string"},
+        "content_digest": {"$ref": "common.v0.2.schema.json#/$defs/sha256_digest"},
+        "tokens": {"$ref": "#/$defs/token_estimate"},
+        "ref": {"$ref": "common.v0.2.schema.json#/$defs/artifact_ref"}
+      }
+    },
+    "capacity": {
+      "description": "api.Capacity.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["window", "reserved_output", "used", "exact"],
+      "properties": {
+        "window": {"type": "integer", "minimum": 0},
+        "reserved_output": {"type": "integer", "minimum": 0},
+        "used": {"type": "integer", "minimum": 0},
+        "exact": {"type": "boolean"}
+      }
+    },
+    "token_estimate": {
+      "description": "api.TokenEstimate.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "exact"],
+      "properties": {
+        "count": {"type": "integer", "minimum": 0},
+        "exact": {"type": "boolean"}
+      }
+    },
+    "routing_decision": {
+      "description": "api.RoutingDecision.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidates"],
+      "properties": {
+        "chosen": {"type": "string"},
+        "candidates": {"type": "array", "items": {"$ref": "#/$defs/routing_candidate"}},
+        "blocked": {"type": "string"}
+      }
+    },
+    "routing_candidate": {
+      "description": "api.RoutingCandidate.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_id", "eligible", "rank", "reasons"],
+      "properties": {
+        "provider_id": {"type": "string"},
+        "eligible": {"type": "boolean"},
+        "rank": {"type": "integer"},
+        "reasons": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "provenance": {
+      "description": "api.Provenance: binds the result to exactly what ran.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kernel_version", "workspace_id", "workspace_digest", "instruction_digest", "isolation"],
+      "properties": {
+        "kernel_version": {"type": "string"},
+        "provider_id": {"type": "string"},
+        "provider_kind": {"type": "string"},
+        "model": {"type": "string"},
+        "model_version_bound": {"type": "string"},
+        "model_version_observed": {"type": "string"},
+        "config_fingerprint": {"type": "string"},
+        "workspace_id": {"type": "string"},
+        "workspace_digest": {"type": "string"},
+        "instruction_digest": {"type": "string"},
+        "context_manifest_digest": {"$ref": "common.v0.2.schema.json#/$defs/sha256_digest"},
+        "isolation": {"$ref": "common.v0.2.schema.json#/$defs/isolation"},
+        "sessions": {"type": "array", "items": {"$ref": "#/$defs/session_observation"}}
+      }
+    },
+    "session_observation": {
+      "description": "api.SessionObservation: an efficiency observation only, never correctness or authority.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_id", "cache_reused"],
+      "properties": {
+        "provider_id": {"type": "string"},
+        "cache_reused": {"type": "boolean"},
+        "ref": {"type": "string"}
+      }
+    }
+  }
+}

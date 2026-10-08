@@ -42,7 +42,7 @@ separately scoped integration issue; the plan is
 | `memory` | provenance-bearing derived records over `storage.Records` |
 | `intelligence` | revision-bound Go structural index, overlays, views |
 | `providers/*` | `scripted`, `openai`, `anthropic`, `local`, shared `conformance` suite |
-| `schemas/` | canonical JSON Schemas (`agentkernel.execution/v0.1`) and examples |
+| `schemas/` | canonical JSON Schemas (`agentkernel.execution/v0.2`) and examples (`examples/v0.2/`); `*.v0.1.schema.json` and `examples/{valid,invalid}/` are historical (Gate A) |
 | `examples/` | `standalone` (A01) and `hostport` (A02) runnable consumers |
 | `cmd/kernel-eval` | offline benchmark harness over `testdata/eval` (`docs/benchmarks/`) |
 | `tests/` | `architecture` (dependency law) and `conformance` (independent acceptance) |
@@ -133,8 +133,11 @@ one is refused at construction (execution spec §1, §4.1).
 - **No CLI parity.** The OpenAI and Anthropic adapters are raw API adapters,
   not native coding-CLI adapters.
 - **Budget envelope is per execution.** Every attempt of one `execution_id`
-  shares one envelope: re-entry, widening and starting beside an in-flight or
-  unsettled attempt are refused (execution spec §11.1). The default admission
+  shares one envelope: re-entry, widening a cumulative bound and starting
+  beside an in-flight or unsettled attempt are refused (execution spec §11.1).
+  The deadline alone is attempt-scoped (contract v0.2): a new attempt may
+  carry a later one. Admission records are versioned; a legacy
+  unversioned (v0.1) record fails closed until explicitly recovered. The default admission
   store is in-memory (one Engine); `engine.Config.Admissions` backed by
   `storage.FileRecords` enforces it across restarts and across processes
   sharing the root on one local filesystem (atomic `PutIfAbsent` claims). A

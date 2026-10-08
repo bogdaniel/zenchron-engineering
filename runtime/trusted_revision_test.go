@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -315,6 +317,51 @@ func TestEvidenceListingsAreNeverTruncated(t *testing.T) {
 	}
 }
 
+// pagedDoer answers by path AND page, so a listing can be split across pages.
+type pagedDoer struct{ pages map[string]string }
+
+func (d pagedDoer) Do(r *http.Request) (*http.Response, error) {
+	page := r.URL.Query().Get("page")
+	body, ok := d.pages[r.URL.Path+"#"+page]
+	if !ok {
+		body, ok = d.pages[r.URL.Path]
+	}
+	if !ok {
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader(`{}`)), Header: http.Header{}}, nil
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+}
+
+// Page 2 is consumed, not merely checked for: the red re-run of the go job
+// lives on page 2 of its attempt's jobs and the green one on page 1 of the
+// next attempt, so eligibility and the inconsistency both depend on it.
+func TestEvidenceOnALaterPageParticipates(t *testing.T) {
+	r := shaOf('a')
+	repo := "/repos/bogdaniel/zenchron-engineering"
+	filler := make([]string, 100)
+	for i := range filler {
+		filler[i] = fmt.Sprintf(`{"id":%d,"name":"lint-%d","head_sha":"%s","status":"completed","conclusion":"success"}`, 1000+i, i, r)
+	}
+	doer := pagedDoer{pages: map[string]string{
+		repo + "/commits/" + r + "/check-runs": `{"total_count":2,"check_runs":[{"id":71,"app":{"id":15368}},{"id":72,"app":{"id":15368}}]}`,
+		repo + "/actions/runs": `{"total_count":1,"workflow_runs":[{"id":7,"path":".github/workflows/ci.yml","event":"push",` +
+			`"head_branch":"main","head_sha":"` + r + `","run_attempt":2}]}`,
+		repo + "/actions/runs/7/attempts/1/jobs#1": `{"total_count":101,"jobs":[` + strings.Join(filler, ",") + `]}`,
+		repo + "/actions/runs/7/attempts/1/jobs#2": `{"total_count":101,"jobs":[{"id":71,"name":"go","head_sha":"` + r + `","status":"completed","conclusion":"failure"}]}`,
+		repo + "/actions/runs/7/attempts/2/jobs#1": `{"total_count":1,"jobs":[{"id":72,"name":"go","head_sha":"` + r + `","status":"completed","conclusion":"success"}]}`,
+	}}
+	observer := GitHubGovernanceObserver{HTTP: doer, Credential: testGovernanceCredential("s")}
+	attempts, err := observer.RevisionEvidence(context.Background(), governedRepo(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := EvaluateT2Evidence(DefaultTrustedRevisionPolicy(), r, attempts)
+	if len(got.Attempts) != 2 || !got.Inconsistent || !got.Eligible {
+		t.Fatalf("observation = %d attempts, inconsistent=%t eligible=%t; the page-2 red attempt was not consumed",
+			len(got.Attempts), got.Inconsistent, got.Eligible)
+	}
+}
+
 // A persisted adopted-build/2 record must prove its own trusted_main: the
 // monotonic floor will be read from it.
 func TestAV2RecordMustProveItsTrustedMain(t *testing.T) {
@@ -326,7 +373,9 @@ func TestAV2RecordMustProveItsTrustedMain(t *testing.T) {
 	for name, mutate := range map[string]func(*AdoptedBuildProvenance){
 		"no policy": func(p *AdoptedBuildProvenance) { p.TrustedRevisionPolicy = nil },
 		"another subject": func(p *AdoptedBuildProvenance) {
+			// Consistent all the way down - evidence about another commit.
 			p.TrustEvidence.Observation.Subject = shaOf('x')
+			p.TrustEvidence.Observation.Attempts[0].HeadSHA = shaOf('x')
 			p.TrustEvidence.Observation.Deciding.HeadSHA = shaOf('x')
 		},
 		"not eligible":      func(p *AdoptedBuildProvenance) { p.TrustEvidence.Observation.Eligible = false },
@@ -335,6 +384,34 @@ func TestAV2RecordMustProveItsTrustedMain(t *testing.T) {
 		"no main_head":      func(p *AdoptedBuildProvenance) { p.MainHead = nil },
 		"legacy kind in v2": func(p *AdoptedBuildProvenance) { p.TrustEvidence.Kind = TrustEvidenceLegacy },
 		"another producer":  func(p *AdoptedBuildProvenance) { p.TrustEvidence.Observation.Deciding.IntegrationID = 99999 },
+		// The cache claims success; the raw attempt it was derived from failed.
+		"cached success over a failed attempt": func(p *AdoptedBuildProvenance) {
+			p.TrustEvidence.Observation.Attempts[0].Conclusion = "failure"
+		},
+		// Policy and deciding attempt changed together: internally consistent,
+		// and still not the frozen policy.
+		"a policy weakened with its evidence": func(p *AdoptedBuildProvenance) {
+			p.TrustedRevisionPolicy.IntegrationID = 99999
+			p.TrustEvidence.Observation.Attempts[0].IntegrationID = 99999
+			p.TrustEvidence.Observation.Deciding.IntegrationID = 99999
+		},
+		// Every cached field agrees with the raw attempt; the record is
+		// internally honest and simply does not prove eligibility.
+		"an honest record of a failed run": func(p *AdoptedBuildProvenance) {
+			p.TrustEvidence.Observation.Attempts[0].Conclusion = "failure"
+			p.TrustEvidence.Observation.Deciding.Conclusion = "failure"
+			p.TrustEvidence.Observation.Eligible = false
+		},
+		"an unpinned attempt smuggled in": func(p *AdoptedBuildProvenance) {
+			extra := p.TrustEvidence.Observation.Attempts[0]
+			extra.Workflow = ".github/workflows/assurance.yml"
+			p.TrustEvidence.Observation.Attempts = append(p.TrustEvidence.Observation.Attempts, extra)
+		},
+		"a hidden inconsistency": func(p *AdoptedBuildProvenance) {
+			red := p.TrustEvidence.Observation.Attempts[0]
+			red.Attempt, red.Conclusion = 0, "failure"
+			p.TrustEvidence.Observation.Attempts = append([]T2Attempt{red}, p.TrustEvidence.Observation.Attempts...)
+		},
 	} {
 		var record AdoptedBuildProvenance
 		raw, _ := json.Marshal(good)

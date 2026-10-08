@@ -50,6 +50,7 @@ func TestA04RefusedBeforeAnySideEffect(t *testing.T) {
 		cause  api.Cause
 	}{
 		"unknown version": {func(r *api.ExecutionRequest) { r.Version = "agentkernel.execution/v9" }, api.CauseInvalidRequest},
+		"v0.1 version":    {func(r *api.ExecutionRequest) { r.Version = "agentkernel.execution/v0.1" }, api.CauseInvalidRequest},
 		"unsupported feature": {func(r *api.ExecutionRequest) {
 			r.Constraints.RequiredFeatures = []string{"streaming"}
 		}, api.CauseInvalidRequest},
@@ -102,10 +103,10 @@ func TestA04RefusedBeforeAnySideEffect(t *testing.T) {
 // case-variant keys never reach validation.
 func TestA04StrictDecodeRefusesAmbiguousJSON(t *testing.T) {
 	for name, doc := range map[string]string{
-		"unknown field": `{"version":"agentkernel.execution/v0.1","authority":"accept"}`,
-		"duplicate key": `{"version":"agentkernel.execution/v0.1","version":"x"}`,
-		"case variant":  `{"version":"agentkernel.execution/v0.1","Mode":"read_write"}`,
-		"trailing data": `{"version":"agentkernel.execution/v0.1"} {}`,
+		"unknown field": `{"version":"agentkernel.execution/v0.2","authority":"accept"}`,
+		"duplicate key": `{"version":"agentkernel.execution/v0.2","version":"x"}`,
+		"case variant":  `{"version":"agentkernel.execution/v0.2","Mode":"read_write"}`,
+		"trailing data": `{"version":"agentkernel.execution/v0.2"} {}`,
 	} {
 		if _, err := api.DecodeRequest([]byte(doc)); err == nil {
 			t.Errorf("%s: decoded", name)
