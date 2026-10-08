@@ -47,3 +47,33 @@ func ProgressRecorder(ctx context.Context) func(Progress) {
 	record, _ := ctx.Value(progressRecorderKey{}).(func(Progress))
 	return record
 }
+
+// ProgressWriter is the FALLIBLE view of the same durable recorder: it
+// returns whether the observation was written. A nil error means durable; an
+// error means it was not, and a caller that must not claim progress it failed
+// to record (a kernel execution's recording guarantee, #518) acts on it.
+type ProgressWriter func(Progress) error
+
+type progressWriterKey struct{}
+
+// WithProgressWriter supplies the fallible recorder and, derived from it, the
+// best-effort ProgressRecorder view that discards the error. One write path
+// serves both, so a provider that only knows the recorder behaves exactly as
+// it did before the writer existed: same writes, same blocking, errors
+// dropped. Installing a recorder afterwards replaces only the best-effort
+// view.
+func WithProgressWriter(ctx context.Context, write ProgressWriter) context.Context {
+	if write == nil {
+		return ctx
+	}
+	ctx = WithProgressRecorder(ctx, func(p Progress) { _ = write(p) })
+	return context.WithValue(ctx, progressWriterKey{}, write)
+}
+
+// ProgressWriterFrom returns the caller's fallible progress writer, or nil
+// when none was supplied; a caller then falls back to ProgressRecorder. It is
+// not named ProgressWriter because the type has that name.
+func ProgressWriterFrom(ctx context.Context) ProgressWriter {
+	write, _ := ctx.Value(progressWriterKey{}).(ProgressWriter)
+	return write
+}

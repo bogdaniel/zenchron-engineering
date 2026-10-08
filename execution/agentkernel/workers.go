@@ -119,7 +119,7 @@ func kernelCause(cause error) error {
 type attempt struct {
 	ref        execution.AttemptRef
 	transcript TranscriptWriter
-	record     func(execution.Progress)
+	write      execution.ProgressWriter
 	clock      clock
 
 	mu sync.Mutex
@@ -134,8 +134,21 @@ type attempt struct {
 	lastErr      *api.ProviderError
 }
 
-func newAttempt(ref execution.AttemptRef, transcript TranscriptWriter, record func(execution.Progress), c clock) *attempt {
-	return &attempt{ref: ref, transcript: transcript, record: record, clock: c, lastProgress: c.now()}
+func newAttempt(ref execution.AttemptRef, transcript TranscriptWriter, write execution.ProgressWriter, c clock) *attempt {
+	return &attempt{ref: ref, transcript: transcript, write: write, clock: c, lastProgress: c.now()}
+}
+
+// progressWriter is the host's fallible progress writer. A host that supplied
+// only the best-effort recorder gets it wrapped never to fail, which is all
+// that recorder ever promised; one that supplied neither gets nil.
+func progressWriter(ctx context.Context) execution.ProgressWriter {
+	if write := execution.ProgressWriterFrom(ctx); write != nil {
+		return write
+	}
+	if record := execution.ProgressRecorder(ctx); record != nil {
+		return func(p execution.Progress) error { record(p); return nil }
+	}
+	return nil
 }
 
 // inactive reports whether the provider has been silent for the whole limit,
@@ -172,9 +185,10 @@ func (s *attempt) recorded() {
 }
 
 // recordEvent is the event sink. Progress is observed on receipt; the
-// transcript write is the durability the kernel waits for, and its failure
-// is returned, so the kernel settles recording_failed and takes no further
-// side effect. The host progress recorder then gets a best-effort projection.
+// transcript write and then the host progress write are the durability the
+// kernel waits for, and either failure is returned, so the kernel settles
+// recording_failed and takes no further side effect. Both writes are host
+// time, never provider silence (attempt.inactive).
 func (s *attempt) recordEvent(ctx context.Context, ev api.Event) error {
 	s.observe()
 	defer s.recorded()
@@ -190,20 +204,26 @@ func (s *attempt) recordEvent(ctx context.Context, ev api.Event) error {
 	s.lastKey = key
 	s.events++
 	s.mu.Unlock()
-	if s.record != nil {
-		s.record(execution.Progress{Key: key, Age: max(time.Since(ev.ObservedAt), 0)})
+	if s.write == nil {
+		return nil
+	}
+	if err := s.write(execution.Progress{Key: key, Age: max(time.Since(ev.ObservedAt), 0)}); err != nil {
+		return fmt.Errorf("progress: %w", err)
 	}
 	return nil
 }
 
 // recordFinal is the recorder's closing write once the execution settled.
-func (s *attempt) recordFinal() {
+// Its error is the caller's: nothing is left to settle, so it can only make
+// the host result incomplete (finalProgressFailed).
+func (s *attempt) recordFinal() error {
 	s.mu.Lock()
 	key := s.lastKey
 	s.mu.Unlock()
-	if s.record != nil && key != "" {
-		s.record(execution.Progress{Key: key, Final: true})
+	if s.write == nil || key == "" {
+		return nil
 	}
+	return s.write(execution.Progress{Key: key, Final: true})
 }
 
 // complete serves the provider and keeps the last typed failure, which is

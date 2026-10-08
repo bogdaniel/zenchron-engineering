@@ -21,6 +21,12 @@ import (
 
 const testTimeout = "30m"
 
+// raceTimeout bounds the -race escalation. A whole-package fallback (for
+// example a change to runtime/operations.go, a declared cross-domain hotspot)
+// escalates every high-risk domain: about 1,000 runtime tests under -race,
+// which does not fit 30m on a hosted runner. The bound still catches a hang.
+const raceTimeout = "60m"
+
 func main() {
 	base := flag.String("base", "origin/main", "revision the branch is compared against (merge base)")
 	planOnly := flag.Bool("plan", false, "print the evidence plan without running it")
@@ -65,7 +71,7 @@ func run(base string, planOnly, race bool) error {
 		if len(plan.Race) == 0 {
 			return nil
 		}
-		return execute(root, [][]string{{"go", "test", "-race", "-timeout", testTimeout, "-run", RunPattern(plan.Race), "./" + reg.FocusedPackage}})
+		return execute(root, [][]string{{"go", "test", "-race", "-timeout", raceTimeout, "-run", RunPattern(plan.Race), "./" + reg.FocusedPackage}})
 	}
 	return execute(root, t1Commands(reg.FocusedPackage, repo.PackageDirs, plan))
 }

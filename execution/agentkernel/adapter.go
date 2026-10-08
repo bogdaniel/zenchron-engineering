@@ -216,7 +216,7 @@ func (a *Adapter) Execute(ctx context.Context, req execution.Request) (execution
 }
 
 func (a *Adapter) run(ctx context.Context, req execution.Request, kreq api.ExecutionRequest) (execution.Result, error) {
-	state := newAttempt(req.AttemptRef(), a.transcript, execution.ProgressRecorder(ctx), a.clock)
+	state := newAttempt(req.AttemptRef(), a.transcript, progressWriter(ctx), a.clock)
 	w := newWorkers()
 	defer w.stop()
 	// The kernel context ends only through supervise, which keeps the host
@@ -235,12 +235,16 @@ func (a *Adapter) run(ctx context.Context, req execution.Request, kreq api.Execu
 	if err != nil {
 		return a.refused(req), fmt.Errorf("agentkernel: engine: %w", err)
 	}
-	state.recordFinal()
+	finalErr := state.recordFinal()
 	var hostCause error
 	if kctx.Err() != nil {
 		hostCause = context.Cause(kctx)
 	}
-	return a.result(req, kreq, kres, state, hostCause, started, completed)
+	res, err := a.result(req, kreq, kres, state, hostCause, started, completed)
+	if finalErr != nil {
+		return finalProgressFailed(res, err, finalErr)
+	}
+	return res, err
 }
 
 // engine composes the kernel for one invocation: kernel file tools on the
