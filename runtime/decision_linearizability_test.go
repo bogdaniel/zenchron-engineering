@@ -10,8 +10,27 @@ package runtime
 // Every test asserts an INVARIANT that holds regardless of which goroutine's
 // transaction the database schedules first - BEGIN IMMEDIATE (sqlite_store.go)
 // decides that, not this test - rather than asserting a specific winner.
+//
+// #508 review P4a (mandatory Phase 1 follow-up): co-starting two goroutines
+// at a single barrier, as the two tests above do, exercises REAL concurrency
+// but does not FORCE the dangerous read-to-insert window open - the database
+// is free to schedule the second transaction entirely before or entirely
+// after the first, and a fast machine routinely does exactly that, never
+// actually interleaving a write between a resolve's own read and its own
+// insert.
+// TestResolveDecisionRequestBlocksConcurrentSupersessionAcrossStoreHandles
+// and TestResolveDecisionRequestBlocksConcurrentSubjectDriftAcrossStoreHandles,
+// below, strengthen exactly those two scenarios: they hold the SAME read
+// ResolveDecisionRequest performs, inside an explicitly held transaction, and
+// prove - across two DISTINCT *SQLiteOperationStore handles on the same
+// database, never one handle racing itself - that the conflicting write
+// cannot land until that transaction ends. BEGIN IMMEDIATE's own locking is
+// what makes this true; the test demonstrates the guarantee #508 relies on
+// directly, rather than hoping a co-started goroutine happens to land inside
+// the window.
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"sync"
@@ -234,6 +253,117 @@ func TestResolveDecisionRequestLinearizesAgainstSubjectDrift(t *testing.T) {
 		}
 	default:
 		t.Fatalf("resolve failed for an unexpected reason: %v", resolveErr)
+	}
+}
+
+// blockedWrite launches a conflicting write and reports whether it landed
+// within the bound - never by sleeping and hoping, but by racing a timeout
+// against a done channel only the write itself closes.
+func blockedWrite(t *testing.T, write func() error, bound time.Duration) (landed bool, err error) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- write() }()
+	select {
+	case err = <-done:
+		return true, err
+	case <-time.After(bound):
+		go func() {
+			// Drain whenever the write eventually does land, so the
+			// goroutine above is never leaked past the test.
+			<-done
+		}()
+		return false, nil
+	}
+}
+
+// TestResolveDecisionRequestBlocksConcurrentSupersessionAcrossStoreHandles is
+// #508 review P4a's strengthening of scenario 1: rather than co-starting two
+// goroutines and trusting the scheduler to interleave them, this test FORCES
+// the dangerous window open - a transaction performing the EXACT read
+// ResolveDecisionRequest performs, held past that read - and proves, across
+// two DISTINCT *SQLiteOperationStore handles on the same database, that a
+// concurrent supersession cannot land until that transaction ends.
+func TestResolveDecisionRequestBlocksConcurrentSupersessionAcrossStoreHandles(t *testing.T) {
+	fixture, batch, runID := newLinearizabilityFixture(t)
+	store := fixture.store
+	second, err := OpenSQLiteOperationStore(fixture.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	now := fixture.clock.Now()
+	d1 := admitTestDecisionRequest(t, store, batch, runID, "op-1", nil, now)
+
+	tx, err := store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := findDecisionRequestTx(tx, d1.ID); err != nil {
+		t.Fatal(err)
+	}
+	// tx now holds the write lock BEGIN IMMEDIATE acquires - exactly the
+	// window between ResolveDecisionRequest's own read and its own insert.
+	landed, writeErr := blockedWrite(t, func() error {
+		_, err := admitTestMessage(second, batch, runID, "op-2",
+			orchestration.MessageDraft{Kind: orchestration.KindDecisionRequest, Purpose: "revised", Body: "pick one, revised", Supersedes: d1.ID}, now)
+		return err
+	}, 150*time.Millisecond)
+	if landed {
+		t.Fatalf("a conflicting supersession landed while the read-side transaction was still open (err=%v)", writeErr)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	// Released: the SAME write must now succeed promptly.
+	if landed, writeErr := blockedWrite(t, func() error {
+		_, err := admitTestMessage(second, batch, runID, "op-3",
+			orchestration.MessageDraft{Kind: orchestration.KindDecisionRequest, Purpose: "revised", Body: "pick one, revised", Supersedes: d1.ID}, now)
+		return err
+	}, time.Second); !landed {
+		t.Fatal("the supersession never landed after the blocking transaction released its lock")
+	} else if writeErr != nil {
+		t.Fatal(writeErr)
+	}
+}
+
+// TestResolveDecisionRequestBlocksConcurrentSubjectDriftAcrossStoreHandles is
+// #508 review P4a's strengthening of scenario 2: the same forced-window proof
+// for a second handoff moving the owner's subject, across two distinct store
+// handles.
+func TestResolveDecisionRequestBlocksConcurrentSubjectDriftAcrossStoreHandles(t *testing.T) {
+	fixture, batch, runID := newLinearizabilityFixture(t)
+	store := fixture.store
+	second, err := OpenSQLiteOperationStore(fixture.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	now := fixture.clock.Now()
+	h1 := admitTestHandoff(t, store, batch, runID, "op-1", "commit-1", now)
+	d1 := admitTestDecisionRequest(t, store, batch, runID, "op-2", &h1, now)
+
+	tx, err := store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := findDecisionRequestTx(tx, d1.ID); err != nil {
+		t.Fatal(err)
+	}
+	landed, writeErr := blockedWrite(t, func() error {
+		return admitTestHandoffNoFatal(second, batch, runID, "op-3", "commit-2", now.Add(time.Second))
+	}, 150*time.Millisecond)
+	if landed {
+		t.Fatalf("a conflicting second handoff landed while the read-side transaction was still open (err=%v)", writeErr)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if landed, writeErr := blockedWrite(t, func() error {
+		return admitTestHandoffNoFatal(second, batch, runID, "op-4", "commit-3", now.Add(2*time.Second))
+	}, time.Second); !landed {
+		t.Fatal("the second handoff never landed after the blocking transaction released its lock")
+	} else if writeErr != nil {
+		t.Fatal(writeErr)
 	}
 }
 
