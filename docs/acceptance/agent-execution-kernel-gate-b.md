@@ -123,6 +123,89 @@ separate observable effect. It stays as the defined observation point. A
 slow write is covered by the write-end refresh and its break; a failing
 write by the recording-failure test.
 
+## 1b. Stage 2: fallible progress seam
+
+Authority: the owner's decision on #518 (comment 6047604378, item 2) and the
+later review conditions: no double write of one event, and a final progress
+failure never rewrites the termination owner.
+
+### Scope
+
+| File | Change |
+| --- | --- |
+| `execution/progress.go` | `ProgressWriter func(Progress) error`, `WithProgressWriter`, `ProgressWriterFrom`; `ProgressRecorder` unchanged |
+| `runtime/operations.go` | installs the writer, returning `RecordProviderProgress`'s error (3778 → 3780 lines; PR-specific #495 override needed) |
+| `execution/agentkernel/{adapter,workers,result}.go` | the adapter writes progress through the fallible writer |
+| `execution/progress_test.go`, `runtime/provider_progress_writer_test.go`, `execution/agentkernel/progress_test.go` (new) | focused tests |
+
+### Semantics
+
+- `WithProgressWriter` installs the writer AND the best-effort recorder,
+  derived from the same write with the error dropped. A native provider
+  (the CLI inactivity recorder) sees the recorder it always saw: same
+  synchronous write, same asynchronous coalescer above it, errors dropped.
+- The adapter uses only the writer when one is installed, never also the
+  recorder, so each kernel event is written to the progress row once. With
+  only a recorder it falls back to it, wrapped never to fail (best effort, as
+  before); with neither it writes nothing.
+- An in-flight progress write failure is returned from the event sink after
+  the transcript write: the kernel settles `recording_failed`
+  (→ `execution_incomplete`) and takes no further side effect.
+- A failed final write comes after settlement. A success becomes
+  `failed`/`execution_incomplete` with the write error; a result that already
+  failed or was cancelled keeps its class (it routes the host) and joins the
+  error. The invocation's termination owner is never rewritten.
+- A progress write in flight is host time, never provider silence, exactly
+  like a transcript write.
+
+### Evidence binding
+
+EVIDENCE_HEAD: `5b9b9a8e790241101441643c0112d25e2a642ba9` (branch
+`claude/518-progress-writer`, base `c0bc2e9`, main after #531). This record's
+binding lands in the next commit, which changes only this file.
+
+### Commands and results (on EVIDENCE_HEAD, 2026-10-08, go1.27.1 darwin/arm64)
+
+| Command | Result |
+| --- | --- |
+| `test -z "$(gofmt -l .)"` | pass |
+| `go vet ./...` and `GOOS=windows GOARCH=amd64 go vet ./...` | pass |
+| `go build ./...` | pass |
+| `go test ./execution/... -race -count=1` | `ok execution`, `ok execution/agentkernel` |
+| `go test ./runtime/ -count=1 -run 'Progress\|ProviderInactivity\|InactivityCause\|Coalescing\|ProgressWriter'` | `ok runtime` (pins the existing coalescing and inactivity recorder behaviour) |
+| `python3 scripts/check_file_sizes.py` | `runtime/operations.go` FAILs as before (3778 → 3780); no other touched file warns |
+
+### Tests
+
+| Behaviour | Test |
+| --- | --- |
+| writer installs the derived recorder; absent writer is nil | `TestProgressWriterInstallsTheBestEffortRecorder`, `TestProgressWriterAbsentOrNil` |
+| runtime returns the record error; the recorder still writes when healthy | `TestRuntimeProgressWriterReturnsTheRecordError` |
+| in-flight failure → `recording_failed`, no further call | `TestInFlightProgressWriteFailureIsARecordingFailure` |
+| final failure → incomplete, owner kept | `TestFinalProgressWriteFailureMakesTheResultIncomplete`, `TestFinalProgressWriteFailureKeepsAFailedClass` |
+| one write per event with both surfaces installed | `TestBothSurfacesWriteEachEventOnce` |
+| no writer → best effort as before | `TestNoProgressWriterIsBestEffort` |
+| slow progress write is not inactivity | `TestSlowProgressWriteIsNotInactivity` |
+
+### Deliberate breaks
+
+All 11 caught; each was applied in place, the named tests run, and the source
+restored.
+
+| Break | Caught by |
+| --- | --- |
+| writer installs no recorder | `progress_test.go:24: installing a writer left no best-effort recorder` |
+| runtime writer swallows the error | `provider_progress_writer_test.go:64: RecordProviderProgress failed and the writer reported success` |
+| runtime installs only a recorder | `provider_progress_writer_test.go:61: the runtime installed no fallible progress writer` |
+| derived recorder writes nothing | `provider_progress_writer_test.go:67: progress key "": the native recorder path must still write the row` |
+| in-flight progress error ignored | `agentkernel/progress_test.go:50: error <nil> is not a *TerminationError` |
+| final write error dropped | `agentkernel/progress_test.go:66: error <nil>, want the final write's failure` |
+| final failure rewrites the owner | `agentkernel/progress_test.go:73: invocation … TerminationCause: …: a recording failure after settlement must not rewrite why the provider ended` |
+| final failure overwrites a failed class | `agentkernel/progress_test.go:106: class "execution_incomplete", want the routing class kept` |
+| adapter also calls the recorder | `agentkernel/progress_test.go:94: 7 recorder calls and 7 writes for 6 events: want 0 and one per event plus the final` |
+| no recorder fallback | `agentkernel/progress_test.go:129: recorder got [], want the projection ending in a final write` |
+| progress write counted as silence | `agentkernel/progress_test.go:152: the watchdog armed no timer` |
+
 ## 2. Design of stage 1
 
 ### Ownership
@@ -199,7 +282,8 @@ own through the `api.CredentialSource` the composition root gives it.
 
 ## 3. Missing seams and obligations carried
 
-1. **Progress recording has no error channel.** `execution/progress.go:37`
+1. **Progress recording has no error channel.** *Closed by stage 2 (§1b) on
+   EVIDENCE_HEAD `5b9b9a8`; the text below is the original finding.* `execution/progress.go:37`
    (`WithProgressRecorder(ctx, record func(Progress))`) and `:46` return no
    error, and the host callback discards the write's result
    (`runtime/operations.go:921`,
@@ -259,7 +343,7 @@ own through the `api.CredentialSource` the composition root gives it.
 
 ## 4. What remains
 
-1. Close or decide seams 1, 2, 3, 5 and obligation 11.
+1. Close or decide seams 2, 3, 5 and obligation 11 (seam 1 closed, §1b).
 2. Composition and registration: a new, default-off agent kind in
    `cmd/zenchron-engineering/agentkernel_*.go` and the agent registry.
 3. Root docs (§9 of the plan) for the adopted scope and the new kind.

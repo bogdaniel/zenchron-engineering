@@ -1,6 +1,8 @@
 package agentkernel
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/agentkernel/api"
@@ -168,4 +170,19 @@ func usage(u api.Usage) (tokens, costMicros *int64) {
 		costMicros = &cost
 	}
 	return tokens, costMicros
+}
+
+// finalProgressFailed keeps a failed closing progress write from
+// disappearing. The kernel has settled, so there is nothing left to stop; the
+// host row still says the recorder is open. A success therefore becomes
+// incomplete work. A result that already failed or was cancelled keeps its
+// class, because that class routes the host (a provider wait, a stop), and
+// the write error joins its error either way.
+func finalProgressFailed(res execution.Result, err, writeErr error) (execution.Result, error) {
+	writeErr = fmt.Errorf("agentkernel: final progress write: %w", writeErr)
+	if res.Outcome == execution.Succeeded {
+		res.Outcome, res.Answer = execution.Failed, ""
+		res.Failure = &execution.Failure{Classification: execution.FailureExecutionIncomplete}
+	}
+	return res, errors.Join(err, writeErr)
 }
