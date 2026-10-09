@@ -63,6 +63,20 @@ func (r *EngineeringRuntime) composeIntegration(_ context.Context, state *runSta
 	// something unexpected happened.
 	ws, err := r.workspace(state)
 	if err != nil {
+		// #475 review N2: r.workspace itself returning *WorkspaceIntegrityError
+		// means a PRIOR attempt already advanced HEAD (a real merge, or a
+		// partial post-merge preparation failure after one) without
+		// journalling it - exactly the same containment this function's own
+		// later errors.As branch already gives IntegrateInputs' failures.
+		// r.workspace returns no usable workspace on error, so recovery
+		// names only Dir/BaseRevision here - exactly what RestoreTrusted
+		// needs - never trusting anything else about the observed state.
+		var integrity *WorkspaceIntegrityError
+		if errors.As(err, &integrity) {
+			return r.restoreCandidate(&CandidateWorkspace{
+				Dir: candidateDir(r.deps.StateDir, state.run.ID), BaseRevision: contract.BaseRevision,
+			}, err)
+		}
 		return failed(err)
 	}
 	sources, readErr := r.integrationSources(origin.GraphID)
@@ -192,7 +206,14 @@ func (r *EngineeringRuntime) integrationInputsStillCurrent(graphID string, input
 // passing, non-stale assurance observation against this exact head.
 func (r *EngineeringRuntime) commitIntegratedCandidate(state *runState, op RunOperation, ws *CandidateWorkspace, contract integration.Contract, candidate integration.IntegratedCandidate) effect {
 	if current, err := r.integrationInputsStillCurrent(contract.GraphID, contract.Inputs); err != nil {
-		return failed(err)
+		// #475 review N2: by this line the real Git merge already advanced
+		// HEAD. A transient read failure here (not necessarily a
+		// *WorkspaceIntegrityError itself) is exactly the same
+		// advanced-but-unrecorded state this function's own later steps
+		// already route through restoreCandidate for - never a bare
+		// failed(err) that would strand it until the NEXT attempt's
+		// r.workspace call happens to classify the mismatch on its own.
+		return r.restoreCandidate(ws, err)
 	} else if !current {
 		if err := ws.RestoreTrusted(); err != nil {
 			return failed(err)

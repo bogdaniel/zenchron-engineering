@@ -171,12 +171,33 @@ func (s *SQLiteOperationStore) AdmitIntegratedHandoff(handoff orchestration.Engi
 	args := []any{handoff.ID, handoff.BatchID, handoff.RunID, handoff.AdmittedAt.UnixNano(), string(document)}
 	clauses := make([]string, 0, len(inputs))
 	for _, input := range inputs {
-		clauses = append(clauses, `NOT EXISTS (
+		// #475 review N1: the referenced handoff must EXIST with this exact
+		// run and subject (a missing id makes the scalar subquery below NULL,
+		// which would otherwise let a nonexistent or wrong-subject reference
+		// pass silently), and it must be the LATEST row for its run ordered
+		// by (admitted_unix_nano, id) - the same tie-break
+		// queryRunHandoffs's own ORDER BY already uses - not merely "nothing
+		// strictly newer", which a same-nanosecond replacement would defeat.
+		clauses = append(clauses, `EXISTS (
 			SELECT 1 FROM orchestration_handoffs
-			WHERE run_id = ? AND id <> ?
-			AND admitted_unix_nano > (SELECT admitted_unix_nano FROM orchestration_handoffs WHERE id = ?)
+			WHERE id = ? AND run_id = ?
+			AND json_extract(document, '$.subject.candidate_revision') = ?
+			AND json_extract(document, '$.subject.candidate_tree') = ?
+		) AND NOT EXISTS (
+			SELECT 1 FROM orchestration_handoffs AS newer
+			WHERE newer.run_id = ? AND newer.id <> ?
+			AND (
+				newer.admitted_unix_nano > (SELECT admitted_unix_nano FROM orchestration_handoffs WHERE id = ?)
+				OR (
+					newer.admitted_unix_nano = (SELECT admitted_unix_nano FROM orchestration_handoffs WHERE id = ?)
+					AND newer.id > ?
+				)
+			)
 		)`)
-		args = append(args, input.RunID, input.HandoffID, input.HandoffID)
+		args = append(args,
+			input.HandoffID, input.RunID, input.CandidateRevision, input.CandidateTree,
+			input.RunID, input.HandoffID, input.HandoffID, input.HandoffID, input.HandoffID,
+		)
 	}
 	where := "1=1"
 	if len(clauses) > 0 {

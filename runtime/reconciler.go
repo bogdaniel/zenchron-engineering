@@ -1360,6 +1360,21 @@ func bindIntegrationHandoffAdmit(s *runState) (string, bool) {
 	if a == nil || a.Stale || !a.Passed {
 		return "", false
 	}
+	// #475 review N3: fresh-evidence-before-handoff applies to the WHOLE
+	// required assurance set for this exact contract, not only the
+	// automated verifier - an integration unit is never exempt. Mirrors
+	// bindAssuranceSemantic's own "is semantic evidence required at all"
+	// test exactly, so a contract with no semantic claim (or no configured
+	// producer) is unaffected, and this never invents a second verification
+	// engine: it only waits for the SAME semantic pass every other unit's
+	// handoff already implicitly waits for by settling goal_state_reached
+	// only once bindAssuranceSemantic itself has nothing left to plan.
+	if s.rt.deps.SemanticAssurance != nil && len(s.semanticClaims()) > 0 {
+		semantic := s.projection.SemanticAssurance
+		if semantic == nil || semantic.Stale || !semantic.Passed {
+			return "", false
+		}
+	}
 	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree, true
 }
 

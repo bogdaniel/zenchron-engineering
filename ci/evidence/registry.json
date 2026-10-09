@@ -206,7 +206,8 @@
         "runtime/integration_dispatch.go"
       ],
       "tests": [
-        "runtime/workgraph*_test.go"
+        "runtime/workgraph*_test.go",
+        "runtime/compose_integration_recovery_test.go"
       ]
     },
     {
