@@ -102,21 +102,22 @@ func boundedField(text string) string {
 // planner from replayed state, and no handler consults `phase`.
 func (r *EngineeringRuntime) handle(ctx context.Context, state *runState, op RunOperation) effect {
 	handler, ok := map[string]func(context.Context, *runState, RunOperation) effect{
-		OpSourceObserve:     r.observeSource,
-		OpContractCompile:   r.compileContract,
-		OpCandidateCreate:   r.createCandidate,
-		OpExecutionInvoke:   r.invokeExecution,
-		OpRemediationGofmt:  r.remediateFormat,
-		OpCandidateCommit:   r.commitCandidate,
-		OpAssuranceGo:       r.assureCandidate,
-		OpAssuranceSemantic: r.assureSemantics,
-		OpBaseIntegrate:     r.integrateBase,
-		OpAuthorityEvaluate: r.evaluateAuthority,
-		OpCandidatePush:     r.pushCandidate,
-		OpPullRequestCreate: r.createPullRequest,
-		OpPullRequestUpdate: r.updatePullRequest,
-		OpGitHubObserve:     r.observeGitHub,
-		OpHandoffRepair:     r.repairHandoff,
+		OpSourceObserve:      r.observeSource,
+		OpContractCompile:    r.compileContract,
+		OpCandidateCreate:    r.createCandidate,
+		OpExecutionInvoke:    r.invokeExecution,
+		OpRemediationGofmt:   r.remediateFormat,
+		OpCandidateCommit:    r.commitCandidate,
+		OpAssuranceGo:        r.assureCandidate,
+		OpAssuranceSemantic:  r.assureSemantics,
+		OpBaseIntegrate:      r.integrateBase,
+		OpIntegrationCompose: r.composeIntegration,
+		OpAuthorityEvaluate:  r.evaluateAuthority,
+		OpCandidatePush:      r.pushCandidate,
+		OpPullRequestCreate:  r.createPullRequest,
+		OpPullRequestUpdate:  r.updatePullRequest,
+		OpGitHubObserve:      r.observeGitHub,
+		OpHandoffRepair:      r.repairHandoff,
 	}[op.Kind]
 	if !ok {
 		return failed(deterministicRefusal("operation.handler_missing", fmt.Errorf("no handler for operation kind %q", op.Kind)))
@@ -2421,6 +2422,18 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	// into a non-retryable stop.
 	if !result.Passed && class == "" {
 		class = FailureVerification
+	}
+	// A WORK GRAPH INTEGRATOR UNIT'S (#475) candidate failing assurance is
+	// never routed as an ordinary verification failure: RouteFailure's
+	// RouteProviderRemediation would try to re-invoke a provider this unit
+	// never receives (bindExecutionInvoke's role guard refuses it), which
+	// would strand the run with nothing eligible to plan. This is exactly
+	// integration.ClassifyAssuranceFailure's case - a clean merge whose
+	// independent assurance then failed - reused here as the one existing
+	// owner of "did this exact head pass", never a second verification
+	// engine: the verdict is unchanged, only its runtime routing is.
+	if !result.Passed && state.origin != nil && state.origin.Role == domain.RoleIntegrator {
+		class = FailureIntegrationConflict
 	}
 	payload := AssuranceObservedPayload{
 		ProviderID:         firstNonEmpty(result.ProviderID, "assurance-provider"),

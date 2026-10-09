@@ -58,6 +58,12 @@ type Conflict struct {
 	Kind   ConflictKind `json:"kind"`
 	Detail string       `json:"detail"`
 	Paths  []string     `json:"paths,omitempty"`
+	// UnitID is the consumed input whose merge step Git itself reported as
+	// conflicting, for a ConflictTextual. It is the exact unit a caller binds
+	// a #473 Finding's subject to - never guessed from Detail's free text -
+	// and it is empty for ConflictSemantic/ConflictUncertain, which name no
+	// single Git-level step.
+	UnitID string `json:"unit_id,omitempty"`
 }
 
 // NewConflict builds a bounded Conflict, refusing anything over bound rather
@@ -70,6 +76,17 @@ type Conflict struct {
 // a conflict was fully described when paths past the cut were quietly
 // dropped from the record. A conflict this large is refused outright instead.
 func NewConflict(kind ConflictKind, detail string, paths []string) (Conflict, error) {
+	return newConflict(kind, detail, paths, "")
+}
+
+// NewTextualConflict is NewConflict for a ConflictTextual specifically, naming
+// the one consumed unit whose merge step Git reported as conflicting - the
+// exact unit a caller binds a #473 Finding's subject to.
+func NewTextualConflict(detail string, paths []string, unitID string) (Conflict, error) {
+	return newConflict(ConflictTextual, detail, paths, unitID)
+}
+
+func newConflict(kind ConflictKind, detail string, paths []string, unitID string) (Conflict, error) {
 	detail = strings.TrimSpace(detail)
 	if len(detail) > maxConflictDetailBytes {
 		return Conflict{}, fmt.Errorf("conflict detail is %d bytes, above the %d byte bound", len(detail), maxConflictDetailBytes)
@@ -84,7 +101,7 @@ func NewConflict(kind ConflictKind, detail string, paths []string) (Conflict, er
 		}
 		bounded[i] = p
 	}
-	return Conflict{Kind: kind, Detail: detail, Paths: bounded}, nil
+	return Conflict{Kind: kind, Detail: detail, Paths: bounded, UnitID: unitID}, nil
 }
 
 // IntegratedCandidate is a new exact subject. It is never one of the inputs'

@@ -56,6 +56,19 @@ type BatchOrigin struct {
 	GraphID string         `json:"graph_id"`
 	UnitID  string         `json:"unit_id"`
 	Inputs  WorkUnitInputs `json:"inputs,omitempty"`
+	// Role is the unit's own responsibility (#64's catalogue), exactly as the
+	// WorkGraph decided it at adoption - never re-derived from this issue's
+	// purpose, title or anything a provider wrote. It is what #475 reads to
+	// dispatch an integration unit's run to deterministic composition instead
+	// of an ordinary execution invocation, and it is frozen the moment this
+	// batch is written: ValidateMutation already refuses a graph revision that
+	// changes an activated unit's role, so this field can never disagree with
+	// the WorkGraph that named it.
+	//
+	// Omitempty and additive: a batch stored before this field existed decodes
+	// with it empty, which is exactly "not an integrator unit" - the safe
+	// default for every batch #475 did not create.
+	Role domain.EngineeringRole `json:"role,omitempty"`
 }
 
 // canonical is the origin with its input set in canonical order. The identity

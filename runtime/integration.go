@@ -151,7 +151,7 @@ func composeAgainstVerifiedBase(ws *CandidateWorkspace, contract integration.Con
 			}
 			detail := fmt.Sprintf("merging %q (%s) conflicts with material already composed from this attempt's earlier inputs",
 				step.UnitID, short12(step.Commit))
-			conflict, err := integration.NewConflict(integration.ConflictTextual, detail, paths)
+			conflict, err := integration.NewTextualConflict(detail, paths, step.UnitID)
 			if err != nil {
 				return integration.Result{}, committed, fmt.Errorf("integration input %q: %w", step.UnitID, err)
 			}
@@ -365,15 +365,22 @@ func assertCleanAtVerifiedBase(dir, revision string) error {
 	if err != nil {
 		return err
 	}
+	// Typed as a WorkspaceIntegrityError, never a plain error: this is exactly
+	// the "this build can no longer vouch for the workspace" case every other
+	// candidate operation routes through the runtime's existing
+	// FailureWorkspaceIntegrity recovery (RestoreTrusted), and a caller must be
+	// able to recognize it as that - never guess from this message's text.
 	if head = strings.TrimSpace(head); head != revision {
-		return fmt.Errorf("integration workspace HEAD is %s, not the contract's verified base %s", short12(head), short12(revision))
+		return &WorkspaceIntegrityError{Detail: fmt.Sprintf(
+			"integration workspace HEAD is %s, not the contract's verified base %s", short12(head), short12(revision))}
 	}
 	entries, err := workingTreeStatus(dir)
 	if err != nil {
 		return err
 	}
 	if len(entries) > 0 {
-		return fmt.Errorf("integration workspace is not clean at its base: %s (and %d more)", entries[0].path, len(entries)-1)
+		return &WorkspaceIntegrityError{Detail: fmt.Sprintf(
+			"integration workspace is not clean at its base: %s (and %d more)", entries[0].path, len(entries)-1)}
 	}
 	return nil
 }

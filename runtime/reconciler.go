@@ -54,10 +54,15 @@ const (
 	OpAssuranceSemantic = "assurance.semantic"
 	OpAuthorityEvaluate = "authority.evaluate"
 	OpBaseIntegrate     = "base.integrate"
-	OpCandidatePush     = "candidate.push"
-	OpPullRequestCreate = "pull_request.create"
-	OpPullRequestUpdate = "pull_request.update"
-	OpGitHubObserve     = "github.observe"
+	// OpIntegrationCompose is the deterministic Git composition for a
+	// WorkGraph integration unit (#475, domain.RoleIntegrator): composing its
+	// exact consumed admitted inputs instead of an ordinary execution
+	// invocation. See bindIntegrationCompose.
+	OpIntegrationCompose = "integration.compose"
+	OpCandidatePush      = "candidate.push"
+	OpPullRequestCreate  = "pull_request.create"
+	OpPullRequestUpdate  = "pull_request.update"
+	OpGitHubObserve      = "github.observe"
 	// OpHandoffRepair is the one result-only correction of a refused
 	// orchestration handoff (#492, handoff_repair.go).
 	OpHandoffRepair = "handoff.repair"
@@ -216,6 +221,11 @@ type runState struct {
 	// deliveredOwnDecisionIDs: load() fails closed on a corrupt decision-
 	// delivery event rather than forgetting it; see deliveredDecisionIDsFromEvents.
 	deliveredOwnDecisionIDs map[string]bool
+	// origin is the WorkGraph unit execution (#472) this run's batch exists to
+	// perform, when it exists - read once per load so every pure bind function
+	// can read it without a store call of its own. nil for an ordinary batch
+	// or plan-stage run, exactly as Orchestration itself is.
+	origin *orchestration.BatchOrigin
 }
 
 func (r *EngineeringRuntime) load(runID string) (*runState, error) {
@@ -246,9 +256,13 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 	if err != nil {
 		return nil, err
 	}
+	origin, err := r.workUnitOrigin(run)
+	if err != nil {
+		return nil, err
+	}
 	state := &runState{
 		rt: r, run: run, snapshot: snapshot, events: events, projection: projection,
-		resolvedOwnDecisions: resolvedOwnDecisions, deliveredOwnDecisionIDs: deliveredOwnDecisionIDs,
+		resolvedOwnDecisions: resolvedOwnDecisions, deliveredOwnDecisionIDs: deliveredOwnDecisionIDs, origin: origin,
 		// A DIFFERENT CONTROLLER IS STILL THE DEFAULT REFUSAL. What changed
 		// with #234 is that one specific transition can be converted from
 		// drift into an admitted succession by evidence in this run's own
@@ -257,6 +271,26 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 	}
 	state.collectSources()
 	return state, nil
+}
+
+// workUnitOrigin reads the WorkGraph unit, if any, this run's batch exists to
+// perform (#472) - the same batch.Origin workUnit() reads for the invocation's
+// upstream context, read once here so every pure bind function can consult
+// it (bindIntegrationCompose, the bindExecutionInvoke integrator guard)
+// without a store call of its own.
+//
+// ponytail: one extra read per orchestrated run per reconcile pass; fine at
+// current scale, fold into load()'s existing Run/Events reads if this ever
+// shows up in a profile.
+func (r *EngineeringRuntime) workUnitOrigin(run EngineeringRun) (*orchestration.BatchOrigin, error) {
+	if run.Orchestration == nil || run.Orchestration.BatchID == "" {
+		return nil, nil
+	}
+	batch, found, err := r.deps.Store.OrchestrationBatch(run.Orchestration.BatchID)
+	if err != nil || !found {
+		return nil, err
+	}
+	return batch.Origin, nil
 }
 
 // collectSources folds the run's succeeded source observations into the state,
@@ -1007,6 +1041,7 @@ var operationSpecs = []operationSpec{
 	{OpGitHubObserve, bindGitHubObserve},
 	{OpContractCompile, bindContractCompile},
 	{OpCandidateCreate, bindCandidateCreate},
+	{OpIntegrationCompose, bindIntegrationCompose},
 	{OpExecutionInvoke, bindExecutionInvoke},
 	{OpRemediationGofmt, bindRemediationGofmt},
 	{OpCandidateCommit, bindCandidateCommit},
@@ -1133,7 +1168,44 @@ func bindCandidateCreate(s *runState) (string, bool) {
 	return s.pinnedBase(), true
 }
 
+// bindIntegrationCompose is the deterministic composition gate for a
+// WorkGraph integration unit (#475): the run's own origin names a unit whose
+// role is domain.RoleIntegrator - explicitly, and only the WorkGraph decided
+// that, never inferred from purpose, issue title or provider prose.
+//
+// Its binding is the exact consumed input set's digest, the same digest the
+// WorkGraph itself activated this unit against (orchestration.WorkUnitBatchID
+// already binds the run to it). A restarted or retried attempt therefore
+// replans the identical operation; an input set that changed would be a
+// different run entirely; one that is activated against inputs since
+// superseded is not this binding's question - the WorkGraph's own
+// exact-subject invalidation already governs that, before any run is reused.
+func bindIntegrationCompose(s *runState) (string, bool) {
+	if s.origin == nil || s.origin.Role != domain.RoleIntegrator {
+		return "", false
+	}
+	if key, wanted := bindCandidateCreate(s); !wanted || !s.satisfied(OpCandidateCreate, key) {
+		return "", false
+	}
+	digest, err := s.origin.Inputs.Digest()
+	if err != nil {
+		return "", false
+	}
+	return digest, true
+}
+
 func bindExecutionInvoke(s *runState) (string, bool) {
+	// A WORK GRAPH INTEGRATOR UNIT (#475) never receives a free-form
+	// engineering invocation: its whole producer stage is the deterministic
+	// composition bindIntegrationCompose performs instead. The guard is
+	// explicit and structural - the unit's own role, decided once by the
+	// WorkGraph at adoption and frozen the moment it was activated - never
+	// inferred from this issue's purpose, title or anything a provider wrote.
+	// It is unconditional: an integrator never receives implementation
+	// authority merely because some other state lines up.
+	if s.origin != nil && s.origin.Role == domain.RoleIntegrator {
+		return "", false
+	}
 	if s.projection.Contract == (Ref{}) {
 		return "", false
 	}

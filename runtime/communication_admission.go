@@ -40,6 +40,19 @@ func queryBatchMessageScope(q sqlExecutor, batch orchestration.Batch) (orchestra
 			current[unit] = &subject
 		}
 	}
+	// A WORK GRAPH UNIT'S OWN BATCH (#475) additionally admits a Finding bound
+	// to one of the EXACT upstream subjects this unit was activated against -
+	// the only outside handoffs its own single-item batch may ever name. This
+	// is never graph-wide visibility: no other unit's batch, or its own scope,
+	// changes at all, and this scope still belongs to this batch alone.
+	if batch.Origin != nil {
+		for _, input := range batch.Origin.Inputs {
+			scope.Subjects[input.HandoffID] = orchestration.MessageSubject{
+				Handoff: input.HandoffID, Owner: input.UnitID,
+				Revision: orchestration.HandoffSubject{CandidateRevision: input.CandidateRevision, CandidateTree: input.CandidateTree},
+			}
+		}
+	}
 	admitted, err := queryScopeMessages(q, batch.ID)
 	if err != nil {
 		return orchestration.MessageScope{}, nil, err

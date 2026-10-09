@@ -248,6 +248,14 @@ func handoffCommitOf(operations map[string]RunOperation, events []EngineeringEve
 	if commit, ok := succeededOperation(operations, OpCandidateCommit, operationKey(OpCandidateCommit, reportingID)); ok {
 		return handoffCommit{commit.ID, EventCandidateCommitted}, "", nil
 	}
+	// A WORK GRAPH INTEGRATION UNIT (#475) commits its own merge result
+	// directly: composeIntegration both reports the handoff and journals
+	// EventCandidateCommitted in one operation, because the commit already
+	// exists in Git when composition succeeds - there is no separate
+	// uncommitted diff for a candidate.commit operation to turn into one.
+	if op, ok := operations[reportingID]; ok && op.Kind == OpIntegrationCompose && op.State == Succeeded {
+		return handoffCommit{reportingID, EventCandidateCommitted}, "", nil
+	}
 	checkpoint, ok := completedCheckpoint(operations[reportingID])
 	if !ok {
 		return handoffCommit{}, "", nil
