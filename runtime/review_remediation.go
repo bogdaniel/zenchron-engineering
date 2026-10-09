@@ -244,6 +244,18 @@ func (r *EngineeringRuntime) AdmitReviewRemediation(ctx context.Context, port Re
 			Detail: fmt.Sprintf("decision %s names run %q, whose own repository %q disagrees with the requested %s", decision.ID, decision.RunID, state.run.Repository, repo),
 		}
 	}
+	// Matching repository and agent is not enough: two different pull
+	// requests at the same repository, produced by the same agent, can share
+	// an exact head SHA (a cherry-pick, a shared base, a coincidence). The
+	// run's OWN runtime-recorded publication - never the decision's claim -
+	// is what proves this run actually published THIS PR number, not merely
+	// some PR at the same commit.
+	if state.projection.PullRequest == nil || state.projection.PullRequest.Number != prNumber {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedSubjectMismatch,
+			Detail: fmt.Sprintf("decision %s names run %s, but that run's own runtime-recorded pull request is not %s#%d", decision.ID, decision.RunID, repo, prNumber),
+		}
+	}
 	if decision.ProducerAgentID == "" || state.run.AgentID != decision.ProducerAgentID {
 		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
 			Reason: ReviewRemediationRefusedProducerMismatch,

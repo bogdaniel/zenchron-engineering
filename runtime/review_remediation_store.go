@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/bogdaniel/zenchron-engineering/review"
 )
 
 // CreateReviewRemediationAdmission writes admission ONCE, globally, keyed by
@@ -12,9 +14,40 @@ import (
 // crashing - is never admitted a second time: the stored document is
 // returned instead, with created=false, exactly as
 // review.CreateReviewDecision already does for the decision itself.
+//
+// This table is now the sole authorization source bindExecutionInvoke's
+// deferred wiring will trust, so it must never accept a row that is merely
+// self-consistent: every insert re-reads the decision admission.DecisionID
+// actually names and refuses unless that decision is REQUEST_CHANGES and its
+// own Subject/RunID agree with what the admission claims. review_decisions
+// is insert-only and never rewritten (review/decision.go), so this read is
+// safe without a transaction: the decision cannot change out from under this
+// check between the read and the insert. This closes the gap AdmitReviewRemediation's
+// own checks cannot: AdmitReviewRemediation is the one INTENDED caller, but
+// nothing in Go stops another caller in this package from calling this
+// exported method directly with a hand-built, structurally valid but
+// unauthorized document - the write itself must refuse that, not merely the
+// one caller this package currently has.
 func (s *SQLiteOperationStore) CreateReviewRemediationAdmission(admission ReviewRemediationAdmission) (ReviewRemediationAdmission, bool, error) {
 	if err := admission.validate(); err != nil {
 		return ReviewRemediationAdmission{}, false, err
+	}
+	decision, found, err := s.ReviewDecision(admission.DecisionID)
+	if err != nil {
+		return ReviewRemediationAdmission{}, false, err
+	}
+	if !found {
+		return ReviewRemediationAdmission{}, false, fmt.Errorf("review remediation admission %s names a decision that does not exist", admission.DecisionID)
+	}
+	if decision.Verdict != review.VerdictRequestChanges {
+		return ReviewRemediationAdmission{}, false, fmt.Errorf(
+			"review remediation admission %s names decision %s whose verdict is %q, not %q",
+			admission.DecisionID, decision.ID, decision.Verdict, review.VerdictRequestChanges)
+	}
+	if decision.RunID != admission.RunID || decision.Subject.Repository != admission.Repository ||
+		decision.Subject.PRNumber != admission.PRNumber || decision.Subject.HeadSHA != admission.HeadSHA {
+		return ReviewRemediationAdmission{}, false, fmt.Errorf(
+			"review remediation admission %s disagrees with its own referenced decision %s's subject", admission.DecisionID, decision.ID)
 	}
 	document, err := CanonicalJSON(admission)
 	if err != nil {
@@ -69,6 +102,13 @@ func (s *SQLiteOperationStore) ReviewRemediationAdmission(decisionID string) (Re
 // runID, across every exact head it has ever been admitted against. This -
 // not a journal event - is what pendingReviewRemediationKeys folds from: the
 // admission row is the complete, single-write durable authorization.
+//
+// Like ReviewPublication's own row/document identity check, a row whose
+// INDEXED run_id column disagrees with its document's own claimed RunID is
+// refused outright rather than silently returned under whichever identity a
+// caller queried by: CreateReviewRemediationAdmission never writes such a
+// row, so one existing is evidence the table itself cannot be trusted
+// without investigation, not something to paper over by picking a side.
 func (s *SQLiteOperationStore) ReviewRemediationAdmissionsForRun(runID string) ([]ReviewRemediationAdmission, error) {
 	rows, err := s.db.Query(`SELECT document FROM review_remediation_admissions WHERE run_id = ?`, runID)
 	if err != nil {
@@ -84,6 +124,9 @@ func (s *SQLiteOperationStore) ReviewRemediationAdmissionsForRun(runID string) (
 		var admission ReviewRemediationAdmission
 		if err := strictJSON([]byte(document), &admission); err != nil {
 			return nil, fmt.Errorf("stored review remediation admission is unreadable: %w", err)
+		}
+		if admission.RunID != runID {
+			return nil, fmt.Errorf("stored review remediation admission %s disagrees with its own indexed run %q (names %q)", admission.DecisionID, runID, admission.RunID)
 		}
 		admissions = append(admissions, admission)
 	}

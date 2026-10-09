@@ -239,3 +239,100 @@ func TestPendingReviewRemediationKeysIgnoresAdmissionsForAnOlderHead(t *testing.
 		t.Fatalf("pendingReviewRemediationKeys() = %v after the head moved past the admitted decision, want none", pending)
 	}
 }
+
+// R1: a matching repository and producer agent are not sufficient - two
+// different pull requests at the same repository and commit (a shared base,
+// a cherry-pick, a coincidence) must never let a decision for one authorize
+// remediation bound to the other. The run's OWN runtime-recorded publication
+// (state.projection.PullRequest.Number, folded from its own journal) is what
+// decides which PR this run actually published - never the decision's claim.
+func TestAdmitReviewRemediationRefusesAPRTheRunNeverPublished(t *testing.T) {
+	f := newAdmissionFixture(t)
+	const otherPRNumber = 8
+	subject := review.Subject{Repository: testRepo.String(), PRNumber: otherPRNumber, HeadSHA: f.headSHA}
+	id, err := review.DecisionID(subject, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hand-constructed exactly as #233's own resolveRunForPullRequest never
+	// would: it binds a decision's RunID only to a run whose OWN journal
+	// observed that exact PR number (review_packet.go), and this run's
+	// journal (seedRun) observed only admissionTestPRNumber (7), never 8.
+	decision := review.Decision{
+		SchemaVersion: review.SchemaVersion, ID: id, Subject: subject, RunID: f.runID,
+		ProducerAgentID: "codex", ReviewerAgentID: "claude", Verdict: review.VerdictRequestChanges,
+		Findings: []review.Finding{blockingFinding("f1")}, CreatedAt: f.clock.Now(),
+	}
+	if _, _, err := f.store.CreateReviewDecision(decision); err != nil {
+		t.Fatal(err)
+	}
+	f.fake.PullRequests[otherPRNumber] = GitHubPullRequest{
+		Number: otherPRNumber, HeadSHA: f.headSHA, BaseSHA: f.baseSHA, BaseRef: "main", State: GitHubOpen,
+	}
+
+	_, _, err = f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, otherPRNumber)
+	if err == nil {
+		t.Fatal("expected a refusal: the run published PR #7, never PR #8, even though both share the same commit")
+	}
+	if reason := refusalReason(t, err); reason != ReviewRemediationRefusedSubjectMismatch {
+		t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedSubjectMismatch)
+	}
+}
+
+// R2: the durable admission table is the sole authorization source the
+// deferred bindExecutionInvoke wiring will trust, so it must refuse a
+// structurally valid row that references a decision that never authorized
+// blocking remediation - regardless of which caller tries to write it.
+func TestCreateReviewRemediationAdmissionRefusesANonBlockingDecision(t *testing.T) {
+	f := newAdmissionFixture(t)
+	approved := f.seedDecision(f.headSHA, "claude", review.VerdictApprove)
+	forged := ReviewRemediationAdmission{
+		SchemaVersion: reviewRemediationAdmissionSchemaVersion, DecisionID: approved.ID, RunID: f.runID,
+		Repository: testRepo.String(), PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA,
+		FindingSignatures: []string{"invented-finding"}, AdmittedAt: f.clock.Now(),
+	}
+	if _, _, err := f.store.CreateReviewRemediationAdmission(forged); err == nil {
+		t.Fatal("expected the store to refuse an admission referencing a non-blocking (APPROVE) decision")
+	}
+
+	state, err := f.runtime().load(f.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := state.pendingReviewRemediationKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pendingReviewRemediationKeys() = %v, want none: the referenced decision never authorized remediation", pending)
+	}
+}
+
+// R2 (indexed/document integrity): a row whose own document disagrees with
+// the run_id column that indexes it must never be returned as belonging to
+// either run - it is evidence of corruption, not a tie to resolve silently.
+func TestReviewRemediationAdmissionsForRunRefusesAnIndexDocumentDisagreement(t *testing.T) {
+	f := newAdmissionFixture(t)
+	decision := f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("f1"))
+	admission := ReviewRemediationAdmission{
+		SchemaVersion: reviewRemediationAdmissionSchemaVersion, DecisionID: decision.ID, RunID: f.runID,
+		Repository: testRepo.String(), PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA,
+		FindingSignatures: []string{"f1"}, AdmittedAt: f.clock.Now(),
+	}
+	document, err := CanonicalJSON(admission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Writes the row directly: the indexed run_id column names a DIFFERENT
+	// run than the document's own RunID field claims - unreachable through
+	// CreateReviewRemediationAdmission, which always writes both from the
+	// same value.
+	if _, err := f.store.db.Exec(`INSERT INTO review_remediation_admissions (decision_id, run_id, admitted_unix_nano, document) VALUES (?, ?, ?, ?)`,
+		admission.DecisionID, "some-other-run", admission.AdmittedAt.UnixNano(), string(document)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.store.ReviewRemediationAdmissionsForRun("some-other-run"); err == nil {
+		t.Fatal("expected a refusal for a row whose indexed run_id disagrees with its own document")
+	}
+}

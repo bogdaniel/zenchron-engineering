@@ -64,29 +64,60 @@ It fails closed, in order, on:
    "Closing the staleness TOCTOU" below);
 6. the producing run cannot be loaded (`run_unknown`);
 7. the run's own `Repository` disagrees with the requested repository
-   (`subject_mismatch`), or its `AgentID` disagrees with the decision's
-   claimed `ProducerAgentID` - including an empty claimed producer
-   (`producer_mismatch`) - both re-checked against the run's own record,
-   never trusted from the decision document;
-8. the run is terminal - checked twice, see "Two directions of staleness"
-   below (`run_terminal`);
-9. the run has no compiled contract (`no_compiled_contract`);
-10. the run's **current** candidate no longer matches the decision's exact
+   (`subject_mismatch`);
+8. the run's own runtime-recorded publication
+   (`state.projection.PullRequest.Number`, folded from its own journal, never
+   the decision's claim) is not the requested PR (`subject_mismatch`) - two
+   different pull requests at the same repository can share an exact head
+   SHA (a shared base, a cherry-pick, a coincidence), so matching repository
+   and commit alone is not proof this run published THIS PR;
+9. the run's `AgentID` disagrees with the decision's claimed
+   `ProducerAgentID` - including an empty claimed producer
+   (`producer_mismatch`) - re-checked against the run's own record, never
+   trusted from the decision document;
+10. the run is terminal - checked twice, see "Two directions of staleness"
+    below (`run_terminal`);
+11. the run has no compiled contract (`no_compiled_contract`);
+12. the run's **current** candidate no longer matches the decision's exact
     reviewed head (`candidate_superseded`) - the run moved on its own, even if
     the PR's last-observed head still agrees with the decision.
 
-### Closing the staleness TOCTOU
+Separately, the durable table itself (`CreateReviewRemediationAdmission`)
+refuses to write a row whose referenced `review.Decision` is not
+`REQUEST_CHANGES`, or whose own `Subject`/`RunID` disagree with what the
+admission claims - see "The table defends itself" below. This is enforced at
+the write, not only read back at the gate, because the table is the sole
+authorization source the deferred dispatch wiring will trust, and nothing in
+Go stops another caller in this package from invoking that exported method
+directly with a hand-built document.
+
+### Closing the internal staleness TOCTOU - and the one that remains
 
 `ReviewPort.IsStale` re-fetches `LatestDecision` internally. If a newer
 decision D2 is admitted in the window between this gate's own first
 `LatestDecision` call (which returned D1) and its `IsStale` call, `IsStale`
 reports on D2 - not D1 - and a naive "not stale" would let D1 through even
-though D2 has superseded it. This gate closes the window by re-fetching
-`LatestDecision` a second time immediately after `IsStale` and refusing
-unless its ID still matches D1's: nothing changed between the three reads if
-and only if the latest decision is still the one being authorized.
+though D2 has superseded it. This gate closes **that specific** window by
+re-fetching `LatestDecision` a second time immediately after `IsStale` and
+refusing unless its ID still matches D1's: nothing changed between the three
+reads if and only if the latest decision is still the one being authorized.
 `reviewRemediationRaceTestHook` exists solely to force this exact
 interleaving on demand in `TestAdmitReviewRemediationRefusesADecisionSupersededBetweenReads`.
+
+What this does **not** and cannot close: the PR's head can still move on
+GitHub, with no new decision ever reached, in the narrow window between this
+gate's last freshness read and the SQLite `INSERT` that commits the
+admission - an external system cannot be linearized against a local write by
+adding more reads, however many. The admission this gate writes is therefore
+a **historical authorization fact** - "an independent reviewer blocked
+exactly this head, as of the checks above" - never a currently-executable
+grant good at any later instant. Closing that residual gap is explicitly the
+deferred dispatch wiring's job, not this gate's: the bindExecutionInvoke
+integration described below MUST re-validate the real current PR head, the
+run's current candidate, and run eligibility immediately before creating or
+leasing an `execution.invoke` operation, refusing a stale admission without
+spending capacity on it. This gate's admission alone is not sufficient
+authority to execute; it is sufficient authority to be WORTH re-checking.
 
 ### Two directions of run staleness
 
@@ -155,6 +186,26 @@ and schedules nothing (`TestAdmitReviewRemediationTouchesNoOperation`).
 Admission is a fact; turning a fact into a scheduled, budgeted invocation
 remains entirely the existing reconciler's job.
 
+### The table defends itself
+
+`AdmitReviewRemediation` is the one INTENDED writer, but it is not the only
+POSSIBLE one: nothing in Go stops other code in this package from calling
+the exported `CreateReviewRemediationAdmission` directly with a hand-built,
+internally self-consistent document. Because this table is now the sole
+authorization source the deferred dispatch wiring will trust, the write
+itself re-reads the decision `admission.DecisionID` names - immutable,
+insert-only, so this read needs no transaction to stay valid up to the
+insert - and refuses unless that decision is `REQUEST_CHANGES` and its own
+`Subject`/`RunID` agree with what the admission claims
+(`TestCreateReviewRemediationAdmissionRefusesANonBlockingDecision`: a durable
+`APPROVE` decision ID plus invented `FindingSignatures` is refused outright,
+never silently returned as a runnable key later). The read side
+(`ReviewRemediationAdmissionsForRun`) separately refuses a row whose indexed
+`run_id` column disagrees with its own document's claimed `RunID`
+(`TestReviewRemediationAdmissionsForRunRefusesAnIndexDocumentDisagreement`),
+mirroring the identity cross-check `ReviewPublication` already makes for its
+own `DecisionID`.
+
 ## Deferred wiring (not yet applied - see below)
 
 Two existing files are the integration seam, and both are presently PR
@@ -175,7 +226,20 @@ after them and before the `#508 P4b` fallback:
 if binding, ok := s.unresolvedReviewRemediationBinding(s.projection.CandidateRevision); ok {
     return binding, true
 }
-if pending, err := s.pendingReviewRemediationKeys(); err == nil && len(pending) > 0 {
+pending, err := s.pendingReviewRemediationKeys()
+if err != nil {
+    // MUST surface as a visible, non-advancing wait - never silently fall
+    // through to "nothing wanted" for this binding. An authorized BLOCK that
+    // cannot be read back must never look like goal_state_reached or a clean
+    // settle; it must look like exactly what it is, an outage, the same way
+    // a capacity wait is recorded in run.waiting rather than swallowed
+    // (docs/orchestration.md, "Recognized capacity waits"). The exact
+    // mechanism (a new wait reason recorded alongside the existing capacity-
+    // wait ones, most likely) is #546 ownership territory to settle once
+    // bindExecutionInvoke's actual post-merge shape is known - this snippet
+    // intentionally does not guess at it.
+}
+if len(pending) > 0 {
     return reviewRemediationBindingPrefix + s.projection.CandidateRevision + "|" + digestOfKeys(pending), true
 }
 ```
@@ -185,10 +249,10 @@ already implemented and unit-tested in `runtime/review_remediation.go` -
 this is a small consumer of code that already exists, not new logic.
 `pendingReviewRemediationKeys` returns an error because, unlike
 `pendingFeedbackKeys`, it reads the durable admission table rather than
-`s.events`; a read failure is treated as "nothing pending this tick" rather
-than a reason to fail the run, since the underlying authorization remains
-durable and un-lost regardless (see "Durable identity and idempotency"
-above).
+`s.events`. An admission that cannot be read back is NOT the same fact as no
+admission existing: the former is visible authorized work this run cannot
+currently see, and reconciliation must say so, never settle quietly as if
+nothing were pending.
 
 **2. `runtime/operations.go`, inside `invokeExecution`'s context assembly** -
 the admitted blocking findings (`ReviewRemediationAdmission.FindingSignatures`,
@@ -277,19 +341,29 @@ remaining ordinary refusal reasons), both run with `-race`:
   decision whose claimed producer is not the run's actual agent, and an
   empty claimed producer are all refused (B3);
 - a run whose wall budget is exhausted but whose persisted disposition has
-  not caught up yet (no reconciliation tick has run since) is refused (B4).
+  not caught up yet (no reconciliation tick has run since) is refused (B4);
+- a decision for a PR this run never published, even at the same commit and
+  with the same producer agent, is refused (R1); a durable admission row
+  referencing an `APPROVE` decision, and a row whose indexed `run_id`
+  disagrees with its own document, are both refused at the store layer
+  regardless of caller (R2).
 
-Five guards were each deliberately inverted, confirmed to break their exact
+Seven guards were each deliberately inverted, confirmed to break their exact
 corresponding test, and restored: the independence re-check, the staleness
 re-confirmation (B2), the producer-identity check (B3), the fresh-conditions
-check (B4), and the `ON CONFLICT DO NOTHING` idempotent insert (all three
-idempotency/concurrency/restart tests, which failed with a raw `UNIQUE
-constraint failed` once removed - proving the guard, not just an
-application-level check, is load-bearing).
+check (B4), the run-published-this-PR check (R1), the decision-verdict write
+guard (R2), the index/document integrity read guard (R2), and the `ON
+CONFLICT DO NOTHING` idempotent insert (all three idempotency/concurrency/
+restart tests, which failed with a raw `UNIQUE constraint failed` once
+removed - proving the guard, not just an application-level check, is
+load-bearing).
 
 Deferred to the reconciler/operations wiring above, and therefore not yet
 independently testable end-to-end: the full H1-committed-and-published →
 BLOCK → remediation **dispatch** → H2 → fresh review → ACCEPT lifecycle; a
 reviewer failing independence against a *resolved* agent registry entry
 (covered today only via a hand-crafted store row, per #233's own test
-suite); a producer provider failing after receiving findings.
+suite); a producer provider failing after receiving findings; the residual
+external-head TOCTOU and the visible-wait-on-read-failure requirement (R3,
+R4 above), both of which are explicitly the dispatch wiring's obligation,
+not this isolated gate's.
