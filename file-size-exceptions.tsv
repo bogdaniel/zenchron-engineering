@@ -3,3 +3,4 @@
 runtime/doctor.go	pre-existing 1611 lines; #537 (ADR-0007 5b) adds only the controller.trusted_main input fields and call site, approved 2026-10-08
 cmd/zenchron-engineering/serve.go	pre-existing 1362 lines; #537 adds only the trusted-main update to the live controller snapshot, approved 2026-10-08
 cmd/zenchron-engineering/operator.go	pre-existing 1435 lines; #537 adds only the doctor live-snapshot read, approved 2026-10-08
+runtime/operations.go	3783	#474 wiring (review-remediation admission -> reconciler/operations dispatch) landed on #546's pre-existing 23-line overage past the 3780 baseline ceiling; DRY extraction paid down 20 of those lines, 3 remain, approved by Bogdan Olteanu 2026-10-09

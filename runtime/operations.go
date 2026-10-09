@@ -608,7 +608,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		}
 		if err != nil {
 			class, _ := candidateGuardFailureClass(err)
-			return r.executionFailureEffect(execStageCandidateAdmission, class, err)
+			return r.executionFailureEffect(OperationFailed, execStageCandidateAdmission, class, err)
 		}
 		defer writer.Close()
 		ctx = withCandidateWriter(ctx, writer)
@@ -681,7 +681,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		return failed(err)
 	}
 	if err := assertExecutionSubject(state, workspace, purpose, subject); err != nil {
-		return r.executionFailureEffect(execStageWorkspaceSubject, FailureWorkspaceIntegrity, err)
+		return r.executionFailureEffect(OperationFailed, execStageWorkspaceSubject, FailureWorkspaceIntegrity, err)
 	}
 	// PROVIDER ADMISSION. The confidentiality decision has to be made before
 	// the producer exists, because admission is what it actually controls: once
@@ -692,7 +692,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// local prerequisite defect by spending a reasoning budget on it is the
 	// same mistake #46 was about, in a different place.
 	if err := ScanCandidateForCredentialValues(workspace.Dir); err != nil {
-		return r.executionFailureEffect(execStageCandidateAdmission, FailureCandidateCredentialMaterial, err)
+		return r.executionFailureEffect(OperationFailed, execStageCandidateAdmission, FailureCandidateCredentialMaterial, err)
 	}
 	// Admitted, applicable, undelivered reviewer feedback. It is assembled
 	// BEFORE the invocation so the same set that is delivered is the set that
@@ -798,7 +798,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// it must not let a provider write under.
 		reserved, err := r.scheduler.ReserveAttemptIdentity(operation.ID, free)
 		if err != nil {
-			return r.executionFailureEffect(execStageProviderRequest, FailureUnknown, err)
+			return r.executionFailureEffect(OperationFailed, execStageProviderRequest, FailureUnknown, err)
 		}
 		physicalAttempt = reserved.AttemptIdentity
 	}
@@ -878,7 +878,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			allowance = fmt.Sprintf(" plus the %s crash-recovery uncertainty allowance for progress the lost controller may not have written",
 				progressRecorderLag(inactivityLimit))
 		}
-		return r.executionFailureEffect(execStageProviderRequest, FailureProviderNoProgress,
+		return r.executionFailureEffect(OperationFailed, execStageProviderRequest, FailureProviderNoProgress,
 			fmt.Errorf("no provider progress has been recorded for %s, which exhausts the %s inactivity bound%s before this invocation could start",
 				ProviderSilence(operation, r.deps.Clock.Now()), inactivityLimit, allowance))
 	}
@@ -912,10 +912,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	if runStopObserved(executing) {
 		watch = endWatch()
 		watch.ended = true
-		return effect{state: OperationCancelled, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureRunCancelled},
-			Diagnostic:     r.executionDiagnostic(execStageProviderRequest, FailureRunCancelled, ExecutionResult{}, errStoppedBeforeProvider),
-		}}
+		return r.executionFailureEffect(OperationCancelled, execStageProviderRequest, FailureRunCancelled, errStoppedBeforeProvider)
 	}
 	executing = withVerificationExecution(executing, r.scheduler, attemptRef, r.deps.StateDir)
 	result, execErr := r.deps.Provider.Execute(executing, unit.apply(stage.apply(ExecutionRequest{
@@ -1742,10 +1739,10 @@ const (
 )
 
 // executionFailureEffect is the repeated shape behind a typed invocation
-// failure with no provider result to report: one failure class, the
-// diagnostic stage it died at, and the error that caused it.
-func (r *EngineeringRuntime) executionFailureEffect(stage string, class FailureClass, cause error) effect {
-	return effect{state: OperationFailed, result: executionRecord{
+// outcome with no provider result: a terminal state, a failure class, the
+// diagnostic stage it died at, and the cause.
+func (r *EngineeringRuntime) executionFailureEffect(opState OperationState, stage string, class FailureClass, cause error) effect {
+	return effect{state: opState, result: executionRecord{
 		mutationResult: mutationResult{FailureClass: class},
 		Diagnostic:     r.executionDiagnostic(stage, class, ExecutionResult{}, cause),
 	}}
