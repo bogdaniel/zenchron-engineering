@@ -223,8 +223,41 @@ The graph **represents** holds and resolves none. #472 owns no decision record,
 no authority and no persistence for one — that is #508 — and there is no path by
 which a worker answers its own hold. A hold source that cannot answer holds
 everything: the pass reports it and activates nothing for that graph rather than
-proceeding past a hold that may exist. Until #508 persists them, nothing supplies
-holds, so `autonomy workgraph status` shows none.
+proceeding past a hold that may exist.
+
+**#508 supplies the holds.** An operator — never a worker, since a unit has no
+run before its first activation — places a hold on one not-yet-activated unit
+through the governed action:
+
+```bash
+zenchron-engineering autonomy workgraph hold GRAPH_ID UNIT_ID --note "why it waits"
+```
+
+and lifts it through the same governed, authority-checked path a decision
+anywhere in this product is answered:
+
+```bash
+zenchron-engineering autonomy workgraph resolve REQUEST_ID allow --note "rationale"
+```
+
+`REQUEST_ID` is the hold's own id (printed by `hold`), or a #473
+`decision_request` message id — both resolve through the same immutable,
+append-only `DecisionResolution`. Resolving one supplies a fact: the frontier
+recomputes on its own next read, and nothing here starts a provider or
+activates a unit directly. A resolution is bound to the exact request it
+answers (`orchestration.DecisionResolutionID`): an identical retry after a lost
+reply finds the same resolution, and a conflicting second answer is refused.
+
+A hold's own request always prescribes an `allow_deny` outcome — a gate is
+inherently pass/fail, never a bounded-text or selected-option question — and
+only an explicit **allow** lifts it. A **deny** is a durable, authorized
+answer too, but it leaves the unit held: nothing here ever auto-runs work a
+human explicitly refused. Lifting a denied hold, if that is ever wanted, is a
+deliberate second governed action, not an automatic consequence of resolving
+the first.
+
+See `docs/control-plane.md` for the authority these two actions share with
+every other governed verb.
 
 ## Not in this ticket
 

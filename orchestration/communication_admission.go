@@ -73,7 +73,8 @@ func admitDraft(draft MessageDraft, index int, digest string, scope MessageScope
 	message := EngineeringMessage{
 		SchemaVersion: MessageSchemaVersion, ID: id, Scope: scope.ID, Kind: draft.Kind, Source: source,
 		InReplyTo: draft.InReplyTo, Supersedes: draft.Supersedes, Purpose: draft.Purpose,
-		Category: draft.Category, Body: draft.Body, DocumentSHA256: digest, AdmittedAt: now,
+		Category: draft.Category, ExpectedOutcomeKind: draft.ExpectedOutcomeKind, PermittedOptions: draft.PermittedOptions,
+		Body: draft.Body, DocumentSHA256: digest, AdmittedAt: now,
 	}
 	if draft.SubjectHandoff != "" {
 		subject, ok := scope.Subjects[draft.SubjectHandoff]

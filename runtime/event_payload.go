@@ -173,7 +173,8 @@ var eventPayloads = map[string]payloadValidator{
 			positive("attempt", p.Attempt),
 			required("detail", p.Detail))
 	}),
-	EventMessagesObserved: payloadSchema(validateMessagesObserved),
+	EventMessagesObserved:   payloadSchema(validateMessagesObserved),
+	EventDecisionsDelivered: payloadSchema(validateDecisionsDelivered),
 	EventExecutionCompleted: payloadSchema(func(p ExecutionCompletedPayload) error {
 		return errors.Join(
 			required("producer_id", p.ProducerID),
@@ -478,13 +479,13 @@ type CandidateCommittedPayload struct {
 	// not carry. It is the durable half of the #189 ownership decision: a
 	// crashed run's inherited scratch is left out of the tree deliberately,
 	// and an operator reading the journal has to be able to see WHICH paths
-	// rather than infer them from a path count that does not add up.
-	//
-	// It is bounded like every other payload list, and it is never truncated to
+	// rather than infer them from a path count that does not add up. It is
+	// bounded like every other payload list, and it is never truncated to
 	// fit: a workspace holding more debris than one payload may carry is
 	// refused at the commit gate, so this list is always the whole of the
 	// decision or there is no commit to describe.
 	ExcludedPaths []string `json:"excluded_paths,omitempty"`
+	Producing     string   `json:"producing_operation,omitempty"` // producing operation's ID (#508 P4a); optional, unchecked
 }
 
 // ExecutionCompletedPayload records that the producer finished its invocation
@@ -837,7 +838,6 @@ type PlanProposedPayload struct {
 	// References is what referenced-issue hydration produced for the invocation
 	// that proposed this revision: which same-repository issues the planner was
 	// given, pinned by digest, and which ones could not be read.
-	//
 	// It is recorded on a SUCCESSFUL proposal as well as a refused attempt,
 	// because "this plan was reasoned from four of the five referenced issues"
 	// is a fact about the plan an operator approves, not a detail of an

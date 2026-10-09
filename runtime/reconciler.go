@@ -28,8 +28,6 @@ package runtime
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -38,6 +36,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // ---------------------------------------------------------------------------
@@ -210,6 +209,13 @@ type runState struct {
 	waitOpenSince time.Time
 	waitOpenWork  time.Duration
 	waitComputed  bool
+	// resolvedOwnDecisions is this run's own live, resolved #473
+	// decision_request messages, read once per load() (#508 P4b); see
+	// decision_resumption.go.
+	resolvedOwnDecisions []orchestration.DecisionResolution
+	// deliveredOwnDecisionIDs: load() fails closed on a corrupt decision-
+	// delivery event rather than forgetting it; see deliveredDecisionIDsFromEvents.
+	deliveredOwnDecisionIDs map[string]bool
 }
 
 func (r *EngineeringRuntime) load(runID string) (*runState, error) {
@@ -232,8 +238,17 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 	if err != nil {
 		return nil, err
 	}
+	resolvedOwnDecisions, err := r.deps.Store.ResolvedOwnDecisionRequests(runID)
+	if err != nil {
+		return nil, err
+	}
+	deliveredOwnDecisionIDs, err := deliveredDecisionIDsFromEvents(events)
+	if err != nil {
+		return nil, err
+	}
 	state := &runState{
 		rt: r, run: run, snapshot: snapshot, events: events, projection: projection,
+		resolvedOwnDecisions: resolvedOwnDecisions, deliveredOwnDecisionIDs: deliveredOwnDecisionIDs,
 		// A DIFFERENT CONTROLLER IS STILL THE DEFAULT REFUSAL. What changed
 		// with #234 is that one specific transition can be converted from
 		// drift into an admitted succession by evidence in this run's own
@@ -433,84 +448,9 @@ func (s *runState) epoch() int64 {
 
 func (s *runState) epochKey() string { return "epoch-" + strconv.FormatInt(s.epoch(), 10) }
 
-// externalWaitReasons is the CLOSED set of waits that are somebody else's turn.
-//
-// An execution wall budget bounds the work this system does. It must not be
-// spent waiting for a human to read a pull request, for an operator to sign a
-// provider back in, or for a rate limit to lift: none of that is the runtime
-// working, and a budget that burns through it forces an operator to size their
-// engineering budget around how fast people answer email. A run that reached
-// its goal and sat overnight awaiting review used to die of
-// run_wall_budget_exhausted, which made the #63 review loop unusable at any
-// budget that still bounded runaway work.
-//
-// The set is closed and fail-closed: a reason that is not listed here SPENDS
-// the budget. A new wait pauses the clock only when somebody decides it should,
-// which is the safe direction for a bound whose whole job is to end things.
-// ReasonGoalStateReached is the wait a run settles into when it has done
-// everything it can: the candidate is produced, assurance has judged it, and
-// what remains is a person in the forge. It is named because a PLAN reads it -
-// a stage whose run reached its goal state has produced its output, and the
-// stages that depend on it can proceed while the run itself waits for review.
-const ReasonGoalStateReached = "goal_state_reached"
-
-// ReasonReviewBudgetExhausted retains accepted review work after its finite
-// continuation allowance is spent. Delivery does not imply remediation was published.
-const ReasonReviewBudgetExhausted = "review_wall_budget_exhausted"
-
-var externalWaitReasons = map[string]bool{
-	ReasonDeterministicFailureUnchanged: true,
-	// Waiting for a person: review, merge authority, a policy decision only an
-	// operator can make.
-	ReasonGoalStateReached:          true,
-	ReasonReviewBudgetExhausted:     true,
-	"awaiting_authority":            true,
-	"authority_blocked":             true,
-	"authority_unknown":             true,
-	"requested_privilege_expansion": true,
-	// Waiting for the operator's own accounts and tools.
-	"execution_provider_account_unavailable": true,
-	"execution_provider_quota":               true,
-	// Rate limiting is the other capacity wait. It is the provider declining to
-	// be asked yet, not the runtime working, and leaving it out charged an
-	// operator for their provider's backoff.
-	"execution_provider_rate_limited": true,
-	// The host cannot reach the provider at all. A machine with no network is
-	// not performing engineering work, and #238's whole defect was charging
-	// exactly this interval to the active-work budget - so leaving it out here
-	// would fix the detection and keep the accounting lie.
-	"execution_provider_unavailable":   true,
-	"assurance_dependency_unavailable": true,
-	// Every host verification slot is held by another run (#490). The run
-	// executes nothing while it waits, and charging it would turn the host's
-	// verification capacity into this run's run_wall_budget_exhausted - the
-	// exact conversion of capacity exhaustion into failure #490 forbids. The
-	// wait is bounded by the verifications holding the slots, each of which
-	// runs under its own physical deadline.
-	ReasonVerificationCapacity: true,
-	ReasonWorkCapacity:         true,
-	ReasonObservationCapacity:  true,
-	// The operator has to free disk before anything can proceed; the run is not
-	// working while it waits for them.
-	"state_storage_exhausted": true,
-	// The controller could not install the brokered candidate-Git boundary, so
-	// it performed no execution at all. Nothing is running and an operator has
-	// to repair the installation.
-	"candidate_guard_unavailable": true,
-	// A dead owner's process still holds the candidate (#168); nothing was
-	// dispatched and an operator has to stop it.
-	"candidate_writer_alive": true,
-	// The controller stopped. The run is not working, and it is waiting for a
-	// supervisor to exist again rather than for anything it can do itself.
-	"controller_shutdown":  true,
-	WatchWaitingGitHubAuth: true,
-	// Waiting for a human decision about the source or the pull request.
-	WatchWaitingOptInRemoved:       true,
-	"source_intent_changed":        true,
-	"source_closed":                true,
-	"pull_request_closed_unmerged": true,
-	"candidate_external_changed":   true,
-}
+// ReasonGoalStateReached, ReasonReviewBudgetExhausted, ReasonDecisionPending
+// and the externalWaitReasons closed set they belong to live in
+// external_wait_reasons.go.
 
 // activeElapsed is the time this run has been the SYSTEM'S turn, derived from
 // the durable journal rather than from a stopwatch: every interval it excludes
@@ -1202,7 +1142,18 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 	}
 	// Initial implementation: no candidate commit exists yet.
 	if s.projection.CandidateRevision == "" {
-		return "initial|" + s.contractRevision() + "|" + s.pinnedBase(), true
+		initial := "initial|" + s.contractRevision() + "|" + s.pinnedBase()
+		if !s.satisfied(OpExecutionInvoke, initial) {
+			return initial, true
+		}
+		// The initial invocation already ran and produced no candidate work -
+		// the one shape #508 P4b exists for: a decision asked and (so far)
+		// answered with nothing else for this run to plan. See
+		// unresumedDecisionResumeBinding.
+		if binding, ok := s.unresumedDecisionResumeBinding(); ok {
+			return binding, true
+		}
+		return "", false
 	}
 	// Continuation: the head is a runtime-owned checkpoint, so the producer was
 	// interrupted rather than finished. One continuation per checkpoint commit,
@@ -1246,184 +1197,13 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 	if pending := s.pendingFeedbackKeys(); len(pending) > 0 {
 		return "feedback|" + s.projection.CandidateRevision + "|" + digestOfKeys(pending), true
 	}
-	return "", false
-}
-
-// unresolvedFeedbackBinding re-proposes the exact feedback execution binding
-// an earlier attempt for this head already started, when that operation has
-// not succeeded. See the call site in bindExecutionInvoke for why this is
-// necessary rather than merely convenient.
-func (s *runState) unresolvedFeedbackBinding(head string) (string, bool) {
-	prefix := "feedback|" + head + "|"
-	for _, op := range s.snapshot.Operations {
-		if op.Kind != OpExecutionInvoke || op.State == Succeeded {
-			continue
-		}
-		if binding := bindingOf(op); strings.HasPrefix(binding, prefix) {
-			return binding, true
-		}
+	// The same #508 P4b fallback as above, for a run whose candidate IS
+	// complete but still has a resolved question of its own with nothing
+	// else left to plan.
+	if binding, ok := s.unresumedDecisionResumeBinding(); ok {
+		return binding, true
 	}
 	return "", false
-}
-
-// pendingFeedbackKeys is the admitted, applicable, undelivered feedback for the
-// current head, in stable order.
-func (s *runState) pendingFeedbackKeys() []string {
-	var keys []string
-	for _, decision := range s.feedbackState().Pending(s.projection.Head()) {
-		keys = append(keys, decision.Key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-// digestOfKeys is a stable identity for a SET of feedback items. The keys
-// themselves would make an unbounded idempotency key; their digest is fixed
-// width and just as exact.
-func digestOfKeys(keys []string) string {
-	sum := sha256.Sum256([]byte(strings.Join(keys, "\n")))
-	return hex.EncodeToString(sum[:])[:32]
-}
-
-// invocationContinuationPrefix marks an execution binding as continuing
-// interrupted work on an exact checkpoint commit. It is part of the durable
-// operation identity, which is what makes continuation depth replayable.
-const invocationContinuationPrefix = "continuation|"
-
-// startedContinuationBindings is the set of DISTINCT continuation execution
-// bindings durable state shows this run has already started.
-//
-// It reads operations, not events, because an operation IS the binding: every
-// retry of continuation|A reuses one operation with one idempotency key, so
-// counting operations counts bindings and counting attempts does not. Nothing
-// here looks at checkpoints, commits, provider invocations or reassessments.
-func (s *runState) startedContinuationBindings() map[string]bool {
-	started := map[string]bool{}
-	for _, op := range s.snapshot.Operations {
-		if op.Kind != OpExecutionInvoke {
-			continue
-		}
-		if binding := bindingOf(op); strings.HasPrefix(binding, invocationContinuationPrefix) {
-			started[binding] = true
-		}
-	}
-	return started
-}
-
-// providerInvocationCeilingReached reports that this run has spent every
-// provider invocation it was created with.
-//
-// It counts ATTEMPTS - one per execution invocation actually begun - because
-// that is what a provider account is charged for. The count comes from the
-// projection of durable events, so a restart resumes at the same total rather
-// than at zero.
-func (s *runState) providerInvocationCeilingReached() bool {
-	limit := s.providerInvocationLimit()
-	if limit <= 0 {
-		return false
-	}
-	// A ceiling refuses the NEXT invocation; it does not retroactively fail a
-	// run that spent its last one productively. Without this, a run whose final
-	// permitted invocation completed the candidate read as failed the moment it
-	// finished - the continuation ceiling has the same exemption, for the same
-	// reason.
-	//
-	// "Next" is a binding the planner would still DISPATCH: wanted and not yet
-	// satisfied. The binding of the invocation that just succeeded stays wanted
-	// until its output is committed - an initial binding until the candidate
-	// exists - and reading that as a further invocation failed the run before
-	// its last permitted work was ever committed (#514).
-	key, wanted := bindExecutionInvoke(s)
-	if !wanted || s.satisfied(OpExecutionInvoke, key) {
-		return false
-	}
-	return s.providerInvocationsSpent() >= limit
-}
-
-// providerInvocationsSpent is the run total MaxProviderInvocations bounds:
-// every begun engineering invocation and every handoff repair that reached a
-// provider (#492). It is the one definition the ceiling, a successor's
-// availability and the remaining-budget view all read.
-func (s *runState) providerInvocationsSpent() int {
-	return providerInvocationsSpent(s.projection, s.snapshot.Operations)
-}
-
-func providerInvocationsSpent(projection RunProjection, operations map[string]RunOperation) int {
-	spent := projection.Attempts[OpExecutionInvoke]
-	for _, op := range operations {
-		if repairReachedProvider(op) {
-			spent++
-		}
-	}
-	return spent
-}
-
-func (s *runState) providerCeiling() providerCeiling {
-	return providerCeiling{limit: s.providerInvocationLimit(), spent: s.providerInvocationsSpent()}
-}
-
-// providerInvocationLimit is the run's total, taken from what the run
-// persisted. Absent means unbounded, exactly as it does for every run created
-// before this bound existed: a run is judged by the budgets it was created
-// with, never by whatever is configured now.
-func (s *runState) providerInvocationLimit() int {
-	if budgets := s.run.Budgets; budgets != nil {
-		return budgets.MaxProviderInvocations
-	}
-	return 0
-}
-
-// continuationLimit is the run's continuation bound, taken from durable state.
-//
-// A run created after #54 persisted an explicit positive budget and is judged
-// by it forever, whatever the operator configures later. A run created BEFORE
-// #54 persisted nothing, and its absence is not "use the new default": it means
-// the run was bounded by the execution-attempt budget, so replaying it has to
-// reproduce that. The oldest runs persisted no budgets at all, and for those
-// the attempt budget is the configured one, exactly as it was when they ran.
-func (s *runState) continuationLimit() int {
-	if budgets := s.run.Budgets; budgets != nil {
-		if limit := budgets.MaxExecutionContinuations; limit > 0 {
-			return limit
-		}
-		if legacy := budgets.MaxExecutionAttempts; legacy > 0 {
-			return legacy
-		}
-	}
-	return s.rt.deps.Budgets.MaxExecutionAttempts
-}
-
-// continuationCeilingReached answers the only question the ceiling is about:
-// may this run START one more distinct continuation binding?
-//
-// It asks the planner what binding it wants rather than predicting anything.
-// That matters because whether an invocation mutates, completes, or does
-// neither is not knowable before it runs - which is exactly why counting
-// checkpoints in advance could never express this rule.
-//
-// Consequences, all of them deliberate:
-//
-//   - retries of an already-started binding are not refused here at all; they
-//     are bounded by that binding's own MaxExecutionAttempts;
-//   - a candidate that COMPLETES is never retroactively failed, because a
-//     complete head asks for no continuation binding;
-//   - the last permitted continuation may finish and go on to assurance;
-//   - only a genuinely NEW binding beyond the ceiling is refused, and the
-//     checkpoint that asked for it is preserved by not being touched.
-func (s *runState) continuationCeilingReached() bool {
-	limit := s.continuationLimit()
-	if limit <= 0 {
-		return false
-	}
-	binding, wanted := bindExecutionInvoke(s)
-	if !wanted || !strings.HasPrefix(binding, invocationContinuationPrefix) {
-		return false
-	}
-	started := s.startedContinuationBindings()
-	if started[binding] {
-		return false
-	}
-	return len(started) >= limit
 }
 
 func bindRemediationGofmt(s *runState) (string, bool) {
@@ -1780,6 +1560,30 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 			return r.settle(state, live, reason)
 		}
 		desired, wanted := state.plan()
+		// #508 (review P4a, D4/R2-E): a run that has itself asked a live
+		// decision - a #473 decision_request this build has not yet admitted a
+		// DecisionResolution for - performs no new provider-facing or mutating
+		// work (decisionWaitPermits decides the narrow exceptions). Checked on
+		// EVERY pass, regardless of wanted, so a run with nothing else to plan
+		// this exact pass does not read as goal_state_reached while its own
+		// question stands open; the earlier shape of this check ran only
+		// inside "if wanted", which left exactly that case unprotected and
+		// depended on an unrelated binding (bindSourceObserve's epoch key)
+		// happening to be wanted to ever run at all. #473's own OpenDecisions
+		// already makes the question visible; this is the ONLY place the wait
+		// is enforced, so it holds for every caller of Reconcile, under every
+		// driver, the same way.
+		//
+		// An unreadable decision store never authorizes dispatch: unknown is
+		// not permission (R2-E), so the pass ends in error here, before
+		// anything is validated or run.
+		open, err := r.deps.Store.OpenDecisionRequestsForRun(runID)
+		if err != nil {
+			return Outcome{}, err
+		}
+		if len(open) > 0 && !decisionWaitPermits(wanted, desired.kind) {
+			return r.settle(state, Waiting, ReasonDecisionPending)
+		}
 		// No progress means PRODUCING the same failure again, not looking at it
 		// again. An observation pass changes nothing and must not spend the
 		// budget bounded remediation needs: a current-head CI or review finding
@@ -1843,6 +1647,19 @@ func (r *EngineeringRuntime) drivenElsewhere(runID string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// decisionWaitPermits answers, for #508's decision-pending wait, whether the
+// one desired operation this pass computed may still run while a decision
+// this run itself asked stands open. Only observation (reads external state,
+// invokes no provider, mutates nothing governed - the same exemption
+// `validate` already grants every other Waiting disposition) and
+// candidate.commit for an already-succeeded, already-proven checkpoint are
+// permitted (#508 review P4a, R2-B): refusing to durably finalize work the
+// run has already produced would strand that work, not protect anything.
+// Nothing is permitted when nothing was wanted in the first place.
+func decisionWaitPermits(wanted bool, kind string) bool {
+	return wanted && (OperationCapacityClass(kind) == CapacityObservation || kind == OpCandidateCommit)
 }
 
 func waitingOr(live, fallback Disposition) Disposition {
