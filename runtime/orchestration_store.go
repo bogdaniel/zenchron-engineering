@@ -178,15 +178,20 @@ func (s *SQLiteOperationStore) AdmitIntegratedHandoff(handoff orchestration.Engi
 		// by (admitted_unix_nano, id) - the same tie-break
 		// queryRunHandoffs's own ORDER BY already uses - not merely "nothing
 		// strictly newer", which a same-nanosecond replacement would defeat.
-		// #475 review N1 (second pass): the checks above prove H is the
-		// latest ADMITTED row for its run, but admission is not the only way
-		// a producer's current output can move - a new attempt can be
-		// JOURNALLED (handoff.reported) before it is ever admitted, and from
-		// that moment WorkGraphStatus/inspectHandoff no longer presents H as
-		// the run's satisfied output. H's own producer identity
-		// (operation_id, attempt) must therefore still match the run's
-		// latest reported attempt, not merely still be the latest row in
-		// orchestration_handoffs.
+		// #475 review N1 (third pass, #5473634194): the checks above prove H
+		// is the latest ADMITTED row for its run, but admission is not the
+		// only way a producer's current output can move - a new attempt, or
+		// a refusal, can be JOURNALLED before any new handoff is ever
+		// admitted, and from that moment inspectHandoff/WorkGraphStatus no
+		// longer presents H as the run's satisfied output. The run's latest
+		// event among {handoff.reported, handoff.refused} must therefore
+		// still BE a report naming H's own producer identity - read from
+		// '$.payload.operation_id'/'$.payload.attempt', the engineering
+		// invocation HandoffReportedPayload actually carries, never the
+		// outer EngineeringEvent's own top-level operation_id (that names
+		// whichever operation appended the event, a repair when one
+		// rewrote the report, not H's producer). A later refusal, a report
+		// for a different attempt, or no report/refusal at all, all refuse.
 		clauses = append(clauses, `EXISTS (
 			SELECT 1 FROM orchestration_handoffs
 			WHERE id = ? AND run_id = ?
@@ -202,22 +207,24 @@ func (s *SQLiteOperationStore) AdmitIntegratedHandoff(handoff orchestration.Engi
 					AND newer.id > ?
 				)
 			)
-		) AND NOT EXISTS (
-			SELECT 1 FROM events
-			WHERE stream_kind = 'run' AND run_id = ? AND type = ?
-			AND sequence = (
+		) AND EXISTS (
+			SELECT 1 FROM events AS latest
+			WHERE latest.stream_kind = 'run' AND latest.run_id = ?
+			AND latest.type IN (?, ?)
+			AND latest.sequence = (
 				SELECT MAX(sequence) FROM events
-				WHERE stream_kind = 'run' AND run_id = ? AND type = ?
+				WHERE stream_kind = 'run' AND run_id = ? AND type IN (?, ?)
 			)
-			AND (
-				json_extract(document, '$.operation_id') <> (SELECT json_extract(document, '$.producer.operation_id') FROM orchestration_handoffs WHERE id = ?)
-				OR json_extract(document, '$.attempt') <> (SELECT json_extract(document, '$.producer.attempt') FROM orchestration_handoffs WHERE id = ?)
-			)
+			AND latest.type = ?
+			AND json_extract(latest.document, '$.payload.operation_id') = (SELECT json_extract(document, '$.producer.operation_id') FROM orchestration_handoffs WHERE id = ?)
+			AND json_extract(latest.document, '$.payload.attempt') = (SELECT json_extract(document, '$.producer.attempt') FROM orchestration_handoffs WHERE id = ?)
 		)`)
 		args = append(args,
 			input.HandoffID, input.RunID, input.CandidateRevision, input.CandidateTree,
 			input.RunID, input.HandoffID, input.HandoffID, input.HandoffID, input.HandoffID,
-			input.RunID, EventHandoffReported, input.RunID, EventHandoffReported, input.HandoffID, input.HandoffID,
+			input.RunID, EventHandoffReported, EventHandoffRefused,
+			input.RunID, EventHandoffReported, EventHandoffRefused,
+			EventHandoffReported, input.HandoffID, input.HandoffID,
 		)
 	}
 	where := "1=1"

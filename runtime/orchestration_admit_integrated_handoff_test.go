@@ -7,6 +7,7 @@ package runtime
 // scenarios the rest of that file covers.
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -177,22 +178,12 @@ func TestAdmitIntegratedHandoffRefusesASameTimestampReplacement(t *testing.T) {
 	}
 }
 
-// TestAdmitIntegratedHandoffRefusesAProducerReportedNewerAttemptNotYetAdmitted
-// is #475 review #5473056173's remaining N1 gap: the checks above prove H is
-// still the latest ADMITTED row for its run, but admission is not the only
-// way a producer's current output can move. A producer can JOURNAL a new
-// attempt as reported before that attempt is ever admitted - from that exact
-// moment inspectHandoff/WorkGraphStatus no longer presents H as the run's
-// satisfied output, yet orchestration_handoffs still has no newer row, so
-// the previous predicate would still admit against it. The atomic INSERT
-// must see the journalled report in the SAME statement.
-//
-// The new report is inserted directly into the events table by a genuinely
-// separate writer connection, not through AppendEvent: this test exercises
-// the admission predicate's own read of that table, never the hash-chained
-// append path, which is proven elsewhere.
-func TestAdmitIntegratedHandoffRefusesAProducerReportedNewerAttemptNotYetAdmitted(t *testing.T) {
-	fixture := newFleetFixture(t, 4)
+// setUpProducerAndIntegratorHandoffs drives a 2-item ordinary #470 batch to
+// settlement and returns the producer's own admitted handoff (standing in
+// for "a") and a synthetic copy of the second item's handoff, retargeted to
+// a fresh ID, that the caller admits against inputs referencing the first.
+func setUpProducerAndIntegratorHandoffs(t *testing.T, fixture *fleetFixture, syntheticID string) (h1, synthetic orchestration.EngineeringHandoff) {
+	t.Helper()
 	supervisor := fixture.supervisor()
 	view := fixture.orchestrate(supervisor, "claude", fleetIssues(2))
 	settled := fixture.drive(supervisor, view.BatchID)
@@ -200,13 +191,29 @@ func TestAdmitIntegratedHandoffRefusesAProducerReportedNewerAttemptNotYetAdmitte
 	if err != nil || len(producerHandoffs) != 1 {
 		t.Fatalf("producer item did not admit exactly one handoff: %d (%v)", len(producerHandoffs), err)
 	}
-	h1 := producerHandoffs[0]
 	integratorHandoffs, err := fixture.store.RunHandoffs(settled.Items[1].RunID)
 	if err != nil || len(integratorHandoffs) != 1 {
 		t.Fatalf("integrator-stand-in item did not admit exactly one handoff: %d (%v)", len(integratorHandoffs), err)
 	}
-	synthetic := integratorHandoffs[0]
-	synthetic.ID = "handoff-integrator-currentness-gap"
+	synthetic = integratorHandoffs[0]
+	synthetic.ID = syntheticID
+	return producerHandoffs[0], synthetic
+}
+
+// TestAdmitIntegratedHandoffRefusesASameOperationRetryNotYetAdmitted is #475
+// review #5473634194's correction of the prior N1 attempt: the checks above
+// prove H is still the latest ADMITTED row for its run, but admission is not
+// the only way a producer's current output can move. The SAME operation can
+// journal its NEXT attempt as reported before that attempt is ever admitted
+// - from that exact moment inspectHandoff/WorkGraphStatus no longer presents
+// H as the run's satisfied output, yet orchestration_handoffs still has no
+// newer row. The journalled report is appended through the real AppendEvent
+// path (the canonical EngineeringEvent document, with the attempt identity
+// at '$.payload.attempt' - never a hand-built payload-shaped document at the
+// event's own root, which a prior version of this test wrongly used).
+func TestAdmitIntegratedHandoffRefusesASameOperationRetryNotYetAdmitted(t *testing.T) {
+	fixture := newFleetFixture(t, 4)
+	h1, synthetic := setUpProducerAndIntegratorHandoffs(t, fixture, "handoff-integrator-same-op-retry")
 	inputs := orchestration.WorkUnitInputs{inputFor("a", h1)}
 
 	writer, err := OpenSQLiteOperationStore(fixture.stateDir)
@@ -217,20 +224,22 @@ func TestAdmitIntegratedHandoffRefusesAProducerReportedNewerAttemptNotYetAdmitte
 	interleaved := false
 	store := integratedHandoffInterleaveStore{SQLiteOperationStore: fixture.store, beforeInsert: func() {
 		interleaved = true
-		// A genuinely separate connection journals producer a's NEXT
-		// attempt as REPORTED - never admitted - between the integrator's
-		// own freshness read and its INSERT.
-		var nextSequence int64
-		if err := writer.db.QueryRow(`SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE run_id = ? AND stream_kind = 'run'`, h1.RunID).Scan(&nextSequence); err != nil {
-			t.Fatalf("reading the next event sequence: %v", err)
+		// A genuinely separate connection journals the SAME operation's
+		// NEXT attempt as REPORTED - never admitted - between the
+		// integrator's own freshness read and its INSERT.
+		payload, err := json.Marshal(HandoffReportedPayload{
+			OperationID: h1.Producer.OperationID, Attempt: h1.Producer.Attempt + 1,
+			Outcome: orchestration.OutcomeCompleted, ReportSHA256: "sha-attempt-2",
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
-		document := `{"operation_id":"op-a-second-attempt","attempt":2,"outcome":"completed","report_sha256":""}`
-		if _, err := writer.db.Exec(`INSERT INTO events
-			(id, run_id, sequence, type, operation_id, previous_event_id, previous_event_hash, state_before, state_after, event_hash, document, stream_kind, plan_id)
-			VALUES (?, ?, ?, ?, 'op-a-second-attempt', '', '', '{}', '{}', 'synthetic', ?, 'run', '')`,
-			"event-a-second-attempt-reported", h1.RunID, nextSequence, EventHandoffReported, document,
-		); err != nil {
-			t.Fatalf("journalling the superseding report: %v", err)
+		if _, err := writer.AppendEvent(EngineeringEvent{
+			SchemaVersion: SchemaVersion, ID: "event-a-attempt-2-reported", RunID: h1.RunID,
+			Type: EventHandoffReported, OperationID: h1.Producer.OperationID,
+			OccurredAt: time.Now(), Payload: payload,
+		}); err != nil {
+			t.Fatalf("journalling the same-operation retry: %v", err)
 		}
 	}}
 	inserted, err := store.AdmitIntegratedHandoff(synthetic, inputs)
@@ -241,7 +250,61 @@ func TestAdmitIntegratedHandoffRefusesAProducerReportedNewerAttemptNotYetAdmitte
 		t.Fatal("admission never reached the insert boundary")
 	}
 	if inserted {
-		t.Fatal("the integrated handoff was admitted despite its input's producer having journalled a newer, not-yet-admitted attempt")
+		t.Fatal("the integrated handoff was admitted despite its input's producer having journalled a same-operation retry not yet admitted")
+	}
+	if handoffs, err := fixture.store.RunHandoffs(synthetic.RunID); err != nil || len(handoffs) != 1 {
+		t.Fatalf("run %s has %d handoffs after a refused synthetic admission, want exactly 1 (%v)", synthetic.RunID, len(handoffs), err)
+	}
+}
+
+// TestAdmitIntegratedHandoffRefusesWhenLatestEventIsARefusal is #475 review
+// #5473634194's second named form of the same defect: inspectHandoff treats
+// the run's latest event among {handoff.reported, handoff.refused} as
+// authoritative, but the predicate above only ever looked at reported
+// events. The journalled refusal here deliberately names H's OWN producer
+// identity (operation_id, attempt) - so only the EVENT TYPE, never the
+// identity fields, distinguishes this from a legitimate match - because a
+// retroactive refusal of the very attempt H was admitted for is the
+// narrowest case: WorkGraphStatus no longer presents H as a satisfied
+// output purely because the latest outcome recorded for it is a refusal,
+// and the predicate must honor that even when the identity still lines up.
+func TestAdmitIntegratedHandoffRefusesWhenLatestEventIsARefusal(t *testing.T) {
+	fixture := newFleetFixture(t, 4)
+	h1, synthetic := setUpProducerAndIntegratorHandoffs(t, fixture, "handoff-integrator-latest-is-refusal")
+	inputs := orchestration.WorkUnitInputs{inputFor("a", h1)}
+
+	writer, err := OpenSQLiteOperationStore(fixture.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { writer.Close() })
+	interleaved := false
+	store := integratedHandoffInterleaveStore{SQLiteOperationStore: fixture.store, beforeInsert: func() {
+		interleaved = true
+		payload, err := json.Marshal(HandoffRefusedPayload{
+			OperationID: h1.Producer.OperationID, Attempt: h1.Producer.Attempt,
+			Kind: HandoffMissing, Detail: "the invocation completed without writing a handoff report",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.AppendEvent(EngineeringEvent{
+			SchemaVersion: SchemaVersion, ID: "event-a-same-attempt-refused", RunID: h1.RunID,
+			Type: EventHandoffRefused, OperationID: h1.Producer.OperationID,
+			OccurredAt: time.Now(), Payload: payload,
+		}); err != nil {
+			t.Fatalf("journalling the superseding refusal: %v", err)
+		}
+	}}
+	inserted, err := store.AdmitIntegratedHandoff(synthetic, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !interleaved {
+		t.Fatal("admission never reached the insert boundary")
+	}
+	if inserted {
+		t.Fatal("the integrated handoff was admitted despite its input's producer having journalled a later refusal")
 	}
 	if handoffs, err := fixture.store.RunHandoffs(synthetic.RunID); err != nil || len(handoffs) != 1 {
 		t.Fatalf("run %s has %d handoffs after a refused synthetic admission, want exactly 1 (%v)", synthetic.RunID, len(handoffs), err)
