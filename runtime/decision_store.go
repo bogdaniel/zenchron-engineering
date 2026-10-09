@@ -697,7 +697,13 @@ func decisionRequestFromMessageTx(q sqlExecutor, message orchestration.Engineeri
 			break
 		}
 	}
-	ref := orchestration.DecisionRequestRef{ID: message.ID, Scope: message.Scope, Subject: message.Subject, Live: live}
+	// ExpectedOutcomeKind/PermittedOptions are read straight off the frozen,
+	// insert-only admitted message (#508 review P4c) - never re-derived,
+	// never widened by anything a later caller supplies.
+	ref := orchestration.DecisionRequestRef{
+		ID: message.ID, Scope: message.Scope, Subject: message.Subject, Live: live,
+		ExpectedOutcomeKind: message.ExpectedOutcomeKind, PermittedOptions: message.PermittedOptions,
+	}
 	if message.Subject == nil {
 		return ref, nil, nil
 	}

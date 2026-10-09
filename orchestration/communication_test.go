@@ -259,3 +259,100 @@ func TestARecordWithAForgedRouteIsInvalid(t *testing.T) {
 		t.Fatal("a finding routed away from its owner validated")
 	}
 }
+
+// #508 review P4c: the decision_request grammar extension. A worker MAY
+// prescribe the only outcome kind its own question accepts, and a
+// selected_option question MUST then also prescribe its own closed,
+// exhaustive option set - admitted and frozen into the insert-only message,
+// never widened afterward.
+
+func decisionRequest(expectedKind string, options ...string) MessageDraft {
+	return MessageDraft{Kind: KindDecisionRequest, Purpose: "which approach?", Body: "two viable options",
+		ExpectedOutcomeKind: expectedKind, PermittedOptions: options}
+}
+
+// TestADecisionRequestMayPrescribeItsOwnAnswerShape is the accepted shape:
+// selected_option together with its own permitted_options admits and is
+// frozen into the durable record exactly as written.
+func TestADecisionRequestMayPrescribeItsOwnAnswerShape(t *testing.T) {
+	asked := admit(t, commScope(), source("issue-1", "run-a", 1),
+		decisionRequest(DecisionSelectedOption, "approach-a", "approach-b"))
+	if asked[0].ExpectedOutcomeKind != DecisionSelectedOption {
+		t.Fatalf("expected_outcome_kind = %q", asked[0].ExpectedOutcomeKind)
+	}
+	if got := asked[0].PermittedOptions; len(got) != 2 || got[0] != "approach-a" || got[1] != "approach-b" {
+		t.Fatalf("permitted_options = %+v", got)
+	}
+	if err := asked[0].Validate(); err != nil {
+		t.Fatalf("a well-formed selected_option decision_request failed its own round-trip validation: %v", err)
+	}
+}
+
+// TestADecisionRequestLegacyOpenEndedShapeStillValidates is #508 review
+// P4c's required compatibility proof: a request naming NEITHER member - the
+// only shape #473 could admit before P4c, and every request #473 admitted
+// before P4c - validates exactly as it always did.
+func TestADecisionRequestLegacyOpenEndedShapeStillValidates(t *testing.T) {
+	asked := admit(t, commScope(), source("issue-1", "run-a", 1),
+		MessageDraft{Kind: KindDecisionRequest, Purpose: "ship it?", Body: "needs a human"})
+	if asked[0].ExpectedOutcomeKind != "" || len(asked[0].PermittedOptions) != 0 {
+		t.Fatalf("a legacy decision_request gained a shape it never asked for: %+v", asked[0])
+	}
+	if err := asked[0].Validate(); err != nil {
+		t.Fatalf("a legacy, open-ended decision_request failed validation: %v", err)
+	}
+}
+
+// TestASelectedOptionDecisionRequestRequiresPermittedOptions is the
+// malformed-input refusal #508 review P4c requires: selected_option without
+// its own exhaustive option set is refused closed, not interpreted as
+// "anything goes" or silently widened to accept any text.
+func TestASelectedOptionDecisionRequestRequiresPermittedOptions(t *testing.T) {
+	refused(t, commScope(), source("issue-1", "run-a", 1), "requires its permitted_options",
+		decisionRequest(DecisionSelectedOption))
+}
+
+// TestNonSelectedOptionDecisionRequestsMayNotCarryPermittedOptions proves
+// the inverse malformed shape - permitted_options stated for a kind that
+// never consults it - is refused rather than silently ignored.
+func TestNonSelectedOptionDecisionRequestsMayNotCarryPermittedOptions(t *testing.T) {
+	refused(t, commScope(), source("issue-1", "run-a", 1), "may not carry permitted_options",
+		decisionRequest(DecisionAllowDeny, "allow"))
+	refused(t, commScope(), source("issue-1", "run-a", 1), "requires expected_outcome_kind to be selected_option",
+		MessageDraft{Kind: KindDecisionRequest, Purpose: "p", Body: "b", PermittedOptions: []string{"a"}})
+}
+
+// TestADecisionRequestUnrecognizedExpectedOutcomeKindIsRefused is the
+// unknown-shape fail-closed refusal: an invented fourth kind is never
+// interpreted, not admitted as if it were one of the three recognized ones.
+func TestADecisionRequestUnrecognizedExpectedOutcomeKindIsRefused(t *testing.T) {
+	refused(t, commScope(), source("issue-1", "run-a", 1), "is not", decisionRequest("yesno", "a"))
+}
+
+// TestADecisionRequestPermittedOptionsAreBoundedUniqueAndWellFormed proves
+// the permitted-option set is itself a closed, finite, deduplicated menu -
+// never an unbounded list a worker could use to smuggle an oversized
+// document into what is supposed to be a short, authority-facing choice.
+func TestADecisionRequestPermittedOptionsAreBoundedUniqueAndWellFormed(t *testing.T) {
+	refused(t, commScope(), source("issue-1", "run-a", 1), "repeated",
+		decisionRequest(DecisionSelectedOption, "a", "a"))
+	refused(t, commScope(), source("issue-1", "run-a", 1), "required",
+		decisionRequest(DecisionSelectedOption, "a", ""))
+	oversized := make([]string, MaxDecisionRequestOptions+1)
+	for i := range oversized {
+		oversized[i] = fmt.Sprintf("option-%d", i)
+	}
+	refused(t, commScope(), source("issue-1", "run-a", 1), "above the", decisionRequest(DecisionSelectedOption, oversized...))
+	tooLong := strings.Repeat("x", maxDecisionOptionBytes+1)
+	refused(t, commScope(), source("issue-1", "run-a", 1), "bytes, above", decisionRequest(DecisionSelectedOption, tooLong))
+}
+
+// TestOnlyADecisionRequestMayCarryItsOwnAnswerShapeMembers proves the other
+// three message kinds cannot smuggle an outcome-kind prescription or option
+// set through a member that only decision_request ever consults.
+func TestOnlyADecisionRequestMayCarryItsOwnAnswerShapeMembers(t *testing.T) {
+	refused(t, commScope(), source("issue-1", "run-a", 1), "may not carry expected_outcome_kind",
+		MessageDraft{Kind: KindStateUpdate, Body: "b", ExpectedOutcomeKind: DecisionAllowDeny})
+	refused(t, commScope(), source("issue-1", "run-a", 1), "may not carry expected_outcome_kind",
+		MessageDraft{Kind: KindCollaborationRequest, Target: "issue-2", Purpose: "p", Body: "b", PermittedOptions: []string{"a"}})
+}

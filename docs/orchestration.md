@@ -208,11 +208,24 @@ unchanged.
 |------|---------------|-----------|
 | `collaboration_request` | `target`, `purpose`, `body`; `in_reply_to` makes it the response to a request addressed to the writer | the target unit |
 | `finding` | `subject_handoff`, `category` (`defect`, `risk`, `inconsistency`), `body` | the unit that owns that handoff |
-| `decision_request` | `purpose` (the question), `body` | human or designated authority |
+| `decision_request` | `purpose` (the question), `body`, optionally `expected_outcome_kind` and, for `selected_option`, `permitted_options` | human or designated authority |
 | `state_update` | `body` | every other unit sees each unit's latest one; it carries no authority |
 
 Any kind may also set `supersedes` to correct one of its own unit's earlier
 messages of that kind. Every other member, kind combination or unknown member is refused.
+
+A `decision_request` MAY prescribe `expected_outcome_kind` (`allow_deny`,
+`selected_option` or `text`) - the only shape #508's `ResolveDecision` will
+accept for it (#508 review P4c). `selected_option` must then also name its own
+`permitted_options`: a closed, exhaustive, deduplicated list (at most 20
+entries, each at most 64 bytes) an authority may select from and never beyond.
+Both members are frozen into the admitted, insert-only record exactly as
+written; no later message, including one that supersedes the request, can
+widen it, and resolving it reads the shape only from that frozen record, never
+from anything the resolving caller supplies. Omitting both leaves the question
+open-ended, exactly as every `decision_request` #473 admitted before this
+extension: `ResolveDecision` then accepts any of the three bounded outcome
+kinds, unchanged.
 
 An orchestrated invocation may write `{"schema_version":"0.1","messages":[...]}`
 (1 to 8 messages, at most 32 KiB) to `messages.json`, in the same runtime-owned

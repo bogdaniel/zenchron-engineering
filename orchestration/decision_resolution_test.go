@@ -255,11 +255,66 @@ func TestResolveDecisionEnforcesAPrescribedOutcomeKind(t *testing.T) {
 	if _, err := ResolveDecision(ref, nil, mismatched, "", operatorAuthority("operator-1"), nil, decisionNow); err == nil {
 		t.Fatal("expected a selected_option answer to an allow_deny-only hold to be refused")
 	}
-	// A request with no prescribed kind (today, every #473 decision_request
-	// message) is unconstrained: #508 does not invent a shape #473 never
-	// stated.
+	// A request with no prescribed kind - a legacy #473 decision_request
+	// message admitted before P4c, or one whose author deliberately left it
+	// open-ended - is unconstrained: #508 does not invent a shape the
+	// request itself never stated.
 	unconstrained := DecisionRequestRef{ID: "message-1", Scope: "batch-1", Live: true}
 	if _, err := ResolveDecision(unconstrained, nil, mismatched, "", operatorAuthority("operator-1"), nil, decisionNow); err != nil {
 		t.Fatalf("expected an unconstrained request to accept any bounded outcome kind, got %v", err)
+	}
+}
+
+// TestResolveDecisionEnforcesPermittedOptions is #508 review P4c's
+// authoritative resolution-path enforcement: a selected_option request that
+// prescribes its own closed option set accepts only a value FROM that set,
+// read solely from the request itself - never from anything the resolving
+// caller supplies - so a caller cannot widen a worker's own prescribed
+// options by answering with a value the request never offered.
+func TestResolveDecisionEnforcesPermittedOptions(t *testing.T) {
+	ref := DecisionRequestRef{ID: "message-1", Scope: "batch-1", Live: true,
+		ExpectedOutcomeKind: DecisionSelectedOption, PermittedOptions: []string{"approach-a", "approach-b"}}
+	outside := DecisionOutcome{Kind: DecisionSelectedOption, Value: "approach-c"}
+	if _, err := ResolveDecision(ref, nil, outside, "", operatorAuthority("operator-1"), nil, decisionNow); err == nil {
+		t.Fatal("expected a value outside the request's own permitted_options to be refused")
+	}
+	inside := DecisionOutcome{Kind: DecisionSelectedOption, Value: "approach-b"}
+	resolution, err := ResolveDecision(ref, nil, inside, "", operatorAuthority("operator-1"), nil, decisionNow)
+	if err != nil {
+		t.Fatalf("expected a permitted value to succeed, got %v", err)
+	}
+	if resolution.Outcome.Value != "approach-b" {
+		t.Fatalf("resolution outcome = %+v", resolution.Outcome)
+	}
+	// A request naming selected_option but, structurally, no options at all
+	// (PermittedOptions empty - never produced by a well-formed #473
+	// admission, which validateDecisionRequestShape already refuses, but a
+	// durable record is read as data, not re-validated here) falls back to
+	// accepting any bounded selected_option value: PermittedOptions is only
+	// CONSULTED when non-empty, never required to be non-empty by
+	// ResolveDecision itself.
+	noOptions := DecisionRequestRef{ID: "message-2", Scope: "batch-1", Live: true, ExpectedOutcomeKind: DecisionSelectedOption}
+	if _, err := ResolveDecision(noOptions, nil, outside, "", operatorAuthority("operator-1"), nil, decisionNow); err != nil {
+		t.Fatalf("expected a selected_option request with no stated options to accept any bounded value, got %v", err)
+	}
+}
+
+// TestResolveDecisionSupersededRequestNeverLendsItsOptionsToTheReplacement
+// proves #508 review P4c's "stale/superseded cannot widen" requirement at
+// the resolution boundary: once a request is superseded (Live=false), it is
+// refused outright regardless of what its own PermittedOptions were, and a
+// DIFFERENT, live replacement is judged ONLY by its own set, never the one
+// it replaced.
+func TestResolveDecisionSupersededRequestNeverLendsItsOptionsToTheReplacement(t *testing.T) {
+	superseded := DecisionRequestRef{ID: "message-1", Scope: "batch-1", Live: false,
+		ExpectedOutcomeKind: DecisionSelectedOption, PermittedOptions: []string{"approach-a", "approach-b"}}
+	inside := DecisionOutcome{Kind: DecisionSelectedOption, Value: "approach-a"}
+	if _, err := ResolveDecision(superseded, nil, inside, "", operatorAuthority("operator-1"), nil, decisionNow); err == nil || !strings.Contains(err.Error(), "no longer live") {
+		t.Fatalf("expected a superseded request to be refused regardless of its own options, got %v", err)
+	}
+	replacement := DecisionRequestRef{ID: "message-2", Scope: "batch-1", Live: true,
+		ExpectedOutcomeKind: DecisionSelectedOption, PermittedOptions: []string{"approach-c"}}
+	if _, err := ResolveDecision(replacement, nil, inside, "", operatorAuthority("operator-1"), nil, decisionNow); err == nil {
+		t.Fatal("expected the replacement's OWN narrower options to govern, not the superseded request's wider ones")
 	}
 }

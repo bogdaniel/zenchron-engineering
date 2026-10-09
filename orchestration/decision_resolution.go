@@ -227,15 +227,22 @@ type DecisionRequestRef struct {
 	// request's own contract permits - prescribed by the request itself, never
 	// chosen by whoever answers it. A WorkUnitHold always names one: a gate
 	// is inherently allow_deny, so nothing can resolve it with a bounded-text
-	// or selected-option answer that was never its question.
+	// or selected-option answer that was never its question. A #473
+	// decision_request names one only when its own author chose to (#508
+	// review P4c; MessageDraft.ExpectedOutcomeKind) - frozen into the
+	// admitted, insert-only message, never re-derived or caller-supplied here.
 	//
-	// Empty means the request's source does not yet prescribe one. #473's
-	// decision_request message carries no outcome-kind or option-set member
-	// today, so a message-sourced request cannot be constrained here without
-	// #473 adding one - which this package does not do on #473's behalf
-	// (docs/orchestration.md names the exact boundary). Until it does,
-	// ResolveDecision accepts any of the three bounded kinds for those.
+	// Empty means the request's source does not yet prescribe one - a
+	// pre-P4c persisted request, or a deliberately open-ended question.
+	// ResolveDecision then accepts any of the three bounded kinds, exactly
+	// as it always has.
 	ExpectedOutcomeKind string
+	// PermittedOptions is the closed, exhaustive set of values a
+	// selected_option answer may take, copied from the same frozen request
+	// (#508 review P4c). Only consulted when ExpectedOutcomeKind is
+	// selected_option; empty otherwise, including for every request that
+	// does not prescribe selected_option at all.
+	PermittedOptions []string
 }
 
 // ResolveDecision validates a proposed answer against the live request and
@@ -270,6 +277,25 @@ func ResolveDecision(ref DecisionRequestRef, current *HandoffSubject, outcome De
 	if ref.ExpectedOutcomeKind != "" && outcome.Kind != ref.ExpectedOutcomeKind {
 		return DecisionResolution{}, fmt.Errorf(
 			"decision request %s requires a %s outcome, not %s", ref.ID, ref.ExpectedOutcomeKind, outcome.Kind)
+	}
+	// Strict, authoritative enforcement of the requesting worker's own
+	// prescribed answer shape (#508 review P4c): a selected_option request
+	// that named its closed option set accepts only a value FROM that set,
+	// read solely from the frozen request - never from anything the
+	// resolving caller supplies, so a caller cannot widen it by answering
+	// with a value the request never offered.
+	if ref.ExpectedOutcomeKind == DecisionSelectedOption && len(ref.PermittedOptions) > 0 {
+		permitted := false
+		for _, option := range ref.PermittedOptions {
+			if option == outcome.Value {
+				permitted = true
+				break
+			}
+		}
+		if !permitted {
+			return DecisionResolution{}, fmt.Errorf(
+				"decision request %s permits only %v, not %q", ref.ID, ref.PermittedOptions, outcome.Value)
+		}
 	}
 	if reason != "" {
 		if err := boundedDecisionText("decision resolution reason", reason, maxDecisionReasonBytes); err != nil {
