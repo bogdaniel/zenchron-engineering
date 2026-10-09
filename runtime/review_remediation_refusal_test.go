@@ -458,3 +458,144 @@ func TestPendingReviewRemediationKeysRefusesARowWrittenAroundTheWriteGuard(t *te
 		t.Fatalf("pendingReviewRemediationKeys() = %v, want none: run %s never published PR #%d", pending, f.runID, otherPRNumber)
 	}
 }
+
+// Independence, re-checked at the shared invariant function: a self-review
+// decision - reviewer == the run's own actual agent - submitted directly to
+// the store API must be refused at the write, exactly as #233's own
+// CheckReviewIndependence would refuse it through the ordinary review path
+// it never went through here.
+func TestCreateReviewRemediationAdmissionRefusesASelfReviewDecision(t *testing.T) {
+	f := newAdmissionFixture(t)
+	subject := review.Subject{Repository: testRepo.String(), PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA}
+	// "codex" is both the run's own agent (seedRun) and, here, the reviewer -
+	// a decision review.Decision.Validate itself does not reject, and #233's
+	// CheckReviewIndependence is never consulted for a row built this way.
+	id, err := review.DecisionID(subject, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := review.Decision{
+		SchemaVersion: review.SchemaVersion, ID: id, Subject: subject, RunID: f.runID,
+		ProducerAgentID: "codex", ReviewerAgentID: "codex", Verdict: review.VerdictRequestChanges,
+		Findings: []review.Finding{blockingFinding("f1")}, CreatedAt: f.clock.Now(),
+	}
+	if _, _, err := f.store.CreateReviewDecision(decision); err != nil {
+		t.Fatal(err)
+	}
+	forged := ReviewRemediationAdmission{
+		SchemaVersion: reviewRemediationAdmissionSchemaVersion, DecisionID: decision.ID, RunID: f.runID,
+		Repository: testRepo.String(), PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA,
+		FindingSignatures: []string{"f1"}, AdmittedAt: f.clock.Now(),
+	}
+	if _, _, err := f.store.CreateReviewRemediationAdmission(forged); err == nil {
+		t.Fatal("expected the store to refuse an admission whose decision names the run's own agent as both producer and reviewer")
+	}
+
+	state, err := f.runtime().load(f.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := state.pendingReviewRemediationKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pendingReviewRemediationKeys() = %v, want none: the decision's reviewer is not independent of the run's own agent", pending)
+	}
+}
+
+// The same self-review decision, injected directly via raw SQL around the
+// write guard entirely: the read side must independently refuse it too.
+func TestPendingReviewRemediationKeysRefusesASelfReviewRowWrittenAroundTheWriteGuard(t *testing.T) {
+	f := newAdmissionFixture(t)
+	subject := review.Subject{Repository: testRepo.String(), PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA}
+	id, err := review.DecisionID(subject, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := review.Decision{
+		SchemaVersion: review.SchemaVersion, ID: id, Subject: subject, RunID: f.runID,
+		ProducerAgentID: "codex", ReviewerAgentID: "codex", Verdict: review.VerdictRequestChanges,
+		Findings: []review.Finding{blockingFinding("f1")}, CreatedAt: f.clock.Now(),
+	}
+	if _, _, err := f.store.CreateReviewDecision(decision); err != nil {
+		t.Fatal(err)
+	}
+	admission := ReviewRemediationAdmission{
+		SchemaVersion: reviewRemediationAdmissionSchemaVersion, DecisionID: decision.ID, RunID: f.runID,
+		Repository: testRepo.String(), PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA,
+		FindingSignatures: []string{"f1"}, AdmittedAt: f.clock.Now(),
+	}
+	document, err := CanonicalJSON(admission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.db.Exec(`INSERT INTO review_remediation_admissions (decision_id, run_id, admitted_unix_nano, document) VALUES (?, ?, ?, ?)`,
+		admission.DecisionID, admission.RunID, admission.AdmittedAt.UnixNano(), string(document)); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := f.runtime().load(f.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := state.pendingReviewRemediationKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pendingReviewRemediationKeys() = %v, want none: the decision's reviewer is not independent of the run's own agent", pending)
+	}
+}
+
+// Storage integrity: ReviewRemediationAdmission's own row key and its
+// document's claimed DecisionID must agree - the same check already applied
+// to ReviewRemediationAdmissionsForRun's run_id, now proven for the
+// decision_id lookup path.
+func TestReviewRemediationAdmissionRefusesAKeyDocumentDisagreement(t *testing.T) {
+	f := newAdmissionFixture(t)
+	decision := f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("f1"))
+	// A second, distinct decision so the FK target exists: the row's indexed
+	// decision_id must reference a real review_decisions row, even though
+	// the document inside claims a DIFFERENT (also real) decision's identity.
+	other := f.seedDecision(f.headSHA, "claude-other", review.VerdictRequestChanges, blockingFinding("f1"))
+	admission := ReviewRemediationAdmission{
+		SchemaVersion: reviewRemediationAdmissionSchemaVersion, DecisionID: decision.ID, RunID: f.runID,
+		Repository: testRepo.String(), PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA,
+		FindingSignatures: []string{"f1"}, AdmittedAt: f.clock.Now(),
+	}
+	document, err := CanonicalJSON(admission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.db.Exec(`INSERT INTO review_remediation_admissions (decision_id, run_id, admitted_unix_nano, document) VALUES (?, ?, ?, ?)`,
+		other.ID, admission.RunID, admission.AdmittedAt.UnixNano(), string(document)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := f.store.ReviewRemediationAdmission(other.ID); err == nil {
+		t.Fatal("expected a refusal for a row whose indexed decision_id disagrees with its own document")
+	}
+}
+
+// Storage integrity: #233's ReviewDecision must refuse a row whose own key
+// disagrees with its document's claimed ID - this is the one lookup
+// reviewRemediationBindingInvariants trusts as authoritative for the
+// decision it is given.
+func TestReviewDecisionRefusesAKeyDocumentDisagreement(t *testing.T) {
+	f := newAdmissionFixture(t)
+	decision := f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("f1"))
+	document, err := CanonicalJSON(decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wrongID = "review-1111111111111111111111"
+	if _, err := f.store.db.Exec(`INSERT INTO review_decisions (id, repository, pr_number, head_sha, run_id, created_unix_nano, document) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		wrongID, decision.Subject.Repository, decision.Subject.PRNumber, decision.Subject.HeadSHA, decision.RunID, decision.CreatedAt.UnixNano(), string(document)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := f.store.ReviewDecision(wrongID); err == nil {
+		t.Fatal("expected a refusal for a row whose indexed id disagrees with its own document")
+	}
+}

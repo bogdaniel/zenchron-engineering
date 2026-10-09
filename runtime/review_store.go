@@ -98,7 +98,13 @@ func (s *SQLiteOperationStore) CreateReviewDecisionFenced(decision review.Decisi
 	return review.Decision{}, false, &ReviewClaimLostError{ClaimKey: claimKey}
 }
 
-// ReviewDecision reads one decision by its exact identity.
+// ReviewDecision reads one decision by its exact identity. The row's own key
+// and the document's own claimed ID must agree - the same check
+// ReviewPublication already makes for its DecisionID - because #474's
+// reviewRemediationBindingInvariants trusts whatever document this method
+// hands back as authoritative for the id it asked for; a disagreement is not
+// decidable by that caller and is refused here rather than silently returned
+// under the queried identity.
 func (s *SQLiteOperationStore) ReviewDecision(id string) (review.Decision, bool, error) {
 	var document string
 	err := s.db.QueryRow(`SELECT document FROM review_decisions WHERE id = ?`, id).Scan(&document)
@@ -109,7 +115,13 @@ func (s *SQLiteOperationStore) ReviewDecision(id string) (review.Decision, bool,
 		return review.Decision{}, false, err
 	}
 	decision, err := decodeReviewDecision(document)
-	return decision, err == nil, err
+	if err != nil {
+		return review.Decision{}, false, err
+	}
+	if decision.ID != id {
+		return review.Decision{}, false, fmt.Errorf("stored review decision row %q disagrees with its own document (names %q)", id, decision.ID)
+	}
+	return decision, true, nil
 }
 
 // ReviewDecisionsForPullRequest reads every decision ever reached for one

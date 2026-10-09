@@ -47,6 +47,16 @@ func reviewRemediationBindingInvariants(decision review.Decision, admission Revi
 	if decision.ProducerAgentID == "" || run.AgentID != decision.ProducerAgentID {
 		return fmt.Errorf("run %s's own agent %q disagrees with decision %s's claimed producer %q", run.ID, run.AgentID, decision.ID, decision.ProducerAgentID)
 	}
+	// Independence, re-checked against the run's own agent - never only
+	// against the decision's own recorded ProducerAgentID, which is exactly
+	// the field a direct, hand-built store call controls. #233's own
+	// CheckReviewIndependence refuses to construct such a Decision through
+	// the ordinary review path, but review.Decision.Validate itself does not
+	// reject producer==reviewer, and a directly stored admission reaches
+	// this function having bypassed CheckReviewIndependence entirely.
+	if decision.ReviewerAgentID == "" || decision.ReviewerAgentID == run.AgentID {
+		return fmt.Errorf("decision %s's reviewer %q is not independent of run %s's own agent %q", decision.ID, decision.ReviewerAgentID, run.ID, run.AgentID)
+	}
 	want := blockingFindingSignatures(decision.Findings)
 	got := append([]string(nil), admission.FindingSignatures...)
 	sort.Strings(got)
@@ -166,6 +176,14 @@ func (s *SQLiteOperationStore) ReviewRemediationAdmission(decisionID string) (Re
 	if err := admission.validate(); err != nil {
 		return ReviewRemediationAdmission{}, false, fmt.Errorf("stored review remediation admission is corrupt: %w", err)
 	}
+	// The row's own key and the document's own claimed identity must agree,
+	// the same check ReviewPublication already makes for its DecisionID: a
+	// disagreement is not decidable by a caller that only sees the decoded
+	// value, so it is refused here rather than silently handed back as if it
+	// named decisionID.
+	if admission.DecisionID != decisionID {
+		return ReviewRemediationAdmission{}, false, fmt.Errorf("stored review remediation admission row %q disagrees with its own document (names %q)", decisionID, admission.DecisionID)
+	}
 	return admission, true, nil
 }
 
@@ -195,6 +213,9 @@ func (s *SQLiteOperationStore) ReviewRemediationAdmissionsForRun(runID string) (
 		var admission ReviewRemediationAdmission
 		if err := strictJSON([]byte(document), &admission); err != nil {
 			return nil, fmt.Errorf("stored review remediation admission is unreadable: %w", err)
+		}
+		if err := admission.validate(); err != nil {
+			return nil, fmt.Errorf("stored review remediation admission is corrupt: %w", err)
 		}
 		if admission.RunID != runID {
 			return nil, fmt.Errorf("stored review remediation admission %s disagrees with its own indexed run %q (names %q)", admission.DecisionID, runID, admission.RunID)

@@ -208,9 +208,13 @@ decision is `REQUEST_CHANGES`; the admission agrees with that decision's
 subject and run; the run's **own runtime-recorded publication**
 (`RunProjection.PullRequest.Number`, folded from its own journal) is the
 exact PR number the admission claims; the run's **own** `AgentID` is the
-decision's claimed producer; and the admission's `FindingSignatures` are
-**exactly** the decision's own blocking findings, sorted - never an invented
-or substituted set.
+decision's claimed producer; the decision's `ReviewerAgentID` is neither
+empty nor equal to that same `AgentID` - independence, re-checked against
+the run's own agent, because a direct store call never passes through
+#233's `CheckReviewIndependence`, and `review.Decision.Validate` itself does
+not reject `ProducerAgentID == ReviewerAgentID`; and the admission's
+`FindingSignatures` are **exactly** the decision's own blocking findings,
+sorted - never an invented or substituted set.
 
 This one function is called at BOTH ends, so a row written through either
 path is held to the same complete standard:
@@ -233,7 +237,22 @@ disagrees with its own document's claimed `RunID`
 (`TestReviewRemediationAdmissionsForRunRefusesAnIndexDocumentDisagreement`),
 mirroring the identity cross-check `ReviewPublication` already makes for its
 own `DecisionID` - a prerequisite sanity check before the full invariant
-function is even worth running against a row.
+function is even worth running against a row. `ReviewRemediationAdmission`'s
+single-row lookup carries the same check on its own `decision_id`
+(`TestReviewRemediationAdmissionRefusesAKeyDocumentDisagreement`), and so
+does #233's own `ReviewDecision` (`runtime/review_store.go`) on its `id` -
+the one lookup `reviewRemediationBindingInvariants` trusts as authoritative
+for the decision it is given
+(`TestReviewDecisionRefusesAKeyDocumentDisagreement`). `ReviewDecision` is
+already-merged #233 code, outside this PR's own files, but the fix is a
+single additive identity check in the same pattern `ReviewPublication`
+already established, directly motivated by #474 now depending on that
+method's result as ground truth - not unrelated cleanup.
+`LatestReviewDecision`/`ReviewDecisionsForPullRequest` are left as they are:
+`AdmitReviewRemediation`'s own Subject re-check (item 4 in "The admission
+gate" above) already catches a document/row disagreement reached through
+either of them, so they are not in this function's direct trust chain the
+way the single-decision `ReviewDecision` lookup is.
 
 ## Deferred wiring (not yet applied - see below)
 
@@ -382,20 +401,28 @@ refusal reasons plus the R1/R2 bypass-closing regressions), both run with
   API, bypassing the gate entirely), and one whose indexed `run_id` disagrees
   with its own document, are all refused - at the write where possible, and
   independently re-verified at the read for a row that exists anyway
-  (written around the write guard, modeling corruption) (R2).
+  (written around the write guard, modeling corruption) (R2);
+- a directly stored self-review decision - reviewer equal to the run's own
+  actual agent, something `review.Decision.Validate` itself never rejects
+  and a direct store call never routes through #233's
+  `CheckReviewIndependence` - is refused by the shared invariant function at
+  both the write and, independently, at the read for a row injected around
+  the write guard entirely.
 
-Twelve guards were each deliberately inverted, confirmed to break their exact
-corresponding test, and restored: the independence re-check, the staleness
-re-confirmation (B2), the producer-identity check (B3), the fresh-conditions
-check (B4), the gate-level run-published-this-PR check (R1), and - inside the
-shared `reviewRemediationBindingInvariants` function, each broken and tested
-independently at both its write-time and read-time call sites where
-applicable - the run-published-this-PR invariant, the finding-signature
-equality invariant, the decision-verdict invariant, the index/document
-integrity check, and the `ON CONFLICT DO NOTHING` idempotent insert (all
-three idempotency/concurrency/restart tests, which failed with a raw `UNIQUE
-constraint failed` once removed - proving the guard, not just an
-application-level check, is load-bearing).
+Fifteen guards were each deliberately inverted, confirmed to break their
+exact corresponding test, and restored: the gate-level independence
+re-check, the staleness re-confirmation (B2), the producer-identity check
+(B3), the fresh-conditions check (B4), the gate-level run-published-this-PR
+check (R1); inside the shared `reviewRemediationBindingInvariants` function,
+each broken and tested independently at both its write-time and read-time
+call sites - the run-published-this-PR invariant, the finding-signature
+equality invariant, the decision-verdict invariant, and the independence
+invariant; the two indexed-key/document integrity checks
+(`ReviewRemediationAdmission` and #233's `ReviewDecision`); the
+`run_id`/document integrity check; and the `ON CONFLICT DO NOTHING`
+idempotent insert (all three idempotency/concurrency/restart tests, which
+failed with a raw `UNIQUE constraint failed` once removed - proving the
+guard, not just an application-level check, is load-bearing).
 
 Deferred to the reconciler/operations wiring above, and therefore not yet
 independently testable end-to-end: the full H1-committed-and-published →
