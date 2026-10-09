@@ -178,6 +178,15 @@ func (r *EngineeringRuntime) failureBinding(s *runState, op RunOperation, code s
 			RecordedCommit                     *runtimeCommit
 			ObservedMetadata                   string
 		}{expected, s.projection.CandidateMetadata, result.RuntimeCommit, metadata})
+	case "integration.textual_conflict", "integration.invalidated":
+		// #475 review's retry-policy follow-up: a deterministic conflict or
+		// invalidation against this exact, frozen consumed input set cannot
+		// fix itself via an identical re-merge. The operation's own identity
+		// IS the input digest already (bindIntegrationCompose's binding), so
+		// a genuinely different input set is a DIFFERENT op.ID entirely,
+		// never reaching this comparison at all; this binding only needs to
+		// be stable across repeated attempts of the SAME op.
+		return Digest(op.IdempotencyKey)
 	default:
 		return candidateFailureBinding(dir, code, string(op.Failure.CheckPath), op.Result)
 	}

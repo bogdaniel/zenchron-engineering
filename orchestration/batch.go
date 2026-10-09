@@ -56,6 +56,20 @@ type BatchOrigin struct {
 	GraphID string         `json:"graph_id"`
 	UnitID  string         `json:"unit_id"`
 	Inputs  WorkUnitInputs `json:"inputs,omitempty"`
+	// ExecutionKind is the unit's own execution algorithm (#475), exactly as
+	// the WorkGraph decided it at adoption - never re-derived from Role, this
+	// issue's purpose, title or anything a provider wrote. It is what #475
+	// reads to dispatch an integration_compose unit's run to deterministic
+	// composition instead of an ordinary execution invocation, and it is
+	// frozen the moment this batch is written: ValidateMutation already
+	// refuses a graph revision that changes an activated unit's execution
+	// kind, so this field can never disagree with the WorkGraph that named
+	// it.
+	//
+	// Omitempty and additive: a batch stored before this field existed
+	// decodes with it empty, which is exactly ExecutionKindProvider - the
+	// safe default for every batch #475 did not create.
+	ExecutionKind WorkUnitExecutionKind `json:"execution_kind,omitempty"`
 }
 
 // canonical is the origin with its input set in canonical order. The identity

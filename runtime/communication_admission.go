@@ -40,6 +40,19 @@ func queryBatchMessageScope(q sqlExecutor, batch orchestration.Batch) (orchestra
 			current[unit] = &subject
 		}
 	}
+	// A WORK GRAPH UNIT'S OWN BATCH (#475) additionally admits a Finding bound
+	// to one of the EXACT upstream subjects this unit was activated against -
+	// the only outside handoffs its own single-item batch may ever name. This
+	// is never graph-wide visibility: no other unit's batch, or its own scope,
+	// changes at all, and this scope still belongs to this batch alone.
+	if batch.Origin != nil {
+		for _, input := range batch.Origin.Inputs {
+			scope.Subjects[input.HandoffID] = orchestration.MessageSubject{
+				Handoff: input.HandoffID, Owner: input.UnitID,
+				Revision: orchestration.HandoffSubject{CandidateRevision: input.CandidateRevision, CandidateTree: input.CandidateTree},
+			}
+		}
+	}
 	admitted, err := queryScopeMessages(q, batch.ID)
 	if err != nil {
 		return orchestration.MessageScope{}, nil, err
@@ -149,6 +162,22 @@ func batchUnitOf(batch orchestration.Batch, runID string) (string, bool) {
 	return "", false
 }
 
+// operationKindsByID is one run's operations, indexed by id, so an admission
+// pass can tell which OPERATION KIND produced an observed report - the one
+// durable, runtime-owned fact a report file itself can never assert either
+// way (#475 R3-2's system-authorship determination).
+func operationKindsByID(store *SQLiteOperationStore, runID string) (map[string]string, error) {
+	operations, err := store.Operations(runID)
+	if err != nil {
+		return nil, err
+	}
+	kinds := make(map[string]string, len(operations))
+	for _, op := range operations {
+		kinds[op.ID] = op.Kind
+	}
+	return kinds, nil
+}
+
 // admitOrchestratedMessages admits every journalled, not yet decided message
 // report of one batch, in batch item order and then journal order, so a
 // replay after restart decides exactly what the first pass decided.
@@ -185,6 +214,10 @@ func admitOrchestratedMessages(store *SQLiteOperationStore, stateDir string, bat
 		if err != nil {
 			return err
 		}
+		operationKind, err := operationKindsByID(store, run.ID)
+		if err != nil {
+			return err
+		}
 		for _, event := range events {
 			if event.Type != EventMessagesObserved {
 				continue
@@ -215,6 +248,14 @@ func admitOrchestratedMessages(store *SQLiteOperationStore, stateDir string, bat
 			source := orchestration.MessageSource{
 				Unit: orchestration.BatchItemUnit(item.Issue), RunID: run.ID, AgentID: run.AgentID,
 				OperationID: observed.OperationID, Attempt: observed.Attempt,
+			}
+			// A message a runtime-only operation produced - no provider was
+			// ever invoked for it - never claims the run's agent wrote it
+			// (#475 R3-2): the only honest source for THAT fact is the
+			// durable operation record this admission pass already reads,
+			// never anything the report file itself could assert.
+			if operationKind[observed.OperationID] == OpIntegrationCompose {
+				source.AgentID, source.System = "", true
 			}
 			admitted, reason, err := admitObservedMessages(stateDir, scope, source, observed.DocumentSHA256, now, observed.FromCheckpoint)
 			if err != nil {

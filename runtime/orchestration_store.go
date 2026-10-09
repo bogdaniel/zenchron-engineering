@@ -150,6 +150,98 @@ func (s *SQLiteOperationStore) admitHandoff(handoff orchestration.EngineeringHan
 	return inserted == 1, err
 }
 
+// AdmitIntegratedHandoff inserts a WorkGraph integration unit's handoff only
+// if every consumed input is STILL the latest admitted handoff for its own
+// run (#475 review B3): the freshness check and the insert are the SAME
+// SQLite statement, not a read followed by a separate write a concurrent
+// supersession could land between. "Latest for its run" is exact: a handoff
+// row with a later admitted_unix_nano for that same run_id proves a newer
+// one superseded it, by this store's own insert-only, append-time ordering.
+func (s *SQLiteOperationStore) AdmitIntegratedHandoff(handoff orchestration.EngineeringHandoff, inputs orchestration.WorkUnitInputs) (bool, error) {
+	if err := handoff.Validate(); err != nil {
+		return false, err
+	}
+	if err := inputs.Validate(); err != nil {
+		return false, err
+	}
+	document, err := CanonicalJSON(handoff)
+	if err != nil {
+		return false, err
+	}
+	args := []any{handoff.ID, handoff.BatchID, handoff.RunID, handoff.AdmittedAt.UnixNano(), string(document)}
+	clauses := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		// #475 review N1: the referenced handoff must EXIST with this exact
+		// run and subject (a missing id makes the scalar subquery below NULL,
+		// which would otherwise let a nonexistent or wrong-subject reference
+		// pass silently), and it must be the LATEST row for its run ordered
+		// by (admitted_unix_nano, id) - the same tie-break
+		// queryRunHandoffs's own ORDER BY already uses - not merely "nothing
+		// strictly newer", which a same-nanosecond replacement would defeat.
+		// #475 review N1 (third pass, #5473634194): the checks above prove H
+		// is the latest ADMITTED row for its run, but admission is not the
+		// only way a producer's current output can move - a new attempt, or
+		// a refusal, can be JOURNALLED before any new handoff is ever
+		// admitted, and from that moment inspectHandoff/WorkGraphStatus no
+		// longer presents H as the run's satisfied output. The run's latest
+		// event among {handoff.reported, handoff.refused} must therefore
+		// still BE a report naming H's own producer identity - read from
+		// '$.payload.operation_id'/'$.payload.attempt', the engineering
+		// invocation HandoffReportedPayload actually carries, never the
+		// outer EngineeringEvent's own top-level operation_id (that names
+		// whichever operation appended the event, a repair when one
+		// rewrote the report, not H's producer). A later refusal, a report
+		// for a different attempt, or no report/refusal at all, all refuse.
+		clauses = append(clauses, `EXISTS (
+			SELECT 1 FROM orchestration_handoffs
+			WHERE id = ? AND run_id = ?
+			AND json_extract(document, '$.subject.candidate_revision') = ?
+			AND json_extract(document, '$.subject.candidate_tree') = ?
+		) AND NOT EXISTS (
+			SELECT 1 FROM orchestration_handoffs AS newer
+			WHERE newer.run_id = ? AND newer.id <> ?
+			AND (
+				newer.admitted_unix_nano > (SELECT admitted_unix_nano FROM orchestration_handoffs WHERE id = ?)
+				OR (
+					newer.admitted_unix_nano = (SELECT admitted_unix_nano FROM orchestration_handoffs WHERE id = ?)
+					AND newer.id > ?
+				)
+			)
+		) AND EXISTS (
+			SELECT 1 FROM events AS latest
+			WHERE latest.stream_kind = 'run' AND latest.run_id = ?
+			AND latest.type IN (?, ?)
+			AND latest.sequence = (
+				SELECT MAX(sequence) FROM events
+				WHERE stream_kind = 'run' AND run_id = ? AND type IN (?, ?)
+			)
+			AND latest.type = ?
+			AND json_extract(latest.document, '$.payload.operation_id') = (SELECT json_extract(document, '$.producer.operation_id') FROM orchestration_handoffs WHERE id = ?)
+			AND json_extract(latest.document, '$.payload.attempt') = (SELECT json_extract(document, '$.producer.attempt') FROM orchestration_handoffs WHERE id = ?)
+		)`)
+		args = append(args,
+			input.HandoffID, input.RunID, input.CandidateRevision, input.CandidateTree,
+			input.RunID, input.HandoffID, input.HandoffID, input.HandoffID, input.HandoffID,
+			input.RunID, EventHandoffReported, EventHandoffRefused,
+			input.RunID, EventHandoffReported, EventHandoffRefused,
+			EventHandoffReported, input.HandoffID, input.HandoffID,
+		)
+	}
+	where := "1=1"
+	if len(clauses) > 0 {
+		where = strings.Join(clauses, " AND ")
+	}
+	result, err := s.db.Exec(`INSERT INTO orchestration_handoffs (id, batch_id, run_id, admitted_unix_nano, document)
+		SELECT ?, ?, ?, ?, ?
+		WHERE `+where+`
+		ON CONFLICT(id) DO NOTHING`, args...)
+	if err != nil {
+		return false, err
+	}
+	inserted, err := result.RowsAffected()
+	return inserted == 1, err
+}
+
 // RunHandoffs reads every handoff admitted for one run, oldest first.
 func (s *SQLiteOperationStore) RunHandoffs(runID string) ([]orchestration.EngineeringHandoff, error) {
 	return queryRunHandoffs(s.db, runID)

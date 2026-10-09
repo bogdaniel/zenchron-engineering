@@ -316,13 +316,27 @@ type EngineeringMessage struct {
 
 // MessageSource is the exact invocation that wrote a message, as the runtime
 // recorded it. Index is the draft's position in that invocation's report.
+//
+// System is true only for a message a runtime operation produced directly,
+// with no provider invocation at all (#475's deterministic integration
+// composition is the first such operation) - decided exclusively by the
+// store-controlled admission path reading the producing OPERATION'S OWN
+// KIND, never by anything a worker-written report could claim: MessageDraft
+// has no such member, so a provider's own JSON can never set this either
+// way. The zero value (false) is every message admitted before this field
+// existed, unaffected.
 type MessageSource struct {
-	Unit        string `json:"unit"`
-	RunID       string `json:"run_id"`
-	AgentID     string `json:"agent_id"`
+	Unit  string `json:"unit"`
+	RunID string `json:"run_id"`
+	// AgentID is the run's bound execution agent. Required unless System is
+	// true: a system-authored message names no agent, because no agent
+	// invocation produced it - claiming one would be exactly the fabricated
+	// provider attempt this field exists to prevent.
+	AgentID     string `json:"agent_id,omitempty"`
 	OperationID string `json:"operation_id"`
 	Attempt     int    `json:"attempt"`
 	Index       int    `json:"index"`
+	System      bool   `json:"system,omitempty"`
 }
 
 // MessageRoute is the runtime-derived recipient.
@@ -345,13 +359,20 @@ func (m EngineeringMessage) Validate() error {
 	if m.SchemaVersion != MessageSchemaVersion {
 		return fmt.Errorf("engineering message schema version %q is not %q", m.SchemaVersion, MessageSchemaVersion)
 	}
-	for name, value := range map[string]string{
+	required := map[string]string{
 		"id": m.ID, "scope": m.Scope, "source.unit": m.Source.Unit, "source.run_id": m.Source.RunID,
-		"source.agent_id": m.Source.AgentID, "source.operation_id": m.Source.OperationID, "document_sha256": m.DocumentSHA256,
-	} {
+		"source.operation_id": m.Source.OperationID, "document_sha256": m.DocumentSHA256,
+	}
+	if !m.Source.System {
+		required["source.agent_id"] = m.Source.AgentID
+	}
+	for name, value := range required {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("engineering message %s is required", name)
 		}
+	}
+	if m.Source.System && m.Source.AgentID != "" {
+		return errors.New("a system-authored engineering message may not also name an agent id")
 	}
 	if m.Source.Attempt <= 0 || m.Source.Index < 0 || m.AdmittedAt.IsZero() {
 		return errors.New("engineering message attempt, index and admission time must be valid")
