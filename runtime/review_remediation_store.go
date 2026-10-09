@@ -192,22 +192,28 @@ func (s *SQLiteOperationStore) ReviewRemediationAdmission(decisionID string) (Re
 // not a journal event - is what pendingReviewRemediationKeys folds from: the
 // admission row is the complete, single-write durable authorization.
 //
-// Like ReviewPublication's own row/document identity check, a row whose
-// INDEXED run_id column disagrees with its document's own claimed RunID is
-// refused outright rather than silently returned under whichever identity a
-// caller queried by: CreateReviewRemediationAdmission never writes such a
-// row, so one existing is evidence the table itself cannot be trusted
-// without investigation, not something to paper over by picking a side.
+// Like ReviewPublication's own row/document identity check (and
+// ReviewRemediationAdmission's single-row lookup, and #233's own
+// ReviewDecision), a row whose INDEXED column disagrees with its document's
+// own claim is refused outright rather than silently returned under
+// whichever identity a caller queried by: CreateReviewRemediationAdmission
+// never writes such a row, so one existing is evidence the table itself
+// cannot be trusted without investigation, not something to paper over by
+// picking a side. Both indexed columns are checked here, not only run_id:
+// this is the list method pendingReviewRemediationKeys - the actual planner
+// read path - calls, so a row indexed under one decision_id but whose
+// document claims another must never be read back as authorization for the
+// document's claimed identity.
 func (s *SQLiteOperationStore) ReviewRemediationAdmissionsForRun(runID string) ([]ReviewRemediationAdmission, error) {
-	rows, err := s.db.Query(`SELECT document FROM review_remediation_admissions WHERE run_id = ?`, runID)
+	rows, err := s.db.Query(`SELECT decision_id, document FROM review_remediation_admissions WHERE run_id = ?`, runID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var admissions []ReviewRemediationAdmission
 	for rows.Next() {
-		var document string
-		if err := rows.Scan(&document); err != nil {
+		var indexedDecisionID, document string
+		if err := rows.Scan(&indexedDecisionID, &document); err != nil {
 			return nil, err
 		}
 		var admission ReviewRemediationAdmission
@@ -216,6 +222,9 @@ func (s *SQLiteOperationStore) ReviewRemediationAdmissionsForRun(runID string) (
 		}
 		if err := admission.validate(); err != nil {
 			return nil, fmt.Errorf("stored review remediation admission is corrupt: %w", err)
+		}
+		if admission.DecisionID != indexedDecisionID {
+			return nil, fmt.Errorf("stored review remediation admission row %q disagrees with its own document (names %q)", indexedDecisionID, admission.DecisionID)
 		}
 		if admission.RunID != runID {
 			return nil, fmt.Errorf("stored review remediation admission %s disagrees with its own indexed run %q (names %q)", admission.DecisionID, runID, admission.RunID)

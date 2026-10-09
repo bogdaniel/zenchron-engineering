@@ -599,3 +599,43 @@ func TestReviewDecisionRefusesAKeyDocumentDisagreement(t *testing.T) {
 		t.Fatal("expected a refusal for a row whose indexed id disagrees with its own document")
 	}
 }
+
+// Storage integrity in the ACTUAL planner read path: ReviewRemediationAdmissionsForRun
+// (what pendingReviewRemediationKeys calls) must refuse a row whose indexed
+// decision_id names a DIFFERENT decision than its own document claims - not
+// merely the single-row ReviewRemediationAdmission lookup, which the planner
+// never calls. Without this, a row indexed under decision B but whose
+// document names decision A would read back as authorization for A.
+func TestPendingReviewRemediationKeysRefusesARowIndexedUnderADifferentDecision(t *testing.T) {
+	f := newAdmissionFixture(t)
+	decisionA := f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("f1"))
+	decisionB := f.seedDecision(f.headSHA, "claude-other", review.VerdictRequestChanges, blockingFinding("f1"))
+	admission := ReviewRemediationAdmission{
+		SchemaVersion: reviewRemediationAdmissionSchemaVersion, DecisionID: decisionA.ID, RunID: f.runID,
+		Repository: testRepo.String(), PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA,
+		FindingSignatures: []string{"f1"}, AdmittedAt: f.clock.Now(),
+	}
+	document, err := CanonicalJSON(admission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The row's indexed decision_id names decisionB; its own document claims
+	// decisionA - unreachable through CreateReviewRemediationAdmission,
+	// which always writes both from the same value.
+	if _, err := f.store.db.Exec(`INSERT INTO review_remediation_admissions (decision_id, run_id, admitted_unix_nano, document) VALUES (?, ?, ?, ?)`,
+		decisionB.ID, admission.RunID, admission.AdmittedAt.UnixNano(), string(document)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.store.ReviewRemediationAdmissionsForRun(f.runID); err == nil {
+		t.Fatal("expected a refusal for a row whose indexed decision_id disagrees with its own document")
+	}
+
+	state, err := f.runtime().load(f.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.pendingReviewRemediationKeys(); err == nil {
+		t.Fatal("expected pendingReviewRemediationKeys to surface the integrity error, not silently report no pending keys")
+	}
+}

@@ -232,17 +232,23 @@ path is held to the same complete standard:
   surface as an executable binding
   (`TestPendingReviewRemediationKeysRefusesARowWrittenAroundTheWriteGuard`).
 
-The read side also separately refuses a row whose indexed `run_id` column
-disagrees with its own document's claimed `RunID`
-(`TestReviewRemediationAdmissionsForRunRefusesAnIndexDocumentDisagreement`),
+The read side also separately refuses a row whose indexed `run_id` **and**
+`decision_id` columns disagree with its own document's claimed `RunID`/
+`DecisionID` (`TestReviewRemediationAdmissionsForRunRefusesAnIndexDocumentDisagreement`,
+`TestPendingReviewRemediationKeysRefusesARowIndexedUnderADifferentDecision`),
 mirroring the identity cross-check `ReviewPublication` already makes for its
 own `DecisionID` - a prerequisite sanity check before the full invariant
-function is even worth running against a row. `ReviewRemediationAdmission`'s
-single-row lookup carries the same check on its own `decision_id`
-(`TestReviewRemediationAdmissionRefusesAKeyDocumentDisagreement`), and so
-does #233's own `ReviewDecision` (`runtime/review_store.go`) on its `id` -
-the one lookup `reviewRemediationBindingInvariants` trusts as authoritative
-for the decision it is given
+function is even worth running against a row. Both indexed columns matter
+here specifically because `ReviewRemediationAdmissionsForRun` is the LIST
+method the actual planner path (`pendingReviewRemediationKeys`) calls: a row
+indexed under decision B but whose document claims decision A must never
+read back as authorization for A merely because the single-row
+`ReviewRemediationAdmission(decisionID)` lookup - which the planner never
+calls - happens to carry its own, separate `decision_id` check
+(`TestReviewRemediationAdmissionRefusesAKeyDocumentDisagreement`). #233's own
+`ReviewDecision` (`runtime/review_store.go`) carries the matching check on
+its `id` - the one lookup `reviewRemediationBindingInvariants` trusts as
+authoritative for the decision it is given
 (`TestReviewDecisionRefusesAKeyDocumentDisagreement`). `ReviewDecision` is
 already-merged #233 code, outside this PR's own files, but the fix is a
 single additive identity check in the same pattern `ReviewPublication`
@@ -409,7 +415,7 @@ refusal reasons plus the R1/R2 bypass-closing regressions), both run with
   both the write and, independently, at the read for a row injected around
   the write guard entirely.
 
-Fifteen guards were each deliberately inverted, confirmed to break their
+Sixteen guards were each deliberately inverted, confirmed to break their
 exact corresponding test, and restored: the gate-level independence
 re-check, the staleness re-confirmation (B2), the producer-identity check
 (B3), the fresh-conditions check (B4), the gate-level run-published-this-PR
@@ -417,12 +423,13 @@ check (R1); inside the shared `reviewRemediationBindingInvariants` function,
 each broken and tested independently at both its write-time and read-time
 call sites - the run-published-this-PR invariant, the finding-signature
 equality invariant, the decision-verdict invariant, and the independence
-invariant; the two indexed-key/document integrity checks
-(`ReviewRemediationAdmission` and #233's `ReviewDecision`); the
-`run_id`/document integrity check; and the `ON CONFLICT DO NOTHING`
-idempotent insert (all three idempotency/concurrency/restart tests, which
-failed with a raw `UNIQUE constraint failed` once removed - proving the
-guard, not just an application-level check, is load-bearing).
+invariant; the three indexed-key/document integrity checks on
+`ReviewRemediationAdmissionsForRun` (both `run_id` and `decision_id`,
+checked separately), `ReviewRemediationAdmission`, and #233's
+`ReviewDecision`; and the `ON CONFLICT DO NOTHING` idempotent insert (all
+three idempotency/concurrency/restart tests, which failed with a raw
+`UNIQUE constraint failed` once removed - proving the guard, not just an
+application-level check, is load-bearing).
 
 Deferred to the reconciler/operations wiring above, and therefore not yet
 independently testable end-to-end: the full H1-committed-and-published →
