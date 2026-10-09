@@ -77,15 +77,25 @@ func (a ReviewRemediationAdmission) validate() error {
 type ReviewRemediationRefusalReason string
 
 const (
-	ReviewRemediationRefusedNoDecision     ReviewRemediationRefusalReason = "no_independent_decision"
-	ReviewRemediationRefusedNotBlocking    ReviewRemediationRefusalReason = "decision_not_blocking"
-	ReviewRemediationRefusedStaleSubject   ReviewRemediationRefusalReason = "subject_stale"
-	ReviewRemediationRefusedNotIndependent ReviewRemediationRefusalReason = "reviewer_not_independent"
-	ReviewRemediationRefusedUnknownRun     ReviewRemediationRefusalReason = "run_unknown"
-	ReviewRemediationRefusedRunTerminal    ReviewRemediationRefusalReason = "run_terminal"
-	ReviewRemediationRefusedCandidateMoved ReviewRemediationRefusalReason = "candidate_superseded"
-	ReviewRemediationRefusedNoContract     ReviewRemediationRefusalReason = "no_compiled_contract"
+	ReviewRemediationRefusedNoDecision       ReviewRemediationRefusalReason = "no_independent_decision"
+	ReviewRemediationRefusedNotBlocking      ReviewRemediationRefusalReason = "decision_not_blocking"
+	ReviewRemediationRefusedStaleSubject     ReviewRemediationRefusalReason = "subject_stale"
+	ReviewRemediationRefusedNotIndependent   ReviewRemediationRefusalReason = "reviewer_not_independent"
+	ReviewRemediationRefusedSubjectMismatch  ReviewRemediationRefusalReason = "subject_mismatch"
+	ReviewRemediationRefusedProducerMismatch ReviewRemediationRefusalReason = "producer_mismatch"
+	ReviewRemediationRefusedUnknownRun       ReviewRemediationRefusalReason = "run_unknown"
+	ReviewRemediationRefusedRunTerminal      ReviewRemediationRefusalReason = "run_terminal"
+	ReviewRemediationRefusedCandidateMoved   ReviewRemediationRefusalReason = "candidate_superseded"
+	ReviewRemediationRefusedNoContract       ReviewRemediationRefusalReason = "no_compiled_contract"
 )
+
+// reviewRemediationRaceTestHook runs, if set, immediately after the staleness
+// check and before the re-confirmation read that follows it. It exists ONLY
+// so a test can deterministically force the exact interleaving a second,
+// newer decision admitted in that narrow window requires - without which
+// that race cannot be reproduced on demand. Nil (and therefore free) outside
+// that one test.
+var reviewRemediationRaceTestHook func()
 
 // ReviewRemediationRefusedError reports that an independently reached
 // REQUEST_CHANGES decision exists but AdmitReviewRemediation refuses to treat
@@ -111,29 +121,45 @@ func (e *ReviewRemediationRefusedError) Error() string {
 //
 //  1. a decision exists at all for this exact (repo, PR);
 //  2. it is REQUEST_CHANGES, not APPROVE or COMMENT_ONLY;
-//  3. it is not stale against the PR's current head;
-//  4. producer and reviewer are not the same identity (defense in depth: see
+//  3. producer and reviewer are not the same identity (defense in depth: see
 //     below);
-//  5. the producing run can be loaded and is not terminal;
-//  6. the run has a compiled contract;
-//  7. the run's CURRENT candidate is still the exact head the decision was
+//  4. it is not stale against the PR's current head, AND it is still the
+//     latest decision at the moment this gate is about to act on it (closes
+//     the TOCTOU window between the staleness read and this read: a newer
+//     decision admitted in between must never let the OLD one through merely
+//     because staleness happened to be evaluated against the newer one);
+//  5. its Subject names exactly the requested repository and PR, re-checked
+//     against the document itself rather than trusted from the query that
+//     found it;
+//  6. the producing run can be loaded, is not terminal - checked both as
+//     already-concluded (the persisted snapshot) and as about-to-become-
+//     terminal-but-not-yet-journalled (a fresh runState.conditions() call,
+//     which catches budget exhaustion a later tick has not recorded yet) -
+//     and its own Repository and AgentID match the decision's claimed
+//     subject and producer - never trusted from the decision document alone;
+//  7. the run has a compiled contract;
+//  8. the run's CURRENT candidate is still the exact head the decision was
 //     reached against.
 //
 // On success it is recorded exactly once, by DecisionID, in the cross-run
 // review_remediation_admissions table (global uniqueness: no decision is
 // ever admitted twice, from any caller, any process - see
-// SQLiteOperationStore.CreateReviewRemediationAdmission) and then on the
-// producing run's own journal (EventReviewRemediationAdmitted), so the run's
-// existing in-package event-folding can plan a remediation invocation without
-// any further store I/O - the same shape unresolvedFeedbackBinding and
-// pendingFeedbackKeys already use for admitted GitHub feedback.
+// SQLiteOperationStore.CreateReviewRemediationAdmission). That single durable
+// write IS the complete authorization: nothing else has to happen for it to
+// become visible, because pendingReviewRemediationKeys reads this same table
+// directly rather than a second, separately-written journal event - see that
+// function's own comment for why a second write was tried and removed.
 //
 // What this function deliberately does NOT do: dispatch a provider, consume a
 // budget, or touch the run's scheduling state. Admission is a fact; turning
 // that fact into a scheduled invocation is bindExecutionInvoke's job, exactly
 // as it already is for remediation|... and feedback|... bindings - see
 // docs/review-remediation.md for the exact, still-pending wiring this
-// deliberately stops short of.
+// deliberately stops short of. The existing scheduler's AcquireOperation is
+// what re-validates terminal/paused run state, transactionally, at the actual
+// moment an invocation would start; this gate's own freshness check (6) is a
+// best-effort reduction of a stale-authorization window, never a substitute
+// for that final, authoritative gate.
 func (r *EngineeringRuntime) AdmitReviewRemediation(ctx context.Context, port ReviewPort, repo GitHubRepo, prNumber int) (ReviewRemediationAdmission, bool, error) {
 	decision, found, err := port.LatestDecision(repo, prNumber)
 	if err != nil {
@@ -163,6 +189,13 @@ func (r *EngineeringRuntime) AdmitReviewRemediation(ctx context.Context, port Re
 			Detail: fmt.Sprintf("decision %s names the same agent %q as both producer and reviewer", decision.ID, decision.ProducerAgentID),
 		}
 	}
+	if decision.Subject.Repository != repo.String() || decision.Subject.PRNumber != prNumber {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedSubjectMismatch,
+			Detail: fmt.Sprintf("decision %s's own subject names %s#%d, not the requested %s#%d",
+				decision.ID, decision.Subject.Repository, decision.Subject.PRNumber, repo, prNumber),
+		}
+	}
 	stale, err := port.IsStale(ctx, repo, prNumber)
 	if err != nil {
 		return ReviewRemediationAdmission{}, false, err
@@ -171,6 +204,26 @@ func (r *EngineeringRuntime) AdmitReviewRemediation(ctx context.Context, port Re
 		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
 			Reason: ReviewRemediationRefusedStaleSubject,
 			Detail: fmt.Sprintf("decision %s is bound to %s, which is no longer %s#%d's current head", decision.ID, short12(decision.Subject.HeadSHA), repo, prNumber),
+		}
+	}
+	if reviewRemediationRaceTestHook != nil {
+		reviewRemediationRaceTestHook()
+	}
+	// IsStale's own LatestDecision read above may have evaluated a DIFFERENT,
+	// newer decision than the one fetched at the top of this function, if one
+	// was admitted in the narrow window between the two reads - in which case
+	// "not stale" above is true of that newer decision, never of this one.
+	// Re-confirming identity here closes that window without a second GitHub
+	// round trip: nothing changed if, and only if, the latest decision for
+	// this subject is still exactly the one being authorized.
+	reconfirm, found, err := port.LatestDecision(repo, prNumber)
+	if err != nil {
+		return ReviewRemediationAdmission{}, false, err
+	}
+	if !found || reconfirm.ID != decision.ID {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedStaleSubject,
+			Detail: fmt.Sprintf("a newer independent decision now exists for %s#%d, superseding %s before it could be admitted", repo, prNumber, decision.ID),
 		}
 	}
 
@@ -185,10 +238,40 @@ func (r *EngineeringRuntime) AdmitReviewRemediation(ctx context.Context, port Re
 			Detail: fmt.Sprintf("decision %s names run %q, which could not be loaded: %v", decision.ID, decision.RunID, err),
 		}
 	}
+	if state.run.Repository != repo.String() {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedSubjectMismatch,
+			Detail: fmt.Sprintf("decision %s names run %q, whose own repository %q disagrees with the requested %s", decision.ID, decision.RunID, state.run.Repository, repo),
+		}
+	}
+	if decision.ProducerAgentID == "" || state.run.AgentID != decision.ProducerAgentID {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedProducerMismatch,
+			Detail: fmt.Sprintf("decision %s claims producer %q, but run %s's actual agent is %q", decision.ID, decision.ProducerAgentID, decision.RunID, state.run.AgentID),
+		}
+	}
+	// Two different staleness directions, both checked: the PERSISTED
+	// snapshot (state.snapshot.Disposition) is how an ALREADY-concluded run -
+	// merged, explicitly failed, operator-cancelled - is read back, folded
+	// from the events that actually recorded it; conditions() is the
+	// opposite direction, re-deriving FRESH what the run's disposition
+	// would be right now, which catches a run whose budget exhausted (or
+	// otherwise became terminal) since the last tick but whose next
+	// reconciliation pass has not yet run to journal that fact. Neither
+	// alone is sufficient: conditions() does not re-derive an
+	// already-concluded Completed/Failed from the snapshot (that is its
+	// OWN output, not its input), and the snapshot alone cannot see an
+	// exhaustion that has not been journalled yet.
 	if terminalDisposition(state.snapshot.Disposition) {
 		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
 			Reason: ReviewRemediationRefusedRunTerminal,
 			Detail: fmt.Sprintf("run %s is %s, and a terminal run is never eligible for another invocation", decision.RunID, state.snapshot.Disposition),
+		}
+	}
+	if disposition, reason := state.conditions(); terminalDisposition(disposition) {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedRunTerminal,
+			Detail: fmt.Sprintf("run %s is about to become %s (%s), even though its persisted disposition has not caught up yet, and is never eligible for another invocation", decision.RunID, disposition, reason),
 		}
 	}
 	if state.projection.Contract == (Ref{}) {
@@ -231,16 +314,6 @@ func (r *EngineeringRuntime) AdmitReviewRemediation(ctx context.Context, port Re
 	if err != nil {
 		return ReviewRemediationAdmission{}, false, err
 	}
-	if created {
-		// The cross-run table above is the actual authorization record and is
-		// already durable at this point; this is visibility on the producing
-		// run's own journal (mirrors EventFeedbackObserved) so the run's
-		// existing event-folding can plan from it. A failure here is
-		// reported, never silently retried into a second admission.
-		if err := r.append(state, EventReviewRemediationAdmitted, "", stored, nil); err != nil {
-			return stored, created, fmt.Errorf("review remediation %s was admitted but could not be journalled on run %s: %w", stored.DecisionID, stored.RunID, err)
-		}
-	}
 	return stored, created, nil
 }
 
@@ -251,8 +324,14 @@ func (r *EngineeringRuntime) AdmitReviewRemediation(ctx context.Context, port Re
 // runtime/reconciler.go's bindExecutionInvoke. runtime/reconciler.go is
 // PR #546's active file (#475); wiring these in is a two-line addition to
 // that function once #546 reaches a stable head - see
-// docs/review-remediation.md for the exact diff. Nothing below mutates
-// anything; both are pure reads over a run's already-loaded events.
+// docs/review-remediation.md for the exact diff. Neither method mutates
+// anything. unresolvedReviewRemediationBinding is a pure read over the run's
+// already-loaded operations; pendingReviewRemediationKeys reads the durable
+// admission table (see its own comment for why), so its signature returns an
+// error a future bindExecutionInvoke branch must decide how to treat - the
+// documented wiring treats a read failure as "nothing pending this tick",
+// never as a reason to fail the run, since the underlying authorization
+// remains durable and un-lost regardless.
 
 // unresolvedReviewRemediationBinding re-finds an EXISTING, not-yet-succeeded
 // execution.invoke binding for an admitted review remediation on head, the
@@ -279,28 +358,34 @@ func (s *runState) unresolvedReviewRemediationBinding(head string) (string, bool
 const reviewRemediationBindingPrefix = "review-remediation|"
 
 // pendingReviewRemediationKeys is every admitted review-remediation
-// DecisionID bound to the CURRENT head that this run's journal has not yet
-// recorded a succeeded execution.invoke for. It reads only s.events - already
-// loaded by (*EngineeringRuntime).load - so, like pendingFeedbackKeys, it
-// requires no further store I/O and folds identically on replay after a
-// restart.
-func (s *runState) pendingReviewRemediationKeys() []string {
-	head := s.projection.Head()
-	admitted := map[string]bool{}
-	for _, e := range s.events {
-		if e.Type != EventReviewRemediationAdmitted {
-			continue
-		}
-		var admission ReviewRemediationAdmission
-		if decodeJSON(e.Payload, &admission) != nil || admission.HeadSHA != head {
-			continue
-		}
-		admitted[admission.DecisionID] = true
+// DecisionID bound to the CURRENT head for this run. It reads
+// review_remediation_admissions directly - the SAME table, and the same
+// single write, AdmitReviewRemediation's durable authorization commits to -
+// rather than a second, separately-written journal event.
+//
+// An earlier version of this method folded from a dedicated
+// EventReviewRemediationAdmitted journal event instead, written as a second
+// store call right after the admission row committed. That shape had a
+// crash window: if the process stopped (or the second write failed) between
+// the two writes, the admission row was durable but no event existed to
+// fold, and because a repeat AdmitReviewRemediation call finds the existing
+// row (created=false) and never re-attempts the journal write, the gap was
+// permanent, not merely delayed. Reading the one authoritative table
+// directly removes the second write - and the gap - entirely: the row IS
+// the fact, immediately and durably visible the instant it commits, restart
+// or no restart.
+func (s *runState) pendingReviewRemediationKeys() ([]string, error) {
+	admissions, err := s.rt.deps.Store.ReviewRemediationAdmissionsForRun(s.run.ID)
+	if err != nil {
+		return nil, err
 	}
-	keys := make([]string, 0, len(admitted))
-	for key := range admitted {
-		keys = append(keys, key)
+	head := s.projection.Head()
+	keys := make([]string, 0, len(admissions))
+	for _, admission := range admissions {
+		if admission.HeadSHA == head {
+			keys = append(keys, admission.DecisionID)
+		}
 	}
 	sort.Strings(keys)
-	return keys
+	return keys, nil
 }

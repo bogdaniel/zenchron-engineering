@@ -65,6 +65,11 @@ func (f *admissionFixture) seedRun() {
 	run := newJournalRun(f.runID)
 	run.Repository = testRepo.String()
 	run.AgentID = "codex"
+	// newJournalRun's fixed CreatedAt (1970) is unrelated to the wall-clock
+	// AdmitReviewRemediation's freshness check (B4) evaluates against; keep
+	// it recent relative to the fixture's own clock so an ordinary admission
+	// is never mistaken for a wall-budget-exhausted run.
+	run.CreatedAt = f.clock.Now().Add(-time.Minute)
 	if err := f.store.PutRun(run); err != nil {
 		f.t.Fatal(err)
 	}
@@ -155,13 +160,16 @@ func TestAdmitReviewRemediationAdmitsABlockingDecision(t *testing.T) {
 		t.Fatalf("admission.FindingSignatures = %v, want the one blocking finding", admission.FindingSignatures)
 	}
 
-	// The fact is visible on the run's OWN journal, which is what lets the
-	// deferred reconciler wiring plan from already-loaded events alone.
+	// The fact is visible through the one durable table the deferred
+	// reconciler wiring will read from, with no further write required.
 	state, err := f.runtime().load(f.runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending := state.pendingReviewRemediationKeys()
+	pending, err := state.pendingReviewRemediationKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(pending) != 1 || pending[0] != decision.ID {
 		t.Fatalf("pendingReviewRemediationKeys() = %v, want [%s]", pending, decision.ID)
 	}
@@ -186,18 +194,12 @@ func TestAdmitReviewRemediationIsIdempotent(t *testing.T) {
 		t.Fatalf("second admission %+v disagrees with the first %+v", second, first)
 	}
 
-	state, err := f.runtime().load(f.runID)
+	admissions, err := f.store.ReviewRemediationAdmissionsForRun(f.runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	count := 0
-	for _, e := range state.events {
-		if e.Type == EventReviewRemediationAdmitted {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("run journal carries %d review.remediation_admitted events, want exactly 1", count)
+	if len(admissions) != 1 {
+		t.Fatalf("run %s carries %d durable admissions, want exactly 1", f.runID, len(admissions))
 	}
 }
 
@@ -319,228 +321,194 @@ func TestAdmitReviewRemediationTouchesNoOperation(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Negative / fail-closed paths
-// ---------------------------------------------------------------------------
-
-func TestAdmitReviewRemediationRefusesWhenNoDecisionExists(t *testing.T) {
-	f := newAdmissionFixture(t)
-	_, _, err := f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
-	if err == nil {
-		t.Fatal("expected a refusal with no decision on record")
-	}
-	if reason := refusalReason(t, err); reason != ReviewRemediationRefusedNoDecision {
-		t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedNoDecision)
-	}
-}
-
-func TestAdmitReviewRemediationRefusesNonBlockingVerdicts(t *testing.T) {
-	for _, verdict := range []review.Verdict{review.VerdictApprove, review.VerdictCommentOnly} {
-		t.Run(string(verdict), func(t *testing.T) {
-			f := newAdmissionFixture(t)
-			f.seedDecision(f.headSHA, "claude", verdict)
-			_, _, err := f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
-			if err == nil {
-				t.Fatalf("expected %q to be refused as not blocking", verdict)
-			}
-			if reason := refusalReason(t, err); reason != ReviewRemediationRefusedNotBlocking {
-				t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedNotBlocking)
-			}
-		})
-	}
-}
-
-// Local BLOCK with GitHub publication disabled or uncertain must still admit:
-// publication state is never consulted (docs/review.md, "GitHub publication
-// is not the authorization source").
-func TestAdmitReviewRemediationIgnoresPublicationState(t *testing.T) {
+// B1: there is no window to crash in between "the admission row committed"
+// and "the fact is visible" any more, because there is no second write.
+// Writing the row directly (never calling AdmitReviewRemediation at all)
+// models exactly what a crash immediately after the real call's one commit
+// would leave behind, and pendingReviewRemediationKeys must find it with no
+// further action - proving the admission row IS the complete, self-contained
+// fact, not half of a two-write protocol.
+func TestReviewRemediationAdmissionIsCompleteOnItsOwnSingleWrite(t *testing.T) {
 	f := newAdmissionFixture(t)
 	decision := f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("f1"))
-	// No review.Publication row is ever written for decision.ID - models
-	// "publication wasn't requested, or is not yet authorized" (ReviewOutcome
-	// doc comment) - and admission must still succeed.
-	_, created, err := f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
-	if err != nil || !created {
-		t.Fatalf("expected admission to succeed with no publication on record, got created=%v err=%v", created, err)
+	admission := ReviewRemediationAdmission{
+		SchemaVersion: reviewRemediationAdmissionSchemaVersion, DecisionID: decision.ID, RunID: f.runID,
+		Repository: testRepo.String(), PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA,
+		FindingSignatures: []string{"f1"}, AdmittedAt: f.clock.Now(),
 	}
-	if _, found, err := f.store.ReviewPublication(decision.ID); err != nil || found {
-		t.Fatalf("test invariant broken: a publication exists (found=%v err=%v)", found, err)
+	if _, created, err := f.store.CreateReviewRemediationAdmission(admission); err != nil || !created {
+		t.Fatalf("seeding the admission row directly: created=%v err=%v", created, err)
 	}
-}
-
-func TestAdmitReviewRemediationRefusesAStaleSubject(t *testing.T) {
-	f := newAdmissionFixture(t)
-	f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("f1"))
-	// The PR has moved past the exact head the decision was reached against.
-	pr := f.fake.PullRequests[admissionTestPRNumber]
-	pr.HeadSHA = strings.Repeat("c", 40)
-	f.fake.PullRequests[admissionTestPRNumber] = pr
-
-	_, _, err := f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
-	if err == nil {
-		t.Fatal("expected a refusal for a decision bound to a superseded head")
-	}
-	if reason := refusalReason(t, err); reason != ReviewRemediationRefusedStaleSubject {
-		t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedStaleSubject)
-	}
-}
-
-// Defense in depth (#474 requirement 2): #233 refuses to construct a Decision
-// at all when producer and reviewer collapse, but a corrupted or
-// hand-crafted row in the durable store must still never buy remediation
-// authorization merely by existing.
-func TestAdmitReviewRemediationRefusesAForgedIndependenceCollapse(t *testing.T) {
-	f := newAdmissionFixture(t)
-	f.seedDecision(f.headSHA, "codex", review.VerdictRequestChanges, blockingFinding("f1")) // reviewer == producer ("codex")
-
-	_, _, err := f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
-	if err == nil {
-		t.Fatal("expected a refusal when the decision names the same agent as producer and reviewer")
-	}
-	if reason := refusalReason(t, err); reason != ReviewRemediationRefusedNotIndependent {
-		t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedNotIndependent)
-	}
-}
-
-func TestAdmitReviewRemediationRefusesATerminalRun(t *testing.T) {
-	for _, disposition := range []Disposition{Completed, Failed, Cancelled} {
-		t.Run(string(disposition), func(t *testing.T) {
-			f := newAdmissionFixture(t)
-			run, found, err := f.store.Run(f.runID)
-			if err != nil || !found {
-				t.Fatal(err)
-			}
-			run.Disposition = disposition
-			if err := f.store.PutRun(run); err != nil {
-				t.Fatal(err)
-			}
-			f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("f1"))
-
-			_, _, err = f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
-			if err == nil {
-				t.Fatalf("expected a %s run to be refused", disposition)
-			}
-			if reason := refusalReason(t, err); reason != ReviewRemediationRefusedRunTerminal {
-				t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedRunTerminal)
-			}
-		})
-	}
-}
-
-func TestAdmitReviewRemediationRefusesAnUnknownRun(t *testing.T) {
-	f := newAdmissionFixture(t)
-	subject := review.Subject{Repository: testRepo.String(), PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA}
-	id, err := review.DecisionID(subject, "claude")
-	if err != nil {
-		t.Fatal(err)
-	}
-	decision := review.Decision{
-		SchemaVersion: review.SchemaVersion, ID: id, Subject: subject, RunID: "run-does-not-exist",
-		ProducerAgentID: "codex", ReviewerAgentID: "claude", Verdict: review.VerdictRequestChanges,
-		Findings: []review.Finding{blockingFinding("f1")}, CreatedAt: f.clock.Now(),
-	}
-	if _, _, err := f.store.CreateReviewDecision(decision); err != nil {
-		t.Fatal(err)
-	}
-
-	_, _, err = f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
-	if err == nil {
-		t.Fatal("expected a refusal for a decision naming an unknown run")
-	}
-	if reason := refusalReason(t, err); reason != ReviewRemediationRefusedUnknownRun {
-		t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedUnknownRun)
-	}
-}
-
-func TestAdmitReviewRemediationRefusesWithNoCompiledContract(t *testing.T) {
-	f := newAdmissionFixture(t)
-	// A run with no EventContractCompiled at all: seed it fresh, bypassing
-	// seedRun's event set.
-	run := newJournalRun("run-no-contract")
-	run.Repository = testRepo.String()
-	run.AgentID = "codex"
-	if err := f.store.PutRun(run); err != nil {
-		t.Fatal(err)
-	}
-	f.runID = "run-no-contract"
-	f.appendEvent(EventCandidateCommitted, CandidateCommittedPayload{Commit: f.headSHA, Tree: "tree-1", PathsDigest: "d1"})
-	f.appendEvent(EventGitHubPRObserved, GitHubPRObservedPayload{Number: admissionTestPRNumber, HeadRevision: f.headSHA, BaseRevision: f.baseSHA, State: "open"})
-	f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("f1"))
-
-	_, _, err := f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
-	if err == nil {
-		t.Fatal("expected a refusal for a run with no compiled contract")
-	}
-	if reason := refusalReason(t, err); reason != ReviewRemediationRefusedNoContract {
-		t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedNoContract)
-	}
-}
-
-// The run's own candidate moved past the reviewed head (a later commit this
-// run made independent of any new PR observation) - the decision is for a
-// subject this run has already superseded, even though the PR's own reported
-// head still matches it.
-func TestAdmitReviewRemediationRefusesASupersededCandidate(t *testing.T) {
-	f := newAdmissionFixture(t)
-	f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("f1"))
-	f.appendEvent(EventCandidateCommitted, CandidateCommittedPayload{Commit: strings.Repeat("d", 40), Tree: "tree-2", PathsDigest: "d2"})
-
-	_, _, err := f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
-	if err == nil {
-		t.Fatal("expected a refusal when the run's own candidate has moved past the reviewed head")
-	}
-	if reason := refusalReason(t, err); reason != ReviewRemediationRefusedCandidateMoved {
-		t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedCandidateMoved)
-	}
-}
-
-// H1's decision can never satisfy H2: a fresh decision for the NEW head is a
-// different DecisionID entirely, admitted (or refused) independently.
-func TestStaleDecisionNeverSatisfiesANewerHead(t *testing.T) {
-	f := newAdmissionFixture(t)
-	h1Decision := f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("f1"))
-
-	h2 := strings.Repeat("e", 40)
-	f.appendEvent(EventCandidateCommitted, CandidateCommittedPayload{Commit: h2, Tree: "tree-2", PathsDigest: "d2"})
-	pr := f.fake.PullRequests[admissionTestPRNumber]
-	pr.HeadSHA = h2
-	f.fake.PullRequests[admissionTestPRNumber] = pr
-
-	// H1's own decision is now both stale (PR moved) and superseded
-	// (candidate moved); LatestDecision still returns it until a NEW one is
-	// reached, and it must never admit.
-	if _, _, err := f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber); err == nil {
-		t.Fatal("expected H1's decision to be refused once H2 is the current head")
-	}
-
-	h2Decision := f.seedDecision(h2, "claude", review.VerdictRequestChanges, blockingFinding("f2"))
-	if h2Decision.ID == h1Decision.ID {
-		t.Fatal("test invariant broken: H1 and H2 decisions must have distinct identities")
-	}
-	admission, created, err := f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
-	if err != nil || !created || admission.DecisionID != h2Decision.ID {
-		t.Fatalf("expected H2's own decision to admit cleanly, got %+v created=%v err=%v", admission, created, err)
-	}
-}
-
-// pendingReviewRemediationKeys folds purely from the run's own already-loaded
-// events: an admission bound to an OLDER head than the run's current one
-// must never appear as pending for the current head.
-func TestPendingReviewRemediationKeysIgnoresAdmissionsForAnOlderHead(t *testing.T) {
-	f := newAdmissionFixture(t)
-	f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("f1"))
-	if _, created, err := f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber); err != nil || !created {
-		t.Fatalf("admitting H1's remediation: created=%v err=%v", created, err)
-	}
-
-	h2 := strings.Repeat("e", 40)
-	f.appendEvent(EventCandidateCommitted, CandidateCommittedPayload{Commit: h2, Tree: "tree-2", PathsDigest: "d2"})
 
 	state, err := f.runtime().load(f.runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending := state.pendingReviewRemediationKeys(); len(pending) != 0 {
-		t.Fatalf("pendingReviewRemediationKeys() = %v after the head moved past the admitted decision, want none", pending)
+	pending, err := state.pendingReviewRemediationKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0] != decision.ID {
+		t.Fatalf("pendingReviewRemediationKeys() = %v immediately after the single write, want [%s] with no further action", pending, decision.ID)
+	}
+}
+
+// B2: IsStale's own internal LatestDecision call can evaluate a DIFFERENT,
+// newer decision than the one fetched at the top of AdmitReviewRemediation,
+// if one is admitted in the narrow window between the two reads. The forced
+// interleaving below reproduces exactly that: by the time the staleness
+// check runs, decision D2 (bound to a newer head) already exists and IS
+// current, so IsStale(D2) reports false - but D1 (the one this call is
+// trying to authorize) must still be refused as superseded.
+func TestAdmitReviewRemediationRefusesADecisionSupersededBetweenReads(t *testing.T) {
+	f := newAdmissionFixture(t)
+	h1Decision := f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("f1"))
+	h2 := strings.Repeat("e", 40)
+
+	defer func() { reviewRemediationRaceTestHook = nil }()
+	reviewRemediationRaceTestHook = func() {
+		// Models a second, concurrent admission that races ahead between
+		// this call's staleness read and its identity re-confirmation: a
+		// fresh candidate head and a fresh, current decision for it.
+		f.appendEvent(EventCandidateCommitted, CandidateCommittedPayload{Commit: h2, Tree: "tree-2", PathsDigest: "d2"})
+		pr := f.fake.PullRequests[admissionTestPRNumber]
+		pr.HeadSHA = h2
+		f.fake.PullRequests[admissionTestPRNumber] = pr
+		f.seedDecision(h2, "claude", review.VerdictRequestChanges, blockingFinding("f2"))
+	}
+
+	_, _, err := f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
+	if err == nil {
+		t.Fatal("expected H1's decision to be refused once a newer decision supersedes it mid-admission")
+	}
+	if reason := refusalReason(t, err); reason != ReviewRemediationRefusedStaleSubject {
+		t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedStaleSubject)
+	}
+	if _, found, err := f.store.ReviewRemediationAdmission(h1Decision.ID); err != nil || found {
+		t.Fatalf("H1 must never be admitted once superseded: found=%v err=%v", found, err)
+	}
+}
+
+// B3: the gate must not trust a decision's claimed producer/subject merely
+// because it is self-consistent - it must match the ACTUAL run and the
+// ACTUAL requested subject.
+func TestAdmitReviewRemediationRefusesSubjectAndProducerMismatches(t *testing.T) {
+	t.Run("decision document disagrees with the indexed row that found it", func(t *testing.T) {
+		f := newAdmissionFixture(t)
+		// Writes a row directly, bypassing CreateReviewDecision entirely, so
+		// its INDEXED (repository, pr_number) columns - what LatestDecision's
+		// query matches on - say testRepo/admissionTestPRNumber, while its
+		// embedded document's OWN claimed Subject.Repository disagrees. No
+		// legitimate store API can produce this; it models #233's store
+		// layer corrupting or disagreeing with itself, which this gate must
+		// never trust merely because the query found a row.
+		subject := review.Subject{Repository: "someone/else", PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA}
+		id, err := review.DecisionID(subject, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		decision := review.Decision{
+			SchemaVersion: review.SchemaVersion, ID: id, Subject: subject, RunID: f.runID,
+			ProducerAgentID: "codex", ReviewerAgentID: "claude", Verdict: review.VerdictRequestChanges,
+			Findings: []review.Finding{blockingFinding("f1")}, CreatedAt: f.clock.Now(),
+		}
+		document, err := CanonicalJSON(decision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.store.db.Exec(`INSERT INTO review_decisions (id, repository, pr_number, head_sha, run_id, created_unix_nano, document)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			decision.ID, testRepo.String(), admissionTestPRNumber, decision.Subject.HeadSHA, decision.RunID, decision.CreatedAt.UnixNano(), string(document)); err != nil {
+			t.Fatal(err)
+		}
+
+		_, _, err = f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
+		if err == nil {
+			t.Fatal("expected a refusal for a decision whose own subject disagrees with the row that found it")
+		}
+		if reason := refusalReason(t, err); reason != ReviewRemediationRefusedSubjectMismatch {
+			t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedSubjectMismatch)
+		}
+	})
+
+	t.Run("run's actual agent disagrees with the decision's claimed producer", func(t *testing.T) {
+		f := newAdmissionFixture(t)
+		subject := review.Subject{Repository: testRepo.String(), PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA}
+		id, err := review.DecisionID(subject, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The run's actual agent is "codex" (seedRun), but this decision
+		// claims an unrelated producer identity - independence (producer !=
+		// reviewer) holds trivially, yet the claimed producer never produced
+		// this run at all.
+		decision := review.Decision{
+			SchemaVersion: review.SchemaVersion, ID: id, Subject: subject, RunID: f.runID,
+			ProducerAgentID: "some-other-agent", ReviewerAgentID: "claude", Verdict: review.VerdictRequestChanges,
+			Findings: []review.Finding{blockingFinding("f1")}, CreatedAt: f.clock.Now(),
+		}
+		if _, _, err := f.store.CreateReviewDecision(decision); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
+		if err == nil {
+			t.Fatal("expected a refusal when the decision's claimed producer is not the run's actual agent")
+		}
+		if reason := refusalReason(t, err); reason != ReviewRemediationRefusedProducerMismatch {
+			t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedProducerMismatch)
+		}
+	})
+
+	t.Run("empty claimed producer", func(t *testing.T) {
+		f := newAdmissionFixture(t)
+		subject := review.Subject{Repository: testRepo.String(), PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA}
+		id, err := review.DecisionID(subject, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		decision := review.Decision{
+			SchemaVersion: review.SchemaVersion, ID: id, Subject: subject, RunID: f.runID,
+			ProducerAgentID: "", ReviewerAgentID: "claude", Verdict: review.VerdictRequestChanges,
+			Findings: []review.Finding{blockingFinding("f1")}, CreatedAt: f.clock.Now(),
+		}
+		if _, _, err := f.store.CreateReviewDecision(decision); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
+		if err == nil {
+			t.Fatal("expected a refusal for an empty claimed producer identity")
+		}
+		if reason := refusalReason(t, err); reason != ReviewRemediationRefusedProducerMismatch {
+			t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedProducerMismatch)
+		}
+	})
+}
+
+// B4: the run's PERSISTED disposition can lag reality - budget exhaustion is
+// only journalled the next time conditions() runs during ordinary
+// reconciliation. Admission must re-derive eligibility fresh rather than
+// trust a snapshot that has not caught up yet.
+func TestAdmitReviewRemediationRefusesARunWhoseBudgetIsExhaustedButNotYetJournalled(t *testing.T) {
+	f := newAdmissionFixture(t)
+	run, found, err := f.store.Run(f.runID)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	// The persisted disposition is still Active (newJournalRun's default) -
+	// no reconciliation tick has run conditions() since the budget below was
+	// exhausted.
+	run.Budgets = &RunBudgets{WallLimit: time.Minute}
+	run.CreatedAt = f.clock.Now().Add(-2 * time.Hour)
+	if err := f.store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("f1"))
+
+	_, _, err = f.runtime().AdmitReviewRemediation(context.Background(), f.port(), testRepo, admissionTestPRNumber)
+	if err == nil {
+		t.Fatal("expected a refusal for a run whose wall budget is exhausted, even though its persisted disposition is still Active")
+	}
+	if reason := refusalReason(t, err); reason != ReviewRemediationRefusedRunTerminal {
+		t.Fatalf("reason = %q, want %q", reason, ReviewRemediationRefusedRunTerminal)
 	}
 }

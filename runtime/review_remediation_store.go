@@ -64,3 +64,28 @@ func (s *SQLiteOperationStore) ReviewRemediationAdmission(decisionID string) (Re
 	}
 	return admission, true, nil
 }
+
+// ReviewRemediationAdmissionsForRun reads every admission ever recorded for
+// runID, across every exact head it has ever been admitted against. This -
+// not a journal event - is what pendingReviewRemediationKeys folds from: the
+// admission row is the complete, single-write durable authorization.
+func (s *SQLiteOperationStore) ReviewRemediationAdmissionsForRun(runID string) ([]ReviewRemediationAdmission, error) {
+	rows, err := s.db.Query(`SELECT document FROM review_remediation_admissions WHERE run_id = ?`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var admissions []ReviewRemediationAdmission
+	for rows.Next() {
+		var document string
+		if err := rows.Scan(&document); err != nil {
+			return nil, err
+		}
+		var admission ReviewRemediationAdmission
+		if err := strictJSON([]byte(document), &admission); err != nil {
+			return nil, fmt.Errorf("stored review remediation admission is unreadable: %w", err)
+		}
+		admissions = append(admissions, admission)
+	}
+	return admissions, rows.Err()
+}

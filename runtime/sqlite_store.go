@@ -617,6 +617,7 @@ CREATE TABLE review_remediation_admissions (
 	admitted_unix_nano INTEGER NOT NULL,
 	document           TEXT NOT NULL
 );
+CREATE INDEX review_remediation_admissions_by_run ON review_remediation_admissions(run_id);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
