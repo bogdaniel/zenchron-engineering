@@ -48,8 +48,15 @@ func (s *SQLiteOperationStore) CreateOrchestrationBatch(batch orchestration.Batc
 // OrchestrationBatch reads one batch. A stored document that does not decode
 // strictly or does not match its own identity is an error, never repaired.
 func (s *SQLiteOperationStore) OrchestrationBatch(id string) (orchestration.Batch, bool, error) {
+	return queryOrchestrationBatch(s.db, id)
+}
+
+// queryOrchestrationBatch is the sqlExecutor-generic read
+// ResolveDecisionRequest (decision_store.go) pins inside its own linearized
+// transaction, exactly as the standalone OrchestrationBatch does outside one.
+func queryOrchestrationBatch(q sqlExecutor, id string) (orchestration.Batch, bool, error) {
 	var document string
-	err := s.db.QueryRow(`SELECT document FROM orchestration_batches WHERE id = ?`, id).Scan(&document)
+	err := q.QueryRow(`SELECT document FROM orchestration_batches WHERE id = ?`, id).Scan(&document)
 	if errors.Is(err, sql.ErrNoRows) {
 		return orchestration.Batch{}, false, nil
 	}

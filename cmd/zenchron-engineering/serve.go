@@ -390,6 +390,7 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 		PollInterval:              time.Duration(policy.PollIntervalSeconds) * time.Second,
 		Discovery:                 discovery,
 		Agents:                    c.agents,
+		WorkUnitHolds:             c.store.WorkGraphHolds, // #508's seam
 		AgentProber: func(agent runtime.ResolvedAgent) runtime.AgentProber {
 			return runtime.AgentProberFor(agent, c.artifacts, operatorHome())
 		},
@@ -463,6 +464,8 @@ func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.S
 			return controlError(err)
 		}
 		return controlOK(view)
+	case runtime.ControlWorkGraphHold, runtime.ControlResolveDecision:
+		return dispatchDecisionControl(supervisor, request) // #508, kept out of this switch's bulk
 	case runtime.ControlStatus:
 		policy, err := c.config.SupervisorPolicy()
 		if err != nil {

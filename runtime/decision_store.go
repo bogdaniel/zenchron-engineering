@@ -1,0 +1,711 @@
+package runtime
+
+// Durable, authorized DecisionResolution persistence (#508).
+//
+// Both tables are insert-only, exactly like the handoff and message tables
+// beside them: a hold is placed once, keyed by its graph and unit alone, and
+// a resolution is written once, keyed by the request it resolves alone. A
+// second writer racing the first - two operators, or a retried request after
+// a lost reply - finds the row already there rather than a free slot to
+// write into; ResolveDecision (orchestration package) then decides whether
+// that is an idempotent replay or a conflict to refuse.
+//
+// ResolveDecisionRequest (#508 review P2) is the one case that insert-only
+// alone does not protect: resolving a request reads two OTHER authoritative
+// facts first - whether it is still live, and its owner's current subject -
+// and both can move under a read taken with no lock at all. Every read and
+// the final insert there run inside ONE transaction, which this store opens
+// BEGIN IMMEDIATE (sqlite_store.go's _txlock=immediate): SQLite itself holds
+// the write lock from that transaction's first statement, so no concurrent
+// writer - another resolution, a message admission superseding the request,
+// a handoff admission moving the subject, in this process or another -
+// can land between the check and the commit. That is the same primitive
+// admitHandoff already relies on for its own conditional admission
+// (orchestration_store.go); this is the multi-step version of it.
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
+)
+
+// sqlExecutor is the read/write surface satisfied identically by *sql.DB and
+// *sql.Tx, so a read that normally runs standalone can be pinned inside one
+// held transaction instead, without a second copy of its query.
+type sqlExecutor interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// PlaceWorkUnitHold writes one hold ONCE. A hold already stored for this
+// graph and unit is not rewritten: it is returned with placed=false, which
+// makes resubmitting a request whose reply was lost find the hold already
+// there. A DIFFERENT hold under the same identity - the graph and unit are
+// the whole identity, so this can only mean a second, disagreeing placement
+// attempt - is a conflict, never an overwrite.
+func (s *SQLiteOperationStore) PlaceWorkUnitHold(hold orchestration.WorkUnitHold) (orchestration.WorkUnitHold, bool, error) {
+	return placeWorkUnitHold(s.db, hold)
+}
+
+// placeWorkUnitHold is the sqlExecutor-generic form Supervisor.PlaceWorkUnitHold
+// (#508 review P3) pins inside the same orchestrationMu-held revalidation it
+// already shares with graph adoption and activation.
+func placeWorkUnitHold(q sqlExecutor, hold orchestration.WorkUnitHold) (orchestration.WorkUnitHold, bool, error) {
+	if err := hold.Validate(); err != nil {
+		return orchestration.WorkUnitHold{}, false, err
+	}
+	document, err := CanonicalJSON(hold)
+	if err != nil {
+		return orchestration.WorkUnitHold{}, false, err
+	}
+	result, err := q.Exec(`INSERT INTO work_unit_holds (id, graph_id, unit_id, requested_unix_nano, document)
+		VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+		hold.ID, hold.GraphID, hold.UnitID, hold.RequestedAt.UnixNano(), string(document))
+	if err != nil {
+		return orchestration.WorkUnitHold{}, false, err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return orchestration.WorkUnitHold{}, false, err
+	}
+	if inserted == 1 {
+		return hold, true, nil
+	}
+	stored, found, err := workUnitHoldByID(q, hold.ID)
+	if err != nil {
+		return orchestration.WorkUnitHold{}, false, err
+	}
+	if !found {
+		return orchestration.WorkUnitHold{}, false, fmt.Errorf("work unit hold %s was neither inserted nor found", hold.ID)
+	}
+	// Compared by IDENTITY CONTENT alone - Purpose and RequestedBy, both
+	// plain strings - never by RequestedAt or a canonical-document byte
+	// comparison that would include it (#508 review B4). RequestedAt is
+	// stamped fresh by the clock on every call, including an identical
+	// retry after a lost reply; comparing it would make that retry its own
+	// conflict rather than the idempotent replay it is. Purpose and
+	// RequestedBy are the only caller-stated content a hold has, and the
+	// graph/unit/id are already proven equal by the lookup itself.
+	if stored.Purpose != hold.Purpose || stored.RequestedBy != hold.RequestedBy {
+		return orchestration.WorkUnitHold{}, false, fmt.Errorf(
+			"work unit %s of graph %s already has a hold placed with different content; a hold is placed at most once", hold.UnitID, hold.GraphID)
+	}
+	return stored, false, nil
+}
+
+// WorkUnitHoldByID reads one hold by its own identity.
+func (s *SQLiteOperationStore) WorkUnitHoldByID(id string) (orchestration.WorkUnitHold, bool, error) {
+	return workUnitHoldByID(s.db, id)
+}
+
+func workUnitHoldByID(q sqlExecutor, id string) (orchestration.WorkUnitHold, bool, error) {
+	var document string
+	err := q.QueryRow(`SELECT document FROM work_unit_holds WHERE id = ?`, id).Scan(&document)
+	if errors.Is(err, sql.ErrNoRows) {
+		return orchestration.WorkUnitHold{}, false, nil
+	}
+	if err != nil {
+		return orchestration.WorkUnitHold{}, false, err
+	}
+	return decodeWorkUnitHold(document)
+}
+
+// WorkGraphHolds reports, for one graph, every unit a hold has been placed on
+// that no durable resolution has yet lifted. It is the function wired as
+// SupervisorDependencies.WorkUnitHolds: the ONLY source #508 supplies for
+// #472's readiness-owner seam. A unit with no row here is simply not held;
+// nothing else in this build can hold one.
+func (s *SQLiteOperationStore) WorkGraphHolds(graphID string) (map[string]orchestration.DecisionWait, error) {
+	rows, err := s.db.Query(`SELECT document FROM work_unit_holds WHERE graph_id = ?`, graphID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var holds []orchestration.WorkUnitHold
+	for rows.Next() {
+		var document string
+		if err := rows.Scan(&document); err != nil {
+			return nil, err
+		}
+		hold, _, err := decodeWorkUnitHold(document)
+		if err != nil {
+			return nil, err
+		}
+		holds = append(holds, hold)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	waits := map[string]orchestration.DecisionWait{}
+	for _, hold := range holds {
+		resolution, resolved, err := s.DecisionResolutionByRequestID(hold.ID)
+		if err != nil {
+			return nil, err
+		}
+		// ONLY an explicit allow lifts a hold (#508 review B2). A hold's own
+		// Ref always prescribes an allow_deny outcome (orchestration.WorkUnitHold.Ref),
+		// so "resolved but not allow" means exactly one thing: an authorized
+		// deny. The unit stays held - never auto-run denied work - and an
+		// unknown/malformed stored outcome fails the same way: closed, not
+		// treated as permission.
+		if resolved && resolution.Outcome.Kind == orchestration.DecisionAllowDeny && resolution.Outcome.Value == orchestration.DecisionAllow {
+			continue
+		}
+		waits[hold.UnitID] = hold.DecisionWait()
+	}
+	return waits, nil
+}
+
+func decodeWorkUnitHold(document string) (orchestration.WorkUnitHold, bool, error) {
+	var hold orchestration.WorkUnitHold
+	if err := strictJSON([]byte(document), &hold); err != nil {
+		return orchestration.WorkUnitHold{}, false, fmt.Errorf("stored work unit hold is unreadable: %w", err)
+	}
+	if err := hold.Validate(); err != nil {
+		return orchestration.WorkUnitHold{}, false, fmt.Errorf("stored work unit hold is corrupt: %w", err)
+	}
+	return hold, true, nil
+}
+
+// InsertDecisionResolution writes one resolution ONCE, keyed by the request it
+// resolves. It always returns the row that is durably stored for that request
+// afterwards - inserted=true only when THIS call wrote it - so a caller can
+// tell an idempotent replay (the stored row matches what it proposed) from a
+// race it lost to a conflicting answer (it does not), exactly as
+// orchestration.ResolveDecision decides which one happened.
+//
+// This standalone form is for tests and callers that already know their read
+// of the live request and its subject cannot have gone stale (there is none,
+// or it was taken inside the same transaction as the insert). The governed
+// path is ResolveDecisionRequest, below, which takes both atomically.
+func (s *SQLiteOperationStore) InsertDecisionResolution(resolution orchestration.DecisionResolution) (orchestration.DecisionResolution, bool, error) {
+	return insertDecisionResolution(s.db, resolution)
+}
+
+func insertDecisionResolution(q sqlExecutor, resolution orchestration.DecisionResolution) (orchestration.DecisionResolution, bool, error) {
+	if err := resolution.Validate(); err != nil {
+		return orchestration.DecisionResolution{}, false, err
+	}
+	document, err := CanonicalJSON(resolution)
+	if err != nil {
+		return orchestration.DecisionResolution{}, false, err
+	}
+	result, err := q.Exec(`INSERT INTO decision_resolutions (id, request_id, scope, resolved_unix_nano, document)
+		VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+		resolution.ID, resolution.RequestID, resolution.Scope, resolution.ResolvedAt.UnixNano(), string(document))
+	if err != nil {
+		return orchestration.DecisionResolution{}, false, err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return orchestration.DecisionResolution{}, false, err
+	}
+	if inserted == 1 {
+		return resolution, true, nil
+	}
+	stored, found, err := decisionResolutionByRequestID(q, resolution.RequestID)
+	if err != nil {
+		return orchestration.DecisionResolution{}, false, err
+	}
+	if !found {
+		return orchestration.DecisionResolution{}, false, fmt.Errorf("decision resolution for request %s was neither inserted nor found", resolution.RequestID)
+	}
+	return stored, false, nil
+}
+
+// DecisionResolutionByRequestID reads the resolution already durably stored
+// for one request, if any.
+func (s *SQLiteOperationStore) DecisionResolutionByRequestID(requestID string) (orchestration.DecisionResolution, bool, error) {
+	return decisionResolutionByRequestID(s.db, requestID)
+}
+
+func decisionResolutionByRequestID(q sqlExecutor, requestID string) (orchestration.DecisionResolution, bool, error) {
+	var document string
+	err := q.QueryRow(`SELECT document FROM decision_resolutions WHERE request_id = ?`, requestID).Scan(&document)
+	if errors.Is(err, sql.ErrNoRows) {
+		return orchestration.DecisionResolution{}, false, nil
+	}
+	if err != nil {
+		return orchestration.DecisionResolution{}, false, err
+	}
+	var resolution orchestration.DecisionResolution
+	if err := strictJSON([]byte(document), &resolution); err != nil {
+		return orchestration.DecisionResolution{}, false, fmt.Errorf("stored decision resolution is unreadable: %w", err)
+	}
+	if err := resolution.Validate(); err != nil {
+		return orchestration.DecisionResolution{}, false, fmt.Errorf("stored decision resolution is corrupt: %w", err)
+	}
+	return resolution, true, nil
+}
+
+// OpenDecisionRequestsForRun is #508's run-level wait eligibility: every live
+// (not superseded), not yet resolved #473 decision_request message THIS run
+// itself admitted. Reconcile holds a run with any open here - plans no
+// further operation, so it spends no provider process or scheduler slot -
+// until each one resolves. A worker cannot shorten this list: nothing it can
+// write resolves a request, and the set is read fresh every pass from durable
+// state alone.
+func (s *SQLiteOperationStore) OpenDecisionRequestsForRun(runID string) ([]orchestration.EngineeringMessage, error) {
+	rows, err := s.db.Query(`SELECT document FROM orchestration_messages WHERE run_id = ?`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var messages []orchestration.EngineeringMessage
+	for rows.Next() {
+		var document string
+		if err := rows.Scan(&document); err != nil {
+			return nil, err
+		}
+		var message orchestration.EngineeringMessage
+		if err := strictJSON([]byte(document), &message); err != nil {
+			return nil, fmt.Errorf("stored message is unreadable: %w", err)
+		}
+		if err := message.Validate(); err != nil {
+			return nil, fmt.Errorf("stored message is corrupt: %w", err)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Live is computed over THIS run's own full message set: a draft can only
+	// supersede a prior one from the same unit of the same scope, and a
+	// run's items are all one unit, so every superseding reference is already
+	// present in what was just read.
+	var open []orchestration.EngineeringMessage
+	for _, message := range orchestration.Live(messages) {
+		if message.Kind != orchestration.KindDecisionRequest {
+			continue
+		}
+		if _, resolved, err := s.DecisionResolutionByRequestID(message.ID); err != nil {
+			return nil, err
+		} else if !resolved {
+			open = append(open, message)
+		}
+	}
+	return open, nil
+}
+
+// ResolvedOwnDecisionRequests is #508 P4b's resumption eligibility: every
+// live (not superseded) #473 decision_request message THIS run itself
+// admitted that now carries a durable resolution, sorted by request id for
+// deterministic replay. A superseded request's resolution, if any, is a true
+// historical fact but is excluded here: the question it answered no longer
+// stands, so it never causes a resumption (the same liveness filter
+// OpenDecisionRequestsForRun already applies to the open side).
+func (s *SQLiteOperationStore) ResolvedOwnDecisionRequests(runID string) ([]orchestration.DecisionResolution, error) {
+	return resolvedOwnDecisionRequestsTx(s.db, runID)
+}
+
+// resolvedOwnDecisionRequestsTx is ResolvedOwnDecisionRequests' sqlExecutor-
+// generic form, pinned inside AdmitDecisionResumption's own BEGIN IMMEDIATE
+// transaction (#508 review F2) exactly as findDecisionRequestTx already is:
+// the complete live resolved-own-decision set an admission pins is read from
+// the SAME held snapshot its insert commits against, never a separate,
+// earlier, unlocked read the caller merely proposes.
+func resolvedOwnDecisionRequestsTx(q sqlExecutor, runID string) ([]orchestration.DecisionResolution, error) {
+	rows, err := q.Query(`SELECT document FROM orchestration_messages WHERE run_id = ?`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var messages []orchestration.EngineeringMessage
+	for rows.Next() {
+		var document string
+		if err := rows.Scan(&document); err != nil {
+			return nil, err
+		}
+		var message orchestration.EngineeringMessage
+		if err := strictJSON([]byte(document), &message); err != nil {
+			return nil, fmt.Errorf("stored message is unreadable: %w", err)
+		}
+		if err := message.Validate(); err != nil {
+			return nil, fmt.Errorf("stored message is corrupt: %w", err)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var resolved []orchestration.DecisionResolution
+	for _, message := range orchestration.Live(messages) {
+		if message.Kind != orchestration.KindDecisionRequest {
+			continue
+		}
+		resolution, found, err := decisionResolutionByRequestID(q, message.ID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			resolved = append(resolved, resolution)
+		}
+	}
+	sort.Slice(resolved, func(i, j int) bool { return resolved[i].RequestID < resolved[j].RequestID })
+	return resolved, nil
+}
+
+// ResolveDecisionRequest is the WHOLE governed resolution as one linearized
+// database operation (#508 review P2): finding the live request, reading its
+// owner's current subject, reading any existing resolution, and the final
+// insert all run inside one BEGIN IMMEDIATE transaction. Nothing else can
+// supersede the request, move its subject, or write a competing resolution
+// between the check and the commit - not another resolution attempt, not a
+// concurrent message or handoff admission pass, in this process or another
+// one sharing this database file.
+//
+// It never starts a provider and never activates anything; it returns the
+// durable resolution (an idempotent replay returns the existing one
+// unchanged) or a refusal, exactly as orchestration.ResolveDecision decides.
+func (s *SQLiteOperationStore) ResolveDecisionRequest(decisionID string, outcome orchestration.DecisionOutcome, reason string,
+	authority orchestration.DecisionResolutionAuthority, now time.Time) (orchestration.DecisionResolution, error) {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return orchestration.DecisionResolution{}, err
+	}
+	defer tx.Rollback()
+	ref, current, err := findDecisionRequestTx(tx, decisionID)
+	if err != nil {
+		return orchestration.DecisionResolution{}, err
+	}
+	existing, found, err := decisionResolutionByRequestID(tx, ref.ID)
+	if err != nil {
+		return orchestration.DecisionResolution{}, err
+	}
+	var existingPtr *orchestration.DecisionResolution
+	if found {
+		existingPtr = &existing
+	}
+	proposed, err := orchestration.ResolveDecision(ref, current, outcome, reason, authority, existingPtr, now)
+	if err != nil {
+		return orchestration.DecisionResolution{}, err
+	}
+	// ON CONFLICT DO NOTHING + a fallback re-read stays as a belt-and-braces
+	// safety net: with BEGIN IMMEDIATE already holding the write lock from
+	// this transaction's first statement, the existing-resolution read above
+	// is already authoritative and this insert cannot find a surprise it did
+	// not already report. Defensive anyway, in case a future connection or
+	// driver change ever weakens that guarantee.
+	stored, _, err := insertDecisionResolution(tx, proposed)
+	if err != nil {
+		return orchestration.DecisionResolution{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return orchestration.DecisionResolution{}, err
+	}
+	return stored, nil
+}
+
+// AdmitDecisionResumption pins, at most once per execution.invoke operation,
+// the exact decision set and subject a #508 P4b decision-resumed binding is
+// authorized to resume for (review B1/B2). An EXISTING admission for this
+// operationID is returned UNCHANGED, regardless of current decision state:
+// once pinned, a later supersession or subject drift belongs to a later
+// epoch and never retroactively invalidates an operation already admitted
+// to run - which is what lets a RETRY of the SAME operation, after its own
+// prior attempt already delivered this exact set, proceed under its own
+// original envelope instead of being refused as stale against itself. The
+// existing row's own binding must still agree with the one this call names,
+// or the operation identity itself is corrupt and the call is refused
+// rather than silently handed a mismatched snapshot.
+//
+// With no existing admission (review F2), nothing proposed by the caller is
+// trusted: the run's own events, its complete current live resolved-own-
+// decision set and its current contract/candidate epoch are ALL re-read
+// fresh, inside this one BEGIN IMMEDIATE transaction - the same held
+// snapshot the final insert commits against, exactly as
+// ResolveDecisionRequest already reads its two facts above. The caller's
+// binding is trusted only once decisionResumeBinding, recomputed from that
+// re-derived set and epoch, reproduces it exactly; any divergence - a
+// resolution admitted or superseded since the caller's own load, a moved
+// candidate or contract - refuses the whole admission before anything is
+// written. Each individual decision is then re-confirmed live with its
+// subject still current, the same rule ResolveDecisionRequest enforces.
+func (s *SQLiteOperationStore) AdmitDecisionResumption(runID, operationID, binding string, now time.Time) (DecisionResumptionAdmission, error) {
+	if runID == "" || operationID == "" || binding == "" {
+		return DecisionResumptionAdmission{}, errors.New("admitting a decision resumption needs its run, operation id and binding")
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	defer tx.Rollback()
+	if existing, found, err := decisionResumptionAdmissionByOperationID(tx, operationID); err != nil {
+		return DecisionResumptionAdmission{}, err
+	} else if found {
+		if existing.Binding != binding {
+			return DecisionResumptionAdmission{}, fmt.Errorf("operation %s is already admitted under a different binding", operationID)
+		}
+		return existing, nil
+	}
+	events, err := queryEvents(tx, runID)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	projection, err := Project(events)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	delivered, err := deliveredDecisionIDsFromEvents(events)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	liveResolved, err := resolvedOwnDecisionRequestsTx(tx, runID)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	contractRevision, candidateSubject := projection.Contract.Revision, projection.CandidateRevision
+	undelivered := undeliveredOf(liveResolved, delivered)
+	if expected := decisionResumeBinding(contractRevision, candidateSubject, undelivered); expected != binding {
+		return DecisionResumptionAdmission{}, fmt.Errorf(
+			"the undelivered decision set, contract or candidate this operation names no longer matches current durable state (recomputed binding %q)", expected)
+	}
+	if len(undelivered) == 0 {
+		return DecisionResumptionAdmission{}, errors.New("a decision resumption admission names at least one decision")
+	}
+	decisions := make([]DeliveredDecision, len(undelivered))
+	for i, resolution := range undelivered {
+		if err := validateLiveAndCurrent(tx, resolution.RequestID); err != nil {
+			return DecisionResumptionAdmission{}, err
+		}
+		decisions[i] = DeliveredDecision{RequestID: resolution.RequestID, ResolutionID: resolution.ID}
+	}
+	admission := DecisionResumptionAdmission{
+		SchemaVersion: DecisionResumptionAdmissionSchemaVersion, OperationID: operationID, Binding: binding,
+		Decisions: decisions, ContractRevision: contractRevision, CandidateSubject: candidateSubject, AdmittedAt: now,
+	}
+	document, err := CanonicalJSON(admission)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	if _, err := tx.Exec(`INSERT INTO decision_resumption_admissions (operation_id, binding, admitted_unix_nano, document)
+		VALUES (?, ?, ?, ?) ON CONFLICT(operation_id) DO NOTHING`,
+		operationID, binding, now.UnixNano(), string(document)); err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	return admission, nil
+}
+
+// decisionResumptionAdmissionByOperationID reads one admission by its
+// primary key, cross-checks the stored document's OWN operation_id field
+// against it (review F2), and validates the whole document (review R2): a
+// row found under a key its own content disagrees with, or that is
+// otherwise malformed or hollowed-out, is corruption, never a usable
+// admission.
+func decisionResumptionAdmissionByOperationID(q sqlExecutor, operationID string) (DecisionResumptionAdmission, bool, error) {
+	var document string
+	err := q.QueryRow(`SELECT document FROM decision_resumption_admissions WHERE operation_id = ?`, operationID).Scan(&document)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DecisionResumptionAdmission{}, false, nil
+	}
+	if err != nil {
+		return DecisionResumptionAdmission{}, false, err
+	}
+	var admission DecisionResumptionAdmission
+	if err := strictJSON([]byte(document), &admission); err != nil {
+		return DecisionResumptionAdmission{}, false, fmt.Errorf("stored decision resumption admission is corrupt: %w", err)
+	}
+	if admission.OperationID != operationID {
+		return DecisionResumptionAdmission{}, false, fmt.Errorf(
+			"stored decision resumption admission for operation %s names operation %s instead", operationID, admission.OperationID)
+	}
+	if err := validateDecisionResumptionAdmission(admission); err != nil {
+		return DecisionResumptionAdmission{}, false, fmt.Errorf("stored decision resumption admission is invalid: %w", err)
+	}
+	return admission, true, nil
+}
+
+// validateDecisionResumptionAdmission is the ONE authoritative check a
+// stored admission document must pass before ANY caller treats it as
+// authority (review R2): a row with the correct key but an empty,
+// oversized, unsorted, duplicated or otherwise hollowed-out Decisions set,
+// a missing schema version/contract/timestamp, or a binding that does not
+// match its own decision set and epoch, is corruption. Without this, a
+// present-but-invalid admission (decisions: []) would read exactly like
+// the TRUE zero-value "no admission for this operation" sentinel, and
+// prepareDecisionResumedMessages would fall through to a fresh, unpinned
+// scope-wide read - silently reopening the substitution path F1 closed.
+func validateDecisionResumptionAdmission(a DecisionResumptionAdmission) error {
+	if a.SchemaVersion != DecisionResumptionAdmissionSchemaVersion {
+		return fmt.Errorf("decision resumption admission schema version %q is not %q", a.SchemaVersion, DecisionResumptionAdmissionSchemaVersion)
+	}
+	// ContractRevision/CandidateSubject are not required non-empty here: an
+	// empty candidate subject is legitimate (the initial invocation, before
+	// any candidate exists, binds decision-resumed|digest("")|... exactly
+	// like unresumedDecisionResumeBinding already allows), and whichever
+	// pair is stored is instead validated for internal consistency below -
+	// the stored binding must match them AND the decision set together.
+	if a.OperationID == "" || a.AdmittedAt.IsZero() {
+		return errors.New("decision resumption admission is missing a required field")
+	}
+	if len(a.Decisions) == 0 || len(a.Decisions) > maxDeliveredDecisions {
+		return fmt.Errorf("decision resumption admission names %d decisions, not 1 to %d", len(a.Decisions), maxDeliveredDecisions)
+	}
+	ids := make([]orchestration.DecisionResolution, len(a.Decisions))
+	seen := make(map[string]bool, len(a.Decisions))
+	for i, d := range a.Decisions {
+		if d.RequestID == "" || d.ResolutionID == "" {
+			return errors.New("decision resumption admission names a decision with an empty request or resolution id")
+		}
+		if seen[d.RequestID] {
+			return fmt.Errorf("decision resumption admission names request %s more than once", d.RequestID)
+		}
+		seen[d.RequestID] = true
+		if i > 0 && a.Decisions[i-1].RequestID >= d.RequestID {
+			return errors.New("decision resumption admission's decisions are not sorted by request id")
+		}
+		ids[i] = orchestration.DecisionResolution{RequestID: d.RequestID}
+	}
+	if expected := decisionResumeBinding(a.ContractRevision, a.CandidateSubject, ids); expected != a.Binding {
+		return fmt.Errorf("decision resumption admission's binding %q does not match its own decision set and epoch (expected %q)", a.Binding, expected)
+	}
+	return nil
+}
+
+// validateLiveAndCurrent proves one decision request is still live and, if
+// subject-bound, still bound to its owner's CURRENT subject - the same two
+// facts ResolveDecisionRequest's own admission already enforces, reused here
+// by both the first #508 P4b admission (review B2) and a later dispatch-time
+// recovery (review F1), so neither can trust a resolution the other would
+// refuse.
+func validateLiveAndCurrent(q sqlExecutor, requestID string) error {
+	ref, current, err := findDecisionRequestTx(q, requestID)
+	if err != nil {
+		return err
+	}
+	if !ref.Live {
+		return fmt.Errorf("decision request %s is no longer live", requestID)
+	}
+	if ref.Subject != nil && (current == nil || *current != ref.Subject.Revision) {
+		return fmt.Errorf("decision request %s is bound to a subject that is no longer current", requestID)
+	}
+	return nil
+}
+
+// RecoverDecisionResumptionContext re-verifies, immediately before dispatch
+// and on EVERY attempt including a retry - never only once, at admission -
+// that every decision a #508 P4b decision-resumed admission is pinned to
+// still carries its original resolution and is still live with its owner's
+// current subject (review F1). The provider's own context is built ONLY
+// from this exact, re-verified snapshot, never a fresh scope-wide read, so a
+// worker is never shown something the admission does not name, a later
+// supersession or newly-resolved, unpinned decision can never substitute
+// into it, and the journal's delivery claim can never name something this
+// attempt was not actually shown. The TRUE zero-value admission (an
+// ordinary, non-resumed operation - OperationID "") answers (nil, nil) at
+// once; a present OperationID with an otherwise invalid document (review
+// R2) fails closed rather than falling through to that same sentinel.
+//
+// Every pinned decision is read and validated under ONE held transaction
+// (review R1): SQLite's own per-transaction read consistency, not a
+// per-statement one, is what makes the whole recovered set a single
+// coherent snapshot rather than several independently-timed reads that
+// could straddle an intervening supersession or subject move. A change
+// that commits before this transaction begins is reflected and checked; one
+// that commits after is a later epoch this call never observes, never a
+// silent partial rewrite of what it already read. The transaction is
+// read-only and is rolled back the instant recovery finishes, well before
+// any provider is ever invoked - no lock is held across that external call.
+func (s *SQLiteOperationStore) RecoverDecisionResumptionContext(admission DecisionResumptionAdmission) ([]orchestration.DecisionResolution, error) {
+	if admission.OperationID == "" {
+		return nil, nil
+	}
+	if err := validateDecisionResumptionAdmission(admission); err != nil {
+		return nil, fmt.Errorf("stored decision resumption admission is invalid: %w", err)
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	return recoverDecisionResumptionContextTx(tx, admission)
+}
+
+// recoverDecisionResumptionContextTx is RecoverDecisionResumptionContext's
+// sqlExecutor-generic core, so a test can force the SAME window open with
+// a caller-held transaction exactly as decision_linearizability_test.go's
+// resolveUnderHeldTx already does for ResolveDecisionRequest.
+func recoverDecisionResumptionContextTx(q sqlExecutor, admission DecisionResumptionAdmission) ([]orchestration.DecisionResolution, error) {
+	resolved := make([]orchestration.DecisionResolution, len(admission.Decisions))
+	for i, pinned := range admission.Decisions {
+		resolution, found, err := decisionResolutionByRequestID(q, pinned.RequestID)
+		if err != nil {
+			return nil, err
+		}
+		if !found || resolution.ID != pinned.ResolutionID {
+			return nil, fmt.Errorf("decision %s no longer carries the resolution %s this operation was admitted for", pinned.RequestID, pinned.ResolutionID)
+		}
+		if err := validateLiveAndCurrent(q, pinned.RequestID); err != nil {
+			return nil, err
+		}
+		resolved[i] = resolution
+	}
+	return resolved, nil
+}
+
+// findDecisionRequestTx resolves one request id to its normalized facts and
+// its owner's CURRENT subject, entirely through q - the SAME read surface
+// the caller's insert runs against, so nothing between this read and that
+// insert can move out from under it. Neither store naming the id is the
+// unknown-request refusal: fail closed, not "probably a hold".
+func findDecisionRequestTx(q sqlExecutor, id string) (orchestration.DecisionRequestRef, *orchestration.HandoffSubject, error) {
+	message, found, err := queryMessageByID(q, id)
+	if err != nil {
+		return orchestration.DecisionRequestRef{}, nil, err
+	}
+	if found {
+		return decisionRequestFromMessageTx(q, message)
+	}
+	hold, found, err := workUnitHoldByID(q, id)
+	if err != nil {
+		return orchestration.DecisionRequestRef{}, nil, err
+	}
+	if !found {
+		return orchestration.DecisionRequestRef{}, nil, fmt.Errorf("unknown decision request %s", id)
+	}
+	return hold.Ref(), nil, nil
+}
+
+func decisionRequestFromMessageTx(q sqlExecutor, message orchestration.EngineeringMessage) (orchestration.DecisionRequestRef, *orchestration.HandoffSubject, error) {
+	if message.Kind != orchestration.KindDecisionRequest {
+		return orchestration.DecisionRequestRef{}, nil, fmt.Errorf("%s is a %s, not a decision request", message.ID, message.Kind)
+	}
+	batch, found, err := queryOrchestrationBatch(q, message.Scope)
+	if err != nil {
+		return orchestration.DecisionRequestRef{}, nil, err
+	}
+	if !found {
+		return orchestration.DecisionRequestRef{}, nil, fmt.Errorf("decision request %s names scope %s, which is unreadable", message.ID, message.Scope)
+	}
+	scope, current, err := queryBatchMessageScope(q, batch)
+	if err != nil {
+		return orchestration.DecisionRequestRef{}, nil, err
+	}
+	live := false
+	for _, admitted := range orchestration.Live(scope.Admitted) {
+		if admitted.ID == message.ID {
+			live = true
+			break
+		}
+	}
+	// ExpectedOutcomeKind/PermittedOptions are read straight off the frozen,
+	// insert-only admitted message (#508 review P4c) - never re-derived,
+	// never widened by anything a later caller supplies.
+	ref := orchestration.DecisionRequestRef{
+		ID: message.ID, Scope: message.Scope, Subject: message.Subject, Live: live,
+		ExpectedOutcomeKind: message.ExpectedOutcomeKind, PermittedOptions: message.PermittedOptions,
+	}
+	if message.Subject == nil {
+		return ref, nil, nil
+	}
+	return ref, current[message.Subject.Owner], nil
+}
