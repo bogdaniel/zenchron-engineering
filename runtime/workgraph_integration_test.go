@@ -798,7 +798,7 @@ func TestWorkGraphIntegrationHandoffWaitsForRequiredSemanticAssurance(t *testing
 	view := fixture.adoptGraph(supervisor, "claude", 1, integrationGraphUnits(issueA, issueB, issueC))
 
 	var cRunID string
-	var sawRequiredSemanticClaim bool
+	var sawRequiredSemanticClaim, sawFailingSemanticObservationOnExactHead bool
 	for range 60 {
 		if _, err := supervisor.Tick(context.Background()); err != nil {
 			t.Fatal(err)
@@ -816,18 +816,27 @@ func TestWorkGraphIntegrationHandoffWaitsForRequiredSemanticAssurance(t *testing
 		} else if len(handoffs) != 0 {
 			t.Fatalf("tick: the integration handoff was admitted despite a failing required semantic verdict: %d handoffs", len(handoffs))
 		}
-		if state, err := engineLoadForTest(t, fixture, cRunID); err == nil && len(state.semanticClaims()) > 0 {
-			sawRequiredSemanticClaim = true
+		if state, err := engineLoadForTest(t, fixture, cRunID); err == nil {
+			if len(state.semanticClaims()) > 0 {
+				sawRequiredSemanticClaim = true
+			}
+			// The negative assertion below (RunHandoffs stays empty) must
+			// not pass merely because semantic assurance never ran against
+			// THIS exact head - #475 review #5473056173's N3 hardening ask.
+			// Confirming the failing verdict itself, bound to the
+			// integrator's own candidate revision, is what makes the test
+			// incapable of passing vacuously.
+			semantic := state.projection.SemanticAssurance
+			if semantic != nil && !semantic.Stale && !semantic.Passed && semantic.Commit == state.projection.CandidateRevision {
+				sawFailingSemanticObservationOnExactHead = true
+			}
 		}
-		// Keep driving the full 60 ticks even after the claim is seen: the
-		// handoff-admit OPERATION succeeding (writing its report) and the
-		// supervisor's separate admitOrchestratedHandoff pass actually
-		// inserting the row into orchestration_handoffs happen on different
-		// ticks. Breaking here would stop before that later tick runs, and
-		// the final assertion below would never see a wrongly-admitted row.
 	}
 	if !sawRequiredSemanticClaim {
-		t.Skip("this fixture's integrator contract never required semantic evidence; N3's guard was never exercised")
+		t.Fatal("this fixture's integrator contract never required semantic evidence; N3's guard was never exercised")
+	}
+	if !sawFailingSemanticObservationOnExactHead {
+		t.Fatal("no failing semantic assurance observation was ever recorded against the integrator's exact candidate revision; this run cannot show N3's guard actually held anything back")
 	}
 	if handoffs, err := fixture.store.RunHandoffs(cRunID); err != nil || len(handoffs) != 0 {
 		t.Fatalf("final: integration handoff admitted despite a failing required semantic verdict: %d handoffs (%v)", len(handoffs), err)
