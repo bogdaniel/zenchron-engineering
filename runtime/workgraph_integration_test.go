@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -45,6 +44,13 @@ type integrationFile struct {
 
 // WritesTypedResults: the controlled worker writes straight to the slot path.
 func (w *integrationWorker) WritesTypedResults() bool { return true }
+
+func (w *integrationWorker) Isolation() ProviderIsolation {
+	return ProviderIsolation{
+		FilesystemRead: IsolationProven, FilesystemWrite: IsolationProven,
+		NetworkDenied: IsolationProven, CredentialScope: IsolationProven,
+	}
+}
 
 func (w *integrationWorker) Execute(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	for marker, file := range w.files {
@@ -298,6 +304,13 @@ func (f providerFunc) Execute(ctx context.Context, request ExecutionRequest) (Ex
 // WritesTypedResults: the controlled worker writes straight to the slot path.
 func (f providerFunc) WritesTypedResults() bool { return true }
 
+func (f providerFunc) Isolation() ProviderIsolation {
+	return ProviderIsolation{
+		FilesystemRead: IsolationProven, FilesystemWrite: IsolationProven,
+		NetworkDenied: IsolationProven, CredentialScope: IsolationProven,
+	}
+}
+
 // TestWorkGraphIntegrationTextualConflictBlocksAndFindsNoHandoff is Scenario
 // B: a and b modify the same content incompatibly. The integration unit
 // never admits a partial or completed handoff, and the conflict is visible
@@ -373,10 +386,12 @@ func TestWorkGraphIntegrationTextualConflictBlocksAndFindsNoHandoff(t *testing.T
 }
 
 // TestWorkGraphIntegrationRestartReproducesTheSameOutcome is Scenario E/H: a
-// fresh supervisor instance over the same durable store (standing in for a
-// restart) replays to the identical frontier, admits no second handoff and
-// creates no second integration run, whether the first pass already
-// finished or is driven again mid-flight.
+// GENUINELY closed and reopened SQLite store (reopen, authority_matrix_test.go
+// - nothing survives out of a connection pool or page cache; everything the
+// restarted supervisor reports has to come off disk) replays to the
+// identical frontier, admits no second handoff and creates no second
+// integration run, whether the first pass already finished or is driven
+// again mid-flight.
 func TestWorkGraphIntegrationRestartReproducesTheSameOutcome(t *testing.T) {
 	const issueA, issueB, issueC = fleetFirstIssue, fleetFirstIssue + 1, fleetFirstIssue + 2
 	fixture := newFleetFixture(t, 4)
@@ -392,7 +407,9 @@ func TestWorkGraphIntegrationRestartReproducesTheSameOutcome(t *testing.T) {
 	c := settled.unit(t, "c")
 	firstRunID, firstCandidate := c.RunID, c.Output.CandidateRevision
 
-	// A FRESH supervisor over the SAME durable store: the restart.
+	// Genuinely close and reopen the store, then a fresh supervisor over the
+	// reopened handle: the restart.
+	reopen(t, fixture.phase8Fixture)
 	restarted := fixture.supervisor()
 	for range 10 {
 		if _, err := restarted.Tick(context.Background()); err != nil {
@@ -467,28 +484,36 @@ func TestWorkGraphIntegrationUnitInvalidatedWhenUpstreamOutputReplaced(t *testin
 	}
 }
 
-// targetedAssurance passes every candidate except one exact run, chosen
-// after the fact (the integration unit's run id is not known before its
-// upstream inputs admit), with a real candidate verdict - never an
-// ambiguous zero-value result - so AssuranceRerun's own confirmation pass
-// and flake detection see a consistent, deliberate failure.
+// targetedAssurance fails exactly the composed integration candidate's own
+// assurance, identified by CONTENT rather than by run id: composeIntegration
+// commits its merge and reaches its own assurance operation within the SAME
+// scheduler tick that first creates the run (there is no intervening
+// provider invocation to span a tick boundary, unlike an ordinary unit), so
+// a run id learned by observing the WorkGraph between ticks is always
+// already stale by the time assurance for that run actually executes.
+// Checking the checkout for both producers' own files - true only of the
+// merged commit - needs no such timing at all.
 type targetedAssurance struct {
-	mu     sync.Mutex
-	failOn string
-}
-
-func (a *targetedAssurance) fail(runID string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.failOn = runID
+	failPaths []string
+	// failClass is the verdict a matched checkout fails with. Defaults to
+	// FailureCompileTest (a real candidate verdict) when left zero.
+	failClass FailureClass
 }
 
 func (a *targetedAssurance) Assure(_ context.Context, request AssuranceRequest) (AssuranceResult, error) {
-	a.mu.Lock()
-	fail := a.failOn != "" && request.RunID == a.failOn
-	a.mu.Unlock()
+	fail := len(a.failPaths) > 0
+	for _, path := range a.failPaths {
+		if _, err := os.Stat(filepath.Join(request.CheckoutDir, path)); err != nil {
+			fail = false
+			break
+		}
+	}
 	if fail {
-		return AssuranceResult{ProviderID: "targeted-assurance", VerifierDefinition: "fake", Passed: false, FailureClass: FailureCompileTest}, nil
+		class := a.failClass
+		if class == "" {
+			class = FailureCompileTest
+		}
+		return AssuranceResult{ProviderID: "targeted-assurance", VerifierDefinition: "fake", Passed: false, FailureClass: class}, nil
 	}
 	return AssuranceResult{ProviderID: "targeted-assurance", VerifierDefinition: "fake", Passed: true}, nil
 }
@@ -528,16 +553,12 @@ func TestWorkGraphIntegrationSemanticAssuranceFailureNeverRoutesToAProvider(t *t
 		return ExecutionResult{ProviderID: "integration-fleet-worker", Outcome: execution.Succeeded},
 			os.WriteFile(request.HandoffPath, []byte(fleetValidReport), 0o600)
 	})
-	assurance := &targetedAssurance{}
+	assurance := &targetedAssurance{failPaths: []string{"a.go", "b.go"}}
 	fixture.deps.Assurance = assurance
 	supervisor := fixture.supervisor()
 	view := fixture.adoptGraph(supervisor, "claude", 1, integrationGraphUnits(issueA, issueB, issueC))
 
-	settled := fixture.driveGraph(supervisor, view.GraphID, func(current WorkGraphView) {
-		if c := current.unit(t, "c"); c.RunID != "" {
-			assurance.fail(c.RunID)
-		}
-	})
+	settled := fixture.driveGraph(supervisor, view.GraphID, nil)
 	a, b, c := settled.unit(t, "a"), settled.unit(t, "b"), settled.unit(t, "c")
 	if a.State != orchestration.UnitState(orchestration.ItemCompleted) || b.State != orchestration.UnitState(orchestration.ItemCompleted) {
 		t.Fatalf("producers did not both complete: a=%s b=%s", a.State, b.State)
@@ -570,5 +591,58 @@ func TestWorkGraphIntegrationSemanticAssuranceFailureNeverRoutesToAProvider(t *t
 	}
 	if !sawIntegrationConflict {
 		t.Fatal("no assurance observation recorded the integration's own typed failure class")
+	}
+}
+
+// TestWorkGraphIntegrationTransientAssuranceFailureIsNeverReclassified proves
+// the RouteProviderRemediation-only guard in assureCandidate by breaking it
+// conceptually: a TRANSIENT infrastructure failure (the sandbox could not
+// run, never a verdict about the candidate) must stay exactly that, never
+// get relabeled integration_conflict. Reclassifying it would be wrong twice
+// over - it misreports why the attempt failed, and integration_conflict's
+// own retry disposition is written for an unchanging deterministic
+// conflict, not a fault that may clear on its own next attempt.
+func TestWorkGraphIntegrationTransientAssuranceFailureIsNeverReclassified(t *testing.T) {
+	const issueA, issueB, issueC = fleetFirstIssue, fleetFirstIssue + 1, fleetFirstIssue + 2
+	fixture := newFleetFixture(t, 4)
+	fixture.setIntegrationIssue(issueA, "a")
+	fixture.setIntegrationIssue(issueB, "b")
+	fixture.deps.Provider = &integrationWorker{files: map[string]integrationFile{
+		"a": {path: "a.go", content: "package candidate\nconst A = 1\n"},
+		"b": {path: "b.go", content: "package candidate\nconst B = 1\n"},
+	}}
+	fixture.deps.Assurance = &targetedAssurance{failPaths: []string{"a.go", "b.go"}, failClass: FailureTransientInfrastructure}
+	supervisor := fixture.supervisor()
+	view := fixture.adoptGraph(supervisor, "claude", 1, integrationGraphUnits(issueA, issueB, issueC))
+	settled := fixture.driveGraph(supervisor, view.GraphID, nil)
+	c := settled.unit(t, "c")
+	if c.Output != nil {
+		t.Fatal("an integration whose own assurance never passed carries an admitted output")
+	}
+	events, err := fixture.store.Events(c.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawTransient, sawMisclassified bool
+	for _, event := range events {
+		if event.Type != EventAssuranceObserved {
+			continue
+		}
+		payload, err := decodePayload[AssuranceObservedPayload](event.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch payload.FailureClass {
+		case FailureTransientInfrastructure:
+			sawTransient = true
+		case FailureIntegrationConflict:
+			sawMisclassified = true
+		}
+	}
+	if !sawTransient {
+		t.Fatal("no assurance observation recorded the real transient infrastructure class")
+	}
+	if sawMisclassified {
+		t.Fatal("a transient infrastructure assurance failure was relabeled integration_conflict")
 	}
 }

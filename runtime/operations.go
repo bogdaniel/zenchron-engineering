@@ -2425,14 +2425,22 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 		class = FailureVerification
 	}
 	// A WORK GRAPH integration_compose UNIT'S (#475) candidate failing
-	// assurance is never routed as an ordinary verification failure:
-	// RouteFailure's RouteProviderRemediation would try to re-invoke a
-	// provider this unit never receives (bindExecutionInvoke's execution-kind
-	// guard refuses it), which would strand the run with nothing eligible to
-	// plan. See classifyIntegrationAssuranceFailure for the actual typed
-	// verdict (integration.ClassifyAssuranceFailure), computed below.
-	if !result.Passed && state.origin != nil && state.origin.ExecutionKind == orchestration.ExecutionKindIntegrationCompose {
-		class = FailureIntegrationConflict
+	// assurance is never routed as an ordinary verification failure: only
+	// when the verdict WOULD have gone to RouteProviderRemediation - a real
+	// candidate-level verdict, never a transient or infrastructure class
+	// this unit's own bounded retry already handles correctly. Re-invoking a
+	// provider for it is impossible (bindExecutionInvoke's execution-kind
+	// guard refuses one), which would otherwise strand the run with nothing
+	// eligible to plan. classifyIntegrationAssuranceFailure uses the actual
+	// typed verdict (integration.ClassifyAssuranceFailure), never a bare
+	// string assignment guessing at the right vocabulary.
+	if !result.Passed && state.origin != nil && state.origin.ExecutionKind == orchestration.ExecutionKindIntegrationCompose &&
+		RouteFailure(class) == RouteProviderRemediation {
+		reclassified, err := r.classifyIntegrationAssuranceFailure(state, result.FailureSignature)
+		if err != nil {
+			return failed(err)
+		}
+		class = reclassified
 	}
 	payload := AssuranceObservedPayload{
 		ProviderID:         firstNonEmpty(result.ProviderID, "assurance-provider"),

@@ -93,6 +93,38 @@ func (r *EngineeringRuntime) composeIntegration(_ context.Context, state *runSta
 	}
 }
 
+// classifyIntegrationAssuranceFailure turns a failing assurance verdict
+// against an integration_compose unit's own composed candidate into
+// integration.ClassifyAssuranceFailure's typed vocabulary, never a bare
+// FailureClass string guessed at the call site.
+//
+// It always classifies ConflictSemantic, never ConflictUncertain: both of
+// this unit's consumed inputs already passed their OWN independent
+// assurance before being admitted (that is what admission means), so a
+// failure specific to the newly merged result is attributable to the
+// combination - never one input's pre-existing defect, and never guessed
+// at. ClassifyAssuranceFailure itself still refuses to classify this a
+// ConflictTextual, so a caller cannot smuggle a fabricated textual conflict
+// through this path either.
+func (r *EngineeringRuntime) classifyIntegrationAssuranceFailure(state *runState, detail string) (FailureClass, error) {
+	origin := state.origin
+	contract, err := integration.NewContract(origin.GraphID, origin.UnitID, state.baseRevision(), origin.Inputs)
+	if err != nil {
+		return "", err
+	}
+	digest, err := origin.Inputs.Digest()
+	if err != nil {
+		return "", err
+	}
+	candidate := integration.IntegratedCandidate{
+		Revision: state.projection.CandidateRevision, Tree: state.projection.CandidateTree, InputsDigest: digest,
+	}
+	if _, err := integration.ClassifyAssuranceFailure(contract, candidate, integration.ConflictSemantic, detail); err != nil {
+		return "", err
+	}
+	return FailureIntegrationConflict, nil
+}
+
 // integrationSources resolves one WorkGraph unit id to its LIVE
 // IntegrationSource, read fresh from durable state on every call - never
 // memoized across the contract's whole plan - so a commit that remains
