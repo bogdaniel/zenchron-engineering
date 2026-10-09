@@ -1062,9 +1062,15 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// "nothing happened".
 	var resolutionErr error
 	if typed.Resolution != nil && execErr == nil && result.Failure == nil {
-		deliveredKeys := make([]string, 0, len(feedback))
+		deliveredKeys := make([]string, 0, len(feedback)+len(reviewFindings))
 		for _, item := range feedback {
 			deliveredKeys = append(deliveredKeys, item.Key)
+		}
+		// #474 B1: a delivered review-remediation finding is as much an
+		// obligation as GitHub feedback; a no-change resolution must name it
+		// too, under the same exact-match admitResolution already enforces.
+		for _, item := range reviewFindings {
+			deliveredKeys = append(deliveredKeys, item.Signature)
 		}
 		switch {
 		case purpose == InvocationContinuation:
@@ -1094,6 +1100,12 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// so the run keeps wanting a successor instead of silently stranding the
 	// obligation behind an operation the scheduler already considers settled.
 	feedbackUnresolved := len(feedback) > 0 && !record.Mutated && execErr == nil &&
+		result.Failure == nil && len(record.ResolvedFeedback) == 0
+	// THE SAME GATE (#474 B1), bound to an admitted independent-review BLOCK
+	// instead of GitHub feedback: left unchecked, a non-mutating return would
+	// satisfy the review-remediation|... binding forever with the reviewer's
+	// REQUEST_CHANGES never addressed.
+	reviewRemediationUnresolved := len(reviewFindings) > 0 && !record.Mutated && execErr == nil &&
 		result.Failure == nil && len(record.ResolvedFeedback) == 0
 	// THE REVIEWER PROTOCOL COMPLETION GATE (#374), the same shape as #376's
 	// feedback gate just above. A stage whose role produces a verdict crosses
@@ -1347,6 +1359,25 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			cause = fmt.Errorf("the feedback resolution did not bind: %w", resolutionErr)
 		}
 		diagnostic := r.executionDiagnostic(execStageCandidateAdmission, FailureFeedbackUnresolved, result, cause)
+		state.admitSuccessor(diagnostic, operation, result.Invocation, false, true, r.deps.Clock.Now())
+		return effect{
+			state:  OperationFailed,
+			events: events,
+			result: executionRecord{
+				mutationResult: record,
+				PriorContext:   result.PriorContext,
+				Diagnostic:     diagnostic,
+			},
+		}
+	}
+	// #474 B1, same reason and same bounded retry as feedbackUnresolved above.
+	if reviewRemediationUnresolved {
+		record.FailureClass = FailureReviewRemediationUnresolved
+		cause := errors.New("the invocation neither changed the candidate nor stated an admitted no-change resolution for the review-remediation finding(s) it was delivered")
+		if resolutionErr != nil {
+			cause = fmt.Errorf("the review-remediation resolution did not bind: %w", resolutionErr)
+		}
+		diagnostic := r.executionDiagnostic(execStageCandidateAdmission, FailureReviewRemediationUnresolved, result, cause)
 		state.admitSuccessor(diagnostic, operation, result.Invocation, false, true, r.deps.Clock.Now())
 		return effect{
 			state:  OperationFailed,

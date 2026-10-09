@@ -12,6 +12,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/execution"
@@ -176,5 +177,102 @@ func TestReviewRemediationEndToEndH1BlockH2Approve(t *testing.T) {
 	// review cannot approve the new head.
 	if _, _, err := fixture.runtime.AdmitReviewRemediation(ctx, port, repo, prNumber); err == nil {
 		t.Fatal("expected AdmitReviewRemediation to refuse once the latest decision is APPROVE, not REQUEST_CHANGES")
+	}
+}
+
+// TestUnresolvedReviewRemediationReturnFailsTheOperationAndStaysActionable is
+// #474 B1's regression, the review-remediation sibling of
+// TestUnresolvedFeedbackReturnFailsTheOperationAndStaysActionable (#376): an
+// admitted independent-review BLOCK must never be satisfied by a producer
+// invocation that merely returns success without mutating the candidate and
+// without stating an admitted no-change resolution naming it. Before B1,
+// invokeExecution's completion gate only consulted len(feedback); a provider
+// that ignored delivered review-remediation findings left
+// EventExecutionCompleted/Succeeded for the exact review-remediation|H1|...
+// binding, which bindExecutionInvoke would then treat as satisfied forever
+// even though the reviewer's REQUEST_CHANGES was never addressed.
+func TestUnresolvedReviewRemediationReturnFailsTheOperationAndStaysActionable(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	fixture.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
+	var attempts int
+	fixture.provider = newIsolatedProvider(func(dir string) error {
+		attempts++
+		if attempts == 1 {
+			return os.WriteFile(filepath.Join(dir, "candidate.go"), []byte("package candidate\n// v1\n"), 0600)
+		}
+		// Every remediation attempt returns success having neither mutated
+		// the candidate nor (resolveFeedback stays false) stated a
+		// no-change resolution - the exact #376/B1 shape under test.
+		return nil
+	})
+	fixture.deps.Provider = fixture.provider
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+
+	runID := fixture.start()
+	for i := 0; i < 20; i++ {
+		fixture.reconcile(runID)
+	}
+	state := fixture.state(runID)
+	if state.projection.CandidateRevision == "" || state.projection.PullRequest == nil {
+		t.Fatalf("producer did not reach a published candidate: projection=%+v", state.projection)
+	}
+	h1 := state.projection.CandidateRevision
+	prNumber := state.projection.PullRequest.Number
+	repo := GitHubRepo{Owner: "acme", Name: "repo"}
+
+	blockDocument := `{"schema_version":"0.1","verdict":"blocked","findings":[{"signature":"candidate is marked incomplete","severity":"blocking"}]}`
+	reviewerProvider := &sequencedReviewProvider{documents: []string{blockDocument}}
+	port := &SupervisorReviewPort{
+		Store: fixture.store, GitHub: fixture.forge, ResolveAgent: e2eResolveAgent,
+		ProviderFor: func(ResolvedAgent) (ExecutionProvider, error) { return reviewerProvider, nil },
+		StateDir:    filepath.Join(fixture.root, "review-state-b1"), Source: fixture.origin,
+		ControllerID: "controller-a", Clock: fixture.clock,
+	}
+	ctx := context.Background()
+	outcome1, admission1, err := fixture.runtime.ReconcileReviewRemediation(ctx, port, repo, prNumber, "claude")
+	if err != nil {
+		t.Fatalf("ReconcileReviewRemediation: %v", err)
+	}
+	if outcome1.Decision.Verdict != "request_changes" || admission1 == nil {
+		t.Fatalf("expected H1 to be admitted for remediation, got outcome=%+v admission=%v", outcome1, admission1)
+	}
+
+	// MaxExecutionAttempts is 2 (phase8Governance's fixture budget): one
+	// Reconcile call runs the binding to attempt exhaustion, exactly as
+	// TestUnresolvedFeedbackReturnFailsTheOperationAndStaysActionable does.
+	outcome := fixture.reconcile(runID)
+	state = fixture.state(runID)
+	if state.projection.CandidateRevision != h1 {
+		t.Fatalf("a provider that neither mutated nor resolved the review-remediation finding advanced the candidate past H1: %s -> %s", h1, state.projection.CandidateRevision)
+	}
+	var invoke RunOperation
+	found := 0
+	for _, op := range state.snapshot.Operations {
+		if op.Kind == OpExecutionInvoke && strings.HasPrefix(bindingOf(op), reviewRemediationBindingPrefix) {
+			invoke, found = op, found+1
+		}
+	}
+	if found != 1 {
+		t.Fatalf("expected exactly one review-remediation execution.invoke operation, found %d", found)
+	}
+	if invoke.State != OperationFailed {
+		t.Fatalf("an invocation that neither changed the candidate nor stated an admitted resolution was recorded as %s, not a failed operation", invoke.State)
+	}
+	var result mutationResult
+	if err := decodeJSON(invoke.Result, &result); err != nil || result.FailureClass != FailureReviewRemediationUnresolved {
+		t.Fatalf("unresolved review remediation did not record failure_class=review_remediation_unresolved: %+v (decode err %v)", result, err)
+	}
+	pending, err := state.pendingReviewRemediationKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("an admitted BLOCK that was never discharged is not outstanding: %v", pending)
+	}
+	if outcome.Disposition == Waiting && outcome.Reason == ReasonGoalStateReached {
+		t.Fatalf("an unaddressed independent-review BLOCK reached goal_state_reached: %+v", outcome)
+	}
+	if outcome.Disposition != Failed || !BudgetBoundary(outcome.Disposition, outcome.Reason) {
+		t.Fatalf("exhausted attempts did not stop the run truthfully under its existing finite authority: %+v", outcome)
 	}
 }

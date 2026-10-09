@@ -466,6 +466,25 @@ const (
 	// runtime bound mid-task, so the retry gets a fresh invocation rather
 	// than observations from an attempt that said nothing.
 	FailureFeedbackUnresolved FailureClass = "feedback_unresolved"
+	// FailureReviewRemediationUnresolved is the same shape as
+	// FailureFeedbackUnresolved (#376), bound to an admitted independent-review
+	// BLOCK (#474) rather than GitHub feedback: an invocation delivered
+	// admitted review-remediation findings that returned without discharging
+	// them, having neither mutated the candidate nor stated an admitted
+	// no_change_required resolution naming them.
+	//
+	// A successful, non-mutating provider return is not proof the BLOCK was
+	// addressed - the exact #474 B1 gap a reviewer's REQUEST_CHANGES verdict
+	// would otherwise let slip past as a quietly completed operation, with
+	// nothing left wanting a successor. Only a bound, admitted resolution (or
+	// a mutation) escapes it.
+	//
+	// It routes to a bounded RETRY of the SAME execution.invoke operation, the
+	// same shape FailureFeedbackUnresolved uses: no budget is minted or reset,
+	// and a producer that keeps returning unresolved exhausts its attempts and
+	// stops truthfully, exactly like any other producer failure that never
+	// lands.
+	FailureReviewRemediationUnresolved FailureClass = "review_remediation_unresolved"
 	// FailureCheckpointContinuationUnresolved is a continuation invocation -
 	// one that inherited a runtime-owned checkpoint, interrupted rather than
 	// finished work - that returned without settling it: it did not state (or
@@ -561,9 +580,9 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureCompileTest, FailureBaseIntegrationConflict, FailureVerification:
 		return RouteProviderRemediation
 	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete,
-		FailureProviderNoProgress, FailureFeedbackUnresolved, FailureCheckpointContinuationUnresolved,
-		FailureReviewerProtocolIncomplete, FailureProviderBackgroundWorkUnresolved, FailureConnectivity,
-		FailureDecisionBindingStale:
+		FailureProviderNoProgress, FailureFeedbackUnresolved, FailureReviewRemediationUnresolved,
+		FailureCheckpointContinuationUnresolved, FailureReviewerProtocolIncomplete,
+		FailureProviderBackgroundWorkUnresolved, FailureConnectivity, FailureDecisionBindingStale:
 		return RouteRetry
 	// An integration unit never gets a producer to remediate it (#475): its
 	// whole producer stage is deterministic composition, not a free-form
