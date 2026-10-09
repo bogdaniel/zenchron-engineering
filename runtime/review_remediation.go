@@ -1,0 +1,306 @@
+package runtime
+
+// #474: automatic independent-review-to-remediation routing.
+//
+// runtime/review_port.go establishes the boundary this file sits exactly on:
+// #233 owns the independent review operation, its exact-head binding and its
+// durable Decision; #474 owns deciding whether and how a REQUEST_CHANGES
+// Decision becomes an authorized producer remediation invocation. This file
+// is that one authorization gate - nothing else here schedules, dispatches or
+// retries anything. See docs/review-remediation.md for the admission
+// contract this implements and for the exact, still-pending reconciler wiring
+// that turns an admission into a scheduled invocation.
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/review"
+)
+
+// reviewRemediationAdmissionSchemaVersion versions the durable
+// ReviewRemediationAdmission document.
+const reviewRemediationAdmissionSchemaVersion = "0.1"
+
+// ReviewRemediationAdmission is the durable, one-shot authorization fact that
+// routes one independent review's REQUEST_CHANGES Decision (#233) into its
+// producer's own bounded remediation invocation. Decision.Verdict alone is
+// independent evidence, never permission (docs/review.md, "The #474
+// interface"): AdmitReviewRemediation is the one place that evidence becomes
+// an authorized remediation trigger, and it is written at most once per
+// DecisionID - a second admission attempt for an already-admitted decision
+// returns the existing admission rather than minting a second remediation
+// budget envelope or a second provider invocation.
+type ReviewRemediationAdmission struct {
+	SchemaVersion string `json:"schema_version"`
+	DecisionID    string `json:"decision_id"`
+	RunID         string `json:"run_id"`
+	Repository    string `json:"repository"`
+	PRNumber      int    `json:"pr_number"`
+	HeadSHA       string `json:"head_sha"`
+	// FindingSignatures are the admitted decision's blocking findings'
+	// signatures (review.Finding), recorded so an operator can read what
+	// remediation was authorized to fix without re-fetching the decision.
+	FindingSignatures []string  `json:"finding_signatures"`
+	AdmittedAt        time.Time `json:"admitted_at"`
+}
+
+func (a ReviewRemediationAdmission) validate() error {
+	if a.SchemaVersion != reviewRemediationAdmissionSchemaVersion {
+		return fmt.Errorf("review remediation admission schema version %q is not %q", a.SchemaVersion, reviewRemediationAdmissionSchemaVersion)
+	}
+	if strings.TrimSpace(a.DecisionID) == "" {
+		return errors.New("a review remediation admission requires the decision it admits")
+	}
+	if strings.TrimSpace(a.RunID) == "" {
+		return errors.New("a review remediation admission requires the producer run it remediates")
+	}
+	if strings.TrimSpace(a.Repository) == "" || a.PRNumber <= 0 || strings.TrimSpace(a.HeadSHA) == "" {
+		return errors.New("a review remediation admission requires its exact subject")
+	}
+	if len(a.FindingSignatures) == 0 {
+		return errors.New("a review remediation admission names no blocking finding to remediate")
+	}
+	if a.AdmittedAt.IsZero() {
+		return errors.New("a review remediation admission requires its admission time")
+	}
+	return nil
+}
+
+// ReviewRemediationRefusalReason names exactly why AdmitReviewRemediation
+// refused, the same fail-closed, named-reason shape runtime/feedback.go
+// already uses for its own admission refusals.
+type ReviewRemediationRefusalReason string
+
+const (
+	ReviewRemediationRefusedNoDecision     ReviewRemediationRefusalReason = "no_independent_decision"
+	ReviewRemediationRefusedNotBlocking    ReviewRemediationRefusalReason = "decision_not_blocking"
+	ReviewRemediationRefusedStaleSubject   ReviewRemediationRefusalReason = "subject_stale"
+	ReviewRemediationRefusedNotIndependent ReviewRemediationRefusalReason = "reviewer_not_independent"
+	ReviewRemediationRefusedUnknownRun     ReviewRemediationRefusalReason = "run_unknown"
+	ReviewRemediationRefusedRunTerminal    ReviewRemediationRefusalReason = "run_terminal"
+	ReviewRemediationRefusedCandidateMoved ReviewRemediationRefusalReason = "candidate_superseded"
+	ReviewRemediationRefusedNoContract     ReviewRemediationRefusalReason = "no_compiled_contract"
+)
+
+// ReviewRemediationRefusedError reports that an independently reached
+// REQUEST_CHANGES decision exists but AdmitReviewRemediation refuses to treat
+// it as remediation authorization. It is never a transient failure: the exact
+// same (repo, PR, reviewer) call refuses again until the named condition
+// itself changes (a fresh review, a restored current head, and so on).
+type ReviewRemediationRefusedError struct {
+	Reason ReviewRemediationRefusalReason
+	Detail string
+}
+
+func (e *ReviewRemediationRefusedError) Error() string {
+	return fmt.Sprintf("review remediation refused (%s): %s", e.Reason, e.Detail)
+}
+
+// AdmitReviewRemediation is #474's one authorization gate between an
+// independently reached review.Decision (#233) and producer remediation. It
+// resolves the decision ITSELF from the durable review store through
+// ReviewPort.LatestDecision/IsStale - never from a caller-supplied copy, so a
+// forged or stale Decision-shaped argument has no channel into this gate at
+// all - and fails closed on every condition docs/review.md and #474 require
+// before that fact may become an authorized remediation trigger:
+//
+//  1. a decision exists at all for this exact (repo, PR);
+//  2. it is REQUEST_CHANGES, not APPROVE or COMMENT_ONLY;
+//  3. it is not stale against the PR's current head;
+//  4. producer and reviewer are not the same identity (defense in depth: see
+//     below);
+//  5. the producing run can be loaded and is not terminal;
+//  6. the run has a compiled contract;
+//  7. the run's CURRENT candidate is still the exact head the decision was
+//     reached against.
+//
+// On success it is recorded exactly once, by DecisionID, in the cross-run
+// review_remediation_admissions table (global uniqueness: no decision is
+// ever admitted twice, from any caller, any process - see
+// SQLiteOperationStore.CreateReviewRemediationAdmission) and then on the
+// producing run's own journal (EventReviewRemediationAdmitted), so the run's
+// existing in-package event-folding can plan a remediation invocation without
+// any further store I/O - the same shape unresolvedFeedbackBinding and
+// pendingFeedbackKeys already use for admitted GitHub feedback.
+//
+// What this function deliberately does NOT do: dispatch a provider, consume a
+// budget, or touch the run's scheduling state. Admission is a fact; turning
+// that fact into a scheduled invocation is bindExecutionInvoke's job, exactly
+// as it already is for remediation|... and feedback|... bindings - see
+// docs/review-remediation.md for the exact, still-pending wiring this
+// deliberately stops short of.
+func (r *EngineeringRuntime) AdmitReviewRemediation(ctx context.Context, port ReviewPort, repo GitHubRepo, prNumber int) (ReviewRemediationAdmission, bool, error) {
+	decision, found, err := port.LatestDecision(repo, prNumber)
+	if err != nil {
+		return ReviewRemediationAdmission{}, false, err
+	}
+	if !found {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedNoDecision,
+			Detail: fmt.Sprintf("no independent review decision exists yet for %s#%d", repo, prNumber),
+		}
+	}
+	if decision.Verdict != review.VerdictRequestChanges {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedNotBlocking,
+			Detail: fmt.Sprintf("the latest decision for %s#%d is %q, not %q", repo, prNumber, decision.Verdict, review.VerdictRequestChanges),
+		}
+	}
+	// Defense in depth: #233 refuses to construct a Decision at all when the
+	// producer and reviewer identities collapse (CheckReviewIndependence,
+	// called before the reviewer is ever dispatched). This gate re-checks the
+	// two identities the stored Decision itself recorded anyway, so a
+	// corrupted or hand-crafted row in the durable store can never buy
+	// remediation authorization merely by existing.
+	if decision.ProducerAgentID != "" && decision.ProducerAgentID == decision.ReviewerAgentID {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedNotIndependent,
+			Detail: fmt.Sprintf("decision %s names the same agent %q as both producer and reviewer", decision.ID, decision.ProducerAgentID),
+		}
+	}
+	stale, err := port.IsStale(ctx, repo, prNumber)
+	if err != nil {
+		return ReviewRemediationAdmission{}, false, err
+	}
+	if stale {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedStaleSubject,
+			Detail: fmt.Sprintf("decision %s is bound to %s, which is no longer %s#%d's current head", decision.ID, short12(decision.Subject.HeadSHA), repo, prNumber),
+		}
+	}
+
+	// The decision is independent evidence; the run it names is the
+	// authoritative place every remaining check is evaluated against. The
+	// decision document is never trusted for anything beyond its own
+	// identity and verdict.
+	state, err := r.load(decision.RunID)
+	if err != nil {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedUnknownRun,
+			Detail: fmt.Sprintf("decision %s names run %q, which could not be loaded: %v", decision.ID, decision.RunID, err),
+		}
+	}
+	if terminalDisposition(state.snapshot.Disposition) {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedRunTerminal,
+			Detail: fmt.Sprintf("run %s is %s, and a terminal run is never eligible for another invocation", decision.RunID, state.snapshot.Disposition),
+		}
+	}
+	if state.projection.Contract == (Ref{}) {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedNoContract,
+			Detail: fmt.Sprintf("run %s has no compiled contract yet", decision.RunID),
+		}
+	}
+	if state.projection.CandidateRevision != decision.Subject.HeadSHA {
+		return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+			Reason: ReviewRemediationRefusedCandidateMoved,
+			Detail: fmt.Sprintf("run %s's current candidate %s no longer matches the decision's exact reviewed head %s",
+				decision.RunID, short12(state.projection.CandidateRevision), short12(decision.Subject.HeadSHA)),
+		}
+	}
+
+	signatures := make([]string, 0, len(decision.Findings))
+	for _, finding := range decision.Findings {
+		if finding.Severity == review.SeverityBlocking {
+			signatures = append(signatures, finding.Signature)
+		}
+	}
+	sort.Strings(signatures)
+
+	admission := ReviewRemediationAdmission{
+		SchemaVersion:     reviewRemediationAdmissionSchemaVersion,
+		DecisionID:        decision.ID,
+		RunID:             decision.RunID,
+		Repository:        repo.String(),
+		PRNumber:          prNumber,
+		HeadSHA:           decision.Subject.HeadSHA,
+		FindingSignatures: signatures,
+		AdmittedAt:        clockNow(r.deps.Clock),
+	}
+	if err := admission.validate(); err != nil {
+		return ReviewRemediationAdmission{}, false, err
+	}
+
+	stored, created, err := r.deps.Store.CreateReviewRemediationAdmission(admission)
+	if err != nil {
+		return ReviewRemediationAdmission{}, false, err
+	}
+	if created {
+		// The cross-run table above is the actual authorization record and is
+		// already durable at this point; this is visibility on the producing
+		// run's own journal (mirrors EventFeedbackObserved) so the run's
+		// existing event-folding can plan from it. A failure here is
+		// reported, never silently retried into a second admission.
+		if err := r.append(state, EventReviewRemediationAdmitted, "", stored, nil); err != nil {
+			return stored, created, fmt.Errorf("review remediation %s was admitted but could not be journalled on run %s: %w", stored.DecisionID, stored.RunID, err)
+		}
+	}
+	return stored, created, nil
+}
+
+// --- Deferred reconciler wiring -------------------------------------------
+//
+// Everything below is isolated #474 core: real runState methods, fully
+// testable against a real loaded run, but NOT YET CALLED from
+// runtime/reconciler.go's bindExecutionInvoke. runtime/reconciler.go is
+// PR #546's active file (#475); wiring these in is a two-line addition to
+// that function once #546 reaches a stable head - see
+// docs/review-remediation.md for the exact diff. Nothing below mutates
+// anything; both are pure reads over a run's already-loaded events.
+
+// unresolvedReviewRemediationBinding re-finds an EXISTING, not-yet-succeeded
+// execution.invoke binding for an admitted review remediation on head, the
+// same re-finding priority rule unresolvedFeedbackBinding uses and for the
+// same reason (#376): a fresh binding derived purely from what is still
+// "pending" would stop proposing this operation again the moment an attempt
+// under it failed.
+func (s *runState) unresolvedReviewRemediationBinding(head string) (string, bool) {
+	prefix := reviewRemediationBindingPrefix + head + "|"
+	for _, op := range s.snapshot.Operations {
+		if op.Kind != OpExecutionInvoke || op.State == Succeeded {
+			continue
+		}
+		if binding := bindingOf(op); strings.HasPrefix(binding, prefix) {
+			return binding, true
+		}
+	}
+	return "", false
+}
+
+// reviewRemediationBindingPrefix marks an execution binding as remediating an
+// admitted independent-review BLOCK, mirroring the "remediation|" and
+// "feedback|" binding families bindExecutionInvoke already derives.
+const reviewRemediationBindingPrefix = "review-remediation|"
+
+// pendingReviewRemediationKeys is every admitted review-remediation
+// DecisionID bound to the CURRENT head that this run's journal has not yet
+// recorded a succeeded execution.invoke for. It reads only s.events - already
+// loaded by (*EngineeringRuntime).load - so, like pendingFeedbackKeys, it
+// requires no further store I/O and folds identically on replay after a
+// restart.
+func (s *runState) pendingReviewRemediationKeys() []string {
+	head := s.projection.Head()
+	admitted := map[string]bool{}
+	for _, e := range s.events {
+		if e.Type != EventReviewRemediationAdmitted {
+			continue
+		}
+		var admission ReviewRemediationAdmission
+		if decodeJSON(e.Payload, &admission) != nil || admission.HeadSHA != head {
+			continue
+		}
+		admitted[admission.DecisionID] = true
+	}
+	keys := make([]string, 0, len(admitted))
+	for key := range admitted {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}

@@ -250,6 +250,13 @@ var eventPayloads = map[string]payloadValidator{
 			nonNegative("finding_count", p.FindingCount))
 	}),
 	EventHumanAuthorityRecorded: humanAuthorityPayload,
+	EventReviewRemediationAdmitted: payloadSchema(func(p ReviewRemediationAdmission) error {
+		return errors.Join(
+			required("decision_id", p.DecisionID),
+			required("run_id", p.RunID),
+			required("repository", p.Repository),
+			required("head_sha", p.HeadSHA))
+	}),
 
 	EventRunAgentAssigned: payloadSchema(func(p AgentAssignedPayload) error {
 		if _, known := agentKinds[p.ProviderKind]; !known {

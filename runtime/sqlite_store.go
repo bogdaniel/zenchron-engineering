@@ -605,6 +605,18 @@ CREATE TABLE review_publication_attempts (
 	decision_id       TEXT PRIMARY KEY REFERENCES review_decisions(id),
 	started_unix_nano INTEGER NOT NULL
 );
+`, `
+-- Durable, idempotent authorization to route one independent review's
+-- REQUEST_CHANGES decision into producer remediation (#474). One row per
+-- decision_id, ever: the primary key is what makes a second admission
+-- attempt for the same already-admitted decision a read, never a second
+-- remediation budget envelope or a second provider invocation.
+CREATE TABLE review_remediation_admissions (
+	decision_id        TEXT PRIMARY KEY REFERENCES review_decisions(id),
+	run_id             TEXT NOT NULL,
+	admitted_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
