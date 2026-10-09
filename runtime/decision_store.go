@@ -496,9 +496,11 @@ func (s *SQLiteOperationStore) AdmitDecisionResumption(runID, operationID, bindi
 }
 
 // decisionResumptionAdmissionByOperationID reads one admission by its
-// primary key and cross-checks the stored document's OWN operation_id field
-// against it (review F2): a row found under a key its own content disagrees
-// with is corruption, never a usable admission.
+// primary key, cross-checks the stored document's OWN operation_id field
+// against it (review F2), and validates the whole document (review R2): a
+// row found under a key its own content disagrees with, or that is
+// otherwise malformed or hollowed-out, is corruption, never a usable
+// admission.
 func decisionResumptionAdmissionByOperationID(q sqlExecutor, operationID string) (DecisionResumptionAdmission, bool, error) {
 	var document string
 	err := q.QueryRow(`SELECT document FROM decision_resumption_admissions WHERE operation_id = ?`, operationID).Scan(&document)
@@ -516,7 +518,57 @@ func decisionResumptionAdmissionByOperationID(q sqlExecutor, operationID string)
 		return DecisionResumptionAdmission{}, false, fmt.Errorf(
 			"stored decision resumption admission for operation %s names operation %s instead", operationID, admission.OperationID)
 	}
+	if err := validateDecisionResumptionAdmission(admission); err != nil {
+		return DecisionResumptionAdmission{}, false, fmt.Errorf("stored decision resumption admission is invalid: %w", err)
+	}
 	return admission, true, nil
+}
+
+// validateDecisionResumptionAdmission is the ONE authoritative check a
+// stored admission document must pass before ANY caller treats it as
+// authority (review R2): a row with the correct key but an empty,
+// oversized, unsorted, duplicated or otherwise hollowed-out Decisions set,
+// a missing schema version/contract/timestamp, or a binding that does not
+// match its own decision set and epoch, is corruption. Without this, a
+// present-but-invalid admission (decisions: []) would read exactly like
+// the TRUE zero-value "no admission for this operation" sentinel, and
+// prepareDecisionResumedMessages would fall through to a fresh, unpinned
+// scope-wide read - silently reopening the substitution path F1 closed.
+func validateDecisionResumptionAdmission(a DecisionResumptionAdmission) error {
+	if a.SchemaVersion != DecisionResumptionAdmissionSchemaVersion {
+		return fmt.Errorf("decision resumption admission schema version %q is not %q", a.SchemaVersion, DecisionResumptionAdmissionSchemaVersion)
+	}
+	// ContractRevision/CandidateSubject are not required non-empty here: an
+	// empty candidate subject is legitimate (the initial invocation, before
+	// any candidate exists, binds decision-resumed|digest("")|... exactly
+	// like unresumedDecisionResumeBinding already allows), and whichever
+	// pair is stored is instead validated for internal consistency below -
+	// the stored binding must match them AND the decision set together.
+	if a.OperationID == "" || a.AdmittedAt.IsZero() {
+		return errors.New("decision resumption admission is missing a required field")
+	}
+	if len(a.Decisions) == 0 || len(a.Decisions) > maxDeliveredDecisions {
+		return fmt.Errorf("decision resumption admission names %d decisions, not 1 to %d", len(a.Decisions), maxDeliveredDecisions)
+	}
+	ids := make([]orchestration.DecisionResolution, len(a.Decisions))
+	seen := make(map[string]bool, len(a.Decisions))
+	for i, d := range a.Decisions {
+		if d.RequestID == "" || d.ResolutionID == "" {
+			return errors.New("decision resumption admission names a decision with an empty request or resolution id")
+		}
+		if seen[d.RequestID] {
+			return fmt.Errorf("decision resumption admission names request %s more than once", d.RequestID)
+		}
+		seen[d.RequestID] = true
+		if i > 0 && a.Decisions[i-1].RequestID >= d.RequestID {
+			return errors.New("decision resumption admission's decisions are not sorted by request id")
+		}
+		ids[i] = orchestration.DecisionResolution{RequestID: d.RequestID}
+	}
+	if expected := decisionResumeBinding(a.ContractRevision, a.CandidateSubject, ids); expected != a.Binding {
+		return fmt.Errorf("decision resumption admission's binding %q does not match its own decision set and epoch (expected %q)", a.Binding, expected)
+	}
+	return nil
 }
 
 // validateLiveAndCurrent proves one decision request is still live and, if
@@ -548,22 +600,51 @@ func validateLiveAndCurrent(q sqlExecutor, requestID string) error {
 // worker is never shown something the admission does not name, a later
 // supersession or newly-resolved, unpinned decision can never substitute
 // into it, and the journal's delivery claim can never name something this
-// attempt was not actually shown. A zero-value admission (an ordinary,
-// non-resumed operation) answers (nil, nil) at once.
+// attempt was not actually shown. The TRUE zero-value admission (an
+// ordinary, non-resumed operation - OperationID "") answers (nil, nil) at
+// once; a present OperationID with an otherwise invalid document (review
+// R2) fails closed rather than falling through to that same sentinel.
+//
+// Every pinned decision is read and validated under ONE held transaction
+// (review R1): SQLite's own per-transaction read consistency, not a
+// per-statement one, is what makes the whole recovered set a single
+// coherent snapshot rather than several independently-timed reads that
+// could straddle an intervening supersession or subject move. A change
+// that commits before this transaction begins is reflected and checked; one
+// that commits after is a later epoch this call never observes, never a
+// silent partial rewrite of what it already read. The transaction is
+// read-only and is rolled back the instant recovery finishes, well before
+// any provider is ever invoked - no lock is held across that external call.
 func (s *SQLiteOperationStore) RecoverDecisionResumptionContext(admission DecisionResumptionAdmission) ([]orchestration.DecisionResolution, error) {
-	if len(admission.Decisions) == 0 {
+	if admission.OperationID == "" {
 		return nil, nil
 	}
+	if err := validateDecisionResumptionAdmission(admission); err != nil {
+		return nil, fmt.Errorf("stored decision resumption admission is invalid: %w", err)
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	return recoverDecisionResumptionContextTx(tx, admission)
+}
+
+// recoverDecisionResumptionContextTx is RecoverDecisionResumptionContext's
+// sqlExecutor-generic core, so a test can force the SAME window open with
+// a caller-held transaction exactly as decision_linearizability_test.go's
+// resolveUnderHeldTx already does for ResolveDecisionRequest.
+func recoverDecisionResumptionContextTx(q sqlExecutor, admission DecisionResumptionAdmission) ([]orchestration.DecisionResolution, error) {
 	resolved := make([]orchestration.DecisionResolution, len(admission.Decisions))
 	for i, pinned := range admission.Decisions {
-		resolution, found, err := decisionResolutionByRequestID(s.db, pinned.RequestID)
+		resolution, found, err := decisionResolutionByRequestID(q, pinned.RequestID)
 		if err != nil {
 			return nil, err
 		}
 		if !found || resolution.ID != pinned.ResolutionID {
 			return nil, fmt.Errorf("decision %s no longer carries the resolution %s this operation was admitted for", pinned.RequestID, pinned.ResolutionID)
 		}
-		if err := validateLiveAndCurrent(s.db, pinned.RequestID); err != nil {
+		if err := validateLiveAndCurrent(q, pinned.RequestID); err != nil {
 			return nil, err
 		}
 		resolved[i] = resolution

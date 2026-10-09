@@ -359,3 +359,156 @@ func TestDeliveredDecisionIDsFromEventsFailsClosedOnAMalformedEvent(t *testing.T
 		t.Fatalf("expected no delivery events to decode cleanly to an empty set: ids=%v err=%v", ids, err)
 	}
 }
+
+// callCountingProvider counts every Provider.Execute call while otherwise
+// behaving exactly like the wrapped, realistic worker - unlike
+// countingProvider (credential_boundary_test.go), which never completes
+// anything and exists only to prove a TOTAL refusal before dispatch; this
+// one is for proving a refusal after one legitimate, unrelated call (the
+// initial invocation) already ran.
+type callCountingProvider struct {
+	*messagingWorker
+	calls int
+}
+
+func (p *callCountingProvider) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	p.calls++
+	return p.messagingWorker.Execute(ctx, request)
+}
+
+// TestACorruptStoredAdmissionRefusesDispatchRatherThanReopeningSubstitution
+// is #508 review R2's required proof: a durable decision_resumption_
+// admissions row with the CORRECT operation_id and binding, but an empty
+// Decisions set, is planted BEFORE the real decision-resumed operation is
+// ever created - simulating a row some other defect left hollowed-out.
+// Once the scheduler plans and leases that exact operation,
+// admitDecisionResumption's own idempotent-first-wins read
+// (decisionResumptionAdmissionByOperationID) finds this row and must
+// refuse it as invalid rather than returning it unchanged: a present but
+// empty Decisions set reads exactly like the TRUE zero-value "no admission
+// yet" sentinel, which would let prepareMessages fall through to a fresh,
+// unpinned scope-wide read - silently reopening the substitution path F1
+// closed. Zero provider starts, like the F3 oversized-set proof.
+func TestACorruptStoredAdmissionRefusesDispatchRatherThanReopeningSubstitution(t *testing.T) {
+	fixture := newFleetFixture(t, 10)
+	inner := &messagingWorker{fleetProvider: fixture.worker, documents: map[string]string{}, seeded: map[string]bool{}}
+	provider := &callCountingProvider{messagingWorker: inner}
+	fixture.deps.Provider = provider
+	view := fixture.orchestrate(fixture.supervisor(), "claude", fleetIssues(1))
+	runID := view.Items[0].RunID
+	inner.say(runID, decisionWaitDocument(t), false)
+
+	supervisor := fixture.supervisor()
+	tick := func() {
+		t.Helper()
+		if _, err := supervisor.Tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		fixture.clock.advance(61 * time.Second)
+	}
+	var waiting EngineeringRun
+	for range 40 {
+		tick()
+		waiting = decisionWaitRunRow(t, fixture, runID)
+		if waiting.Reason == ReasonDecisionPending {
+			break
+		}
+	}
+	if waiting.Reason != ReasonDecisionPending {
+		t.Fatal("test precondition violated: the run never reached the decision wait")
+	}
+	open, err := fixture.store.OpenDecisionRequestsForRun(runID)
+	if err != nil || len(open) != 1 {
+		t.Fatalf("expected exactly one open decision request: open=%v err=%v", open, err)
+	}
+	if _, err := supervisor.ResolveDecision(ControlRequest{
+		DecisionID: open[0].ID, DecisionOutcomeKind: orchestration.DecisionSelectedOption, DecisionOutcomeValue: "approach-b",
+		Operator: "operator@example",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inner.say(runID, "", false)
+
+	// The exact future decision-resumed operation identity, computed and
+	// planted BEFORE the scheduler ever derives it itself - simulating a
+	// row some other defect left hollowed-out, found on the operation's
+	// own FIRST, idempotent-first-wins admission read.
+	engine, err := fixture.supervisor().engine("acme/repo", "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := engine.load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, ok := state.unresumedDecisionResumeBinding()
+	if !ok {
+		t.Fatal("expected a decision-resumed binding to be derivable before the scheduler ever plans it")
+	}
+	operationID := StableOperationKey(runID, OpExecutionInvoke, operationKey(OpExecutionInvoke, binding))
+	now := fixture.clock.Now()
+	corrupt := DecisionResumptionAdmission{
+		SchemaVersion: DecisionResumptionAdmissionSchemaVersion, OperationID: operationID, Binding: binding,
+		Decisions: nil, ContractRevision: state.contractRevision(), CandidateSubject: state.projection.CandidateRevision, AdmittedAt: now,
+	}
+	document, err := CanonicalJSON(corrupt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.db.Exec(`INSERT INTO decision_resumption_admissions (operation_id, binding, admitted_unix_nano, document)
+		VALUES (?, ?, ?, ?)`, operationID, binding, now.UnixNano(), string(document)); err != nil {
+		t.Fatal(err)
+	}
+
+	callsBeforeResumption := provider.calls
+	for range 20 {
+		tick()
+	}
+	if provider.calls != callsBeforeResumption {
+		t.Fatalf("expected ZERO further provider calls once this operation's own stored admission is found invalid, got %d more", provider.calls-callsBeforeResumption)
+	}
+
+	resumed := decisionResumedOperations(t, fixture, runID)
+	if len(resumed) != 1 {
+		t.Fatalf("expected exactly one decision-resumed operation (never a second one working around the corrupt row), got %d: %+v", len(resumed), resumed)
+	}
+	if resumed[0].State != OperationFailed {
+		t.Fatalf("expected the operation to fail closed on its invalid stored admission, got state=%s", resumed[0].State)
+	}
+
+	// The journal's own EventOperationAfter snapshots, not the live row (an
+	// attempts-exhausted terminal transition does not carry the result
+	// field forward on the row itself), are the durable, authoritative
+	// record of why - the same pattern reviewerProtocolCorrectionExhausted
+	// (reconciler.go) already reads. BOTH of this operation's two attempts
+	// must show the SAME explicit integrity failure: never silently
+	// treated as valid on a retry, never a different, unrelated cause.
+	events, err := fixture.store.Events(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptsSeen := 0
+	for _, e := range events {
+		if e.Type != EventOperationAfter || e.OperationID != resumed[0].ID {
+			continue
+		}
+		var op RunOperation
+		if err := decodeJSON(e.Payload, &op); err != nil {
+			t.Fatal(err)
+		}
+		if op.State != OperationFailed {
+			continue
+		}
+		var record executionRecord
+		if err := decodeJSON(op.Result, &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.FailureClass != FailureDecisionBindingStale {
+			t.Fatalf("expected an explicit integrity failure (FailureDecisionBindingStale) on attempt %d, got %v", op.Attempt, record.FailureClass)
+		}
+		attemptsSeen++
+	}
+	if attemptsSeen != 2 {
+		t.Fatalf("expected BOTH of this operation's bounded attempts to show the same explicit integrity failure, saw %d", attemptsSeen)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -850,5 +851,126 @@ func TestAdmitDecisionResumptionBlocksConcurrentSupersessionAndPinsRegardless(t 
 	}
 	if len(pinned.Decisions) != 1 || pinned.Decisions[0].RequestID != d1.ID {
 		t.Fatalf("the admission's pinned snapshot changed after a later-landing supersession: %+v", pinned)
+	}
+}
+
+// TestRecoverDecisionResumptionContextReadsTheWholePinnedSetFromOneSnapshot
+// is #508 review R1's required proof: with TWO pinned decisions, recovery
+// must read both from the SAME held snapshot, never two independently-
+// timed statements - the same forced-interleaving technique
+// decision_linearizability_test.go's resolveUnderHeldTx already uses for
+// ResolveDecisionRequest. recoverDecisionResumptionContextTx is run inside
+// a transaction the TEST opens and controls the commit of; a single
+// contender's supersession of the SECOND pinned decision is given a
+// ready-to-attempt signal and proven BLOCKED for a bound BEFORE recovery
+// even runs, so the whole recovered set is read from one, single
+// pre-supersession snapshot - never a mix of an old D1 and a moving D2.
+// The transaction then commits, the contender's own completion is awaited
+// on the SAME channel, and a FRESH recovery afterward correctly refuses
+// the now-superseded decision, proving the epoch boundary sits exactly at
+// commit. A final unguarded supersession (no held transaction in the way)
+// completes immediately, demonstrating the earlier block came from the
+// held snapshot itself, not an unrelated serialization.
+func TestRecoverDecisionResumptionContextReadsTheWholePinnedSetFromOneSnapshot(t *testing.T) {
+	fixture, batch, runID := newLinearizabilityFixture(t)
+	store := fixture.store
+	second, err := OpenSQLiteOperationStore(fixture.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	now := fixture.clock.Now()
+	d1 := admitTestDecisionRequest(t, store, batch, runID, "op-1", nil, now)
+	d2 := admitTestDecisionRequest(t, store, batch, runID, "op-2", nil, now)
+	resolvedD1, err := store.ResolveDecisionRequest(d1.ID, allowOutcomeForStore(), "go", testHoldAuthority("operator-1"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedD2, err := store.ResolveDecisionRequest(d2.ID, allowOutcomeForStore(), "go", testHoldAuthority("operator-1"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contractRevision, candidateSubject := realContractAndCandidate(t, store, runID)
+	decisions := []DeliveredDecision{
+		{RequestID: d1.ID, ResolutionID: resolvedD1.ID},
+		{RequestID: d2.ID, ResolutionID: resolvedD2.ID},
+	}
+	// Sorted by request id, exactly as validateDecisionResumptionAdmission
+	// requires and as undeliveredOf's own sort.Slice always produces: the
+	// binding below must be computed from this SAME order, or it would
+	// mismatch its own decision set regardless of liveness.
+	sort.Slice(decisions, func(i, j int) bool { return decisions[i].RequestID < decisions[j].RequestID })
+	ids := make([]orchestration.DecisionResolution, len(decisions))
+	for i, d := range decisions {
+		ids[i] = orchestration.DecisionResolution{RequestID: d.RequestID}
+	}
+	binding := decisionResumeBinding(contractRevision, candidateSubject, ids)
+	admission := DecisionResumptionAdmission{
+		SchemaVersion: DecisionResumptionAdmissionSchemaVersion, OperationID: "op-recover-under-test", Binding: binding,
+		Decisions: decisions, ContractRevision: contractRevision, CandidateSubject: candidateSubject, AdmittedAt: now,
+	}
+
+	tx, err := store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan struct{})
+	completed := make(chan error, 1)
+	go func() {
+		close(ready)
+		_, err := admitTestMessage(second, batch, runID, "op-3",
+			orchestration.MessageDraft{Kind: orchestration.KindDecisionRequest, Purpose: "revised", Body: "revised", Supersedes: d2.ID}, now)
+		completed <- err
+	}()
+	<-ready
+	select {
+	case err := <-completed:
+		t.Fatalf("the contender's supersession of D2 landed while the recovery snapshot was still open (err=%v)", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	resolved, err := recoverDecisionResumptionContextTx(tx, admission)
+	if err != nil {
+		t.Fatalf("expected the WHOLE pinned set to recover successfully from the one pre-supersession snapshot, got %v", err)
+	}
+	if len(resolved) != 2 {
+		t.Fatalf("expected both D1 and D2 recovered from the same snapshot, got %+v", resolved)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-completed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the contender's supersession never completed after the snapshot committed")
+	}
+
+	// The REAL public method, not the test's own replicated steps, confirms
+	// the outcome - the same "replica for the race, the real method for the
+	// result" split TestAdmitDecisionResumptionBlocksConcurrentSupersession
+	// AndPinsRegardless already uses above.
+	if _, err := store.RecoverDecisionResumptionContext(admission); err == nil {
+		t.Fatal("expected a fresh recovery, strictly after the supersession committed, to refuse D2's now-stale pin")
+	}
+
+	d3 := admitTestDecisionRequest(t, store, batch, runID, "op-4", nil, now)
+	if _, err := store.ResolveDecisionRequest(d3.ID, allowOutcomeForStore(), "go", testHoldAuthority("operator-1"), now); err != nil {
+		t.Fatal(err)
+	}
+	unguardedDone := make(chan error, 1)
+	go func() {
+		_, err := admitTestMessage(second, batch, runID, "op-5",
+			orchestration.MessageDraft{Kind: orchestration.KindDecisionRequest, Purpose: "revised", Body: "revised", Supersedes: d3.ID}, now)
+		unguardedDone <- err
+	}()
+	select {
+	case err := <-unguardedDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected an UNGUARDED supersession, with no held recovery transaction in the way, to complete immediately")
 	}
 }
