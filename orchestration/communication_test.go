@@ -114,6 +114,36 @@ func TestAdmissionBindsRuntimeFactsAndRoutesFindingsToTheirOwner(t *testing.T) {
 	refused(t, commScope(), source("issue-9", "run-z", 1), "not a unit", request("issue-1", "x"))
 }
 
+// TestSystemAuthoredMessageNeverNamesAnAgent is #475 R3-2: a runtime
+// operation that never invoked a provider (deterministic integration
+// composition) must be able to admit a Finding without claiming any agent
+// wrote it. The caller decides System; nothing in MessageDraft - the
+// worker-writable shape - can ever set it, so a worker's own report can never
+// forge this regardless of what it contains.
+func TestSystemAuthoredMessageNeverNamesAnAgent(t *testing.T) {
+	from := MessageSource{Unit: "issue-1", RunID: "run-a", OperationID: "op-run-a", Attempt: 1, System: true}
+	messages := admit(t, commScope(), from,
+		MessageDraft{Kind: KindFinding, SubjectHandoff: "handoff-b2", Category: FindingDefect, Body: "deterministic merge conflict"})
+	if !messages[0].Source.System || messages[0].Source.AgentID != "" {
+		t.Fatalf("system-authored message source = %+v, want System=true and no agent id", messages[0].Source)
+	}
+
+	// Prove the guard by breaking it: claiming BOTH system authorship and a
+	// worker agent identity is refused, never silently accepted as "system
+	// wins" or "agent wins".
+	forged := MessageSource{Unit: "issue-1", RunID: "run-a", AgentID: "claude", OperationID: "op-run-a", Attempt: 1, System: true}
+	if err := (EngineeringMessage{SchemaVersion: MessageSchemaVersion, ID: "m", Scope: "s", Kind: KindStateUpdate,
+		Source: forged, Route: MessageRoute{Audience: AudienceScope}, Body: "x", DocumentSHA256: "sha",
+		AdmittedAt: commNow}).Validate(); err == nil || !strings.Contains(err.Error(), "may not also name an agent id") {
+		t.Fatalf("a message claiming both system authorship and an agent id validated: %v", err)
+	}
+
+	// An ordinary (non-system) message still requires its agent id: R3-2 only
+	// widens the vocabulary, it never weakens the existing requirement.
+	refused(t, commScope(), MessageSource{Unit: "issue-1", RunID: "run-a", OperationID: "op-run-a", Attempt: 1},
+		"source.agent_id is required", request("issue-3", "x"))
+}
+
 // A response answers exactly one request addressed to the responder, and goes
 // back to its requester. A DecisionRequest cannot be answered this way.
 func TestOnlyAnAddressedRequestCanBeAnswered(t *testing.T) {

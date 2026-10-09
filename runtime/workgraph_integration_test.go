@@ -361,6 +361,15 @@ func TestWorkGraphIntegrationTextualConflictBlocksAndFindsNoHandoff(t *testing.T
 	if finding.Route.Unit != "a" && finding.Route.Unit != "b" {
 		t.Fatalf("finding routes to %q, not one of the conflicting units", finding.Route.Unit)
 	}
+	// R3-2: this Finding was produced by deterministic composition, never by
+	// an invocation of the run's agent. It must say so honestly, never
+	// borrow the run's AgentID to look like one.
+	if !finding.Source.System {
+		t.Fatal("a Finding from deterministic composition is not marked system-authored")
+	}
+	if finding.Source.AgentID != "" {
+		t.Fatalf("a system-authored Finding names agent id %q; it never invoked an agent", finding.Source.AgentID)
+	}
 }
 
 // TestWorkGraphIntegrationRestartReproducesTheSameOutcome is Scenario E/H: a
