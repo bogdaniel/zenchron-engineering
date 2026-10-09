@@ -75,7 +75,16 @@ type communicationView struct {
 // rather than re-deciding it, is the delivery-evidence journalling in
 // invokeExecution (operations.go) - never a second, independent read of the
 // same fact.
-func communicationContext(store *SQLiteOperationStore, run EngineeringRun) (string, []orchestration.DecisionResolution, error) {
+//
+// pinned, when non-nil, OVERRIDES resolved_decisions with a decision-resumed
+// operation's exact, already re-verified admission snapshot (review F1)
+// instead of this fresh, scope-wide splitDecisionsByResolution read: a
+// decision superseded since admission is refused upstream before this is
+// ever called (recoverDecisionResumptionContext), so overriding here is
+// never unsafe, and it is what stops a newly-resolved, unpinned decision
+// from substituting into this attempt's context mid-retry. open is
+// unaffected - still a fresh read of what remains unanswered.
+func communicationContext(store *SQLiteOperationStore, run EngineeringRun, pinned []orchestration.DecisionResolution) (string, []orchestration.DecisionResolution, error) {
 	batch, found, err := store.OrchestrationBatch(run.Orchestration.BatchID)
 	if err != nil || !found {
 		return "", nil, fmt.Errorf("orchestration batch %s of run %s is unreadable (found=%t): %v", run.Orchestration.BatchID, run.ID, found, err)
@@ -91,6 +100,9 @@ func communicationContext(store *SQLiteOperationStore, run EngineeringRun) (stri
 	open, resolved, err := splitDecisionsByResolution(store, scope.Admitted)
 	if err != nil {
 		return "", nil, err
+	}
+	if pinned != nil {
+		resolved = pinned
 	}
 	view := communicationView{
 		Unit: unit, Handoffs: map[string]string{},

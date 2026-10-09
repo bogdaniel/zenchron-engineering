@@ -75,7 +75,12 @@ func validateMessagesObserved(p MessagesObservedPayload) error {
 // set the rendered communication's own resolved_decisions carries (#508
 // P4b) - the fact invokeExecution journals as delivered once reachedWorker
 // is known, never re-derived separately from the same read.
-func (r *EngineeringRuntime) prepareMessages(state *runState, operationID string, attempt int) (
+//
+// pinned, when non-nil, is a decision-resumed operation's exact, dispatch-
+// time re-verified admission snapshot (review F1): communicationContext
+// then renders resolved_decisions from THAT snapshot alone, never a fresh
+// scope-wide read, so resolved here is guaranteed to equal pinned.
+func (r *EngineeringRuntime) prepareMessages(state *runState, operationID string, attempt int, pinned []orchestration.DecisionResolution) (
 	path, communication string, resolved []orchestration.DecisionResolution, err error) {
 	if state.run.Orchestration == nil {
 		return "", "", nil, nil
@@ -87,7 +92,7 @@ func (r *EngineeringRuntime) prepareMessages(state *runState, operationID string
 	if err := clearResultSlot(path); err != nil {
 		return "", "", nil, err
 	}
-	communication, resolved, err = communicationContext(r.deps.Store, state.run)
+	communication, resolved, err = communicationContext(r.deps.Store, state.run, pinned)
 	return path, communication, resolved, err
 }
 

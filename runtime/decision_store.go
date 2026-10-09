@@ -301,7 +301,17 @@ func (s *SQLiteOperationStore) OpenDecisionRequestsForRun(runID string) ([]orche
 // stands, so it never causes a resumption (the same liveness filter
 // OpenDecisionRequestsForRun already applies to the open side).
 func (s *SQLiteOperationStore) ResolvedOwnDecisionRequests(runID string) ([]orchestration.DecisionResolution, error) {
-	rows, err := s.db.Query(`SELECT document FROM orchestration_messages WHERE run_id = ?`, runID)
+	return resolvedOwnDecisionRequestsTx(s.db, runID)
+}
+
+// resolvedOwnDecisionRequestsTx is ResolvedOwnDecisionRequests' sqlExecutor-
+// generic form, pinned inside AdmitDecisionResumption's own BEGIN IMMEDIATE
+// transaction (#508 review F2) exactly as findDecisionRequestTx already is:
+// the complete live resolved-own-decision set an admission pins is read from
+// the SAME held snapshot its insert commits against, never a separate,
+// earlier, unlocked read the caller merely proposes.
+func resolvedOwnDecisionRequestsTx(q sqlExecutor, runID string) ([]orchestration.DecisionResolution, error) {
+	rows, err := q.Query(`SELECT document FROM orchestration_messages WHERE run_id = ?`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -329,7 +339,7 @@ func (s *SQLiteOperationStore) ResolvedOwnDecisionRequests(runID string) ([]orch
 		if message.Kind != orchestration.KindDecisionRequest {
 			continue
 		}
-		resolution, found, err := s.DecisionResolutionByRequestID(message.ID)
+		resolution, found, err := decisionResolutionByRequestID(q, message.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -400,21 +410,26 @@ func (s *SQLiteOperationStore) ResolveDecisionRequest(decisionID string, outcome
 // epoch and never retroactively invalidates an operation already admitted
 // to run - which is what lets a RETRY of the SAME operation, after its own
 // prior attempt already delivered this exact set, proceed under its own
-// original envelope instead of being refused as stale against itself.
+// original envelope instead of being refused as stale against itself. The
+// existing row's own binding must still agree with the one this call names,
+// or the operation identity itself is corrupt and the call is refused
+// rather than silently handed a mismatched snapshot.
 //
-// With no existing admission, proposed (the binding's own undelivered set,
-// computed by the caller from durable state) is validated FRESH, inside
-// this one BEGIN IMMEDIATE transaction: each decision must still be live
-// with its subject still current - orchestration.ResolveDecision's own
-// liveness/subject rule, reused here via findDecisionRequestTx exactly as
-// ResolveDecisionRequest already does above - or the whole admission is
-// refused and nothing is written. contractRevision/candidateSubject are the
-// calling run's own projection fields: never a race, because only that
-// run's own driver, holding its lease, ever appends to its own journal.
-func (s *SQLiteOperationStore) AdmitDecisionResumption(operationID, binding, contractRevision, candidateSubject string,
-	proposed []orchestration.DecisionResolution, now time.Time) (DecisionResumptionAdmission, error) {
-	if operationID == "" || binding == "" {
-		return DecisionResumptionAdmission{}, errors.New("admitting a decision resumption needs its operation id and binding")
+// With no existing admission (review F2), nothing proposed by the caller is
+// trusted: the run's own events, its complete current live resolved-own-
+// decision set and its current contract/candidate epoch are ALL re-read
+// fresh, inside this one BEGIN IMMEDIATE transaction - the same held
+// snapshot the final insert commits against, exactly as
+// ResolveDecisionRequest already reads its two facts above. The caller's
+// binding is trusted only once decisionResumeBinding, recomputed from that
+// re-derived set and epoch, reproduces it exactly; any divergence - a
+// resolution admitted or superseded since the caller's own load, a moved
+// candidate or contract - refuses the whole admission before anything is
+// written. Each individual decision is then re-confirmed live with its
+// subject still current, the same rule ResolveDecisionRequest enforces.
+func (s *SQLiteOperationStore) AdmitDecisionResumption(runID, operationID, binding string, now time.Time) (DecisionResumptionAdmission, error) {
+	if runID == "" || operationID == "" || binding == "" {
+		return DecisionResumptionAdmission{}, errors.New("admitting a decision resumption needs its run, operation id and binding")
 	}
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -424,22 +439,40 @@ func (s *SQLiteOperationStore) AdmitDecisionResumption(operationID, binding, con
 	if existing, found, err := decisionResumptionAdmissionByOperationID(tx, operationID); err != nil {
 		return DecisionResumptionAdmission{}, err
 	} else if found {
+		if existing.Binding != binding {
+			return DecisionResumptionAdmission{}, fmt.Errorf("operation %s is already admitted under a different binding", operationID)
+		}
 		return existing, nil
 	}
-	if len(proposed) == 0 {
+	events, err := queryEvents(tx, runID)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	projection, err := Project(events)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	delivered, err := deliveredDecisionIDsFromEvents(events)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	liveResolved, err := resolvedOwnDecisionRequestsTx(tx, runID)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	contractRevision, candidateSubject := projection.Contract.Revision, projection.CandidateRevision
+	undelivered := undeliveredOf(liveResolved, delivered)
+	if expected := decisionResumeBinding(contractRevision, candidateSubject, undelivered); expected != binding {
+		return DecisionResumptionAdmission{}, fmt.Errorf(
+			"the undelivered decision set, contract or candidate this operation names no longer matches current durable state (recomputed binding %q)", expected)
+	}
+	if len(undelivered) == 0 {
 		return DecisionResumptionAdmission{}, errors.New("a decision resumption admission names at least one decision")
 	}
-	decisions := make([]DeliveredDecision, len(proposed))
-	for i, resolution := range proposed {
-		ref, current, err := findDecisionRequestTx(tx, resolution.RequestID)
-		if err != nil {
+	decisions := make([]DeliveredDecision, len(undelivered))
+	for i, resolution := range undelivered {
+		if err := validateLiveAndCurrent(tx, resolution.RequestID); err != nil {
 			return DecisionResumptionAdmission{}, err
-		}
-		if !ref.Live {
-			return DecisionResumptionAdmission{}, fmt.Errorf("decision request %s is no longer live", resolution.RequestID)
-		}
-		if ref.Subject != nil && (current == nil || *current != ref.Subject.Revision) {
-			return DecisionResumptionAdmission{}, fmt.Errorf("decision request %s is bound to a subject that is no longer current", resolution.RequestID)
 		}
 		decisions[i] = DeliveredDecision{RequestID: resolution.RequestID, ResolutionID: resolution.ID}
 	}
@@ -462,6 +495,10 @@ func (s *SQLiteOperationStore) AdmitDecisionResumption(operationID, binding, con
 	return admission, nil
 }
 
+// decisionResumptionAdmissionByOperationID reads one admission by its
+// primary key and cross-checks the stored document's OWN operation_id field
+// against it (review F2): a row found under a key its own content disagrees
+// with is corruption, never a usable admission.
 func decisionResumptionAdmissionByOperationID(q sqlExecutor, operationID string) (DecisionResumptionAdmission, bool, error) {
 	var document string
 	err := q.QueryRow(`SELECT document FROM decision_resumption_admissions WHERE operation_id = ?`, operationID).Scan(&document)
@@ -475,7 +512,63 @@ func decisionResumptionAdmissionByOperationID(q sqlExecutor, operationID string)
 	if err := strictJSON([]byte(document), &admission); err != nil {
 		return DecisionResumptionAdmission{}, false, fmt.Errorf("stored decision resumption admission is corrupt: %w", err)
 	}
+	if admission.OperationID != operationID {
+		return DecisionResumptionAdmission{}, false, fmt.Errorf(
+			"stored decision resumption admission for operation %s names operation %s instead", operationID, admission.OperationID)
+	}
 	return admission, true, nil
+}
+
+// validateLiveAndCurrent proves one decision request is still live and, if
+// subject-bound, still bound to its owner's CURRENT subject - the same two
+// facts ResolveDecisionRequest's own admission already enforces, reused here
+// by both the first #508 P4b admission (review B2) and a later dispatch-time
+// recovery (review F1), so neither can trust a resolution the other would
+// refuse.
+func validateLiveAndCurrent(q sqlExecutor, requestID string) error {
+	ref, current, err := findDecisionRequestTx(q, requestID)
+	if err != nil {
+		return err
+	}
+	if !ref.Live {
+		return fmt.Errorf("decision request %s is no longer live", requestID)
+	}
+	if ref.Subject != nil && (current == nil || *current != ref.Subject.Revision) {
+		return fmt.Errorf("decision request %s is bound to a subject that is no longer current", requestID)
+	}
+	return nil
+}
+
+// RecoverDecisionResumptionContext re-verifies, immediately before dispatch
+// and on EVERY attempt including a retry - never only once, at admission -
+// that every decision a #508 P4b decision-resumed admission is pinned to
+// still carries its original resolution and is still live with its owner's
+// current subject (review F1). The provider's own context is built ONLY
+// from this exact, re-verified snapshot, never a fresh scope-wide read, so a
+// worker is never shown something the admission does not name, a later
+// supersession or newly-resolved, unpinned decision can never substitute
+// into it, and the journal's delivery claim can never name something this
+// attempt was not actually shown. A zero-value admission (an ordinary,
+// non-resumed operation) answers (nil, nil) at once.
+func (s *SQLiteOperationStore) RecoverDecisionResumptionContext(admission DecisionResumptionAdmission) ([]orchestration.DecisionResolution, error) {
+	if len(admission.Decisions) == 0 {
+		return nil, nil
+	}
+	resolved := make([]orchestration.DecisionResolution, len(admission.Decisions))
+	for i, pinned := range admission.Decisions {
+		resolution, found, err := decisionResolutionByRequestID(s.db, pinned.RequestID)
+		if err != nil {
+			return nil, err
+		}
+		if !found || resolution.ID != pinned.ResolutionID {
+			return nil, fmt.Errorf("decision %s no longer carries the resolution %s this operation was admitted for", pinned.RequestID, pinned.ResolutionID)
+		}
+		if err := validateLiveAndCurrent(s.db, pinned.RequestID); err != nil {
+			return nil, err
+		}
+		resolved[i] = resolution
+	}
+	return resolved, nil
 }
 
 // findDecisionRequestTx resolves one request id to its normalized facts and

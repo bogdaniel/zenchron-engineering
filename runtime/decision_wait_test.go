@@ -249,7 +249,7 @@ func TestResumedContextCarriesTheResolvedDecisionNotTheOpenOne(t *testing.T) {
 	requestID := open[0].ID
 
 	run := runRowFor(t, fixture, runID)
-	before, _, err := communicationContext(fixture.store, run)
+	before, _, err := communicationContext(fixture.store, run, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func TestResumedContextCarriesTheResolvedDecisionNotTheOpenOne(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	after, _, err := communicationContext(fixture.store, run)
+	after, _, err := communicationContext(fixture.store, run, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

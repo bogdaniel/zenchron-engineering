@@ -30,7 +30,6 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/execution"
-	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // ---------------------------------------------------------------------------
@@ -848,18 +847,11 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// invocation and only for a run an orchestration batch created. Every
 	// other run is given no path and is unchanged.
 	handoffPath, err := r.prepareHandoffSlot(state, operation.ID, physicalAttempt)
-	var messagePath, communication string                 // #473, same rule; communication_slot.go
-	var shownDecisions []orchestration.DecisionResolution // #508 P4b delivery evidence
-	if err == nil {
-		messagePath, communication, shownDecisions, err = r.prepareMessages(state, operation.ID, physicalAttempt)
-	}
 	if err != nil {
-		return effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureUnknown},
-			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
-		}}
+		return *r.workspaceSubjectFailure(err)
 	}
-	resumptionAdmission, refusal := r.admitDecisionResumption(state, operation) // #508 P4b §6
+	// #473/#508 P4b review F1/F3; see prepareDecisionResumedMessages.
+	messagePath, communication, shownDecisions, resumptionAdmission, refusal := r.prepareDecisionResumedMessages(state, operation, physicalAttempt)
 	if refusal != nil {
 		return *refusal
 	}

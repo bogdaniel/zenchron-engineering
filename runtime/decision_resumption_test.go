@@ -1,6 +1,9 @@
 package runtime
 
-// #508 P4b: the bounded, same-RunID decision continuation.
+// #508 P4b: the bounded, same-RunID decision continuation. This file covers
+// the binding-selection and admission mechanism (review B1/B2/F1/F2); see
+// decision_delivery_test.go for the delivery-journalling, bound and fail-
+// closed tests (review B3/B4/F3 and the additional regressions).
 
 import (
 	"context"
@@ -300,9 +303,10 @@ func TestTwoDecisionsResolvedBeforeAnyResumptionBecomeOneOperation(t *testing.T)
 // is #508 review P4b §3/§5's budget-sharing proof at the unit level: a
 // decision-resumed binding spends the SAME finite continuation ceiling a
 // checkpoint continuation already does (startedContinuationBindings,
-// continuationCeilingReached, reconciler.go), never a second, unbounded
-// resource - the one fact that integration relies on, isolated from the
-// rest of the (already-proven, unchanged) ceiling machinery.
+// continuationCeilingReached, execution_continuation_budget.go), never a
+// second, unbounded resource - the one fact that integration relies on,
+// isolated from the rest of the (already-proven, unchanged) ceiling
+// machinery.
 func TestIsResumptionBindingRecognizesBothContinuationAndDecisionResumeShapes(t *testing.T) {
 	cases := []struct {
 		binding string
@@ -514,6 +518,184 @@ func TestAFailedAfterDeliveryDecisionResumptionRetriesTheSameOperation(t *testin
 	}
 }
 
+// TestARetryRefusesRatherThanSubstitutesWhenItsPinnedDecisionIsSuperseded is
+// #508 review F1's required proof, at the exact two calls invokeExecution
+// itself makes before every dispatch (admitDecisionResumption then
+// recoverDecisionResumptionContext - the scheduler's own immediate-retry
+// timing is not under test here, decisionResumptionAdmissionByOperationID
+// and decision_resumption_test's B1/B2 tests already cover that): D1's
+// admission is pinned once, the FIRST attempt's own recovery renders a
+// context carrying exactly D1, D1 is then superseded (D2 admitted in its
+// place), and the SAME operation's retry reuses the SAME pinned admission
+// (B1) but its OWN dispatch-time recovery refuses once D1 is no longer
+// live - never silently substituting D2's content, and never claiming D1
+// delivered a second time, because no context is ever rendered at all.
+func TestARetryRefusesRatherThanSubstitutesWhenItsPinnedDecisionIsSuperseded(t *testing.T) {
+	fixture, batch, runID := newLinearizabilityFixture(t)
+	store := fixture.store
+	now := fixture.clock.Now()
+	d1 := admitTestDecisionRequest(t, store, batch, runID, "op-1", nil, now)
+	if _, err := store.ResolveDecisionRequest(d1.ID, allowOutcomeForStore(), "go", testHoldAuthority("operator-1"), now); err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := fixture.supervisor().engine("acme/repo", "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := engine.load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, ok := state.unresumedDecisionResumeBinding()
+	if !ok {
+		t.Fatal("expected a decision-resumed binding before the supersession")
+	}
+	operation := RunOperation{ID: "op-under-test", RunID: runID, Kind: OpExecutionInvoke, IdempotencyKey: operationKey(OpExecutionInvoke, binding)}
+
+	// FIRST attempt: admit and recover - exactly what invokeExecution does
+	// right before rendering the provider's own context.
+	admission, refusal := engine.admitDecisionResumption(state, operation)
+	if refusal != nil {
+		t.Fatalf("expected the first admission to succeed, got refusal: %+v", refusal)
+	}
+	firstResolved, refusal := engine.recoverDecisionResumptionContext(admission)
+	if refusal != nil {
+		t.Fatalf("expected the first recovery to succeed, got refusal: %+v", refusal)
+	}
+	if len(firstResolved) != 1 || firstResolved[0].RequestID != d1.ID {
+		t.Fatalf("expected the first attempt's context to carry exactly D1, got %+v", firstResolved)
+	}
+	communication, resolvedInView, err := communicationContext(store, state.run, firstResolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolvedInView) != 1 || resolvedInView[0].RequestID != d1.ID {
+		t.Fatalf("expected the rendered provider context's own resolved_decisions to agree with the pinned admission, got %+v", resolvedInView)
+	}
+	if !strings.Contains(communication, d1.ID) {
+		t.Fatalf("expected the rendered ExecutionRequest.Communication to name D1, got %s", communication)
+	}
+
+	// D1 is superseded by D2 BETWEEN the pinned admission and the retry -
+	// exactly the review F1 scenario.
+	if _, err := admitTestMessage(store, batch, runID, "op-2",
+		orchestration.MessageDraft{Kind: orchestration.KindDecisionRequest, Purpose: "revised", Body: "revised", Supersedes: d1.ID}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, err := engine.load(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryAdmission, refusal := engine.admitDecisionResumption(fresh, operation)
+	if refusal != nil {
+		t.Fatalf("expected the SAME operation's admission to be reused unchanged (review B1), got refusal: %+v", refusal)
+	}
+	if len(retryAdmission.Decisions) != 1 || retryAdmission.Decisions[0].RequestID != d1.ID {
+		t.Fatalf("expected the retry to reuse the SAME pinned admission (D1), got %+v", retryAdmission)
+	}
+	retryResolved, refusal := engine.recoverDecisionResumptionContext(retryAdmission)
+	if refusal == nil {
+		t.Fatalf("expected the retry's dispatch-time recovery to refuse once D1 went non-live, never silently substitute D2, got resolved=%+v", retryResolved)
+	}
+	if class := refusal.result.(executionRecord).FailureClass; class != FailureDecisionBindingStale {
+		t.Fatalf("expected FailureDecisionBindingStale, got %v", class)
+	}
+}
+
+// TestAdmitDecisionResumptionRefusesWhenANewResolutionLandsBeforeAdmission
+// is #508 review F2's CONTENDER-FIRST ordering with a NEW resolution (not a
+// supersession) as the perturbing fact: a caller's "old load" binding,
+// derived when only D1 was resolved, is stale the moment D2 resolves before
+// AdmitDecisionResumption is ever called - the fresh re-derivation inside
+// admission now sees BOTH as undelivered, computes a DIFFERENT binding, and
+// refuses before any provider is ever reached. No concurrency is needed to
+// prove this ordering, exactly like the supersession-based contender-first
+// test above.
+func TestAdmitDecisionResumptionRefusesWhenANewResolutionLandsBeforeAdmission(t *testing.T) {
+	fixture, batch, runID := newLinearizabilityFixture(t)
+	store := fixture.store
+	now := fixture.clock.Now()
+	d1 := admitTestDecisionRequest(t, store, batch, runID, "op-1", nil, now)
+	d2 := admitTestDecisionRequest(t, store, batch, runID, "op-2", nil, now)
+	resolvedD1, err := store.ResolveDecisionRequest(d1.ID, allowOutcomeForStore(), "go", testHoldAuthority("operator-1"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contractRevision, candidateSubject := realContractAndCandidate(t, store, runID)
+	staleBinding := decisionResumeBinding(contractRevision, candidateSubject, []orchestration.DecisionResolution{resolvedD1})
+
+	if _, err := store.ResolveDecisionRequest(d2.ID, allowOutcomeForStore(), "go", testHoldAuthority("operator-1"), now); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.AdmitDecisionResumption(runID, "op-x", staleBinding, now); err == nil {
+		t.Fatal("expected the admission to refuse a binding that no longer reflects D2's own, later resolution")
+	}
+	if _, found, err := decisionResumptionAdmissionByOperationID(store.db, "op-x"); err != nil || found {
+		t.Fatalf("a refused admission must leave no durable row: found=%t err=%v", found, err)
+	}
+}
+
+// TestAdmitDecisionResumptionPinsD1OnlyAndNeverExpandsWhenD2ResolvesLater is
+// #508 review F2's RESOLUTION-FIRST (here: admission-first) ordering: D1's
+// admission is pinned while D2 is still unresolved; D2 then resolves. A
+// later read of the SAME operation's admission proves it was never
+// expanded or otherwise mutated - D2 belongs to a separate, later epoch,
+// never substituted or silently merged into an admission already pinned.
+func TestAdmitDecisionResumptionPinsD1OnlyAndNeverExpandsWhenD2ResolvesLater(t *testing.T) {
+	fixture, batch, runID := newLinearizabilityFixture(t)
+	store := fixture.store
+	now := fixture.clock.Now()
+	d1 := admitTestDecisionRequest(t, store, batch, runID, "op-1", nil, now)
+	d2 := admitTestDecisionRequest(t, store, batch, runID, "op-2", nil, now)
+	resolvedD1, err := store.ResolveDecisionRequest(d1.ID, allowOutcomeForStore(), "go", testHoldAuthority("operator-1"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contractRevision, candidateSubject := realContractAndCandidate(t, store, runID)
+	binding := decisionResumeBinding(contractRevision, candidateSubject, []orchestration.DecisionResolution{resolvedD1})
+
+	pinned, err := store.AdmitDecisionResumption(runID, "op-d1-only", binding, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pinned.Decisions) != 1 || pinned.Decisions[0].RequestID != d1.ID {
+		t.Fatalf("expected the admission to pin exactly D1, got %+v", pinned)
+	}
+
+	if _, err := store.ResolveDecisionRequest(d2.ID, allowOutcomeForStore(), "go", testHoldAuthority("operator-1"), now); err != nil {
+		t.Fatal(err)
+	}
+
+	again, found, err := decisionResumptionAdmissionByOperationID(store.db, "op-d1-only")
+	if err != nil || !found {
+		t.Fatalf("expected the existing admission to still be found: found=%t err=%v", found, err)
+	}
+	if len(again.Decisions) != 1 || again.Decisions[0].RequestID != d1.ID {
+		t.Fatalf("expected D1's admission to stay exactly as pinned, never expanded by D2's later resolution: %+v", again)
+	}
+}
+
+// realContractAndCandidate reads one run's ACTUAL current contract revision
+// and candidate subject straight from its own event-sourced projection -
+// never a fixed test literal - so a binding built from them is the SAME one
+// AdmitDecisionResumption's own fresh re-derivation (review F2) will
+// recompute.
+func realContractAndCandidate(t *testing.T, store *SQLiteOperationStore, runID string) (string, string) {
+	t.Helper()
+	events, err := store.Events(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err := Project(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return projection.Contract.Revision, projection.CandidateRevision
+}
+
 // TestAdmitDecisionResumptionRefusesWhenSupersededBeforeAdmission is #508
 // review B2's CONTENDER-FIRST ordering: a decision superseded before
 // AdmitDecisionResumption is ever called refuses the whole admission and
@@ -532,8 +714,9 @@ func TestAdmitDecisionResumptionRefusesWhenSupersededBeforeAdmission(t *testing.
 		t.Fatal(err)
 	}
 
-	binding := decisionResumeBinding("contract-rev", "", []orchestration.DecisionResolution{resolved})
-	if _, err := store.AdmitDecisionResumption("op-x", binding, "contract-rev", "", []orchestration.DecisionResolution{resolved}, now); err == nil {
+	contractRevision, candidateSubject := realContractAndCandidate(t, store, runID)
+	binding := decisionResumeBinding(contractRevision, candidateSubject, []orchestration.DecisionResolution{resolved})
+	if _, err := store.AdmitDecisionResumption(runID, "op-x", binding, now); err == nil {
 		t.Fatal("expected the admission to refuse a decision already superseded before it was ever called")
 	}
 	if _, found, err := decisionResumptionAdmissionByOperationID(store.db, "op-x"); err != nil || found {
@@ -543,29 +726,43 @@ func TestAdmitDecisionResumptionRefusesWhenSupersededBeforeAdmission(t *testing.
 
 // admitDecisionResumptionUnderHeldTx replicates AdmitDecisionResumption's own
 // steps using its own production helpers (decisionResumptionAdmissionByOperationID,
-// findDecisionRequestTx), inside a transaction the CALLER opened and controls
-// the commit of - the same technique decision_linearizability_test.go's
-// resolveUnderHeldTx already uses, for the same reason: it holds the exact
-// window between this admission's validation and its own insert open for an
-// externally observed duration.
-func admitDecisionResumptionUnderHeldTx(tx *sql.Tx, operationID, binding, contractRevision, candidateSubject string,
-	proposed []orchestration.DecisionResolution, now time.Time) (DecisionResumptionAdmission, error) {
+// queryEvents, Project, resolvedOwnDecisionRequestsTx, validateLiveAndCurrent),
+// inside a transaction the CALLER opened and controls the commit of - the
+// same technique decision_linearizability_test.go's resolveUnderHeldTx
+// already uses, for the same reason: it holds the exact window between this
+// admission's validation and its own insert open for an externally observed
+// duration.
+func admitDecisionResumptionUnderHeldTx(tx *sql.Tx, runID, operationID, binding string, now time.Time) (DecisionResumptionAdmission, error) {
 	if existing, found, err := decisionResumptionAdmissionByOperationID(tx, operationID); err != nil {
 		return DecisionResumptionAdmission{}, err
 	} else if found {
 		return existing, nil
 	}
-	decisions := make([]DeliveredDecision, len(proposed))
-	for i, r := range proposed {
-		ref, current, err := findDecisionRequestTx(tx, r.RequestID)
-		if err != nil {
+	events, err := queryEvents(tx, runID)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	projection, err := Project(events)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	delivered, err := deliveredDecisionIDsFromEvents(events)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	liveResolved, err := resolvedOwnDecisionRequestsTx(tx, runID)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	contractRevision, candidateSubject := projection.Contract.Revision, projection.CandidateRevision
+	undelivered := undeliveredOf(liveResolved, delivered)
+	if expected := decisionResumeBinding(contractRevision, candidateSubject, undelivered); expected != binding {
+		return DecisionResumptionAdmission{}, fmt.Errorf("the undelivered decision set, contract or candidate no longer matches (recomputed binding %q, got %q)", expected, binding)
+	}
+	decisions := make([]DeliveredDecision, len(undelivered))
+	for i, r := range undelivered {
+		if err := validateLiveAndCurrent(tx, r.RequestID); err != nil {
 			return DecisionResumptionAdmission{}, err
-		}
-		if !ref.Live {
-			return DecisionResumptionAdmission{}, fmt.Errorf("decision request %s is no longer live", r.RequestID)
-		}
-		if ref.Subject != nil && (current == nil || *current != ref.Subject.Revision) {
-			return DecisionResumptionAdmission{}, fmt.Errorf("decision request %s is bound to a subject that is no longer current", r.RequestID)
 		}
 		decisions[i] = DeliveredDecision{RequestID: r.RequestID, ResolutionID: r.ID}
 	}
@@ -611,13 +808,14 @@ func TestAdmitDecisionResumptionBlocksConcurrentSupersessionAndPinsRegardless(t 
 		t.Fatal(err)
 	}
 	operationID := "op-decision-resumed-under-test"
-	binding := decisionResumeBinding("contract-rev", "", []orchestration.DecisionResolution{resolved})
+	contractRevision, candidateSubject := realContractAndCandidate(t, store, runID)
+	binding := decisionResumeBinding(contractRevision, candidateSubject, []orchestration.DecisionResolution{resolved})
 
 	tx, err := store.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := admitDecisionResumptionUnderHeldTx(tx, operationID, binding, "contract-rev", "", []orchestration.DecisionResolution{resolved}, now); err != nil {
+	if _, err := admitDecisionResumptionUnderHeldTx(tx, runID, operationID, binding, now); err != nil {
 		t.Fatal(err)
 	}
 	ready := make(chan struct{})
@@ -646,128 +844,11 @@ func TestAdmitDecisionResumptionBlocksConcurrentSupersessionAndPinsRegardless(t 
 		t.Fatal("the contender's supersession never completed after the admission's transaction committed")
 	}
 
-	pinned, err := store.AdmitDecisionResumption(operationID, binding, "contract-rev", "", nil, now)
+	pinned, err := store.AdmitDecisionResumption(runID, operationID, binding, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(pinned.Decisions) != 1 || pinned.Decisions[0].RequestID != d1.ID {
 		t.Fatalf("the admission's pinned snapshot changed after a later-landing supersession: %+v", pinned)
-	}
-}
-
-// TestDecisionDeliveryEntryBoundsToOwnDecisionsEvenInALargeMultiUnitScope is
-// #508 review B4's required proof: communicationContext's OWN return is
-// scope-wide (every unit's resolved decisions, not only this run's), and a
-// real multi-unit batch can easily carry more than
-// orchestration.MaxMessagesPerInvocation (8) live resolved decisions spread
-// across several units. decisionDeliveryEntry must still succeed and carry
-// ONLY this run's own decision(s) - never fail validation merely because the
-// WHOLE scope happens to be large, and never silently lose this run's own
-// provenance by trying to represent the other units' decisions too.
-func TestDecisionDeliveryEntryBoundsToOwnDecisionsEvenInALargeMultiUnitScope(t *testing.T) {
-	own := []orchestration.DecisionResolution{{RequestID: "own-1", ID: "res-own-1"}}
-	shown := append([]orchestration.DecisionResolution{}, own...)
-	for i := range 9 {
-		shown = append(shown, orchestration.DecisionResolution{
-			RequestID: fmt.Sprintf("other-unit-decision-%d", i), ID: fmt.Sprintf("res-other-%d", i),
-		})
-	}
-	if len(shown) <= orchestration.MaxMessagesPerInvocation {
-		t.Fatalf("test precondition violated: the whole-scope set (%d) must exceed MaxMessagesPerInvocation (%d)", len(shown), orchestration.MaxMessagesPerInvocation)
-	}
-
-	entry, ok, err := decisionDeliveryEntry(DecisionResumptionAdmission{}, own, shown, "op-1", 1, "contract-rev", "subject")
-	if err != nil {
-		t.Fatalf("a whole-batch scope of %d resolved decisions must not fail delivery validation when only 1 is THIS run's own: %v", len(shown), err)
-	}
-	if !ok {
-		t.Fatal("expected a delivery entry")
-	}
-	payload, ok := entry.Payload.(DecisionsDeliveredPayload)
-	if !ok {
-		t.Fatalf("unexpected payload type %T", entry.Payload)
-	}
-	if len(payload.Decisions) != 1 || payload.Decisions[0].RequestID != "own-1" {
-		t.Fatalf("expected the delivery to carry ONLY this run's own decision, got %+v", payload.Decisions)
-	}
-	if err := validateDecisionsDelivered(payload); err != nil {
-		t.Fatalf("the bounded, own-only delivery payload must pass its own schema validation: %v", err)
-	}
-}
-
-// TestDecisionDeliveryEntryFailsClosedWhenGenuinelyOversized is the
-// complementary proof: if THIS run's own delivered set itself ever exceeds
-// maxDeliveredDecisions, the result is an ERROR - never a silently
-// truncated or dropped delivery record (review B4).
-func TestDecisionDeliveryEntryFailsClosedWhenGenuinelyOversized(t *testing.T) {
-	var own []orchestration.DecisionResolution
-	for i := range maxDeliveredDecisions + 1 {
-		own = append(own, orchestration.DecisionResolution{RequestID: fmt.Sprintf("own-%03d", i), ID: fmt.Sprintf("res-%03d", i)})
-	}
-	_, _, err := decisionDeliveryEntry(DecisionResumptionAdmission{}, own, own, "op-1", 1, "contract-rev", "subject")
-	if err == nil {
-		t.Fatalf("expected an error when this run's own delivered set (%d) exceeds the %d bound, got none", len(own), maxDeliveredDecisions)
-	}
-}
-
-// TestDecisionResumptionAdmissionOperationIDStaysWithinTheFieldBound is the
-// author's own missing regression this review named explicitly: a real bug
-// found and fixed during this implementation (an early binding format that
-// embedded the full contract revision and candidate subject verbatim
-// overran the 200-byte operation_id field bound every event payload
-// enforces, silently exhausting a decision-resumed operation's attempts
-// with no diagnostic). Proves, with WORST-CASE-LENGTH inputs a contract
-// revision and a candidate revision can actually take in this build (a full
-// reassessment-suffixed revision over a 40-character commit SHA, per
-// bindContractCompile/ReassessmentCompletedPayload), that the resulting
-// operation id still fits, and that operation.planned/before/after and
-// EventDecisionsDelivered all validate against it without error.
-func TestDecisionResumptionAdmissionOperationIDStaysWithinTheFieldBound(t *testing.T) {
-	longCommit := strings.Repeat("a", 40)
-	contractRevision := "1-" + longCommit + "-next" // the exact reassessment-suffixed shape operations.go's commitCandidate produces
-	candidateSubject := longCommit
-	undelivered := []orchestration.DecisionResolution{{RequestID: strings.Repeat("r", 64), ID: strings.Repeat("s", 64)}}
-	binding := decisionResumeBinding(contractRevision, candidateSubject, undelivered)
-
-	runID := "run-" + strings.Repeat("f", 32)
-	operationID := runID + ":" + OpExecutionInvoke + ":" + operationKey(OpExecutionInvoke, binding)
-	const fieldBound = 200
-	if len(operationID) > fieldBound {
-		t.Fatalf("worst-case decision-resumed operation id is %d bytes, exceeds the %d byte field bound: %s", len(operationID), fieldBound, operationID)
-	}
-
-	// The field this review's own fix actually protects: operation_id as
-	// carried by the EVENT payloads that reference it (messages.observed,
-	// handoff.reported, decision.delivered) - required()/bounded() enforces
-	// maxPayloadFieldBytes (200) on THIS string, never on RunOperation.ID
-	// itself. decisionDeliveryEntry + validateDecisionsDelivered is the
-	// exact mechanism that broke (handoff.reported's own validator, the
-	// same required()/bounded() pair, broke identically on the same
-	// oversized id before this binding was digested).
-	entry, ok, err := decisionDeliveryEntry(DecisionResumptionAdmission{}, undelivered, undelivered, operationID, 1, contractRevision, candidateSubject)
-	if err != nil || !ok {
-		t.Fatalf("a worst-case-length decision delivery must still validate: ok=%t err=%v", ok, err)
-	}
-	if err := validateDecisionsDelivered(entry.Payload.(DecisionsDeliveredPayload)); err != nil {
-		t.Fatalf("a worst-case-length decision delivery payload must pass schema validation: %v", err)
-	}
-}
-
-// TestDeliveredDecisionIDsFromEventsFailsClosedOnAMalformedEvent is #508
-// review's additional required fix: deliveredDecisionIDs must distinguish
-// "no delivery event exists" (legacy absence, fine) from "a delivery event
-// exists but cannot be decoded" (present-but-invalid evidence) - the latter
-// must fail closed (an error load() propagates, failing the whole
-// Reconcile pass) rather than silently forgetting a real delivery.
-func TestDeliveredDecisionIDsFromEventsFailsClosedOnAMalformedEvent(t *testing.T) {
-	events := []EngineeringEvent{
-		{Type: EventDecisionsDelivered, Payload: []byte(`{"operation_id":`)}, // truncated, invalid JSON
-	}
-	if _, err := deliveredDecisionIDsFromEvents(events); err == nil {
-		t.Fatal("expected a malformed EventDecisionsDelivered payload to fail closed, got nil error")
-	}
-	// A run with NO delivery event at all (legacy absence) is unaffected.
-	if ids, err := deliveredDecisionIDsFromEvents(nil); err != nil || len(ids) != 0 {
-		t.Fatalf("expected no delivery events to decode cleanly to an empty set: ids=%v err=%v", ids, err)
 	}
 }

@@ -25,8 +25,8 @@ package runtime
 //     OWN prior delivery, and a supersession after admission belongs to a
 //     later epoch, never retroactively rewriting it);
 //   - the existing OpExecutionInvoke scheduler, attempt ceilings and
-//     continuation-depth ceiling (reconciler.go) - unmodified, and now
-//     counting this binding shape too.
+//     continuation-depth ceiling (execution_continuation_budget.go) -
+//     unmodified, and now counting this binding shape too.
 
 import (
 	"errors"
@@ -43,7 +43,7 @@ import (
 // convention invocationContinuationPrefix already uses for a checkpoint
 // continuation, a DIFFERENT prefix so the two are never confused, but
 // counted against the SAME finite continuation ceiling (isResumptionBinding,
-// reconciler.go).
+// execution_continuation_budget.go).
 const decisionResumptionPrefix = "decision-resumed|"
 
 // maxDeliveredDecisions bounds one delivery record - always THIS run's own
@@ -138,10 +138,7 @@ func deliveredForThisRun(own, shown []orchestration.DecisionResolution) []orches
 // (review B4).
 func decisionDeliveryEntry(admission DecisionResumptionAdmission, own, shown []orchestration.DecisionResolution,
 	operationID string, attempt int, contractRevision, candidateSubject string) (journalEntry, bool, error) {
-	decisions := admission.Decisions
-	if len(decisions) == 0 {
-		decisions = deliveredDecisions(deliveredForThisRun(own, shown))
-	}
+	decisions := decisionsToDeliver(admission, own, shown)
 	if len(decisions) == 0 {
 		return journalEntry{}, false, nil
 	}
@@ -153,6 +150,17 @@ func decisionDeliveryEntry(admission DecisionResumptionAdmission, own, shown []o
 		OperationID: operationID, Attempt: attempt, Decisions: decisions,
 		ContractRevision: contractRevision, CandidateSubject: candidateSubject,
 	}}, true, nil
+}
+
+// decisionsToDeliver is the one definition of "what this attempt delivers"
+// decisionDeliveryEntry and decisionDeliveryPreflight (review F3) both read:
+// a decision-resumed operation's own pinned admission when one exists,
+// otherwise this run's own resolutions actually shown (deliveredForThisRun).
+func decisionsToDeliver(admission DecisionResumptionAdmission, own, shown []orchestration.DecisionResolution) []DeliveredDecision {
+	if len(admission.Decisions) > 0 {
+		return admission.Decisions
+	}
+	return deliveredDecisions(deliveredForThisRun(own, shown))
 }
 
 // decisionDeliveryEffect is the one shared shell both invokeExecution exit
@@ -299,7 +307,7 @@ type DecisionResumptionAdmission struct {
 }
 
 // admitDecisionResumption is invokeExecution's dispatch-time gate for a
-// decision-resumed operation (#508 review B1/B2), called once, immediately
+// decision-resumed operation (#508 review B1/B2/F2), called once, immediately
 // before any context is assembled for it. Every other operation kind or
 // binding returns (zero value, nil) at once.
 //
@@ -310,25 +318,98 @@ type DecisionResumptionAdmission struct {
 // - after its own first attempt already delivered this exact set - proceed
 // under its own original envelope instead of being refused as "stale"
 // against its own prior delivery (review B1). With no existing admission,
-// the run's current undeliveredResolvedOwnDecisions() is proposed and
-// validated FRESH, inside the store's own BEGIN IMMEDIATE transaction
-// (review B2): a decision superseded, or its subject moved, before this
-// moment refuses the whole admission; nothing after it can retroactively
-// invalidate what was just pinned.
+// nothing this call passes is trusted as proposed content: the store itself
+// re-derives the run's complete current undelivered decision set and
+// contract/candidate epoch, inside its own BEGIN IMMEDIATE transaction
+// (review B2/F2), and refuses unless decisionResumeBinding recomputed from
+// that fresh read reproduces the SAME binding this operation names.
 func (r *EngineeringRuntime) admitDecisionResumption(state *runState, operation RunOperation) (DecisionResumptionAdmission, *effect) {
 	binding := bindingOf(operation)
 	if !strings.HasPrefix(binding, decisionResumptionPrefix) {
 		return DecisionResumptionAdmission{}, nil
 	}
-	proposed := state.undeliveredResolvedOwnDecisions()
-	admission, err := r.deps.Store.AdmitDecisionResumption(operation.ID, binding,
-		state.contractRevision(), state.projection.CandidateRevision, proposed, r.deps.Clock.Now())
+	admission, err := r.deps.Store.AdmitDecisionResumption(state.run.ID, operation.ID, binding, r.deps.Clock.Now())
 	if err != nil {
-		cause := fmt.Errorf("this decision-resumed operation's own decision set or candidate subject no longer matches current durable state: %w", err)
+		cause := fmt.Errorf("this decision-resumed operation's own decision set, contract or candidate subject no longer matches current durable state: %w", err)
 		return DecisionResumptionAdmission{}, &effect{state: OperationFailed, result: executionRecord{
 			mutationResult: mutationResult{FailureClass: FailureDecisionBindingStale},
 			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureDecisionBindingStale, ExecutionResult{}, cause),
 		}}
 	}
 	return admission, nil
+}
+
+// recoverDecisionResumptionContext wraps
+// SQLiteOperationStore.RecoverDecisionResumptionContext (review F1) with the
+// same OperationFailed/FailureDecisionBindingStale refusal shape
+// admitDecisionResumption uses: reached before any provider invocation, so a
+// mismatch here never dispatches and never falsely claims a delivery that
+// did not happen.
+func (r *EngineeringRuntime) recoverDecisionResumptionContext(admission DecisionResumptionAdmission) ([]orchestration.DecisionResolution, *effect) {
+	resolved, err := r.deps.Store.RecoverDecisionResumptionContext(admission)
+	if err != nil {
+		cause := fmt.Errorf("this decision-resumed operation's pinned decisions no longer match current durable state: %w", err)
+		return nil, &effect{state: OperationFailed, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: FailureDecisionBindingStale},
+			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureDecisionBindingStale, ExecutionResult{}, cause),
+		}}
+	}
+	return resolved, nil
+}
+
+// decisionDeliveryPreflight is #508 P4b review F3's dispatch-time bound: the
+// count decisionDeliveryEntry will later have to journal is known and
+// checked BEFORE Provider.Execute ever runs, so an oversized set is refused
+// with ZERO provider starts and no attempt spent on work whose own delivery
+// could never be durably recorded, rather than discovered only after a
+// worker already saw it.
+func (r *EngineeringRuntime) decisionDeliveryPreflight(admission DecisionResumptionAdmission, own, shown []orchestration.DecisionResolution) *effect {
+	count := len(decisionsToDeliver(admission, own, shown))
+	if count <= maxDeliveredDecisions {
+		return nil
+	}
+	cause := fmt.Errorf("this attempt's own decisions to deliver (%d) exceed the %d bound a durable delivery record enforces", count, maxDeliveredDecisions)
+	return &effect{state: OperationFailed, result: executionRecord{
+		mutationResult: mutationResult{FailureClass: FailureUnknown},
+		Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, cause),
+	}}
+}
+
+// workspaceSubjectFailure is the one-line OperationFailed/FailureUnknown
+// refusal shape the decision-resumed dispatch helpers above share with
+// invokeExecution's own pre-dispatch workspace/subject failures.
+func (r *EngineeringRuntime) workspaceSubjectFailure(err error) *effect {
+	return &effect{state: OperationFailed, result: executionRecord{
+		mutationResult: mutationResult{FailureClass: FailureUnknown},
+		Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
+	}}
+}
+
+// prepareDecisionResumedMessages is invokeExecution's one combined step for
+// admission, dispatch-time recovery, message rendering and the delivery-size
+// preflight (review F1/F3): for an ordinary operation it is a thin pass-
+// through to prepareMessages; for a decision-resumed one, the provider's own
+// context is built from the exact, freshly re-verified admission snapshot,
+// never a fresh scope-wide read, so the decisions this attempt is shown and
+// the decisions the journal will claim delivered are always the same set.
+func (r *EngineeringRuntime) prepareDecisionResumedMessages(state *runState, operation RunOperation, attempt int) (
+	messagePath, communication string, shownDecisions []orchestration.DecisionResolution,
+	resumptionAdmission DecisionResumptionAdmission, refusal *effect) {
+	resumptionAdmission, refusal = r.admitDecisionResumption(state, operation)
+	if refusal != nil {
+		return "", "", nil, DecisionResumptionAdmission{}, refusal
+	}
+	pinnedDecisions, refusal := r.recoverDecisionResumptionContext(resumptionAdmission)
+	if refusal != nil {
+		return "", "", nil, DecisionResumptionAdmission{}, refusal
+	}
+	var err error
+	messagePath, communication, shownDecisions, err = r.prepareMessages(state, operation.ID, attempt, pinnedDecisions)
+	if err != nil {
+		return "", "", nil, DecisionResumptionAdmission{}, r.workspaceSubjectFailure(err)
+	}
+	if refusal := r.decisionDeliveryPreflight(resumptionAdmission, state.resolvedOwnDecisions, shownDecisions); refusal != nil {
+		return "", "", nil, DecisionResumptionAdmission{}, refusal
+	}
+	return messagePath, communication, shownDecisions, resumptionAdmission, nil
 }
