@@ -66,6 +66,30 @@ func reviewRemediationBindingInvariants(decision review.Decision, admission Revi
 	return nil
 }
 
+// reviewRemediationSuperseded is #474 R2's dispatch-adjacent freshness
+// check: an admission's referenced decision is immutable once created, but a
+// NEWER independent decision for the SAME (repository, PR) - reached after
+// admission, possibly at the exact same head B2's live head check would
+// therefore pass - supersedes it as the governing review. B2 proves the live
+// PR head still agrees with the head the findings were assembled against;
+// this proves the admitted decision is still the LATEST one for that PR,
+// which a same-head re-review can falsify without moving the head at all.
+// Checked at every pending/delivery read (pendingReviewRemediationKeys,
+// reviewRemediationFindings), never only once at admission time.
+func reviewRemediationSuperseded(store *SQLiteOperationStore, decision review.Decision) (bool, error) {
+	latest, found, err := store.LatestReviewDecision(decision.Subject.Repository, decision.Subject.PRNumber)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		// decision itself was just read from this same table: a read
+		// finding no latest decision at all for its own (repository, PR) is
+		// incoherent, not proof of currency. Fail closed.
+		return true, nil
+	}
+	return latest.ID != decision.ID, nil
+}
+
 // blockingFindingSignatures is the sorted set of signatures a decision's
 // blocking findings carry - the one authoritative value an admission's own
 // FindingSignatures must equal exactly.

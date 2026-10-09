@@ -50,6 +50,15 @@ func (r *EngineeringRuntime) reviewRemediationFindings(state *runState) ([]Findi
 		if reviewRemediationBindingInvariants(decision, admission, state.run, state.projection) != nil {
 			continue
 		}
+		// #474 R2: a newer independent decision for this PR - possibly at
+		// this exact same head B2's live head check would therefore pass -
+		// supersedes the one this admission is bound to. Its findings are
+		// never delivered once superseded.
+		if superseded, err := reviewRemediationSuperseded(r.deps.Store, decision); err != nil {
+			return nil, err
+		} else if superseded {
+			continue
+		}
 		for _, finding := range decision.Findings {
 			if finding.Severity != review.SeverityBlocking {
 				continue

@@ -1258,13 +1258,15 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 				}})
 			}
 		}
-		// feedbackUnresolved, reviewUnresolved and continuationUnresolved are
-		// excluded here deliberately: none of the three is a finished
-		// execution (#376, #374, #379) even though the provider itself
-		// reported success, so the exact subject it left behind must not
-		// become eligible to be treated as a finished candidate. The failure
-		// path below is what actually settles this attempt.
-		if !feedbackUnresolved && !reviewUnresolved && !continuationUnresolved {
+		// feedbackUnresolved, reviewRemediationUnresolved, reviewUnresolved and
+		// continuationUnresolved are excluded here deliberately: none of the
+		// four is a finished execution (#376, #474 B1, #374, #379) even though
+		// the provider itself reported success, so the exact subject it left
+		// behind must not become eligible to be treated as a finished
+		// candidate - and must not journal EventExecutionCompleted, which
+		// Project (runtime/projection.go) reads as exactly that claim. The
+		// failure path below is what actually settles this attempt.
+		if !feedbackUnresolved && !reviewRemediationUnresolved && !reviewUnresolved && !continuationUnresolved {
 			events = append(events, journalEntry{Type: EventExecutionCompleted, Payload: ExecutionCompletedPayload{
 				ProducerID:    producerID,
 				Purpose:       purpose,

@@ -422,6 +422,14 @@ func (s *runState) pendingReviewRemediationKeys() ([]string, error) {
 		if reviewRemediationBindingInvariants(decision, admission, s.run, s.projection) != nil {
 			continue
 		}
+		// #474 R2: a newer independent decision for this PR - possibly at
+		// this exact same head - supersedes the one this admission is bound
+		// to. A superseded admission binds nothing.
+		if superseded, err := reviewRemediationSuperseded(s.rt.deps.Store, decision); err != nil {
+			return nil, err
+		} else if superseded {
+			continue
+		}
 		keys = append(keys, admission.DecisionID)
 	}
 	sort.Strings(keys)

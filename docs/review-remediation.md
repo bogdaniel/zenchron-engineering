@@ -409,6 +409,47 @@ explicitly asked for: the PR's forge-side head moves with no observation
 tick in between, so the run's own journalled projection is untouched and
 only the live read can see the move.
 
+A second exact-head re-review of B1/B2 found two further exact-source gaps,
+both closed with no new mechanism:
+
+- **R1 - the B1 failure gate didn't gate the completion EVENT.**
+  `reviewRemediationUnresolved` correctly failed the OPERATION, but the
+  event-creation guard in `invokeExecution` (`!feedbackUnresolved &&
+  !reviewUnresolved && !continuationUnresolved`) still omitted it: a failed
+  no-op remediation attempt could still journal `EventExecutionCompleted`
+  (and, for a WorkGraph unit, an admissible handoff), contradicting the
+  `OperationFailed` record right beside it - `Project`
+  (`runtime/projection.go`) reads `EventExecutionCompleted` as "this
+  candidate is execution-complete". Added `reviewRemediationUnresolved` to
+  that same guard.
+- **R2 - a same-head review supersession was unchecked at dispatch.** B2
+  proves the live PR head still agrees with the head an admission's findings
+  were assembled against; it says nothing about whether that admission's
+  referenced decision is still the LATEST independent decision for the PR.
+  A fresh decision for the SAME exact head - a second reviewer reaching
+  APPROVE with no head move at all - supersedes an earlier REQUEST_CHANGES
+  without ever failing B2's check. `reviewRemediationSuperseded`
+  (`review_remediation_store.go`) is a `LatestReviewDecision` read compared
+  against the admission's own referenced decision's ID, called from both
+  `pendingReviewRemediationKeys` (binding) and `reviewRemediationFindings`
+  (delivery) - the same two read-time call sites
+  `reviewRemediationBindingInvariants` already runs at. A store read failure
+  fails closed (treated as superseded, never as current).
+
+`TestUnresolvedReviewRemediationReturnFailsTheOperationAndStaysActionable`
+now also asserts the real journal contains exactly one
+`EventExecutionCompleted` (the original successful commit) and no handoff
+observation for the failed remediation attempt (R1).
+`TestSameHeadReviewSupersessionBlocksProviderDispatch` admits D1
+(REQUEST_CHANGES) for H1, then durably records D2 (APPROVE, a different
+reviewer) for the identical subject with no intervening projection change,
+and asserts both that D1 no longer binds or delivers findings and that the
+producer is never invoked for it (R2); a second focused test
+(`TestReviewRemediationSupersessionFailsClosedOnAnUnreadableLatestDecision`)
+proves the fail-closed error path. All four new guards (R1's event gate,
+R2's two call sites, R2's error path) were deliberately disabled and
+confirmed to fail their exact test before being restored.
+
 ## WorkGraph review-readiness (section 8): a frozen, deferred contract
 
 `orchestration/workgraph_projection.go`'s `ProjectWorkGraph` marks a unit
@@ -538,8 +579,12 @@ application-level check, is load-bearing).
   `bindExecutionInvoke`'s and `conditions()`'s real call sites, deliberately
   broken and restored like every other guard above.
 - `TestUnresolvedReviewRemediationReturnFailsTheOperationAndStaysActionable`
-  (B1) and `review_remediation_delivery_test.go`'s four tests (B2) - see the
+  (B1, now also asserting the event-journal absence R1 requires) and
+  `review_remediation_delivery_test.go`'s four tests (B2) - see the
   hardening section above.
+- `TestSameHeadReviewSupersessionBlocksProviderDispatch` and
+  `TestReviewRemediationSupersessionFailsClosedOnAnUnreadableLatestDecision`
+  (R2) - see the hardening section above.
 - `TestReviewTriggerRunsOncePerTickPerRun`, `TestReviewTriggerErrorIsReported-
   SeparatelyFromDriveFailure` and `TestReviewTriggerSurvivesSupervisorRestart`
   (B3) prove the supervisor wiring itself - repeated tick, isolated error
