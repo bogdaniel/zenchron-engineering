@@ -150,6 +150,49 @@ func (s *SQLiteOperationStore) admitHandoff(handoff orchestration.EngineeringHan
 	return inserted == 1, err
 }
 
+// AdmitIntegratedHandoff inserts a WorkGraph integration unit's handoff only
+// if every consumed input is STILL the latest admitted handoff for its own
+// run (#475 review B3): the freshness check and the insert are the SAME
+// SQLite statement, not a read followed by a separate write a concurrent
+// supersession could land between. "Latest for its run" is exact: a handoff
+// row with a later admitted_unix_nano for that same run_id proves a newer
+// one superseded it, by this store's own insert-only, append-time ordering.
+func (s *SQLiteOperationStore) AdmitIntegratedHandoff(handoff orchestration.EngineeringHandoff, inputs orchestration.WorkUnitInputs) (bool, error) {
+	if err := handoff.Validate(); err != nil {
+		return false, err
+	}
+	if err := inputs.Validate(); err != nil {
+		return false, err
+	}
+	document, err := CanonicalJSON(handoff)
+	if err != nil {
+		return false, err
+	}
+	args := []any{handoff.ID, handoff.BatchID, handoff.RunID, handoff.AdmittedAt.UnixNano(), string(document)}
+	clauses := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		clauses = append(clauses, `NOT EXISTS (
+			SELECT 1 FROM orchestration_handoffs
+			WHERE run_id = ? AND id <> ?
+			AND admitted_unix_nano > (SELECT admitted_unix_nano FROM orchestration_handoffs WHERE id = ?)
+		)`)
+		args = append(args, input.RunID, input.HandoffID, input.HandoffID)
+	}
+	where := "1=1"
+	if len(clauses) > 0 {
+		where = strings.Join(clauses, " AND ")
+	}
+	result, err := s.db.Exec(`INSERT INTO orchestration_handoffs (id, batch_id, run_id, admitted_unix_nano, document)
+		SELECT ?, ?, ?, ?, ?
+		WHERE `+where+`
+		ON CONFLICT(id) DO NOTHING`, args...)
+	if err != nil {
+		return false, err
+	}
+	inserted, err := result.RowsAffected()
+	return inserted == 1, err
+}
+
 // RunHandoffs reads every handoff admitted for one run, oldest first.
 func (s *SQLiteOperationStore) RunHandoffs(runID string) ([]orchestration.EngineeringHandoff, error) {
 	return queryRunHandoffs(s.db, runID)

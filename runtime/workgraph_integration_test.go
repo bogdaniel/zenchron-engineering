@@ -19,6 +19,7 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/execution"
+	"github.com/bogdaniel/zenchron-engineering/integration"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
@@ -327,20 +328,77 @@ func TestWorkGraphIntegrationTextualConflictBlocksAndFindsNoHandoff(t *testing.T
 	supervisor := fixture.supervisor()
 	view := fixture.adoptGraph(supervisor, "claude", 1, integrationGraphUnits(issueA, issueB, issueC))
 
-	settled := fixture.driveGraph(supervisor, view.GraphID, func(current WorkGraphView) {
+	// This deterministic conflict never clears on its own (#475 review's
+	// retry-policy follow-up): the run PARKS (Waiting,
+	// deterministic_failure_unchanged) after its first identical-attempt
+	// check, rather than spending its whole attempt budget re-merging the
+	// same unchanged pair. unitSettled (workgraph_test.go) has no case for
+	// that disposition - correctly: a capacity or external wait is expected
+	// to clear as the loop keeps ticking, and treating every Waiting state
+	// as "done" would stop driveGraph before those clear - so this test
+	// drives manually and checks for the exact durable disposition instead
+	// of relying on driveGraph's generic settlement detection.
+	var cRunID string
+	var parked bool
+	for range 60 {
+		if _, err := supervisor.Tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		fixture.clock.advance(61 * time.Second)
+		current := fixture.graph(view.GraphID)
 		if c := current.unit(t, "c"); c.Output != nil {
 			t.Fatal("a conflicting integration admitted a handoff")
+		} else if c.RunID != "" {
+			cRunID = c.RunID
 		}
-	})
-	a, b, c := settled.unit(t, "a"), settled.unit(t, "b"), settled.unit(t, "c")
+		if cRunID == "" {
+			continue
+		}
+		events, err := fixture.store.Events(cRunID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			if event.Type != EventRunWaiting {
+				continue
+			}
+			var payload dispositionRecord
+			if err := decodeJSON(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Reason == ReasonDeterministicFailureUnchanged {
+				parked = true
+			}
+		}
+		if parked {
+			break
+		}
+	}
+	if !parked {
+		t.Fatal("the blocked integration unit never parked on its unchanged deterministic conflict")
+	}
+	a, b := fixture.graph(view.GraphID).unit(t, "a"), fixture.graph(view.GraphID).unit(t, "b")
 	if a.State != orchestration.UnitState(orchestration.ItemCompleted) || b.State != orchestration.UnitState(orchestration.ItemCompleted) {
 		t.Fatalf("producers did not both complete: a=%s b=%s", a.State, b.State)
 	}
-	if c.State != orchestration.UnitState(orchestration.ItemFailed) {
-		t.Fatalf("blocked integration unit settled as %s, not failed: %s", c.State, c.Reason)
-	}
+	c := fixture.graph(view.GraphID).unit(t, "c")
 	if c.Output != nil {
 		t.Fatal("blocked integration unit carries an admitted output")
+	}
+	// Parked, not retried to exhaustion: at most ONE real integration.compose
+	// attempt ran before the identical-failure check parked the run.
+	ops, err := fixture.store.Operations(cRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var composeAttempts int
+	for _, op := range ops {
+		if op.Kind == OpIntegrationCompose {
+			composeAttempts++
+		}
+	}
+	if composeAttempts != 1 {
+		t.Fatalf("integration.compose ran %d times before parking, want exactly 1", composeAttempts)
 	}
 	// Message admission reads the state a pass STARTED with (#470's existing
 	// tick-granular admission), so it lags the pass that journalled the run's
@@ -382,6 +440,25 @@ func TestWorkGraphIntegrationTextualConflictBlocksAndFindsNoHandoff(t *testing.T
 	}
 	if finding.Source.AgentID != "" {
 		t.Fatalf("a system-authored Finding names agent id %q; it never invoked an agent", finding.Source.AgentID)
+	}
+	// #475 review B1: honestly, this is admission into the integrator's OWN
+	// batch, not delivery into producer a's inbox - #473's per-batch
+	// isolation means producer a's own batch scope must NOT see it. This is
+	// the regression guard against ever closing that gap by accident with
+	// graph-wide visibility (reverted #543) instead of a deliberate,
+	// narrow, exact-subject delivery mechanism.
+	producerRun, ok := storedRun(t, fixture.phase8Fixture, a.RunID)
+	if !ok || producerRun.Orchestration == nil {
+		t.Fatal("producer a's run not found or not orchestrated")
+	}
+	producerMessages, err := fixture.store.ScopeMessages(producerRun.Orchestration.BatchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range producerMessages {
+		if message.ID == finding.ID {
+			t.Fatal("the integrator's Finding leaked into producer a's own batch scope - #473 per-batch isolation is broken")
+		}
 	}
 }
 
@@ -569,6 +646,15 @@ func TestWorkGraphIntegrationSemanticAssuranceFailureNeverRoutesToAProvider(t *t
 	if c.Output != nil {
 		t.Fatal("an integration whose own assurance failed carries an admitted output")
 	}
+	// #475 review B2: WorkGraph's own Output being nil is a PROJECTION fact,
+	// not proof the durable handoffs table is empty. Assert the actual row
+	// count directly - a failing assurance must never let the durable
+	// handoff a successful Git merge could have reported slip through.
+	if handoffs, err := fixture.store.RunHandoffs(c.RunID); err != nil {
+		t.Fatal(err)
+	} else if len(handoffs) != 0 {
+		t.Fatalf("an integration whose own assurance failed admitted %d durable handoffs, want 0", len(handoffs))
+	}
 	if invoked[c.RunID] {
 		t.Fatalf("a provider was invoked for the integrator unit's run %s after its assurance failed", c.RunID)
 	}
@@ -587,6 +673,11 @@ func TestWorkGraphIntegrationSemanticAssuranceFailureNeverRoutesToAProvider(t *t
 		}
 		if !payload.Passed && payload.FailureClass == FailureIntegrationConflict {
 			sawIntegrationConflict = true
+			// #475 review B5: the runtime's own retry-routing relabel must
+			// never erase the fresh verifier's actual verdict.
+			if payload.IntegrationOriginalFailureClass != FailureCompileTest {
+				t.Fatalf("original verifier class not preserved: got %q, want %q", payload.IntegrationOriginalFailureClass, FailureCompileTest)
+			}
 		}
 	}
 	if !sawIntegrationConflict {
@@ -644,5 +735,223 @@ func TestWorkGraphIntegrationTransientAssuranceFailureIsNeverReclassified(t *tes
 	}
 	if sawMisclassified {
 		t.Fatal("a transient infrastructure assurance failure was relabeled integration_conflict")
+	}
+}
+
+// integratedHandoffInterleaveStore wraps the real store to inject a second,
+// genuinely separate writer connection's competing admission between
+// AdmitIntegratedHandoff's freshness check and its own insert (#475 review
+// B3's "two database handles" ask) - the same technique
+// interleavedCheckpointHandoffStore (orchestration_checkpoint_handoff_test.go)
+// already proves for the pre-existing checkpoint-handoff race.
+type integratedHandoffInterleaveStore struct {
+	*SQLiteOperationStore
+	beforeInsert func()
+}
+
+func (s integratedHandoffInterleaveStore) AdmitIntegratedHandoff(handoff orchestration.EngineeringHandoff, inputs orchestration.WorkUnitInputs) (bool, error) {
+	s.beforeInsert()
+	return s.SQLiteOperationStore.AdmitIntegratedHandoff(handoff, inputs)
+}
+
+func inputFor(unitID string, handoff orchestration.EngineeringHandoff) orchestration.WorkUnitInput {
+	return orchestration.WorkUnitInput{UnitID: unitID, UnitOutput: orchestration.UnitOutput{
+		HandoffID: handoff.ID, RunID: handoff.RunID,
+		CandidateRevision: handoff.Subject.CandidateRevision, CandidateTree: handoff.Subject.CandidateTree,
+		Outcome: orchestration.OutcomeCompleted,
+	}}
+}
+
+// TestAdmitIntegratedHandoffLosesToSupersededInputBeforeInsert is Scenario
+// B3: an upstream input superseded in the GAP between the live freshness
+// check and the handoff INSERT must still lose, because the check and the
+// write are the SAME SQLite statement - proven with a genuinely separate
+// writer connection performing the superseding admission between them, not
+// merely a stale read followed by a later write on one connection. (The
+// non-superseded, successful case is already proven end to end by every
+// other #475 scenario here - this test exercises only the race.)
+//
+// Two ordinary #470 batch items (not WorkGraph units) stand in for the
+// producer and the integrator: AdmitIntegratedHandoff's own contract needs
+// only valid run_id/batch_id foreign keys, which an ordinary completed item
+// already provides, without any WorkGraph/ExecutionKind machinery this test
+// does not need.
+func TestAdmitIntegratedHandoffLosesToSupersededInputBeforeInsert(t *testing.T) {
+	fixture := newFleetFixture(t, 4)
+	supervisor := fixture.supervisor()
+	view := fixture.orchestrate(supervisor, "claude", fleetIssues(2))
+	settled := fixture.drive(supervisor, view.BatchID)
+	producerHandoffs, err := fixture.store.RunHandoffs(settled.Items[0].RunID)
+	if err != nil || len(producerHandoffs) != 1 {
+		t.Fatalf("producer item did not admit exactly one handoff: %d (%v)", len(producerHandoffs), err)
+	}
+	h1 := producerHandoffs[0]
+	integratorHandoffs, err := fixture.store.RunHandoffs(settled.Items[1].RunID)
+	if err != nil || len(integratorHandoffs) != 1 {
+		t.Fatalf("integrator-stand-in item did not admit exactly one handoff: %d (%v)", len(integratorHandoffs), err)
+	}
+	// A SYNTHETIC second attempt against the same already-admitted run/batch
+	// (valid FK anchors), never actually produced by the ordinary flow -
+	// AdmitIntegratedHandoff itself decides whether it is admissible.
+	synthetic := integratorHandoffs[0]
+	synthetic.ID = "handoff-integrator-synthetic"
+
+	inputs := orchestration.WorkUnitInputs{inputFor("a", h1)}
+	writer, err := OpenSQLiteOperationStore(fixture.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { writer.Close() })
+	interleaved := false
+	store := integratedHandoffInterleaveStore{SQLiteOperationStore: fixture.store, beforeInsert: func() {
+		interleaved = true
+		// A genuinely separate connection admits producer a's SECOND,
+		// superseding handoff for the SAME run - the race window this
+		// proves closed.
+		superseding := h1
+		superseding.ID = "handoff-a-superseding"
+		superseding.AdmittedAt = h1.AdmittedAt.Add(time.Second)
+		if ok, err := writer.AdmitHandoff(superseding); err != nil || !ok {
+			t.Fatalf("competing admission did not land: ok=%t err=%v", ok, err)
+		}
+	}}
+	inserted, err := store.AdmitIntegratedHandoff(synthetic, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !interleaved {
+		t.Fatal("admission never reached the insert boundary")
+	}
+	if inserted {
+		t.Fatal("the integrated handoff was admitted despite its input being superseded between the check and the insert")
+	}
+	// Exactly the one REAL handoff the ordinary flow admitted - the
+	// synthetic, superseded attempt never landed.
+	if handoffs, err := fixture.store.RunHandoffs(synthetic.RunID); err != nil || len(handoffs) != 1 {
+		t.Fatalf("run %s has %d handoffs after a refused synthetic admission, want exactly 1 (%v)", synthetic.RunID, len(handoffs), err)
+	}
+}
+
+// TestComposeIntegrationPostMergeFailureIsContainedAndRecovers is Scenario
+// B4: once IntegrateInputs returns StatusIntegrated, Git HEAD has already
+// advanced. A failure in one of commitIntegratedCandidate's own LATER steps
+// (here, integratedChangedPaths, forced by a corrupted candidate revision
+// that does not exist) must never be a bare, unowned error: it is routed
+// through the existing restoreCandidate/FailureWorkspaceIntegrity
+// containment, which both fails the operation and restores the workspace -
+// never a false success, never a silently stranded advanced HEAD. A
+// subsequent attempt against the now-restored workspace then composes and
+// commits cleanly, proving recovery, not merely containment.
+//
+// This calls commitIntegratedCandidate directly rather than through the full
+// scheduler: the window it tests - after a real Git merge, before this run's
+// own journal write - has no provider invocation to pause at, exactly as
+// R4's own review response documents (see the Scenario F discussion), so a
+// full-stack tick-boundary reproduction is not possible; the function under
+// test is exercised with the exact same real Git workspace, contract and
+// resolver composeIntegration itself would use.
+func TestComposeIntegrationPostMergeFailureIsContainedAndRecovers(t *testing.T) {
+	fixture := newFleetFixture(t, 4)
+	const issueA, issueB = fleetFirstIssue, fleetFirstIssue + 1
+	fixture.setIntegrationIssue(issueA, "a")
+	fixture.setIntegrationIssue(issueB, "b")
+	fixture.deps.Provider = &integrationWorker{files: map[string]integrationFile{
+		"a": {path: "a.go", content: "package candidate\nconst A = 1\n"},
+		"b": {path: "b.go", content: "package candidate\nconst B = 1\n"},
+	}}
+	supervisor := fixture.supervisor()
+	// An ordinary two-unit graph - no integrator unit at all. This test needs
+	// only REAL, current admitted inputs to build a real integration.Contract
+	// against; it exercises commitIntegratedCandidate directly, never through
+	// WorkGraph activation for a third unit.
+	view := fixture.adoptGraph(supervisor, "claude", 1, []orchestration.WorkUnit{
+		{ID: "a", Purpose: "land a", Role: domain.RoleImplementer, Issue: issueA},
+		{ID: "b", Purpose: "land b", Role: domain.RoleImplementer, Issue: issueB},
+	})
+	settled := fixture.driveGraph(supervisor, view.GraphID, nil)
+	for _, unit := range settled.Units {
+		if unit.State != orchestration.UnitState(orchestration.ItemCompleted) {
+			t.Fatalf("unit %s settled as %s: %s", unit.UnitID, unit.State, unit.Reason)
+		}
+	}
+	a, b := settled.unit(t, "a"), settled.unit(t, "b")
+	inputs := orchestration.WorkUnitInputs{
+		{UnitID: "a", UnitOutput: orchestration.UnitOutput{HandoffID: a.Output.HandoffID, RunID: a.RunID,
+			CandidateRevision: a.Output.CandidateRevision, CandidateTree: a.Output.CandidateTree, Outcome: orchestration.OutcomeCompleted}},
+		{UnitID: "b", UnitOutput: orchestration.UnitOutput{HandoffID: b.Output.HandoffID, RunID: b.RunID,
+			CandidateRevision: b.Output.CandidateRevision, CandidateTree: b.Output.CandidateTree, Outcome: orchestration.OutcomeCompleted}},
+	}
+	contract, err := integration.NewContract(view.GraphID, "fault-injection-unit", fixture.base, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := supervisor.engine("acme/repo", "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const faultRunID = "run-fault-injection-test"
+	created, err := CreateCandidateClone(fixture.stateDir, faultRunID, fixture.deps.Remote.URL, fixture.base, fixture.deps.Credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := &created
+	sources, readErr := engine.integrationSources(view.GraphID)
+	result, err := IntegrateInputs(ws, contract, sources)
+	if *readErr != nil {
+		t.Fatal(*readErr)
+	}
+	if err != nil {
+		t.Fatalf("the real merge itself failed, before this test's injected fault: %v", err)
+	}
+	if result.Status != integration.StatusIntegrated {
+		t.Fatalf("the real merge did not integrate cleanly: %+v", result)
+	}
+	realCandidate := *result.Candidate
+	headAfterRealMerge, err := gitOutput(ws.Dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(headAfterRealMerge) != realCandidate.Revision {
+		t.Fatalf("workspace HEAD %s does not match the real merge commit %s", headAfterRealMerge, realCandidate.Revision)
+	}
+
+	// Inject the fault: a candidate revision integratedChangedPaths cannot
+	// possibly read, forcing commitIntegratedCandidate's OWN later step to
+	// fail - AFTER the real Git merge above already advanced HEAD, exactly
+	// B4's window.
+	corrupted := realCandidate
+	corrupted.Revision = strings.Repeat("f", 40)
+	eff := engine.commitIntegratedCandidate(&runState{}, RunOperation{}, ws, contract, corrupted)
+	if eff.state != OperationFailed {
+		t.Fatalf("a post-merge preparation failure settled as %s, not failed", eff.state)
+	}
+	if len(eff.events) != 0 {
+		t.Fatalf("a contained post-merge failure journalled %d events; want none (no false commit)", len(eff.events))
+	}
+	// The canonical containment route actually restored the workspace - the
+	// real merge commit's advanced HEAD is gone, not silently stranded.
+	headAfterContainment, err := gitOutput(ws.Dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(headAfterContainment) != fixture.base {
+		t.Fatalf("workspace HEAD after containment is %s, want restored to base %s", headAfterContainment, fixture.base)
+	}
+
+	// Recovery, not merely containment: a fresh attempt against the
+	// now-restored workspace composes cleanly again (the restored workspace
+	// is genuinely usable, not left in some intermediate state), and the
+	// EXACT step this test injected the fault into - integratedChangedPaths -
+	// succeeds on the real, uncorrupted result.
+	sources2, readErr2 := engine.integrationSources(view.GraphID)
+	result2, err := IntegrateInputs(ws, contract, sources2)
+	if *readErr2 != nil {
+		t.Fatal(*readErr2)
+	}
+	if err != nil || result2.Status != integration.StatusIntegrated {
+		t.Fatalf("the recovery attempt did not integrate cleanly: status=%v err=%v", result2.Status, err)
+	}
+	if _, err := integratedChangedPaths(ws.Dir, contract.BaseRevision, result2.Candidate.Revision); err != nil {
+		t.Fatalf("the exact step this test faulted still fails after recovery: %v", err)
 	}
 }

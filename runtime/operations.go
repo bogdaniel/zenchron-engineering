@@ -103,22 +103,23 @@ func boundedField(text string) string {
 // planner from replayed state, and no handler consults `phase`.
 func (r *EngineeringRuntime) handle(ctx context.Context, state *runState, op RunOperation) effect {
 	handler, ok := map[string]func(context.Context, *runState, RunOperation) effect{
-		OpSourceObserve:      r.observeSource,
-		OpContractCompile:    r.compileContract,
-		OpCandidateCreate:    r.createCandidate,
-		OpExecutionInvoke:    r.invokeExecution,
-		OpRemediationGofmt:   r.remediateFormat,
-		OpCandidateCommit:    r.commitCandidate,
-		OpAssuranceGo:        r.assureCandidate,
-		OpAssuranceSemantic:  r.assureSemantics,
-		OpBaseIntegrate:      r.integrateBase,
-		OpIntegrationCompose: r.composeIntegration,
-		OpAuthorityEvaluate:  r.evaluateAuthority,
-		OpCandidatePush:      r.pushCandidate,
-		OpPullRequestCreate:  r.createPullRequest,
-		OpPullRequestUpdate:  r.updatePullRequest,
-		OpGitHubObserve:      r.observeGitHub,
-		OpHandoffRepair:      r.repairHandoff,
+		OpSourceObserve:           r.observeSource,
+		OpContractCompile:         r.compileContract,
+		OpCandidateCreate:         r.createCandidate,
+		OpExecutionInvoke:         r.invokeExecution,
+		OpRemediationGofmt:        r.remediateFormat,
+		OpCandidateCommit:         r.commitCandidate,
+		OpAssuranceGo:             r.assureCandidate,
+		OpAssuranceSemantic:       r.assureSemantics,
+		OpBaseIntegrate:           r.integrateBase,
+		OpIntegrationCompose:      r.composeIntegration,
+		OpIntegrationHandoffAdmit: r.admitIntegrationHandoff,
+		OpAuthorityEvaluate:       r.evaluateAuthority,
+		OpCandidatePush:           r.pushCandidate,
+		OpPullRequestCreate:       r.createPullRequest,
+		OpPullRequestUpdate:       r.updatePullRequest,
+		OpGitHubObserve:           r.observeGitHub,
+		OpHandoffRepair:           r.repairHandoff,
 	}[op.Kind]
 	if !ok {
 		return failed(deterministicRefusal("operation.handler_missing", fmt.Errorf("no handler for operation kind %q", op.Kind)))
@@ -2434,21 +2435,23 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	// eligible to plan. classifyIntegrationAssuranceFailure uses the actual
 	// typed verdict (integration.ClassifyAssuranceFailure), never a bare
 	// string assignment guessing at the right vocabulary.
+	var integrationOriginalClass FailureClass
 	if !result.Passed && state.origin != nil && state.origin.ExecutionKind == orchestration.ExecutionKindIntegrationCompose &&
 		RouteFailure(class) == RouteProviderRemediation {
 		reclassified, err := r.classifyIntegrationAssuranceFailure(state, result.FailureSignature)
 		if err != nil {
 			return failed(err)
 		}
-		class = reclassified
+		integrationOriginalClass, class = class, reclassified
 	}
 	payload := AssuranceObservedPayload{
-		ProviderID:         firstNonEmpty(result.ProviderID, "assurance-provider"),
-		VerifierDefinition: firstNonEmpty(result.VerifierDefinition, "unknown-verifier"),
-		Passed:             result.Passed,
-		FailureClass:       class,
-		Commit:             commit,
-		Tree:               tree,
+		ProviderID:                      firstNonEmpty(result.ProviderID, "assurance-provider"),
+		VerifierDefinition:              firstNonEmpty(result.VerifierDefinition, "unknown-verifier"),
+		Passed:                          result.Passed,
+		FailureClass:                    class,
+		IntegrationOriginalFailureClass: integrationOriginalClass,
+		Commit:                          commit,
+		Tree:                            tree,
 		// What a later remediation reads to learn WHICH failure this was. Both
 		// are runtime-composed machine tokens; neither is candidate text.
 		ArtifactRef:      result.ArtifactRef,

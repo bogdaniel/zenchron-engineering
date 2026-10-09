@@ -83,11 +83,11 @@ func (r *EngineeringRuntime) composeIntegration(_ context.Context, state *runSta
 	}
 	switch result.Status {
 	case integration.StatusIntegrated:
-		return r.admitIntegratedCandidate(state, op, ws, contract, *result.Candidate)
+		return r.commitIntegratedCandidate(state, op, ws, contract, *result.Candidate)
 	case integration.StatusBlocked:
 		return r.refuseIntegrationConflict(state, op, *result.Conflict)
 	case integration.StatusInvalidated:
-		return effect{state: OperationFailed, result: integrationFailureResult{FailureClass: FailureIntegrationInvalidated, Reason: boundedDetail(result.Reason)}}
+		return integrationFailureEffect(FailureIntegrationInvalidated, integrationInvalidatedCode, result.Reason, nil)
 	default:
 		return failed(errors.New("integration composition returned an unrecognized status " + string(result.Status)))
 	}
@@ -98,14 +98,16 @@ func (r *EngineeringRuntime) composeIntegration(_ context.Context, state *runSta
 // integration.ClassifyAssuranceFailure's typed vocabulary, never a bare
 // FailureClass string guessed at the call site.
 //
-// It always classifies ConflictSemantic, never ConflictUncertain: both of
-// this unit's consumed inputs already passed their OWN independent
-// assurance before being admitted (that is what admission means), so a
-// failure specific to the newly merged result is attributable to the
-// combination - never one input's pre-existing defect, and never guessed
-// at. ClassifyAssuranceFailure itself still refuses to classify this a
-// ConflictTextual, so a caller cannot smuggle a fabricated textual conflict
-// through this path either.
+// It always classifies ConflictUncertain, never ConflictSemantic (#475
+// review B5): both consumed inputs passing their OWN assurance before
+// admission is not positive evidence that THIS failure is specific to their
+// combination - the verifier could be flaky, the environment could have
+// drifted since either input was assured, or the failure could be latent in
+// one input alone and merely surfaced now. Attributing it to "the
+// combination" without evidence that actually distinguishes that from "one
+// input's pre-existing defect" would be exactly the fabricated blame the
+// architecture record forbids. ClassifyAssuranceFailure itself still refuses
+// to classify this a ConflictTextual either way.
 func (r *EngineeringRuntime) classifyIntegrationAssuranceFailure(state *runState, detail string) (FailureClass, error) {
 	origin := state.origin
 	contract, err := integration.NewContract(origin.GraphID, origin.UnitID, state.baseRevision(), origin.Inputs)
@@ -119,7 +121,7 @@ func (r *EngineeringRuntime) classifyIntegrationAssuranceFailure(state *runState
 	candidate := integration.IntegratedCandidate{
 		Revision: state.projection.CandidateRevision, Tree: state.projection.CandidateTree, InputsDigest: digest,
 	}
-	if _, err := integration.ClassifyAssuranceFailure(contract, candidate, integration.ConflictSemantic, detail); err != nil {
+	if _, err := integration.ClassifyAssuranceFailure(contract, candidate, integration.ConflictUncertain, detail); err != nil {
 		return "", err
 	}
 	return FailureIntegrationConflict, nil
@@ -175,27 +177,89 @@ func (r *EngineeringRuntime) integrationInputsStillCurrent(graphID string, input
 	return true, nil
 }
 
-// admitIntegratedCandidate journals a clean composition exactly as
+// commitIntegratedCandidate journals a clean composition exactly as
 // candidate.commit would for an ordinary mutation - the same
 // EventCandidateCommitted and EventReassessmentCompleted shapes, so every
-// existing reader (assurance gating, handoff admission, status projection)
-// needs no change to see this candidate - and reports the same runtime-
-// authored handoff an ordinary worker's completed invocation would.
-func (r *EngineeringRuntime) admitIntegratedCandidate(state *runState, op RunOperation, ws *CandidateWorkspace, contract integration.Contract, candidate integration.IntegratedCandidate) effect {
+// existing reader (assurance gating, status projection) needs no change to
+// see this candidate.
+//
+// It does NOT report a handoff (#475 review B2). A successful Git
+// composition is not acceptance: reporting here would make
+// handoffCommitOf/admitOrchestratedHandoff consider this run's handoff
+// admissible before its own fresh assurance has even run, let alone passed.
+// That report is deferred to admitIntegrationHandoff, OpIntegrationHandoffAdmit's
+// own handler, which runs only once bindIntegrationHandoffAdmit sees a
+// passing, non-stale assurance observation against this exact head.
+func (r *EngineeringRuntime) commitIntegratedCandidate(state *runState, op RunOperation, ws *CandidateWorkspace, contract integration.Contract, candidate integration.IntegratedCandidate) effect {
 	if current, err := r.integrationInputsStillCurrent(contract.GraphID, contract.Inputs); err != nil {
 		return failed(err)
 	} else if !current {
 		if err := ws.RestoreTrusted(); err != nil {
 			return failed(err)
 		}
-		return effect{state: OperationFailed, result: integrationFailureResult{FailureClass: FailureIntegrationInvalidated,
-			Reason: "an upstream input was superseded during composition, immediately before admission"}}
+		return integrationFailureEffect(FailureIntegrationInvalidated, integrationInvalidatedCode,
+			"an upstream input was superseded during composition, immediately before admission", nil)
 	}
 	paths, err := integratedChangedPaths(ws.Dir, contract.BaseRevision, candidate.Revision)
 	if err != nil {
-		return failed(err)
+		// The merge already committed: HEAD has advanced, but nothing durable
+		// records it yet (#475 review B4). r.workspace's own expected-head
+		// check will see that mismatch on any later attempt and return a
+		// *WorkspaceIntegrityError before this function's own precondition
+		// ever runs again - that is the existing recovery route, reached
+		// through composeIntegration's own errors.As branch, not reinvented
+		// here. This function itself never retries or self-heals.
+		return r.restoreCandidate(ws, err)
 	}
 	next, err := r.buildKernelAt(state, ws.Dir, candidate.Revision)
+	if err != nil {
+		return r.restoreCandidate(ws, err)
+	}
+	return effect{
+		state:  Succeeded,
+		result: mutationResult{Mutated: true, PathCount: len(paths), ProviderID: "integration.compose"},
+		events: []journalEntry{
+			{Type: EventCandidateCommitted, Payload: CandidateCommittedPayload{
+				Commit: candidate.Revision, Tree: candidate.Tree, PathCount: len(paths), PathsDigest: pathsDigest(paths),
+			}},
+			{Type: EventReassessmentCompleted, Payload: ReassessmentCompletedPayload{
+				Material:                next.Reassessment.Material,
+				Contract:                Ref{ID: next.Contract.ID, Revision: next.Contract.Revision},
+				DeviationKinds:          deviationKinds(next),
+				RequestedPrivilegeCount: len(next.Reassessment.RequestedPrivilegeExpansion),
+			}},
+		},
+	}
+}
+
+// admitIntegrationHandoff is OpIntegrationHandoffAdmit's handler (#475
+// review B2): the deferred handoff report for a WorkGraph integration_compose
+// unit, reached only once its own composed head has a passing, non-stale
+// assurance observation (bindIntegrationHandoffAdmit). It re-verifies
+// freshness one more time, immediately before writing the report that makes
+// handoffCommitOf/admitOrchestratedHandoff consider this admissible - the
+// generic admission path's own AdmitIntegratedHandoff additionally enforces
+// this atomically against the SAME exact inputs at the actual SQL INSERT
+// (#475 review B3), so this check is a fast, clear failure path, not the
+// sole guarantee.
+func (r *EngineeringRuntime) admitIntegrationHandoff(_ context.Context, state *runState, op RunOperation) effect {
+	origin := state.origin
+	if origin == nil || origin.ExecutionKind != orchestration.ExecutionKindIntegrationCompose {
+		return failed(errors.New("integration.handoff_admit dispatched for a run whose origin is not an explicit integration_compose unit"))
+	}
+	current, err := r.integrationInputsStillCurrent(origin.GraphID, origin.Inputs)
+	if err != nil {
+		return failed(err)
+	}
+	if !current {
+		// The commit this run made already exists and stays exactly as
+		// committed - it is not undone merely because an unrelated upstream
+		// unit moved on. Only the handoff that would make it admissible is
+		// refused.
+		return integrationFailureEffect(FailureIntegrationInvalidated, integrationInvalidatedCode,
+			"an upstream input was superseded before the integration handoff could be admitted", nil)
+	}
+	contract, err := integration.NewContract(origin.GraphID, origin.UnitID, state.baseRevision(), origin.Inputs)
 	if err != nil {
 		return failed(err)
 	}
@@ -212,29 +276,65 @@ func (r *EngineeringRuntime) admitIntegratedCandidate(state *runState, op RunOpe
 		return failed(err)
 	}
 	return effect{
-		state:  Succeeded,
-		result: mutationResult{Mutated: true, PathCount: len(paths), ProviderID: "integration.compose"},
-		events: []journalEntry{
-			{Type: EventCandidateCommitted, Payload: CandidateCommittedPayload{
-				Commit: candidate.Revision, Tree: candidate.Tree, PathCount: len(paths), PathsDigest: pathsDigest(paths),
-			}},
-			{Type: EventReassessmentCompleted, Payload: ReassessmentCompletedPayload{
-				Material:                next.Reassessment.Material,
-				Contract:                Ref{ID: next.Contract.ID, Revision: next.Contract.Revision},
-				DeviationKinds:          deviationKinds(next),
-				RequestedPrivilegeCount: len(next.Reassessment.RequestedPrivilegeExpansion),
-			}},
-			handoffObservation(handoffPath, op.ID, attempt),
-		},
+		state: Succeeded,
+		// Mutated: true is what inspectHandoff reads to tell a real commit to
+		// bind from a no-op report (runtime/orchestration_handoff.go) - true
+		// here because there genuinely IS a committed candidate to bind to,
+		// from this run's own earlier OpIntegrationCompose. Returning the
+		// zero value would make inspectHandoff read this exactly like an
+		// invocation that reported a handoff after changing nothing, and
+		// refuse it as unbindable even though the commit is real.
+		result: mutationResult{Mutated: true, ProviderID: "integration.handoff_admit"},
+		events: []journalEntry{handoffObservation(handoffPath, op.ID, attempt)},
 	}
 }
 
 // refuseIntegrationConflict fails the operation under a typed, non-provider-
 // routed failure class and, for a textual conflict, admits a bounded #473
 // Finding bound to the exact consumed input Git reported as conflicting -
-// never graph-wide, never a forged worker invocation: the message is sourced
-// from this run's own operation, exactly as any runtime-derived observation
-// is.
+// never a forged worker invocation: the message is sourced from this run's
+// own operation, exactly as any runtime-derived observation is.
+//
+// Review B1: this Finding is admitted into the INTEGRATION UNIT'S OWN
+// single-item batch, never the producer's. #473's per-batch isolation means
+// it is durable, typed, correctly sourced and visible to anyone reading
+// THIS batch's scope (the run, its operator, its own status) - it is not
+// yet delivered into the producer's own inbox, which lives in a separate
+// batch this one has no read access to. Route.Unit names the producer as
+// the intended audience without granting it: routeOf's own Audience enum
+// has no "another batch" case, only AudienceUnit/AudienceAuthority/
+// AudienceScope within THIS scope. Building that cross-batch delivery
+// (or an explicit decision for it) is the still-open #475 follow-up; do
+// not resurrect reverted #543's graph-wide mailbox to get there.
+// integrationTextualConflictCode and integrationInvalidatedCode are
+// deterministicCode identities for the two ways a WorkGraph
+// integration_compose unit's attempt can be blocked - never provider
+// diagnoses, see deterministicError.
+const (
+	integrationTextualConflictCode = "integration.textual_conflict"
+	integrationInvalidatedCode     = "integration.invalidated"
+)
+
+// integrationFailureEffect builds a typed, non-provider-routed failure that
+// ALSO participates in the runtime's existing identicalDeterministicFailure
+// park-not-retry mechanism (#475 review's retry-policy follow-up): a
+// deterministic conflict or invalidation against this exact, frozen
+// consumed input set can never fix itself via an identical re-merge, so a
+// repeated attempt of the SAME operation parks (settles Waiting,
+// deterministic_failure_unchanged) rather than spending its whole attempt
+// budget on an unchanging pair. A genuinely different input set is a
+// DIFFERENT operation entirely - bindIntegrationCompose's own binding IS
+// the consumed input digest - so it is never compared against this one at
+// all, and reaches a fresh attempt exactly as #472's own activation
+// identity already guarantees.
+func integrationFailureEffect(class FailureClass, code, detail string, events []journalEntry) effect {
+	cause := deterministicRefusal(code, errors.New(detail))
+	return effect{
+		state: OperationFailed, events: events, failure: deterministicIdentity(cause),
+		result: integrationFailureResult{FailureClass: class, Reason: boundedDetail(detail)},
+	}
+}
+
 func (r *EngineeringRuntime) refuseIntegrationConflict(state *runState, op RunOperation, conflict integration.Conflict) effect {
 	events := []journalEntry(nil)
 	if conflict.Kind == integration.ConflictTextual && conflict.UnitID != "" {
@@ -257,8 +357,7 @@ func (r *EngineeringRuntime) refuseIntegrationConflict(state *runState, op RunOp
 			events = append(events, entry)
 		}
 	}
-	return effect{state: OperationFailed, events: events,
-		result: integrationFailureResult{FailureClass: FailureIntegrationConflict, Reason: boundedDetail(conflict.Detail)}}
+	return integrationFailureEffect(FailureIntegrationConflict, integrationTextualConflictCode, conflict.Detail, events)
 }
 
 // integrationFailureResult is a blocked or invalidated attempt's durable

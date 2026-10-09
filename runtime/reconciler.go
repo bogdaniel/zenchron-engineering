@@ -59,10 +59,14 @@ const (
 	// (#475): composing its exact consumed admitted inputs instead of an
 	// ordinary execution invocation. See bindIntegrationCompose.
 	OpIntegrationCompose = "integration.compose"
-	OpCandidatePush      = "candidate.push"
-	OpPullRequestCreate  = "pull_request.create"
-	OpPullRequestUpdate  = "pull_request.update"
-	OpGitHubObserve      = "github.observe"
+	// OpIntegrationHandoffAdmit defers an integration_compose unit's handoff
+	// report until its own fresh assurance has passed (#475 review B2). See
+	// bindIntegrationHandoffAdmit.
+	OpIntegrationHandoffAdmit = "integration.handoff_admit"
+	OpCandidatePush           = "candidate.push"
+	OpPullRequestCreate       = "pull_request.create"
+	OpPullRequestUpdate       = "pull_request.update"
+	OpGitHubObserve           = "github.observe"
 	// OpHandoffRepair is the one result-only correction of a refused
 	// orchestration handoff (#492, handoff_repair.go).
 	OpHandoffRepair = "handoff.repair"
@@ -1047,6 +1051,7 @@ var operationSpecs = []operationSpec{
 	{OpCandidateCommit, bindCandidateCommit},
 	{OpHandoffRepair, bindHandoffRepair},
 	{OpAssuranceGo, bindAssuranceGo},
+	{OpIntegrationHandoffAdmit, bindIntegrationHandoffAdmit},
 	{OpAssuranceSemantic, bindAssuranceSemantic},
 	{OpBaseIntegrate, bindBaseIntegrate},
 	{OpAuthorityEvaluate, bindAuthorityEvaluate},
@@ -1332,6 +1337,30 @@ func bindAssuranceGo(s *runState) (string, bool) {
 		return "", false
 	}
 	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree + "|" + s.contractRevision(), true
+}
+
+// bindIntegrationHandoffAdmit is the deferred handoff-report step for a
+// WorkGraph integration_compose unit (#475 review B2): composeIntegration's
+// own commit never reports a handoff, because a successful Git composition
+// is not acceptance. This operation becomes wanted only once the composed
+// head's OWN fresh assurance has actually PASSED - never merely "ran" (an
+// assurance verdict that is not a passing candidate verdict settles the run
+// through its own existing route; this never fires for it). Only then does
+// handoffCommitOf/admitOrchestratedHandoff have anything to consider
+// admissible. This is strictly additional to whatever an ordinary unit's own
+// handoff timing already is; it changes nothing about that generic path.
+func bindIntegrationHandoffAdmit(s *runState) (string, bool) {
+	if s.origin == nil || s.origin.ExecutionKind != orchestration.ExecutionKindIntegrationCompose {
+		return "", false
+	}
+	if s.projection.CandidateRevision == "" {
+		return "", false
+	}
+	a := s.projection.Assurance
+	if a == nil || a.Stale || !a.Passed {
+		return "", false
+	}
+	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree, true
 }
 
 // bindAssuranceSemantic plans an INDEPENDENT semantic assurance invocation when
