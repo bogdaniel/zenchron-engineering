@@ -342,12 +342,22 @@ separately-scheduled operation (`docs/review.md`, "Known scope limits").
 `ReconcileReviewRemediation` is idempotent at every step (`NeedsReview`,
 `RequestReview` and `AdmitReviewRemediation` all are), so calling it
 repeatedly - once per supervisor tick, forever - is the whole mechanism.
-**Not yet wired**: an actual call site inside `serve`'s own polling loop
-(mirroring `feedback_observe.go`'s relationship to `Reconcile`) - this PR
-proves the mechanism end-to-end (see the acceptance test below) but does not
-additionally touch `cmd/zenchron-engineering/serve.go`, itself a frozen
-baseline file, to make a running supervisor call it automatically. That one
-remaining deployment-wiring step is left for a follow-up.
+**Now wired into `serve` (B3)**: `runtime.SupervisorDependencies.ReviewTrigger`
+is the same nil-disabled convention `Discovery`/`AgentProber` already use;
+`Supervisor.driveOne` calls it once per run per pass, same cadence as
+`ObserveFeedback`, through a new `ReconcileReviewRemediationForRun` that
+resolves the run's own repository and published PR from durable state.
+`serve --reviewer-agent <id>` is the operator opt-in (empty disables the
+trigger entirely, never a silently-chosen default reviewer); the composition
+root builds the `ReviewPort` per call from the fixed CLI-era fields
+(`Store`, `GitHub`, agent registry, provider factory) plus the run's own
+`GovernedRemote` identity. That last part closes a real pre-existing #233 gap:
+`RunIndependentReviewInput.Source` assumed a single operator checkout,
+which a long-running multi-repository supervisor has no equivalent of;
+`RunIndependentReviewInput.Remote`/`Credentials` and `reviewWorkspace` now
+clone from the governed remote instead, through the same credential-bound
+Git boundary a candidate clone already uses
+(`CreatePlanningWorkspaceFromRemote`), when `Source` is empty.
 
 **Test-fixture fix along the way**: `FakeGitHubAdapter.PullRequest` returned
 a `HeadSHA` frozen at `CreatePullRequest` time and never refreshed - real
@@ -356,6 +366,48 @@ GitHub reports whatever the branch currently points at with no separate
 ever pushed a SECOND commit to an already-published PR through the real
 reconciler loop, so nothing had surfaced this. Fixed to re-read the live ref
 on every `PullRequest` call.
+
+## Independent-review re-review hardening (B1, B2)
+
+Two gaps an independent exact-head re-review found in the wiring above,
+both closed with no new mechanism:
+
+- **B1 - a BLOCK silently discharged by a no-op return.** `invokeExecution`'s
+  completion gate (#376) only ever consulted `len(feedback)` for "was this
+  invocation's obligation discharged". A remediation invocation carrying
+  delivered review-remediation findings that returned success without
+  mutating the candidate and without an admitted no-change resolution left
+  `EventExecutionCompleted`/`Succeeded` for the exact
+  `review-remediation|H1|...` binding, which `bindExecutionInvoke` then
+  treated as satisfied forever. `reviewRemediationUnresolved` is
+  `feedbackUnresolved`'s sibling, under a new `FailureReviewRemediationUnresolved`
+  class (same `RouteRetry`, bounded-attempt shape), and review-remediation
+  finding signatures now feed the SAME `deliveredKeys`/`admitResolution`
+  exact-match check feedback keys already use: a no-change resolution must
+  name every delivered obligation, not a subset.
+- **B2 - no live GitHub re-check at dispatch time.** `reviewRemediationFindings`
+  and `bindExecutionInvoke`'s binding both read only journalled state,
+  refreshed by whenever `observeGitHub` last ran - never the PR's actual
+  current head. `reviewRemediationLiveHeadCheck` (`review_remediation_delivery.go`)
+  is a live `GitHub.PullRequest` read, called from `invokeExecution`
+  immediately before `Provider.Execute` - the same point `runStopObserved`
+  already guards - compared against the head the findings were assembled
+  against. A live disagreement or an unreachable GitHub both refuse THIS
+  attempt under a new `FailureReviewRemediationStale` class, rather than
+  deliver findings whose subject may already have moved. The external read
+  and the provider actually starting can still never be made perfectly
+  atomic from inside this process; this closes the gap that previously had
+  no live check at all, not the theoretical remainder.
+
+Both added guards were deliberately disabled and confirmed to fail their
+exact regression test before being restored:
+`TestUnresolvedReviewRemediationReturnFailsTheOperationAndStaysActionable`
+(B1, the `TestUnresolvedFeedbackReturnFailsTheOperationAndStaysActionable`
+sibling, driven through the real coordinator) and the four focused tests in
+`review_remediation_delivery_test.go` (B2), including the adversarial case
+explicitly asked for: the PR's forge-side head moves with no observation
+tick in between, so the run's own journalled projection is untouched and
+only the live read can see the move.
 
 ## WorkGraph review-readiness (section 8): a frozen, deferred contract
 
@@ -485,19 +537,26 @@ application-level check, is load-bearing).
   the store-read-failure-must-be-visible requirement at both of
   `bindExecutionInvoke`'s and `conditions()`'s real call sites, deliberately
   broken and restored like every other guard above.
+- `TestUnresolvedReviewRemediationReturnFailsTheOperationAndStaysActionable`
+  (B1) and `review_remediation_delivery_test.go`'s four tests (B2) - see the
+  hardening section above.
+- `TestReviewTriggerRunsOncePerTickPerRun`, `TestReviewTriggerErrorIsReported-
+  SeparatelyFromDriveFailure` and `TestReviewTriggerSurvivesSupervisorRestart`
+  (B3) prove the supervisor wiring itself - repeated tick, isolated error
+  reporting, and no reliance on in-process state across a simulated restart;
+  `TestRunIndependentReviewClonesFromTheGovernedRemoteWithNoSourceCheckout`
+  and `TestRunIndependentReviewRefusesWithNeitherSourceNorRemote` prove the
+  remote-clone fallback.
 
 **Still deferred, and why:** the WorkGraph review-readiness gate (section 8
 below - a cross-package schema change layered above this now-complete
-producer loop); wiring `ReconcileReviewRemediation` into `serve`'s own
-polling loop (the mechanism is proven end-to-end above; a running
-supervisor calling it automatically per tracked PR is the remaining
-deployment step, deferred because `cmd/zenchron-engineering/serve.go` is
-itself a frozen baseline file this PR does not otherwise touch); the
-residual external-head TOCTOU between this gate's last freshness check and
-its SQLite commit (explicitly documented above as the dispatch path's own
-obligation, not something more internal reads can close); and a reviewer
-failing independence against a *resolved* agent registry entry with a
-distinct, real vendor family mismatch (covered today only via a
-hand-crafted store row with an identical agent ID, per #233's own test
-suite - the E2E test's own two agents already prove the registry-resolved,
-cross-vendor-family independence path on the SUCCESS side).
+producer loop); the residual external-head TOCTOU between this gate's last
+freshness check and its SQLite commit (explicitly documented above as the
+dispatch path's own obligation, not something more internal reads can
+close - B2 closes the dispatch-time instance of this, not the theoretical
+remainder); and a reviewer failing independence against a *resolved* agent
+registry entry with a distinct, real vendor family mismatch (covered today
+only via a hand-crafted store row with an identical agent ID, per #233's own
+test suite - the E2E test's own two agents already prove the
+registry-resolved, cross-vendor-family independence path on the SUCCESS
+side).

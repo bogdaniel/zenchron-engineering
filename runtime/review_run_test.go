@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -102,6 +103,53 @@ func TestRunIndependentReviewApprovesAndPublishesACleanPR(t *testing.T) {
 	}
 	if submits != 1 {
 		t.Fatalf("expected exactly one SubmitReview call, got %d", submits)
+	}
+}
+
+// TestRunIndependentReviewClonesFromTheGovernedRemoteWithNoSourceCheckout is
+// #474 B3's own regression: a long-running supervisor governing several
+// repositories has no single operator Source checkout to assume, the exact
+// gap RunIndependentReviewInput's own doc comment names. Clearing Source and
+// supplying only a governed Remote must still reach the exact PR head.
+func TestRunIndependentReviewClonesFromTheGovernedRemoteWithNoSourceCheckout(t *testing.T) {
+	in, _, _ := reviewRunFixture(t)
+	remote, err := GovernedRemote(in.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Remote = remote
+	in.Source = ""
+
+	document, err := json.Marshal(ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Provider = reviewStubProvider{document: string(document)}
+
+	out, err := RunIndependentReview(context.Background(), in)
+	if err != nil {
+		t.Fatalf("RunIndependentReview with no Source checkout: %v", err)
+	}
+	if !out.Created || out.Decision.Verdict != "approve" {
+		t.Fatalf("expected a newly created APPROVE decision from the remote-cloned workspace, got %+v", out)
+	}
+}
+
+// TestRunIndependentReviewRefusesWithNeitherSourceNorRemote proves the two
+// paths are an exclusive-or, not a silent "do nothing": a caller supplying
+// neither is refused, never handed an empty or stale workspace.
+func TestRunIndependentReviewRefusesWithNeitherSourceNorRemote(t *testing.T) {
+	in, _, _ := reviewRunFixture(t)
+	in.Source = ""
+
+	document, err := json.Marshal(ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Provider = reviewStubProvider{document: string(document)}
+
+	if _, err := RunIndependentReview(context.Background(), in); !errors.Is(err, errReviewWorkspaceSource) {
+		t.Fatalf("expected errReviewWorkspaceSource with neither Source nor Remote supplied, got %v", err)
 	}
 }
 

@@ -63,3 +63,29 @@ func (r *EngineeringRuntime) ReconcileReviewRemediation(ctx context.Context, por
 	}
 	return outcome, &admission, nil
 }
+
+// ReconcileReviewRemediationForRun is ReconcileReviewRemediation's run-driven
+// form (#474 B3): resolves the repository and the run's own currently
+// published PR from durable state, and is a clean no-op - not an error, not
+// a review - when the run has not published one yet. It is what lets a
+// supervisor's existing per-run tick (driveOne, same cadence
+// ObserveFeedback already runs on) call the automatic trigger by run id
+// alone, without reaching into the run's projection itself.
+func (r *EngineeringRuntime) ReconcileReviewRemediationForRun(ctx context.Context, runID string, port ReviewPort, reviewerAgentID string) (*ReviewOutcome, *ReviewRemediationAdmission, error) {
+	state, err := r.load(runID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if state.projection.PullRequest == nil {
+		return nil, nil, nil
+	}
+	repo, err := parseGitHubRepo(state.run.Repository)
+	if err != nil {
+		return nil, nil, err
+	}
+	outcome, admission, err := r.ReconcileReviewRemediation(ctx, port, repo, state.projection.PullRequest.Number, reviewerAgentID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &outcome, admission, nil
+}

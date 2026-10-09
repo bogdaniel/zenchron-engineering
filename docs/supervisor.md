@@ -651,9 +651,18 @@ advancement paths over the same runs: a freshly claimed run reconciled once by
 discovery and again by the supervisor enumerating non-terminal runs, in a single
 tick, with the operator's ceiling enforced twice over rather than once.
 
+## Automatic independent review (#474)
+
+`serve --reviewer-agent <id>` is the same opt-in convention as Discovery:
+empty (the default) disables the trigger entirely, never a silently-chosen
+default reviewer. Set, the supervisor's existing per-run tick calls #233's
+independent review and #474's remediation admission for each run's own
+published PR - see `docs/review-remediation.md` for the full mechanism.
+
 ## Related documents
 
 - [`product-architecture.md`](product-architecture.md) — where the supervisor sits
 - [`agents.md`](agents.md) — the workers it drives
 - [`running-multiple-tasks.md`](running-multiple-tasks.md) — the operator workflow
 - [`troubleshooting.md`](troubleshooting.md) — endpoint and lifecycle symptoms
+- [`review-remediation.md`](review-remediation.md) — #474's automatic independent-review trigger
