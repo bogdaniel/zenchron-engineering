@@ -182,6 +182,15 @@ const (
 	// permission bypass, and is given no tools, findings or feedback: the
 	// engineering is already committed and this invocation cannot reach it.
 	PurposeHandoffRepair Purpose = "handoff_repair"
+	// PurposeIndependentReview is an independent engineering review of an
+	// EXTERNALLY supplied subject - a pull request's exact head, not a
+	// candidate this runtime produced (#233). Like planning, it is the other
+	// purpose that runs in a non-mutating provider mode: a reviewer may read,
+	// and may run independent checks/tests that write only to ScratchDir, but
+	// the candidate workspace it was given must verify unchanged afterwards.
+	// It is never implementation or remediation, and it grants no merge,
+	// publication or candidate-mutation authority by itself.
+	PurposeIndependentReview Purpose = "independent_review"
 )
 
 type Budget struct {

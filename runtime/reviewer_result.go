@@ -98,7 +98,23 @@ type ReviewerFinding struct {
 	Signature string `json:"signature"`
 	// Detail is optional bounded context for an operator.
 	Detail string `json:"detail,omitempty"`
+	// Severity is OPTIONAL and, for the plan-stage reviewer this file has
+	// always served, unused: a plan-stage BLOCK is uniformly blocking, and an
+	// absent Severity preserves that reading exactly. An independent PR review
+	// (#233) is the first consumer that distinguishes severities, and it reads
+	// an absent or unrecognized value as ReviewSeverityBlocking - the safe
+	// default for a finding whose severity was not stated, never the
+	// permissive one.
+	Severity string `json:"severity,omitempty"`
 }
+
+// Closed vocabulary for ReviewerFinding.Severity. Defined here, beside the
+// field, so a reader of either package need not cross-reference the other to
+// learn what the string may say.
+const (
+	ReviewSeverityBlocking    = "blocking"
+	ReviewSeverityNonBlocking = "non_blocking"
+)
 
 // ReviewerResultMembers names, in declaration order, every JSON member
 // ReadReviewerResult's strict decoder accepts on a ReviewerResult document.

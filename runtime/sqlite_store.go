@@ -547,6 +547,64 @@ CREATE TABLE decision_resumption_admissions (
 	admitted_unix_nano INTEGER NOT NULL,
 	document           TEXT NOT NULL
 );
+`, `
+-- Independent PR review (#233). review_decisions is insert-only and never
+-- rewritten: a moved head or a different reviewer always identifies a
+-- different decision (review.DecisionID), so there is no "latest" to update
+-- in place, only more rows. repository and pr_number are indexed columns
+-- (not only fields inside document) so status and staleness can be answered
+-- with one query instead of a decode-every-row scan.
+--
+-- review_publications is a SEPARATE table on purpose: a publication attempt
+-- that fails after the decision already committed must never be able to
+-- corrupt or erase that decision by sharing its row.
+CREATE TABLE review_decisions (
+	id                TEXT PRIMARY KEY,
+	repository        TEXT NOT NULL,
+	pr_number         INTEGER NOT NULL,
+	head_sha          TEXT NOT NULL,
+	run_id            TEXT NOT NULL,
+	created_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+CREATE INDEX review_decisions_by_pr ON review_decisions(repository, pr_number, created_unix_nano);
+CREATE TABLE review_publications (
+	decision_id TEXT PRIMARY KEY REFERENCES review_decisions(id),
+	document    TEXT NOT NULL
+);
+`, `
+-- A durable, atomic claim over one bounded review operation (#233 B4):
+-- performing an independent review, or publishing one decision, each claim
+-- exactly one key before doing any expensive or externally-visible work, so
+-- two concurrent callers for the same exact subject/reviewer cannot both
+-- invoke a provider or both submit a GitHub review. A claim is released by
+-- its owner on ordinary completion (success or a clean failure); one left
+-- behind by a crashed process is reclaimed once it is older than the
+-- caller's staleness bound - see ClaimReview - so a dead claimant can never
+-- strand the operation forever.
+CREATE TABLE review_claims (
+	claim_key         TEXT PRIMARY KEY,
+	claimed_unix_nano INTEGER NOT NULL,
+	owner             TEXT NOT NULL,
+	-- token is the fencing token ClaimReview mints on every successful claim
+	-- or steal. A release or renewal naming any other token is a no-op: it
+	-- names a claim that has already been superseded, so acting on it would
+	-- let a stale holder delete or extend a claim it no longer owns.
+	token             TEXT NOT NULL
+);
+-- review_publication_attempts is the durable "an external POST may be in
+-- flight or its outcome is unknown" marker (#233 P1). It is written BEFORE
+-- PublishReview calls GitHub.SubmitReview and removed only once that
+-- decision's outcome is confirmed - either a success this invocation itself
+-- observed, or a later reconciliation that found GitHub's own matching
+-- review. A row surviving past that point is proof no caller has yet
+-- confirmed what happened to some earlier POST, which is exactly the
+-- condition under which a NEW POST must be refused: GitHub's matching
+-- review not being visible yet is never proof it was never accepted.
+CREATE TABLE review_publication_attempts (
+	decision_id       TEXT PRIMARY KEY REFERENCES review_decisions(id),
+	started_unix_nano INTEGER NOT NULL
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

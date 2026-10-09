@@ -96,6 +96,7 @@
         "runtime/doctor_test.go",
         "runtime/operator_test.go",
         "runtime/watch*_test.go",
+        "runtime/forge_review_test_doubles_test.go",
         "runtime/connectivity_test.go",
         "runtime/fleet*_test.go",
         "runtime/gc_test.go",
@@ -242,6 +243,7 @@
         "runtime/provider_*.go",
         "runtime/claude_stream.go",
         "runtime/cli_agent.go",
+        "runtime/cli_help_probe.go",
         "runtime/native_codex.go",
         "runtime/openai_*.go",
         "runtime/agent_*.go",
@@ -344,6 +346,35 @@
         "runtime/feedback*_test.go",
         "runtime/conversation_pagination_test.go",
         "runtime/remediation_test.go"
+      ]
+    },
+    {
+      "name": "review",
+      "why": "Independent PR review (#233): the context packet, reviewer/producer independence, the non-mutating reviewer invocation, durable decisions and GitHub publication.",
+      "race": true,
+      "sources": [
+        "runtime/review_packet.go",
+        "runtime/review_independence.go",
+        "runtime/review_contract.go",
+        "runtime/review_execute.go",
+        "runtime/review_publish.go",
+        "runtime/review_run.go",
+        "runtime/review_store.go",
+        "runtime/review_port.go",
+        "review/*.go"
+      ],
+      "tests": [
+        "runtime/review_packet_test.go",
+        "runtime/review_independence_test.go",
+        "runtime/review_contract_test.go",
+        "runtime/review_execute_test.go",
+        "runtime/review_invoke_test.go",
+        "runtime/review_publish_test.go",
+        "runtime/review_publish_concurrency_test.go",
+        "runtime/review_run_test.go",
+        "runtime/review_store_test.go",
+        "runtime/review_port_test.go",
+        "runtime/review_concurrency_test.go"
       ]
     },
     {

@@ -119,6 +119,15 @@ func (s *SQLiteOperationStore) ActiveRuns() ([]EngineeringRun, error) {
 	return s.queryRuns(` WHERE COALESCE(json_extract(document, '$.disposition'), '') NOT IN ('completed', 'failed', 'cancelled')`)
 }
 
+// runsForRepository lists every run row for exactly one repository, oldest
+// first. It exists for #233's PR-to-run resolution, which must consider every
+// run this repository has ever created rather than only the active ones: the
+// producing run of an already-merged or already-closed PR is still the
+// correct subject for a historical review.
+func (s *SQLiteOperationStore) runsForRepository(repository string) ([]EngineeringRun, error) {
+	return s.queryRuns(` WHERE repository = ?`, repository)
+}
+
 // RunJournalActivity returns when each run's journal last moved: the time of
 // its newest event. The run document carries no cursor - replay derives it
 // from the events - so this is the durable answer to "has this run been
