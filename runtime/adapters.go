@@ -543,6 +543,15 @@ const (
 	// binding exhausts its own attempts rather than ever being dispatched
 	// with context that would contradict it.
 	FailureDecisionBindingStale FailureClass = "decision_binding_stale"
+	// FailureReviewRemediationStale is the same shape as
+	// FailureDecisionBindingStale, for an admitted independent-review BLOCK
+	// (#474 B2): a live GitHub read taken immediately before the provider is
+	// launched disagreed with the head the admitted findings were assembled
+	// against, or GitHub was unreachable for that read. Nothing was
+	// attempted; it routes to a bounded retry of the SAME operation, so a
+	// genuinely moved PR exhausts its own attempts rather than ever
+	// delivering findings whose subject may already be gone.
+	FailureReviewRemediationStale FailureClass = "review_remediation_stale"
 )
 
 type FailureRoute string
@@ -582,7 +591,8 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete,
 		FailureProviderNoProgress, FailureFeedbackUnresolved, FailureReviewRemediationUnresolved,
 		FailureCheckpointContinuationUnresolved, FailureReviewerProtocolIncomplete,
-		FailureProviderBackgroundWorkUnresolved, FailureConnectivity, FailureDecisionBindingStale:
+		FailureProviderBackgroundWorkUnresolved, FailureConnectivity, FailureDecisionBindingStale,
+		FailureReviewRemediationStale:
 		return RouteRetry
 	// An integration unit never gets a producer to remediate it (#475): its
 	// whole producer stage is deterministic composition, not a free-form

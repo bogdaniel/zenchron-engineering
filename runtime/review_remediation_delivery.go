@@ -9,6 +9,9 @@ package runtime
 // produces for admitted GitHub feedback.
 
 import (
+	"context"
+	"fmt"
+
 	"github.com/bogdaniel/zenchron-engineering/review"
 )
 
@@ -60,4 +63,43 @@ func (r *EngineeringRuntime) reviewRemediationFindings(state *runState) ([]Findi
 		}
 	}
 	return findings, nil
+}
+
+// reviewRemediationLiveHeadCheck re-confirms, by a live GitHub read rather
+// than the run's own last-observed projection, that the pull request's
+// ACTUAL current head still agrees with the head reviewFindings was just
+// assembled against (#474 B2). reviewRemediationFindings and
+// bindExecutionInvoke's binding both read only journalled state refreshed by
+// whenever observeGitHub last ran; this is the one point, immediately before
+// the provider is launched, that asks GitHub itself. An external PR move
+// between admission and this call, or GitHub being unreachable, refuses THIS
+// attempt rather than deliver findings whose subject may already be gone -
+// the run retries under its own existing bounded attempt ceiling, the same
+// as any other transient dispatch failure.
+//
+// The external read and the provider actually starting can never be made
+// atomic from here - a move landing in that residual gap is irreducible from
+// inside this process - but the gap this closes is the one between
+// admission and dispatch that previously had no live check at all.
+func (r *EngineeringRuntime) reviewRemediationLiveHeadCheck(ctx context.Context, state *runState, findings []Finding) error {
+	if len(findings) == 0 {
+		return nil
+	}
+	pr := state.projection.PullRequest
+	if pr == nil {
+		return fmt.Errorf("review-remediation findings were assembled with no published pull request to recheck live")
+	}
+	repo, err := parseGitHubRepo(state.run.Repository)
+	if err != nil {
+		return err
+	}
+	live, err := r.deps.GitHub.PullRequest(ctx, repo, pr.Number)
+	if err != nil {
+		return fmt.Errorf("live pull request head recheck failed: %w", err)
+	}
+	if live.HeadSHA != state.projection.Head() {
+		return fmt.Errorf("the pull request's live head %s disagrees with the head %s the admitted review-remediation findings were assembled against",
+			short12(live.HeadSHA), short12(state.projection.Head()))
+	}
+	return nil
 }

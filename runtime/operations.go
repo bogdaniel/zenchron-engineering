@@ -914,6 +914,12 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		watch.ended = true
 		return r.executionFailureEffect(OperationCancelled, execStageProviderRequest, FailureRunCancelled, errStoppedBeforeProvider)
 	}
+	// #474 B2: the last point before the provider actually starts, and the
+	// one check in this whole path that asks GitHub itself rather than the
+	// run's own last-observed projection.
+	if err := r.reviewRemediationLiveHeadCheck(ctx, state, reviewFindings); err != nil {
+		return r.executionFailureEffect(OperationFailed, execStageProviderRequest, FailureReviewRemediationStale, err)
+	}
 	executing = withVerificationExecution(executing, r.scheduler, attemptRef, r.deps.StateDir)
 	result, execErr := r.deps.Provider.Execute(executing, unit.apply(stage.apply(ExecutionRequest{
 		ReviewerResultPath:     reviewerResultPath,
