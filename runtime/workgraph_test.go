@@ -11,6 +11,7 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
+	"github.com/bogdaniel/zenchron-engineering/review"
 )
 
 // The #472 acceptance fixture reuses the #470 fleet: one governed repository,
@@ -634,5 +635,122 @@ func TestAWorkGraphRefusesWhatItCannotGovern(t *testing.T) {
 	graphs, err := fixture.store.WorkGraphs()
 	if err != nil || len(graphs) != 0 {
 		t.Fatalf("a refused request stored %d graphs (%v)", len(graphs), err)
+	}
+}
+
+// graphReviewGated is #474's own acceptance shape: a depends on nothing and
+// requires independent review; b depends on a alone.
+func graphReviewGated() []orchestration.WorkUnit {
+	return []orchestration.WorkUnit{
+		{ID: "a", Purpose: "land the schema", Role: domain.RoleImplementer, Issue: graphUnitA, RequiresReview: true},
+		{ID: "b", Purpose: "land the reader", Role: domain.RoleImplementer, Issue: graphUnitB, DependsOn: []string{"a"}},
+	}
+}
+
+// seedWorkGraphReviewDecision writes a durable review.Decision directly - the
+// same shape a real RunIndependentReview call would produce - without
+// performing one. producerID need not match the unit's own run; #474's
+// WorkGraph satisfaction predicate asks only "is the LATEST decision for
+// this PR an APPROVE of this exact commit", never independence (that is
+// #233/#474's own admission gate's concern, not this read-only gate's).
+func seedWorkGraphReviewDecision(t *testing.T, store *SQLiteOperationStore, repo GitHubRepo, prNumber int, headSHA, runID, reviewerID string, verdict review.Verdict, at time.Time) review.Decision {
+	t.Helper()
+	subject := review.Subject{Repository: repo.String(), PRNumber: prNumber, HeadSHA: headSHA}
+	id, err := review.DecisionID(subject, reviewerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var findings []review.Finding
+	if verdict == review.VerdictRequestChanges {
+		findings = []review.Finding{{Severity: review.SeverityBlocking, Signature: "incomplete"}}
+	}
+	decision := review.Decision{
+		SchemaVersion: review.SchemaVersion, ID: id, Subject: subject, RunID: runID,
+		ProducerAgentID: "claude", ReviewerAgentID: reviewerID, Verdict: verdict, Findings: findings, CreatedAt: at,
+	}
+	stored, _, err := store.CreateReviewDecision(decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stored
+}
+
+// TestAReviewGatedUnitBlocksItsDependentUntilIndependentApproval is #474's
+// own required A->B acceptance test: a unit's admitted handoff satisfies a
+// dependent only once an independent decision for the exact bound commit is
+// APPROVE - never merely on ItemCompleted, never on REQUEST_CHANGES
+// invalidating anything, and never on an APPROVE bound to the wrong commit.
+//
+// Every status read in this test (fixture.graph) is an entirely fresh,
+// independent computation with nothing cached from the previous call -
+// ProjectWorkGraph and WorkGraphStatus hold no state between reads, so the
+// restart property #474 asked for ("the same after a restart") is not a
+// separate code path to test: it is what every assertion below already
+// exercises, on every call.
+func TestAReviewGatedUnitBlocksItsDependentUntilIndependentApproval(t *testing.T) {
+	fixture := newFleetFixture(t, 4)
+	supervisor := fixture.supervisor()
+	view := fixture.adoptGraph(supervisor, "claude", 1, graphReviewGated())
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// a completes exactly like any ordinary unit (#474: the graph does not
+	// rename what the child run already says it is); b is BLOCKED, not
+	// merely unready, because a's review predicate is not yet satisfied -
+	// unitSettled treats blocked as settled, so this returns as soon as a
+	// completes.
+	settled := fixture.driveGraph(supervisor, view.GraphID, nil)
+	a := settled.unit(t, "a")
+	if a.State != orchestration.UnitState(orchestration.ItemCompleted) {
+		t.Fatalf("a never completed: %+v", a)
+	}
+	if a.Output == nil || a.Child == nil || a.Child.PullRequest == 0 {
+		t.Fatalf("a completed with no admitted output or published pull request: %+v", a)
+	}
+	if a.RequiresReview != true || a.ReviewApproved {
+		t.Fatalf("a reports RequiresReview=%v ReviewApproved=%v before any decision exists", a.RequiresReview, a.ReviewApproved)
+	}
+	if b := settled.unit(t, "b"); b.State != orchestration.UnitBlocked {
+		t.Fatalf("b = %s before any independent review exists, want blocked", b.State)
+	}
+	h1, prNumber := a.Output.CandidateRevision, a.Child.PullRequest
+
+	// A REQUEST_CHANGES decision does NOT invalidate anything downstream -
+	// nothing was ever satisfied on it. b simply stays blocked, visibly.
+	seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, h1, a.RunID, "reviewer-1", review.VerdictRequestChanges, fixture.clock.Now())
+	afterBlock := fixture.graph(view.GraphID)
+	b := afterBlock.unit(t, "b")
+	if b.State != orchestration.UnitBlocked {
+		t.Fatalf("b = %s after REQUEST_CHANGES, want still blocked (never invalidated)", b.State)
+	}
+
+	// An APPROVE bound to the WRONG commit - a stale or otherwise-mismatched
+	// review - must never release b either.
+	seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, strings.Repeat("f", 40), a.RunID, "reviewer-2", review.VerdictApprove, fixture.clock.Now().Add(time.Minute))
+	afterWrongHead := fixture.graph(view.GraphID)
+	if got := afterWrongHead.unit(t, "b").State; got != orchestration.UnitBlocked {
+		t.Fatalf("b = %s after an APPROVE bound to the wrong commit, want still blocked", got)
+	}
+
+	// A fresh independent APPROVE of the EXACT commit a produced satisfies
+	// it: b becomes ready, with no supervisor tick needed - satisfaction is
+	// a pure read-time fact, exactly like every other #472 satisfaction.
+	seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, h1, a.RunID, "reviewer-3", review.VerdictApprove, fixture.clock.Now().Add(2*time.Minute))
+	approved := fixture.graph(view.GraphID)
+	if got := approved.unit(t, "b").State; got != orchestration.UnitReady {
+		t.Fatalf("b = %s after a fresh independent APPROVE of the exact commit, want ready: %+v", got, approved.unit(t, "b"))
+	}
+	if !approved.unit(t, "a").ReviewApproved {
+		t.Fatal("a does not report ReviewApproved once an exact-commit APPROVE exists")
+	}
+
+	// b is not merely LABELLED ready: driving it reaches an ordinary
+	// completed admission through #472's own existing frontier/activation
+	// machinery, unchanged.
+	final := fixture.driveGraph(supervisor, view.GraphID, nil)
+	if got := final.unit(t, "b").State; got != orchestration.UnitState(orchestration.ItemCompleted) {
+		t.Fatalf("b never completed once a was approved: %+v", final.unit(t, "b"))
 	}
 }

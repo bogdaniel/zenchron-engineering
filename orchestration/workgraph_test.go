@@ -149,6 +149,15 @@ func TestWorkGraphRefusesGraphsNothingCouldAdvance(t *testing.T) {
 			},
 			want: `"b" is an integration_compose unit; it names 1 dependencies, needing at least 2`,
 		},
+		"integration_compose requiring review": {
+			units: []WorkUnit{
+				{ID: "a", Purpose: "p", Role: domain.RoleImplementer, Issue: 1},
+				{ID: "b", Purpose: "p", Role: domain.RoleImplementer, Issue: 2},
+				{ID: "c", Purpose: "p", Role: domain.RoleIntegrator, ExecutionKind: ExecutionKindIntegrationCompose,
+					Issue: 3, DependsOn: []string{"a", "b"}, RequiresReview: true},
+			},
+			want: `"c" is an integration_compose unit; it has no independent review to require`,
+		},
 		"no issue": {
 			units: []WorkUnit{{ID: "a", Purpose: "p", Role: domain.RoleImplementer}},
 			want:  "a unit performs one existing issue",

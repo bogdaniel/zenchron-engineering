@@ -105,6 +105,13 @@ type WorkUnit struct {
 	// path a direct #470 submission uses.
 	Issue     int      `json:"issue"`
 	DependsOn []string `json:"depends_on,omitempty"`
+	// RequiresReview opts this unit into #474's review-readiness gate: its
+	// admitted handoff satisfies a dependent only once an independent
+	// decision for the exact bound commit is APPROVE, never merely on
+	// ItemCompleted. False (the default, so every graph that predates this
+	// field keeps its exact prior behavior and digest) means ordinary #472
+	// satisfaction, unchanged.
+	RequiresReview bool `json:"requires_review,omitempty"`
 }
 
 // WorkUnitExecutionKind is the closed, explicit discriminator for which
@@ -295,6 +302,13 @@ func (g WorkGraph) Validate() error {
 		}
 		if unit.effectiveExecutionKind() == ExecutionKindIntegrationCompose && len(unit.DependsOn) < 2 {
 			return fmt.Errorf("work unit %q is an integration_compose unit; it names %d dependencies, needing at least 2 exact admitted inputs", unit.ID, len(unit.DependsOn))
+		}
+		// An integration_compose unit's whole producer stage is deterministic
+		// Git composition over consumed inputs (#475); it invokes no provider
+		// and publishes no PR of its own, so it has no independent review to
+		// require - requiring one would simply never satisfy.
+		if unit.RequiresReview && unit.effectiveExecutionKind() == ExecutionKindIntegrationCompose {
+			return fmt.Errorf("work unit %q is an integration_compose unit; it has no independent review to require", unit.ID)
 		}
 		if unit.Issue <= 0 {
 			return fmt.Errorf("work unit %q names issue %d; a unit performs one existing issue", unit.ID, unit.Issue)

@@ -467,46 +467,71 @@ proves the fail-closed error path. All four new guards (R1's event gate,
 R2's two call sites, R2's error path) were deliberately disabled and
 confirmed to fail their exact test before being restored.
 
-## WorkGraph review-readiness (section 8): a frozen, deferred contract
+## WorkGraph review-readiness (section 8, now implemented)
 
-`orchestration/workgraph_projection.go`'s `ProjectWorkGraph` marks a unit
-`satisfied` purely from its admitted handoff (`docs/workgraph.md`); there is
-no concept of "activated, completed, but not yet independently accepted" a
-downstream unit's readiness could gate on. Investigated directly (not
-assumed): no `review_gate`/`review_obligation` field exists on `WorkUnit` or
-its projection anywhere in the codebase.
+`orchestration/workgraph_projection.go`'s `ProjectWorkGraph` used to mark a
+unit `satisfied` purely from its admitted handoff; there was no concept of
+"activated, completed, but not yet independently accepted" a downstream
+unit's readiness could gate on. B4 implements exactly the contract this
+section used to freeze, with no change to its shape:
 
-This remains deferred even now that #546 has merged and released the files
-it would touch (`orchestration/workgraph.go`, `runtime/workgraph_status.go`):
-it is a cross-package schema change with its own test surface, layered
-**above** the now-complete producer review/remediation loop this PR proves
-end-to-end, and #474's own governing comment thread already HELD exactly
-this shape of change once before (PR #543) for widening WorkGraph scope
-without an agreed contract first. The frozen contract, for whoever picks
-this up next:
+- `WorkUnit.RequiresReview bool` is the opt-in (`requires_review` in JSON).
+  Zero value false, so every existing WorkGraph with no such unit behaves
+  identically to before - the digest of a graph that never sets it is
+  unchanged. `Validate` refuses it on an `integration_compose` unit: that
+  unit's whole producer stage is deterministic Git composition, never a
+  provider invocation, so it publishes no PR and has no independent review
+  to require.
+- `UnitFacts.ReviewApproved` is the one new externally-supplied fact,
+  threaded in exactly like `AwaitingDecision` already is -
+  `ProjectWorkGraph` performs no review read of its own. `satisfied[id]`
+  gains one additional term: `fact.Item == ItemCompleted && (!unit.RequiresReview
+  || fact.ReviewApproved)`. The unit's own reported `State` is untouched -
+  completed is still completed, #470's state, never renamed - only whether
+  a dependent may consume it is gated, through the existing "completed, has
+  transferred no admitted handoff yet" blocked reason `unsatisfiedReason`
+  already produces for any other unsatisfied dependency.
+- `runtime/workgraph_status.go`'s `reviewApprovedFor` computes the fact: the
+  LATEST `review.Decision` for (`graph.Repository`, the unit's own
+  `PullRequest`) is `APPROVE`, bound to the EXACT `CandidateRevision` the
+  unit's own admitted handoff transferred - a plain `LatestReviewDecision`
+  store read, no `ReviewPort`, no live GitHub call, no new parameter on
+  `WorkGraphStatus` or any of its five call sites. A unit's satisfaction is
+  a question about review of the EXACT output it already produced, which
+  the durable decision history answers completely by itself; this is the
+  same exact-commit binding `reviewRemediationFindings` already keys
+  delivery on, keyed here to the unit's own `CandidateRevision` instead of
+  the run's current head.
+- Binding to the EXACT commit is what makes "H1 approval never authorizes
+  H2" true with no separate invalidation step: a fresh admitted handoff on
+  the same unit's run is a different `CandidateRevision`, so the comparison
+  fails until a decision bound to THAT exact commit is also `APPROVE`.
+- A `REQUEST_CHANGES` decision never invalidates anything downstream
+  (nothing was ever satisfied on it, and it is never routed through
+  `AdmitReviewRemediation` here - acceptance is a #233 fact read directly,
+  not an admission); the dependent simply stays `blocked`, visibly, for as
+  long as no current `APPROVE` exists.
+- This is #472's existing invalidation and frontier machinery, unchanged:
+  one additional satisfaction predicate, never a second satisfaction
+  mechanism, a second activation path, or a second graph, and no new
+  parameter threaded through `WorkGraphStatus`'s five call sites.
 
-- a `WorkUnit` MAY declare `requires_review: true` (opt-in; every existing
-  WorkGraph with no such unit behaves identically to today - "preserve
-  existing behavior for ordinary WorkGraphs" is non-negotiable per #474);
-- such a unit's `satisfied` fact becomes: admitted handoff **AND**
-  `!ReviewPort.NeedsReview(...)` **AND** the latest `review.Decision` for its
-  bound PR is `APPROVE` (never routed through `AdmitReviewRemediation`, which
-  is REQUEST_CHANGES-only machinery - acceptance is a #233 fact read
-  directly, not an admission);
-- a fresh candidate head (a new admitted handoff on the same unit's run, same
-  mechanism exact-subject invalidation already uses) makes the unit
-  unsatisfied again until a fresh `APPROVE` exists for the new exact head -
-  this is what makes "H1 approval never authorizes H2" true for a
-  review-gated unit without any new invalidation mechanism;
-- a `REQUEST_CHANGES` decision does **not** itself invalidate anything
-  downstream (nothing was ever satisfied on it); remediation and a fresh
-  review are what eventually produce the `APPROVE` the gate is waiting for;
-  downstream simply stays `blocked` ("review required, not yet accepted")
-  the whole time, visibly, which is the existing `blocked` state's reason
-  string doing exactly its documented job;
-- this uses #472's existing invalidation and frontier machinery as-is; it
-  adds one additional satisfaction predicate, never a second satisfaction
-  mechanism, a second activation path, or a second graph.
+`TestAReviewGatedUnitBlocksItsDependentUntilIndependentApproval`
+(`runtime/workgraph_test.go`) is the required A->B acceptance test, driven
+through the real fleet fixture (`fleetFixture`, real supervisor, real
+scheduler, the same infrastructure #472's own acceptance tests use): a
+completes and publishes a real PR; b stays blocked with no review at all,
+stays blocked through a `REQUEST_CHANGES`, stays blocked through an
+`APPROVE` bound to the WRONG commit, becomes `ready` only once a fresh
+independent `APPROVE` of the EXACT commit exists - with no supervisor tick
+needed, since satisfaction is a pure read-time fact - and then drives to
+completion through #472's own ordinary activation path, unchanged. Every
+new guard (the satisfaction predicate itself, the exact-commit binding, and
+the `integration_compose` validation refusal) was deliberately disabled,
+confirmed to fail its exact test, then restored. Restart is not a separate
+code path to test: `ProjectWorkGraph` and `WorkGraphStatus` hold no state
+between reads, so every call in the test already is the fresh,
+independent computation a restart would also produce.
 
 ## Negative and recovery coverage
 
@@ -613,15 +638,15 @@ application-level check, is load-bearing).
   trigger skipped (never queued, never reported as an error) for the whole
   pass while the first holds the only slot.
 
-**Still deferred, and why:** the WorkGraph review-readiness gate (section 8
-below - a cross-package schema change layered above this now-complete
-producer loop); the residual external-head TOCTOU between this gate's last
-freshness check and its SQLite commit (explicitly documented above as the
-dispatch path's own obligation, not something more internal reads can
-close - B2 closes the dispatch-time instance of this, not the theoretical
-remainder); and a reviewer failing independence against a *resolved* agent
-registry entry with a distinct, real vendor family mismatch (covered today
-only via a hand-crafted store row with an identical agent ID, per #233's own
-test suite - the E2E test's own two agents already prove the
-registry-resolved, cross-vendor-family independence path on the SUCCESS
-side).
+**Still deferred, and why:** the residual external-head TOCTOU between this
+gate's last freshness check and its SQLite commit (explicitly documented
+above as the dispatch path's own obligation, not something more internal
+reads can close - B2 closes the dispatch-time instance of this, not the
+theoretical remainder); and a reviewer failing independence against a
+*resolved* agent registry entry with a distinct, real vendor family
+mismatch (covered today only via a hand-crafted store row with an
+identical agent ID, per #233's own test suite - the E2E test's own two
+agents already prove the registry-resolved, cross-vendor-family
+independence path on the SUCCESS side). The WorkGraph review-readiness
+gate (section 8 above) is no longer deferred - see its own section for
+what it implements.
