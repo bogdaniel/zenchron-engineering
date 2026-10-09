@@ -387,6 +387,15 @@ const reviewRemediationBindingPrefix = "review-remediation|"
 // the fact, immediately and durably visible the instant it commits, restart
 // or no restart.
 func (s *runState) pendingReviewRemediationKeys() ([]string, error) {
+	// A runState built without a durable store (a handful of tests construct
+	// one directly to exercise budget/conditions arithmetic in isolation) has
+	// no database to have admitted anything into - "nothing pending" is the
+	// true fact here, not a failure being swallowed. Every production runState
+	// loads through (*EngineeringRuntime).load, which always wires a real
+	// store.
+	if s.rt == nil || s.rt.deps.Store == nil {
+		return nil, nil
+	}
 	admissions, err := s.rt.deps.Store.ReviewRemediationAdmissionsForRun(s.run.ID)
 	if err != nil {
 		return nil, err

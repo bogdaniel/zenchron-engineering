@@ -608,10 +608,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		}
 		if err != nil {
 			class, _ := candidateGuardFailureClass(err)
-			return effect{state: OperationFailed, result: executionRecord{
-				mutationResult: mutationResult{FailureClass: class},
-				Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, class, ExecutionResult{}, err),
-			}}
+			return r.executionFailureEffect(execStageCandidateAdmission, class, err)
 		}
 		defer writer.Close()
 		ctx = withCandidateWriter(ctx, writer)
@@ -684,10 +681,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		return failed(err)
 	}
 	if err := assertExecutionSubject(state, workspace, purpose, subject); err != nil {
-		return effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureWorkspaceIntegrity},
-			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureWorkspaceIntegrity, ExecutionResult{}, err),
-		}}
+		return r.executionFailureEffect(execStageWorkspaceSubject, FailureWorkspaceIntegrity, err)
 	}
 	// PROVIDER ADMISSION. The confidentiality decision has to be made before
 	// the producer exists, because admission is what it actually controls: once
@@ -698,10 +692,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// local prerequisite defect by spending a reasoning budget on it is the
 	// same mistake #46 was about, in a different place.
 	if err := ScanCandidateForCredentialValues(workspace.Dir); err != nil {
-		return effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureCandidateCredentialMaterial},
-			Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureCandidateCredentialMaterial, ExecutionResult{}, err),
-		}}
+		return r.executionFailureEffect(execStageCandidateAdmission, FailureCandidateCredentialMaterial, err)
 	}
 	// Admitted, applicable, undelivered reviewer feedback. It is assembled
 	// BEFORE the invocation so the same set that is delivered is the set that
@@ -729,6 +720,15 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		purpose = InvocationRemediation
 		findings = append(findings, feedbackFindings(feedback)...)
 	}
+	// #474: an unreadable admission table must never read as an empty queue.
+	reviewFindings, err := r.reviewRemediationFindings(state)
+	if err != nil {
+		return failed(err)
+	}
+	if len(reviewFindings) > 0 && purpose != InvocationContinuation {
+		purpose = InvocationRemediation
+		findings = append(findings, reviewFindings...)
+	}
 	// The previous attempt of THIS operation, read from durable state. It is
 	// the same typed provenance the reattemptability rule consults, so nothing
 	// new decides what a retry may inherit, and a first attempt reads empty.
@@ -754,20 +754,14 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// is unchanged and takes the contract's own objective.
 	stage, err := r.planStage(state)
 	if err != nil {
-		return effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureUnknown},
-			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
-		}}
+		return *r.workspaceSubjectFailure(err)
 	}
 	// A WORK GRAPH unit's child run receives the exact admitted upstream
 	// handoffs its activation was bound to (#472). An ordinary orchestrated run
 	// and a plan stage run are unchanged: neither has a unit origin.
 	unit, err := r.workUnit(state)
 	if err != nil {
-		return effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureUnknown},
-			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
-		}}
+		return *r.workspaceSubjectFailure(err)
 	}
 	// THE PHYSICAL ATTEMPT IDENTITY of the invocation about to happen.
 	//
@@ -804,27 +798,20 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// it must not let a provider write under.
 		reserved, err := r.scheduler.ReserveAttemptIdentity(operation.ID, free)
 		if err != nil {
-			return effect{state: OperationFailed, result: executionRecord{
-				mutationResult: mutationResult{FailureClass: FailureUnknown},
-				Diagnostic:     r.executionDiagnostic(execStageProviderRequest, FailureUnknown, ExecutionResult{}, err),
-			}}
+			return r.executionFailureEffect(execStageProviderRequest, FailureUnknown, err)
 		}
 		physicalAttempt = reserved.AttemptIdentity
 	}
+	attemptRef := ExecutionAttemptRef{RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt}
 	// THE REVIEWER RESULT SLOT, prepared before the invocation and only for a
 	// stage whose role produces a verdict. An implementer is given no path at
 	// all, so it has nowhere to write one: the authority is carried by the
 	// role, not by the ability to produce matching JSON.
 	reviewerResultPath := ""
 	if stage.producesVerdict() {
-		reviewerResultPath, err = PrepareReviewerResult(r.deps.StateDir, ExecutionAttemptRef{
-			RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
-		})
+		reviewerResultPath, err = PrepareReviewerResult(r.deps.StateDir, attemptRef)
 		if err != nil {
-			return effect{state: OperationFailed, result: executionRecord{
-				mutationResult: mutationResult{FailureClass: FailureUnknown},
-				Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
-			}}
+			return *r.workspaceSubjectFailure(err)
 		}
 	}
 	// THE FEEDBACK RESOLUTION SLOT, prepared before the invocation when this
@@ -836,14 +823,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// binds to nothing (#376).
 	feedbackResolutionPath := ""
 	if len(feedback) > 0 || purpose == InvocationContinuation {
-		feedbackResolutionPath, err = PrepareFeedbackResolution(r.deps.StateDir, ExecutionAttemptRef{
-			RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
-		})
+		feedbackResolutionPath, err = PrepareFeedbackResolution(r.deps.StateDir, attemptRef)
 		if err != nil {
-			return effect{state: OperationFailed, result: executionRecord{
-				mutationResult: mutationResult{FailureClass: FailureUnknown},
-				Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
-			}}
+			return *r.workspaceSubjectFailure(err)
 		}
 	}
 	// THE ORCHESTRATION HANDOFF SLOT (#470), prepared and emptied before the
@@ -866,14 +848,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// invocation whose contract obliges `go test` has to be able to EXECUTE the
 	// binary that command links, and the default temporary location is noexec
 	// inside this runtime's own sandbox.
-	scratchDir, err := ExecutionScratchDir(r.deps.StateDir, ExecutionAttemptRef{
-		RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
-	})
+	scratchDir, err := ExecutionScratchDir(r.deps.StateDir, attemptRef)
 	if err != nil {
-		return effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureUnknown},
-			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
-		}}
+		return *r.workspaceSubjectFailure(err)
 	}
 	// THE NO-PROGRESS WINDOW THIS INVOCATION GETS: the run's PERSISTED bound
 	// less the silence already durably recorded against this operation.
@@ -901,12 +878,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			allowance = fmt.Sprintf(" plus the %s crash-recovery uncertainty allowance for progress the lost controller may not have written",
 				progressRecorderLag(inactivityLimit))
 		}
-		return effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureProviderNoProgress},
-			Diagnostic: r.executionDiagnostic(execStageProviderRequest, FailureProviderNoProgress, ExecutionResult{},
-				fmt.Errorf("no provider progress has been recorded for %s, which exhausts the %s inactivity bound%s before this invocation could start",
-					ProviderSilence(operation, r.deps.Clock.Now()), inactivityLimit, allowance)),
-		}}
+		return r.executionFailureEffect(execStageProviderRequest, FailureProviderNoProgress,
+			fmt.Errorf("no provider progress has been recorded for %s, which exhausts the %s inactivity bound%s before this invocation could start",
+				ProviderSilence(operation, r.deps.Clock.Now()), inactivityLimit, allowance))
 	}
 	// Observed progress is written back to the operation row, so "silent for"
 	// in status is a durable observation about the WORK rather than the age of
@@ -943,8 +917,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageProviderRequest, FailureRunCancelled, ExecutionResult{}, errStoppedBeforeProvider),
 		}}
 	}
-	executing = withVerificationExecution(executing, r.scheduler,
-		ExecutionAttemptRef{RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt}, r.deps.StateDir)
+	executing = withVerificationExecution(executing, r.scheduler, attemptRef, r.deps.StateDir)
 	result, execErr := r.deps.Provider.Execute(executing, unit.apply(stage.apply(ExecutionRequest{
 		ReviewerResultPath:     reviewerResultPath,
 		FeedbackResolutionPath: feedbackResolutionPath,
@@ -1767,6 +1740,16 @@ const (
 	execStageProviderLoop       = "provider_loop"
 	execStageProviderResult     = "provider_result"
 )
+
+// executionFailureEffect is the repeated shape behind a typed invocation
+// failure with no provider result to report: one failure class, the
+// diagnostic stage it died at, and the error that caused it.
+func (r *EngineeringRuntime) executionFailureEffect(stage string, class FailureClass, cause error) effect {
+	return effect{state: OperationFailed, result: executionRecord{
+		mutationResult: mutationResult{FailureClass: class},
+		Diagnostic:     r.executionDiagnostic(stage, class, ExecutionResult{}, cause),
+	}}
+}
 
 func (r *EngineeringRuntime) executionDiagnostic(stage string, class FailureClass, result ExecutionResult, cause error) *ExecutionDiagnostic {
 	diagnostic := &ExecutionDiagnostic{

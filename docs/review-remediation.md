@@ -2,10 +2,11 @@
 
 This document is the #474 half of the loop `docs/review.md` (#233) ends with:
 "Nothing in this document grants #474 authority it does not independently
-establish." It covers exactly one thing: the durable authorization gate
-between an independently reached `REQUEST_CHANGES` and a producer's own
-bounded remediation invocation, and the exact, still-pending wiring that
-turns an admission into a scheduled invocation.
+establish." It covers the durable authorization gate between an
+independently reached `REQUEST_CHANGES` and a producer's own bounded
+remediation invocation, the wiring that turns an admission into a scheduled
+invocation, and the automatic trigger that removes the operator as the
+relay between an independent reviewer and the producer it blocks.
 
 ## Ownership map (what already existed)
 
@@ -260,17 +261,11 @@ gate" above) already catches a document/row disagreement reached through
 either of them, so they are not in this function's direct trust chain the
 way the single-decision `ReviewDecision` lookup is.
 
-## Deferred wiring (not yet applied - see below)
+## The wiring (now live - #546 merged at `122f438`)
 
-Two existing files are the integration seam, and both are presently PR
-#546's (#475) active files. The diffs below are complete, reviewed and
-tested against the helper methods already shipped in this PR
-(`runtime/review_remediation.go`); they are being held rather than applied,
-per #474's own "Critical concurrent-development constraint" and this
-session's explicit coordination with the #475 agent (acknowledged: one
-`ExecutionKindIntegrationCompose` early-return guard added to
-`bindExecutionInvoke`'s top, no other control-flow changes, composes cleanly
-with the addition below).
+#546 merged into `main`, releasing `runtime/reconciler.go` and
+`runtime/operations.go`. This PR now contains the real wiring, not a
+documented diff waiting for one.
 
 **1. `runtime/reconciler.go`, inside `bindExecutionInvoke`** - a new branch at
 the same priority tier as the existing GitHub-feedback branches, inserted
@@ -280,53 +275,87 @@ after them and before the `#508 P4b` fallback:
 if binding, ok := s.unresolvedReviewRemediationBinding(s.projection.CandidateRevision); ok {
     return binding, true
 }
-pending, err := s.pendingReviewRemediationKeys()
-if err != nil {
-    // MUST surface as a visible, non-advancing wait - never silently fall
-    // through to "nothing wanted" for this binding. An authorized BLOCK that
-    // cannot be read back must never look like goal_state_reached or a clean
-    // settle; it must look like exactly what it is, an outage, the same way
-    // a capacity wait is recorded in run.waiting rather than swallowed
-    // (docs/orchestration.md, "Recognized capacity waits"). The exact
-    // mechanism (a new wait reason recorded alongside the existing capacity-
-    // wait ones, most likely) is #546 ownership territory to settle once
-    // bindExecutionInvoke's actual post-merge shape is known - this snippet
-    // intentionally does not guess at it.
-}
-if len(pending) > 0 {
+if pending, err := s.pendingReviewRemediationKeys(); err == nil && len(pending) > 0 {
     return reviewRemediationBindingPrefix + s.projection.CandidateRevision + "|" + digestOfKeys(pending), true
 }
 ```
 
-Both helper methods, and the `reviewRemediationBindingPrefix` constant, are
-already implemented and unit-tested in `runtime/review_remediation.go` -
-this is a small consumer of code that already exists, not new logic.
-`pendingReviewRemediationKeys` returns an error because, unlike
-`pendingFeedbackKeys`, it reads the durable admission table rather than
-`s.events`. An admission that cannot be read back is NOT the same fact as no
-admission existing: the former is visible authorized work this run cannot
-currently see, and reconciliation must say so, never settle quietly as if
-nothing were pending.
+A read failure here falls through to the next fallback, not to a fabricated
+binding - and that is safe, not a swallowed error, because **`conditions()`
+is where the failure is actually surfaced**, checked once per pass before
+`plan()`/`bindExecutionInvoke` ever runs:
+
+```go
+// in conditions(), alongside controller_changed/candidate_external_changed:
+if _, err := s.pendingReviewRemediationKeys(); err != nil {
+    return Waiting, "review_remediation_unavailable"
+}
+```
+
+`Reconcile`'s own existing control flow (`runtime/reconciler.go`, the
+`!wanted` branch) settles a pass with nothing else to plan under
+`conditions()`'s disposition/reason rather than always
+`goal_state_reached` - so an unreadable admission table reads as the visible
+wait `review_remediation_unavailable`, never as an empty queue, exactly
+when there would otherwise be nothing else keeping the run busy.
+`pendingReviewRemediationKeys` itself degrades to "nothing pending" (not an
+error) when `s.rt`/`s.rt.deps.Store` is nil - the shape several existing
+tests use to exercise `conditions()`'s budget arithmetic in isolation,
+which never had a real database to begin with and genuinely has nothing
+admitted.
 
 **2. `runtime/operations.go`, inside `invokeExecution`'s context assembly** -
-the admitted blocking findings (`ReviewRemediationAdmission.FindingSignatures`,
-or the full `review.Decision.Findings` read back by `DecisionID`) need to
-reach the provider the same way `feedbackDeliveryFor` already delivers
-admitted GitHub feedback: framed and neutralized as untrusted data
-(`UNTRUSTED-REVIEW-CONTEXT`/`UNTRUSTED-INTERWORKER-MESSAGES` precedent),
-never as instructions. This is intentionally **not** written against #546's
-current `invokeExecution` body in this PR: that function is #475's active
-file, and the exact shape of "attach findings for binding
-`review-remediation|...`" needs to be read off whatever `invokeExecution`
-looks like once #546 lands, not guessed at against a moving target.
+right after the existing GitHub-feedback findings block:
 
-Why not applied now: `runtime/reconciler.go` and `runtime/operations.go` are
-both open PR #546's actively-edited files. The host environment's own
-shared-resource safeguard refused this session's attempt to edit
-`reconciler.go` even read-only, which is the correct outcome here - a
-two-line, already-tested, already-reviewed diff is still a diff to a file
-another agent is mid-flight on, and the right place for it to land is a
-follow-up commit once #546 merges (or an explicit human-approved exception).
+```go
+reviewFindings, err := r.reviewRemediationFindings(state)
+if err != nil {
+    return failed(err)
+}
+if len(reviewFindings) > 0 && purpose != InvocationContinuation {
+    purpose = InvocationRemediation
+    findings = append(findings, reviewFindings...)
+}
+```
+
+`reviewRemediationFindings` (`runtime/review_remediation_delivery.go`)
+re-validates every admission bound to the current head through the same
+`reviewRemediationBindingInvariants` the store already enforces, then
+renders each blocking `review.Finding` as a typed `Finding`: `Signature`
+carries the reviewer's own bounded dedup key (printed directly, the same
+treatment stage-review findings already get); `Detail` reaches the provider
+only inside the existing `verifierEvidenceEnvelope`'s `UNTRUSTED-SOURCE`
+markers - reused as-is, no new framing mechanism. A store read failure here
+fails the operation outright (`failed(err)`), consuming the attempt rather
+than silently proceeding with no findings - the same "never an empty queue"
+discipline as `conditions()`'s own check, at the point that actually matters
+most: the moment a producer would otherwise be invoked uninformed.
+
+**3. `runtime/review_remediation_trigger.go` (new)** - `ReconcileReviewRemediation`
+is the one piece neither `reconciler.go` nor `operations.go` could be:
+the automatic entry point that actually calls `ReviewPort.RequestReview`/
+`AdmitReviewRemediation` for a published PR, removing the operator as relay.
+Nothing in `Reconcile`'s own per-run tick calls `RequestReview` - #233's
+review operation runs a provider and must stay outside a producer run's
+tick, capacity-respecting the same way `review pr` already is a bounded,
+separately-scheduled operation (`docs/review.md`, "Known scope limits").
+`ReconcileReviewRemediation` is idempotent at every step (`NeedsReview`,
+`RequestReview` and `AdmitReviewRemediation` all are), so calling it
+repeatedly - once per supervisor tick, forever - is the whole mechanism.
+**Not yet wired**: an actual call site inside `serve`'s own polling loop
+(mirroring `feedback_observe.go`'s relationship to `Reconcile`) - this PR
+proves the mechanism end-to-end (see the acceptance test below) but does not
+additionally touch `cmd/zenchron-engineering/serve.go`, itself a frozen
+baseline file, to make a running supervisor call it automatically. That one
+remaining deployment-wiring step is left for a follow-up.
+
+**Test-fixture fix along the way**: `FakeGitHubAdapter.PullRequest` returned
+a `HeadSHA` frozen at `CreatePullRequest` time and never refreshed - real
+GitHub reports whatever the branch currently points at with no separate
+"update the PR" call for the head. No existing test before the one below
+ever pushed a SECOND commit to an already-published PR through the real
+reconciler loop, so nothing had surfaced this. Fixed to re-read the live ref
+on every `PullRequest` call.
 
 ## WorkGraph review-readiness (section 8): a frozen, deferred contract
 
@@ -337,12 +366,14 @@ downstream unit's readiness could gate on. Investigated directly (not
 assumed): no `review_gate`/`review_obligation` field exists on `WorkUnit` or
 its projection anywhere in the codebase.
 
-Adding one is a WorkGraph-schema change to files `orchestration/workgraph.go`
-and `runtime/workgraph_status.go` presently own (#475's active files), and
-#474's own governing comment thread on the issue already HELD exactly this
-kind of change once before (PR #543) for widening scope without an agreed
-contract. This PR does not implement it. The frozen contract, for whoever
-picks this up once #546 lands:
+This remains deferred even now that #546 has merged and released the files
+it would touch (`orchestration/workgraph.go`, `runtime/workgraph_status.go`):
+it is a cross-package schema change with its own test surface, layered
+**above** the now-complete producer review/remediation loop this PR proves
+end-to-end, and #474's own governing comment thread already HELD exactly
+this shape of change once before (PR #543) for widening WorkGraph scope
+without an agreed contract first. The frozen contract, for whoever picks
+this up next:
 
 - a `WorkUnit` MAY declare `requires_review: true` (opt-in; every existing
   WorkGraph with no such unit behaves identically to today - "preserve
@@ -431,12 +462,42 @@ three idempotency/concurrency/restart tests, which failed with a raw
 `UNIQUE constraint failed` once removed - proving the guard, not just an
 application-level check, is load-bearing).
 
-Deferred to the reconciler/operations wiring above, and therefore not yet
-independently testable end-to-end: the full H1-committed-and-published →
-BLOCK → remediation **dispatch** → H2 → fresh review → ACCEPT lifecycle; a
-reviewer failing independence against a *resolved* agent registry entry
-(covered today only via a hand-crafted store row, per #233's own test
-suite); a producer provider failing after receiving findings; the residual
-external-head TOCTOU and the visible-wait-on-read-failure requirement (R3,
-R4 above), both of which are explicitly the dispatch wiring's obligation,
-not this isolated gate's.
+**End-to-end, through the real wiring (no manually injected rows), now that
+#546 has merged:**
+
+- `TestReviewRemediationEndToEndH1BlockH2Approve` drives the full lifecycle
+  through the real `Reconcile` loop, the real `ReviewPort`
+  (`RunIndependentReview`), and `ReconcileReviewRemediation`: producer A
+  commits H1, publishes; an independent review reaches `REQUEST_CHANGES`
+  with a blocking finding; `ReconcileReviewRemediation` durably admits
+  remediation with no operator relay; the SAME `RunID`'s next
+  `execution.invoke` is a genuinely fresh `Execute` call (no inherited
+  transcript - `isolatedProvider`'s stateful mutate proves the SECOND
+  invocation is a distinct call, not a resumed one) and produces a
+  different exact H2; H2 is freshly committed, assured and republished; H1's
+  decision is confirmed stale (`IsStale`); a fresh independent review of the
+  exact new head reaches a DIFFERENT `DecisionID` and `APPROVE`; and
+  attempting to admit against the (now superseded) latest decision again is
+  refused - H1's review can never approve H2, and an `APPROVE` is never
+  routed through remediation admission.
+- `TestConditionsSurfacesAnUnreadableReviewRemediationTable` and
+  `TestBindExecutionInvokeToleratesAnUnreadableReviewRemediationTable` prove
+  the store-read-failure-must-be-visible requirement at both of
+  `bindExecutionInvoke`'s and `conditions()`'s real call sites, deliberately
+  broken and restored like every other guard above.
+
+**Still deferred, and why:** the WorkGraph review-readiness gate (section 8
+below - a cross-package schema change layered above this now-complete
+producer loop); wiring `ReconcileReviewRemediation` into `serve`'s own
+polling loop (the mechanism is proven end-to-end above; a running
+supervisor calling it automatically per tracked PR is the remaining
+deployment step, deferred because `cmd/zenchron-engineering/serve.go` is
+itself a frozen baseline file this PR does not otherwise touch); the
+residual external-head TOCTOU between this gate's last freshness check and
+its SQLite commit (explicitly documented above as the dispatch path's own
+obligation, not something more internal reads can close); and a reviewer
+failing independence against a *resolved* agent registry entry with a
+distinct, real vendor family mismatch (covered today only via a
+hand-crafted store row with an identical agent ID, per #233's own test
+suite - the E2E test's own two agents already prove the registry-resolved,
+cross-vendor-family independence path on the SUCCESS side).

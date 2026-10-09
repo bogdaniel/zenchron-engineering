@@ -227,6 +227,15 @@ func (f *FakeGitHubAdapter) PullRequest(_ context.Context, repo GitHubRepo, numb
 	if !ok {
 		return GitHubPullRequest{}, fmt.Errorf("no pull request %d in %s", number, repo)
 	}
+	// Real GitHub reports a PR's head as whatever the branch currently points
+	// at - pushing a new commit moves it with no separate "update the PR"
+	// call required. UpdatePullRequest here, like the real one, only ever
+	// carries Title/Body/State; refreshing HeadSHA from the live ref on every
+	// read is what a stored, never-reread field cannot otherwise reflect
+	// after a second push to an already-published PR.
+	if head, tracked := f.Refs[pr.HeadRef]; tracked {
+		pr.HeadSHA = head
+	}
 	return pr, nil
 }
 

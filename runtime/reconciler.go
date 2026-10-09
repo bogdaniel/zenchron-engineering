@@ -971,6 +971,13 @@ func (s *runState) conditions() (Disposition, string) {
 	if s.projection.SourceIntentChanged {
 		return Waiting, "source_intent_changed"
 	}
+	// #474: an unreadable admission table must never read as nothing pending.
+	// A transient failure here waits visibly under its own reason instead of
+	// settling goal_state_reached over work this pass could not prove was
+	// absent.
+	if _, err := s.pendingReviewRemediationKeys(); err != nil {
+		return Waiting, "review_remediation_unavailable"
+	}
 	// A closed issue with an open, unmerged pull request is source
 	// cancellation semantics; MergePrecedence is the one place that ordering
 	// lives, and it has already ruled out the merged case above.
@@ -1278,6 +1285,16 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 	}
 	if pending := s.pendingFeedbackKeys(); len(pending) > 0 {
 		return "feedback|" + s.projection.CandidateRevision + "|" + digestOfKeys(pending), true
+	}
+	// #474: an admitted independent-review BLOCK, at the same priority as
+	// GitHub feedback and for the same reason. conditions() has already
+	// turned a store read failure into a visible wait before this is ever
+	// reached, so a bare read error here is simply "nothing new to plan".
+	if binding, ok := s.unresolvedReviewRemediationBinding(s.projection.CandidateRevision); ok {
+		return binding, true
+	}
+	if pending, err := s.pendingReviewRemediationKeys(); err == nil && len(pending) > 0 {
+		return reviewRemediationBindingPrefix + s.projection.CandidateRevision + "|" + digestOfKeys(pending), true
 	}
 	// The same #508 P4b fallback as above, for a run whose candidate IS
 	// complete but still has a resolved question of its own with nothing
