@@ -48,20 +48,21 @@ func (r *EngineeringRuntime) composeIntegration(_ context.Context, state *runSta
 	if err != nil {
 		return failed(err)
 	}
-	// The workspace is forced to the contract's exact verified base before
-	// anything else runs, on every attempt including a retry after a crash.
-	// This is deliberately NOT r.workspace(state)'s journal-cross-check: the
-	// only operation that ever touches this run's candidate before a commit
-	// exists is this one, so a prior attempt's abandoned partial merge is
-	// never legitimate material to preserve, and resetting it is exactly the
-	// recovery runtime/integration.go's own docs name - RestoreTrusted,
-	// through the existing FailureWorkspaceIntegrity route - just performed
-	// up front rather than reached for after a refusal.
-	ws := &CandidateWorkspace{
-		Dir: candidateDir(r.deps.StateDir, state.run.ID), BaseRevision: contract.BaseRevision,
-		Remote: r.deps.Remote.URL, Credentials: r.deps.Credentials,
-	}
-	if err := ws.RestoreTrusted(); err != nil {
+	// The workspace is loaded through the SAME r.workspace(state) every other
+	// candidate operation uses (#475 R3-3) - never a hand-built struct, and
+	// never preemptively reset. r.workspace verifies head against the run's
+	// own durably recorded revision and loads TrustedMetadata from the
+	// journalled baseline createCandidate established; it performs no
+	// destructive action itself. A prior attempt's abandoned partial merge, a
+	// crash mid-plan, or genuine tampering surfaces as a real error here -
+	// IntegrateInputs' own precondition (assertCleanAtVerifiedBase) additionally
+	// proves the workspace is clean - and is OBSERVED and CLASSIFIED before
+	// anything restores it: only the runtime's existing FailureWorkspaceIntegrity
+	// route restores, with that real cause recorded as the operation's
+	// failure. Resetting before observing would erase the one signal that
+	// something unexpected happened.
+	ws, err := r.workspace(state)
+	if err != nil {
 		return failed(err)
 	}
 	sources, readErr := r.integrationSources(origin.GraphID)
