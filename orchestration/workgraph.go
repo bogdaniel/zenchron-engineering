@@ -87,13 +87,63 @@ type WorkGraph struct {
 type WorkUnit struct {
 	ID      string `json:"id"`
 	Purpose string `json:"purpose"`
-	// Role is the responsibility type, from #64's catalogue.
+	// Role is the responsibility type, from #64's catalogue. It names WHO is
+	// qualified to perform this unit's work, never WHAT execution algorithm
+	// runs it - domain.RoleIntegrator is an ordinary provider-executed unit
+	// unless ExecutionKind says otherwise.
 	Role domain.EngineeringRole `json:"role"`
+	// ExecutionKind names the execution algorithm this unit's child run uses,
+	// decided once by the authorized WorkGraph author/compiler and frozen the
+	// moment the unit is activated (sameUnit, ValidateMutation). It is
+	// independent of Role: a RoleIntegrator unit with an absent/"provider"
+	// ExecutionKind still receives an ordinary execution.invoke. The empty
+	// value means ExecutionKindProvider, so every graph that predates this
+	// field keeps its exact prior behavior and digest.
+	ExecutionKind WorkUnitExecutionKind `json:"execution_kind,omitempty"`
 	// Issue is the existing issue this unit performs. Agent-backed units
 	// execute as ordinary EngineeringRuns, through the same one-issue batch
 	// path a direct #470 submission uses.
 	Issue     int      `json:"issue"`
 	DependsOn []string `json:"depends_on,omitempty"`
+}
+
+// WorkUnitExecutionKind is the closed, explicit discriminator for which
+// execution algorithm a unit's child run uses (#475). It is never inferred
+// from Role, Purpose, an issue title or anything a provider wrote.
+type WorkUnitExecutionKind string
+
+const (
+	// ExecutionKindProvider is the default, legacy execution path: an
+	// ordinary execution.invoke. The zero value names this kind, so an
+	// absent ExecutionKind is always ExecutionKindProvider.
+	ExecutionKindProvider WorkUnitExecutionKind = "provider"
+	// ExecutionKindIntegrationCompose is deterministic Git composition
+	// (#475, runtime.IntegrateInputs) over this unit's exact consumed
+	// admitted inputs. It never invokes a provider, and it requires at
+	// least two dependencies - a single dependency is #472's ordinary
+	// dependency delivery, not integration.
+	ExecutionKindIntegrationCompose WorkUnitExecutionKind = "integration_compose"
+)
+
+// KnownExecutionKind reports whether a kind is in the closed vocabulary,
+// including the empty value. An unknown kind is refused rather than passed
+// through, exactly as domain.KnownRole refuses an unknown role.
+func KnownExecutionKind(kind WorkUnitExecutionKind) bool {
+	switch kind {
+	case "", ExecutionKindProvider, ExecutionKindIntegrationCompose:
+		return true
+	default:
+		return false
+	}
+}
+
+// effectiveExecutionKind is the unit's execution kind with its default
+// applied, the one place that default is decided.
+func (u WorkUnit) effectiveExecutionKind() WorkUnitExecutionKind {
+	if u.ExecutionKind == "" {
+		return ExecutionKindProvider
+	}
+	return u.ExecutionKind
 }
 
 // WorkGraphID is the deterministic identity of a graph: the same repository,
@@ -240,6 +290,12 @@ func (g WorkGraph) Validate() error {
 		if !domain.KnownRole(unit.Role) {
 			return fmt.Errorf("work unit %q names role %q, which is not in the role catalogue", unit.ID, unit.Role)
 		}
+		if !KnownExecutionKind(unit.ExecutionKind) {
+			return fmt.Errorf("work unit %q names execution kind %q, which is not in the execution kind vocabulary", unit.ID, unit.ExecutionKind)
+		}
+		if unit.effectiveExecutionKind() == ExecutionKindIntegrationCompose && len(unit.DependsOn) < 2 {
+			return fmt.Errorf("work unit %q is an integration_compose unit; it names %d dependencies, needing at least 2 exact admitted inputs", unit.ID, len(unit.DependsOn))
+		}
 		if unit.Issue <= 0 {
 			return fmt.Errorf("work unit %q names issue %d; a unit performs one existing issue", unit.ID, unit.Issue)
 		}
@@ -317,7 +373,7 @@ func ValidateMutation(current, next WorkGraph, activated map[string]bool) error 
 			return fmt.Errorf("work unit %q has already been activated, so revision %d may not remove it", unit.ID, next.Revision)
 		}
 		if !sameUnit(unit, proposed) {
-			return fmt.Errorf("work unit %q has already been activated, so revision %d may not change its issue, role, purpose or dependencies", unit.ID, next.Revision)
+			return fmt.Errorf("work unit %q has already been activated, so revision %d may not change its issue, role, execution kind, purpose or dependencies", unit.ID, next.Revision)
 		}
 	}
 	return nil
@@ -341,7 +397,8 @@ func boundedField(name, value string, limit int) error {
 }
 
 func sameUnit(a, b WorkUnit) bool {
-	if a.Issue != b.Issue || a.Role != b.Role || a.Purpose != b.Purpose || len(a.DependsOn) != len(b.DependsOn) {
+	if a.Issue != b.Issue || a.Role != b.Role || a.effectiveExecutionKind() != b.effectiveExecutionKind() ||
+		a.Purpose != b.Purpose || len(a.DependsOn) != len(b.DependsOn) {
 		return false
 	}
 	left, right := sortedCopy(a.DependsOn), sortedCopy(b.DependsOn)

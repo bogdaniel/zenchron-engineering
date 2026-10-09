@@ -30,6 +30,7 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/execution"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // ---------------------------------------------------------------------------
@@ -2423,16 +2424,14 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	if !result.Passed && class == "" {
 		class = FailureVerification
 	}
-	// A WORK GRAPH INTEGRATOR UNIT'S (#475) candidate failing assurance is
-	// never routed as an ordinary verification failure: RouteFailure's
-	// RouteProviderRemediation would try to re-invoke a provider this unit
-	// never receives (bindExecutionInvoke's role guard refuses it), which
-	// would strand the run with nothing eligible to plan. This is exactly
-	// integration.ClassifyAssuranceFailure's case - a clean merge whose
-	// independent assurance then failed - reused here as the one existing
-	// owner of "did this exact head pass", never a second verification
-	// engine: the verdict is unchanged, only its runtime routing is.
-	if !result.Passed && state.origin != nil && state.origin.Role == domain.RoleIntegrator {
+	// A WORK GRAPH integration_compose UNIT'S (#475) candidate failing
+	// assurance is never routed as an ordinary verification failure:
+	// RouteFailure's RouteProviderRemediation would try to re-invoke a
+	// provider this unit never receives (bindExecutionInvoke's execution-kind
+	// guard refuses it), which would strand the run with nothing eligible to
+	// plan. See classifyIntegrationAssuranceFailure for the actual typed
+	// verdict (integration.ClassifyAssuranceFailure), computed below.
+	if !result.Passed && state.origin != nil && state.origin.ExecutionKind == orchestration.ExecutionKindIntegrationCompose {
 		class = FailureIntegrationConflict
 	}
 	payload := AssuranceObservedPayload{

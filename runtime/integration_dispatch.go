@@ -6,14 +6,18 @@ package runtime
 // EngineeringRun (#63) lifecycle.
 //
 // composeIntegration is OpIntegrationCompose's handler. It runs in place of
-// an ordinary execution.invoke for exactly one kind of unit: one whose
-// WorkGraph role is domain.RoleIntegrator, decided once at adoption and read
-// here from the run's own frozen batch origin - never inferred from purpose,
-// issue title or anything a provider wrote. It grants that unit no
-// implementation, publication, merge or acceptance authority: a clean result
-// is a new candidate that still needs its own fresh admission, assurance and
-// review, exactly like any other run's commit, through the SAME downstream
-// pipeline every other operation in this file already drives.
+// an ordinary execution.invoke for exactly one kind of unit: one explicitly
+// marked orchestration.ExecutionKindIntegrationCompose, decided once at
+// adoption by the WorkGraph author/compiler and read here from the run's own
+// frozen batch origin - never inferred from Role, purpose, issue title or
+// anything a provider wrote. (Role identifies who is qualified to perform a
+// unit; ExecutionKind identifies which algorithm its run uses - an ordinary
+// RoleIntegrator unit with no ExecutionKind set still gets execution.invoke.)
+// It grants that unit no implementation, publication, merge or acceptance
+// authority: a clean result is a new candidate that still needs its own
+// fresh admission, assurance and review, exactly like any other run's
+// commit, through the SAME downstream pipeline every other operation in this
+// file already drives.
 import (
 	"context"
 	"encoding/json"
@@ -21,7 +25,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/integration"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
@@ -35,11 +38,11 @@ import (
 // failure class instead.
 func (r *EngineeringRuntime) composeIntegration(_ context.Context, state *runState, op RunOperation) effect {
 	origin := state.origin
-	if origin == nil || origin.Role != domain.RoleIntegrator {
+	if origin == nil || origin.ExecutionKind != orchestration.ExecutionKindIntegrationCompose {
 		// bindIntegrationCompose never wants this operation for anything
 		// else; a handler reached for the wrong unit is a planner defect,
 		// not a recoverable condition.
-		return failed(errors.New("integration.compose dispatched for a run whose origin is not a WorkGraph integrator unit"))
+		return failed(errors.New("integration.compose dispatched for a run whose origin is not an explicit integration_compose unit"))
 	}
 	contract, err := integration.NewContract(origin.GraphID, origin.UnitID, state.baseRevision(), origin.Inputs)
 	if err != nil {
@@ -217,7 +220,7 @@ func (r *EngineeringRuntime) refuseIntegrationConflict(state *runState, op RunOp
 		if err := writeMessageReport(path, report); err != nil {
 			return failed(err)
 		}
-		if entry, wrote := messageObservation(path, op.ID, attempt); wrote {
+		if entry, wrote := messageObservation(path, op.ID, attempt, false); wrote {
 			events = append(events, entry)
 		}
 	}

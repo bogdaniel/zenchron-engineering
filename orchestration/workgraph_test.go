@@ -137,6 +137,18 @@ func TestWorkGraphRefusesGraphsNothingCouldAdvance(t *testing.T) {
 			units: []WorkUnit{{ID: "a", Purpose: "p", Role: "wizard", Issue: 1}},
 			want:  "not in the role catalogue",
 		},
+		"unknown execution kind": {
+			units: []WorkUnit{{ID: "a", Purpose: "p", Role: domain.RoleImplementer, ExecutionKind: "rewrite_everything", Issue: 1}},
+			want:  "not in the execution kind vocabulary",
+		},
+		"integration_compose with fewer than two dependencies": {
+			units: []WorkUnit{
+				{ID: "a", Purpose: "p", Role: domain.RoleImplementer, Issue: 1},
+				{ID: "b", Purpose: "p", Role: domain.RoleIntegrator, ExecutionKind: ExecutionKindIntegrationCompose,
+					Issue: 2, DependsOn: []string{"a"}},
+			},
+			want: `"b" is an integration_compose unit; it names 1 dependencies, needing at least 2`,
+		},
 		"no issue": {
 			units: []WorkUnit{{ID: "a", Purpose: "p", Role: domain.RoleImplementer}},
 			want:  "a unit performs one existing issue",
@@ -242,6 +254,30 @@ func TestMutationValidationRefusesEveryEscalation(t *testing.T) {
 	edited := mutate(diamond(), func(units []WorkUnit) { units[3].Issue = 444 })
 	if err := ValidateMutation(current, composed(t, 2, edited), activated); err != nil {
 		t.Fatalf("editing an unactivated unit was refused: %v", err)
+	}
+}
+
+// TestMutationValidationFreezesExecutionKind is R3-1's own escalation case,
+// kept separate from diamond()'s fixture because an integration_compose unit
+// needs two dependencies and diamond()'s only two-dependency unit ("d") is
+// never activated in TestMutationValidationRefusesEveryEscalation's fixture.
+func integrationUnits() []WorkUnit {
+	return []WorkUnit{
+		{ID: "a", Purpose: "land a", Role: domain.RoleImplementer, Issue: 1},
+		{ID: "b", Purpose: "land b", Role: domain.RoleImplementer, Issue: 2},
+		{ID: "c", Purpose: "integrate", Role: domain.RoleIntegrator,
+			ExecutionKind: ExecutionKindIntegrationCompose, Issue: 3, DependsOn: []string{"a", "b"}},
+	}
+}
+
+func TestMutationValidationFreezesExecutionKind(t *testing.T) {
+	current := composed(t, 1, integrationUnits())
+	activated := map[string]bool{"c": true}
+
+	reverted := mutate(integrationUnits(), func(u []WorkUnit) { u[2].ExecutionKind = "" })
+	if err := ValidateMutation(current, composed(t, 2, reverted), activated); err == nil ||
+		!strings.Contains(err.Error(), `"c" has already been activated, so revision 2 may not change`) {
+		t.Fatalf("an activated unit's execution kind reverting to ordinary was not refused: %v", err)
 	}
 }
 

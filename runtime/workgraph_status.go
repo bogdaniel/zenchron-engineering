@@ -35,13 +35,16 @@ type WorkGraphView struct {
 // WorkGraphUnitView is one unit: what it is, what it depends on, the state the
 // graph projected for it, and the child run behind it when there is one.
 type WorkGraphUnitView struct {
-	UnitID    string                  `json:"unit_id"`
-	Purpose   string                  `json:"purpose"`
-	Role      domain.EngineeringRole  `json:"role"`
-	Issue     int                     `json:"issue"`
-	DependsOn []string                `json:"depends_on,omitempty"`
-	State     orchestration.UnitState `json:"state"`
-	Reason    string                  `json:"reason,omitempty"`
+	UnitID  string                 `json:"unit_id"`
+	Purpose string                 `json:"purpose"`
+	Role    domain.EngineeringRole `json:"role"`
+	// ExecutionKind is the unit's execution algorithm (#475) - independent of
+	// Role, see orchestration.WorkUnitExecutionKind.
+	ExecutionKind orchestration.WorkUnitExecutionKind `json:"execution_kind,omitempty"`
+	Issue         int                                 `json:"issue"`
+	DependsOn     []string                            `json:"depends_on,omitempty"`
+	State         orchestration.UnitState             `json:"state"`
+	Reason        string                              `json:"reason,omitempty"`
 	// InputsDigest is the digest of the upstream outputs this unit would be,
 	// or was correctly, activated against, and Inputs is that same set,
 	// readable - what an activation records so the child run's execution can be
@@ -134,7 +137,7 @@ func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now 
 	for _, unit := range graph.Units {
 		decided := projection.Units[unit.ID]
 		out := WorkGraphUnitView{
-			UnitID: unit.ID, Purpose: unit.Purpose, Role: unit.Role, Issue: unit.Issue,
+			UnitID: unit.ID, Purpose: unit.Purpose, Role: unit.Role, ExecutionKind: unit.ExecutionKind, Issue: unit.Issue,
 			DependsOn: unit.DependsOn, State: decided.State, Reason: decided.Reason,
 			InputsDigest: decided.InputsDigest, Inputs: decided.Inputs,
 			AwaitingDecision: decided.AwaitingDecision,

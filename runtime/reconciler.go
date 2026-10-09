@@ -55,9 +55,9 @@ const (
 	OpAuthorityEvaluate = "authority.evaluate"
 	OpBaseIntegrate     = "base.integrate"
 	// OpIntegrationCompose is the deterministic Git composition for a
-	// WorkGraph integration unit (#475, domain.RoleIntegrator): composing its
-	// exact consumed admitted inputs instead of an ordinary execution
-	// invocation. See bindIntegrationCompose.
+	// WorkGraph unit explicitly marked orchestration.ExecutionKindIntegrationCompose
+	// (#475): composing its exact consumed admitted inputs instead of an
+	// ordinary execution invocation. See bindIntegrationCompose.
 	OpIntegrationCompose = "integration.compose"
 	OpCandidatePush      = "candidate.push"
 	OpPullRequestCreate  = "pull_request.create"
@@ -1170,8 +1170,12 @@ func bindCandidateCreate(s *runState) (string, bool) {
 
 // bindIntegrationCompose is the deterministic composition gate for a
 // WorkGraph integration unit (#475): the run's own origin names a unit whose
-// role is domain.RoleIntegrator - explicitly, and only the WorkGraph decided
-// that, never inferred from purpose, issue title or provider prose.
+// execution kind is orchestration.ExecutionKindIntegrationCompose -
+// explicitly, and only the WorkGraph author/compiler decided that, never
+// inferred from Role, purpose, issue title or provider prose. Role identifies
+// who is qualified to perform a unit; ExecutionKind identifies which
+// algorithm its run uses, and the two are independent: a RoleIntegrator unit
+// with no ExecutionKind set is an ordinary provider-executed unit.
 //
 // Its binding is the exact consumed input set's digest, the same digest the
 // WorkGraph itself activated this unit against (orchestration.WorkUnitBatchID
@@ -1181,7 +1185,7 @@ func bindCandidateCreate(s *runState) (string, bool) {
 // superseded is not this binding's question - the WorkGraph's own
 // exact-subject invalidation already governs that, before any run is reused.
 func bindIntegrationCompose(s *runState) (string, bool) {
-	if s.origin == nil || s.origin.Role != domain.RoleIntegrator {
+	if s.origin == nil || s.origin.ExecutionKind != orchestration.ExecutionKindIntegrationCompose {
 		return "", false
 	}
 	if key, wanted := bindCandidateCreate(s); !wanted || !s.satisfied(OpCandidateCreate, key) {
@@ -1195,15 +1199,16 @@ func bindIntegrationCompose(s *runState) (string, bool) {
 }
 
 func bindExecutionInvoke(s *runState) (string, bool) {
-	// A WORK GRAPH INTEGRATOR UNIT (#475) never receives a free-form
-	// engineering invocation: its whole producer stage is the deterministic
-	// composition bindIntegrationCompose performs instead. The guard is
-	// explicit and structural - the unit's own role, decided once by the
-	// WorkGraph at adoption and frozen the moment it was activated - never
-	// inferred from this issue's purpose, title or anything a provider wrote.
-	// It is unconditional: an integrator never receives implementation
-	// authority merely because some other state lines up.
-	if s.origin != nil && s.origin.Role == domain.RoleIntegrator {
+	// A WORK GRAPH UNIT EXPLICITLY MARKED integration_compose (#475) never
+	// receives a free-form engineering invocation: its whole producer stage
+	// is the deterministic composition bindIntegrationCompose performs
+	// instead. The guard is explicit and structural - the unit's own
+	// execution kind, decided once by the WorkGraph author/compiler at
+	// adoption and frozen the moment it was activated - never inferred from
+	// Role, this issue's purpose, or anything a provider wrote. An ordinary
+	// RoleIntegrator unit (ExecutionKind absent or "provider") falls through
+	// unchanged below: Role alone never suppresses a provider invocation.
+	if s.origin != nil && s.origin.ExecutionKind == orchestration.ExecutionKindIntegrationCompose {
 		return "", false
 	}
 	if s.projection.Contract == (Ref{}) {

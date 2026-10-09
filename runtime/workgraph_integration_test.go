@@ -71,7 +71,8 @@ func integrationGraphUnits(issueA, issueB, issueC int) []orchestration.WorkUnit 
 	return []orchestration.WorkUnit{
 		{ID: "a", Purpose: "land a", Role: domain.RoleImplementer, Issue: issueA},
 		{ID: "b", Purpose: "land b", Role: domain.RoleImplementer, Issue: issueB},
-		{ID: "c", Purpose: "integrate a and b", Role: domain.RoleIntegrator, Issue: issueC, DependsOn: []string{"a", "b"}},
+		{ID: "c", Purpose: "integrate a and b", Role: domain.RoleIntegrator,
+			ExecutionKind: orchestration.ExecutionKindIntegrationCompose, Issue: issueC, DependsOn: []string{"a", "b"}},
 	}
 }
 
@@ -223,6 +224,66 @@ func TestWorkGraphIntegrationNeverInvokesAProviderForTheIntegratorUnit(t *testin
 	c := settled.unit(t, "c")
 	if invoked[c.RunID] {
 		t.Fatalf("a provider was invoked for the integrator unit's own run %s; it must receive deterministic composition only", c.RunID)
+	}
+}
+
+// TestWorkGraphOrdinaryRoleIntegratorUnitStillUsesAProvider is R3-1's
+// required counterexample: domain.RoleIntegrator alone - with no explicit
+// ExecutionKind - names a worker RESPONSIBILITY, never an execution
+// algorithm. A unit with that role and no ExecutionKind set must still be an
+// ordinary execution.invoke, exactly like any other role, proving Role and
+// ExecutionKind are genuinely independent axes rather than one overloaded
+// field.
+func TestWorkGraphOrdinaryRoleIntegratorUnitStillUsesAProvider(t *testing.T) {
+	const issueA, issueB = fleetFirstIssue, fleetFirstIssue + 1
+	fixture := newFleetFixture(t, 4)
+	fixture.setIntegrationIssue(issueA, "a")
+	fixture.setIntegrationIssue(issueB, "b")
+	invoked := map[string]bool{}
+	fixture.deps.Provider = providerFunc(func(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
+		invoked[request.RunID] = true
+		if strings.Contains(request.Objective, integrationUnitMarker("a")) {
+			if err := os.WriteFile(filepath.Join(request.CandidateDir, "a.go"), []byte("package candidate\nconst A = 1\n"), 0o600); err != nil {
+				return ExecutionResult{}, err
+			}
+		}
+		if strings.Contains(request.Objective, integrationUnitMarker("b")) {
+			if err := os.WriteFile(filepath.Join(request.CandidateDir, "b.go"), []byte("package candidate\nconst B = 1\n"), 0o600); err != nil {
+				return ExecutionResult{}, err
+			}
+		}
+		if request.HandoffPath == "" {
+			return ExecutionResult{ProviderID: "integration-fleet-worker", Outcome: execution.Succeeded}, nil
+		}
+		return ExecutionResult{ProviderID: "integration-fleet-worker", Outcome: execution.Succeeded},
+			os.WriteFile(request.HandoffPath, []byte(fleetValidReport), 0o600)
+	})
+	supervisor := fixture.supervisor()
+	units := []orchestration.WorkUnit{
+		{ID: "a", Purpose: "land a", Role: domain.RoleImplementer, Issue: issueA},
+		// Role is domain.RoleIntegrator, same responsibility as c in the other
+		// scenarios, but ExecutionKind is absent: this must behave exactly like
+		// an ordinary RoleImplementer unit, never deterministic composition.
+		{ID: "b", Purpose: "integrate a, the ordinary way", Role: domain.RoleIntegrator, Issue: issueB, DependsOn: []string{"a"}},
+	}
+	view := fixture.adoptGraph(supervisor, "claude", 1, units)
+	settled := fixture.driveGraph(supervisor, view.GraphID, nil)
+	for _, unit := range settled.Units {
+		if unit.State != orchestration.UnitState(orchestration.ItemCompleted) {
+			t.Fatalf("unit %s settled as %s: %s", unit.UnitID, unit.State, unit.Reason)
+		}
+	}
+	b := settled.unit(t, "b")
+	if !invoked[b.RunID] {
+		t.Fatalf("an ordinary RoleIntegrator unit with no ExecutionKind never reached a provider; run %s", b.RunID)
+	}
+	run, ok := storedRun(t, fixture.phase8Fixture, b.RunID)
+	if !ok {
+		t.Fatal("ordinary integrator-role run not found")
+	}
+	dir := candidateDir(fixture.stateDir, run.ID)
+	if _, err := os.Stat(filepath.Join(dir, "b.go")); err != nil {
+		t.Fatalf("provider-written content missing from an ordinary RoleIntegrator unit's candidate: %v", err)
 	}
 }
 
