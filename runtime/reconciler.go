@@ -215,6 +215,9 @@ type runState struct {
 	// decision_request messages, read once per load() (#508 P4b); see
 	// decision_resumption.go.
 	resolvedOwnDecisions []orchestration.DecisionResolution
+	// deliveredOwnDecisionIDs: load() fails closed on a corrupt decision-
+	// delivery event rather than forgetting it; see deliveredDecisionIDsFromEvents.
+	deliveredOwnDecisionIDs map[string]bool
 }
 
 func (r *EngineeringRuntime) load(runID string) (*runState, error) {
@@ -241,9 +244,13 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 	if err != nil {
 		return nil, err
 	}
+	deliveredOwnDecisionIDs, err := deliveredDecisionIDsFromEvents(events)
+	if err != nil {
+		return nil, err
+	}
 	state := &runState{
 		rt: r, run: run, snapshot: snapshot, events: events, projection: projection,
-		resolvedOwnDecisions: resolvedOwnDecisions,
+		resolvedOwnDecisions: resolvedOwnDecisions, deliveredOwnDecisionIDs: deliveredOwnDecisionIDs,
 		// A DIFFERENT CONTROLLER IS STILL THE DEFAULT REFUSAL. What changed
 		// with #234 is that one specific transition can be converted from
 		// drift into an admitted succession by evidence in this run's own

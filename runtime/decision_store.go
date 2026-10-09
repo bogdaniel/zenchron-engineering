@@ -392,6 +392,92 @@ func (s *SQLiteOperationStore) ResolveDecisionRequest(decisionID string, outcome
 	return stored, nil
 }
 
+// AdmitDecisionResumption pins, at most once per execution.invoke operation,
+// the exact decision set and subject a #508 P4b decision-resumed binding is
+// authorized to resume for (review B1/B2). An EXISTING admission for this
+// operationID is returned UNCHANGED, regardless of current decision state:
+// once pinned, a later supersession or subject drift belongs to a later
+// epoch and never retroactively invalidates an operation already admitted
+// to run - which is what lets a RETRY of the SAME operation, after its own
+// prior attempt already delivered this exact set, proceed under its own
+// original envelope instead of being refused as stale against itself.
+//
+// With no existing admission, proposed (the binding's own undelivered set,
+// computed by the caller from durable state) is validated FRESH, inside
+// this one BEGIN IMMEDIATE transaction: each decision must still be live
+// with its subject still current - orchestration.ResolveDecision's own
+// liveness/subject rule, reused here via findDecisionRequestTx exactly as
+// ResolveDecisionRequest already does above - or the whole admission is
+// refused and nothing is written. contractRevision/candidateSubject are the
+// calling run's own projection fields: never a race, because only that
+// run's own driver, holding its lease, ever appends to its own journal.
+func (s *SQLiteOperationStore) AdmitDecisionResumption(operationID, binding, contractRevision, candidateSubject string,
+	proposed []orchestration.DecisionResolution, now time.Time) (DecisionResumptionAdmission, error) {
+	if operationID == "" || binding == "" {
+		return DecisionResumptionAdmission{}, errors.New("admitting a decision resumption needs its operation id and binding")
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	defer tx.Rollback()
+	if existing, found, err := decisionResumptionAdmissionByOperationID(tx, operationID); err != nil {
+		return DecisionResumptionAdmission{}, err
+	} else if found {
+		return existing, nil
+	}
+	if len(proposed) == 0 {
+		return DecisionResumptionAdmission{}, errors.New("a decision resumption admission names at least one decision")
+	}
+	decisions := make([]DeliveredDecision, len(proposed))
+	for i, resolution := range proposed {
+		ref, current, err := findDecisionRequestTx(tx, resolution.RequestID)
+		if err != nil {
+			return DecisionResumptionAdmission{}, err
+		}
+		if !ref.Live {
+			return DecisionResumptionAdmission{}, fmt.Errorf("decision request %s is no longer live", resolution.RequestID)
+		}
+		if ref.Subject != nil && (current == nil || *current != ref.Subject.Revision) {
+			return DecisionResumptionAdmission{}, fmt.Errorf("decision request %s is bound to a subject that is no longer current", resolution.RequestID)
+		}
+		decisions[i] = DeliveredDecision{RequestID: resolution.RequestID, ResolutionID: resolution.ID}
+	}
+	admission := DecisionResumptionAdmission{
+		SchemaVersion: DecisionResumptionAdmissionSchemaVersion, OperationID: operationID, Binding: binding,
+		Decisions: decisions, ContractRevision: contractRevision, CandidateSubject: candidateSubject, AdmittedAt: now,
+	}
+	document, err := CanonicalJSON(admission)
+	if err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	if _, err := tx.Exec(`INSERT INTO decision_resumption_admissions (operation_id, binding, admitted_unix_nano, document)
+		VALUES (?, ?, ?, ?) ON CONFLICT(operation_id) DO NOTHING`,
+		operationID, binding, now.UnixNano(), string(document)); err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DecisionResumptionAdmission{}, err
+	}
+	return admission, nil
+}
+
+func decisionResumptionAdmissionByOperationID(q sqlExecutor, operationID string) (DecisionResumptionAdmission, bool, error) {
+	var document string
+	err := q.QueryRow(`SELECT document FROM decision_resumption_admissions WHERE operation_id = ?`, operationID).Scan(&document)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DecisionResumptionAdmission{}, false, nil
+	}
+	if err != nil {
+		return DecisionResumptionAdmission{}, false, err
+	}
+	var admission DecisionResumptionAdmission
+	if err := strictJSON([]byte(document), &admission); err != nil {
+		return DecisionResumptionAdmission{}, false, fmt.Errorf("stored decision resumption admission is corrupt: %w", err)
+	}
+	return admission, true, nil
+}
+
 // findDecisionRequestTx resolves one request id to its normalized facts and
 // its owner's CURRENT subject, entirely through q - the SAME read surface
 // the caller's insert runs against, so nothing between this read and that

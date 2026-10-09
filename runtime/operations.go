@@ -859,8 +859,13 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
 		}}
 	}
-	if refusal := r.decisionResumeStillValid(state, operation); refusal != nil { // #508 P4b §6
+	resumptionAdmission, refusal := r.admitDecisionResumption(state, operation) // #508 P4b §6
+	if refusal != nil {
 		return *refusal
+	}
+	deliverDecisions := func(reached bool, evs []journalEntry) ([]journalEntry, *effect) { // #508 P4b B3; see decisionDeliveryEffect
+		return r.decisionDeliveryEffect(resumptionAdmission, state.resolvedOwnDecisions, shownDecisions,
+			operation.ID, physicalAttempt, state.contractRevision(), state.projection.CandidateRevision, reached, evs)
 	}
 	// THE BUILD SCRATCH, owned by the runtime and scoped to this attempt. An
 	// invocation whose contract obliges `go test` has to be able to EXECUTE the
@@ -1020,6 +1025,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	}
 	recorded := func(e effect) effect {
 		e.events = append(append([]journalEntry(nil), attemptProvenance...), e.events...)
+		if e.events, refusal = deliverDecisions(reachedWorker(result, execErr), e.events); refusal != nil {
+			return *refusal
+		}
 		return e
 	}
 	// A tool may outlive an interrupted provider. Until its ownership is
@@ -1171,6 +1179,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		},
 		Artifacts: result.Artifacts,
 	})
+	if events, refusal = deliverDecisions(reachedWorker(result, execErr), events); refusal != nil { // #508 P4b B3
+		return *refusal
+	}
 	// A producer that FINISHED is the only thing that completes an execution,
 	// and for a CONTINUATION, finishing is exactly what continuationUnresolved
 	// above decides: mutating further, or stating a resolution that binds, not
@@ -1307,9 +1318,6 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// the comment above defends: re-delivering a human's review because the
 	// work failed afterwards would duplicate it.
 	invoked := reachedWorker(result, execErr)
-	if entry, ok := deliveredDecisionsEvent(shownDecisions, operation.ID, physicalAttempt, state.contractRevision(), state.projection.CandidateRevision); invoked && ok { // #508 P4b: delivery, not completion
-		events = append(events, entry)
-	}
 	if len(pending) > 0 && invoked {
 		delivered := make(map[string]bool, len(feedback))
 		keys := make([]string, 0, len(feedback))

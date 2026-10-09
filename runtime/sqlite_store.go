@@ -532,6 +532,21 @@ CREATE TABLE decision_resolutions (
 	resolved_unix_nano INTEGER NOT NULL,
 	document          TEXT NOT NULL
 );
+`, `
+-- decision_resumption_admissions pins, at most once per execution.invoke
+-- operation, the exact decision set and subject a #508 P4b decision-resumed
+-- binding is authorized to resume for (review B1/B2): admitted inside one
+-- BEGIN IMMEDIATE transaction that re-validates liveness and subject fresh
+-- (AdmitDecisionResumption, decision_store.go), so a supersession or subject
+-- drift either lands BEFORE this row exists - refusing admission - or
+-- belongs to a later epoch, never retroactively rewriting an operation
+-- already admitted to run.
+CREATE TABLE decision_resumption_admissions (
+	operation_id       TEXT PRIMARY KEY,
+	binding            TEXT NOT NULL,
+	admitted_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

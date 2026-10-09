@@ -8,14 +8,22 @@ package runtime
 // attempt budgets, and never dispatched with a decision set or candidate
 // subject that has moved since the operation was created.
 //
-// Three durable facts, all already owned elsewhere, compose the whole
-// mechanism:
+// Four durable facts, all already owned elsewhere or newly insert-once like
+// their siblings, compose the whole mechanism:
 //   - orchestration.DecisionResolution (decision_resolution.go) - the
 //     immutable, authority-checked answer;
 //   - EventDecisionsDelivered (this file) - the exact, per-physical-attempt
-//     record of what one invocation's compiled context actually carried,
-//     journalled only once that attempt reached the worker (reachedWorker),
-//     never inferred from a timestamp;
+//     record of what one invocation's compiled context actually carried for
+//     THIS run's own decisions, journalled once that attempt reached the
+//     worker (reachedWorker), on every exit that is true for, never
+//     inferred from a timestamp;
+//   - decision_resumption_admissions (decision_store.go) - the ONE pinned,
+//     insert-once snapshot a decision-resumed operation is authorized to
+//     resume for, validated fresh inside one BEGIN IMMEDIATE transaction the
+//     first time, reused unchanged on every later retry of the SAME
+//     operation (review B1/B2: a retry is never re-validated against its
+//     OWN prior delivery, and a supersession after admission belongs to a
+//     later epoch, never retroactively rewriting it);
 //   - the existing OpExecutionInvoke scheduler, attempt ceilings and
 //     continuation-depth ceiling (reconciler.go) - unmodified, and now
 //     counting this binding shape too.
@@ -25,6 +33,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
@@ -37,6 +46,13 @@ import (
 // reconciler.go).
 const decisionResumptionPrefix = "decision-resumed|"
 
+// maxDeliveredDecisions bounds one delivery record - always THIS run's own
+// decisions alone (never a whole, possibly multi-unit, batch scope; see the
+// review B4 fix in deliveredForThisRun), so it is set generously above any
+// realistic single-run question count rather than reused from #473's own,
+// differently-scoped MaxMessagesPerInvocation.
+const maxDeliveredDecisions = 64
+
 // DeliveredDecision is one resolved decision a compiled context actually
 // carried: the request it answers and the exact resolution it delivered.
 type DeliveredDecision struct {
@@ -45,9 +61,10 @@ type DeliveredDecision struct {
 }
 
 // DecisionsDeliveredPayload is EventDecisionsDelivered's schema: the exact,
-// sorted set one physical attempt's compiled context carried, and the
-// candidate/contract subject it was compiled against. Decisions is never
-// empty - the event is journalled only when there is at least one.
+// sorted set one physical attempt's compiled context carried OF THIS RUN'S
+// OWN decisions alone, and the candidate/contract subject it was compiled
+// against. Decisions is never empty - the event is journalled only when
+// there is at least one.
 type DecisionsDeliveredPayload struct {
 	OperationID      string              `json:"operation_id"`
 	Attempt          int                 `json:"attempt"`
@@ -57,55 +74,144 @@ type DecisionsDeliveredPayload struct {
 }
 
 func validateDecisionsDelivered(p DecisionsDeliveredPayload) error {
-	if len(p.Decisions) == 0 || len(p.Decisions) > orchestration.MaxMessagesPerInvocation {
-		return fmt.Errorf("a decision delivery names 1 to %d decisions, not %d", orchestration.MaxMessagesPerInvocation, len(p.Decisions))
+	if len(p.Decisions) == 0 || len(p.Decisions) > maxDeliveredDecisions {
+		return fmt.Errorf("a decision delivery names 1 to %d decisions, not %d", maxDeliveredDecisions, len(p.Decisions))
 	}
-	for _, d := range p.Decisions {
+	seen := make(map[string]bool, len(p.Decisions))
+	for i, d := range p.Decisions {
 		if err := errors.Join(required("request_id", d.RequestID), required("resolution_id", d.ResolutionID)); err != nil {
 			return err
+		}
+		if seen[d.RequestID] {
+			return fmt.Errorf("a decision delivery names request %s more than once", d.RequestID)
+		}
+		seen[d.RequestID] = true
+		if i > 0 && d.RequestID <= p.Decisions[i-1].RequestID {
+			return fmt.Errorf("a decision delivery's own decisions must be sorted and unique by request id")
 		}
 	}
 	return errors.Join(required("operation_id", p.OperationID), positive("attempt", p.Attempt))
 }
 
-// deliveredDecisionsEvent builds EventDecisionsDelivered's journal entry for
-// one physical attempt, or ok=false when it delivered nothing (an ordinary
-// invocation whose scope has no resolved decision at all).
-func deliveredDecisionsEvent(resolved []orchestration.DecisionResolution, operationID string, attempt int, contractRevision, candidateSubject string) (journalEntry, bool) {
-	if len(resolved) == 0 {
-		return journalEntry{}, false
-	}
+// deliveredDecisions converts a sorted resolution slice to the sorted,
+// deduplicated DeliveredDecision form EventDecisionsDelivered persists.
+func deliveredDecisions(resolved []orchestration.DecisionResolution) []DeliveredDecision {
 	decisions := make([]DeliveredDecision, len(resolved))
 	for i, r := range resolved {
 		decisions[i] = DeliveredDecision{RequestID: r.RequestID, ResolutionID: r.ID}
 	}
+	return decisions
+}
+
+// deliveredForThisRun is what ONE physical attempt's compiled context
+// actually carried of THIS RUN'S OWN resolved decisions alone (#508 review
+// B4): never the whole batch scope communicationContext itself renders for
+// every unit alike, which can hold more live resolved decisions than any
+// one run asked and overran the per-event bound when journalled whole. own
+// is this run's resolvedOwnDecisions (load()-time); shown is the exact set
+// communicationContext/prepareMessages rendered for this one attempt. The
+// intersection is what THIS attempt is authoritative proof of having shown.
+func deliveredForThisRun(own, shown []orchestration.DecisionResolution) []orchestration.DecisionResolution {
+	shownIDs := make(map[string]bool, len(shown))
+	for _, d := range shown {
+		shownIDs[d.RequestID] = true
+	}
+	var delivered []orchestration.DecisionResolution
+	for _, d := range own {
+		if shownIDs[d.RequestID] {
+			delivered = append(delivered, d)
+		}
+	}
+	sort.Slice(delivered, func(i, j int) bool { return delivered[i].RequestID < delivered[j].RequestID })
+	return delivered
+}
+
+// decisionDeliveryEntry builds EventDecisionsDelivered's journal entry for
+// one physical attempt, or ok=false when nothing of this run's own was
+// delivered. admission, when non-zero (a decision-resumed operation that has
+// an admitted snapshot - see admitDecisionResumption), is the AUTHORITATIVE
+// delivered set: the pinned snapshot, never a fresh recomputation that a
+// retry's own prior delivery would make look empty (review B1). Every other
+// operation (an ordinary checkpoint continuation, remediation or feedback
+// invocation) uses deliveredForThisRun instead. An oversized result fails
+// closed - an error, never a silently truncated or dropped delivery record
+// (review B4).
+func decisionDeliveryEntry(admission DecisionResumptionAdmission, own, shown []orchestration.DecisionResolution,
+	operationID string, attempt int, contractRevision, candidateSubject string) (journalEntry, bool, error) {
+	decisions := admission.Decisions
+	if len(decisions) == 0 {
+		decisions = deliveredDecisions(deliveredForThisRun(own, shown))
+	}
+	if len(decisions) == 0 {
+		return journalEntry{}, false, nil
+	}
+	if len(decisions) > maxDeliveredDecisions {
+		return journalEntry{}, false, fmt.Errorf("this attempt's own decisions to deliver (%d) exceed the %d bound a durable delivery record enforces",
+			len(decisions), maxDeliveredDecisions)
+	}
 	return journalEntry{Type: EventDecisionsDelivered, Payload: DecisionsDeliveredPayload{
 		OperationID: operationID, Attempt: attempt, Decisions: decisions,
 		ContractRevision: contractRevision, CandidateSubject: candidateSubject,
-	}}, true
+	}}, true, nil
 }
 
-// deliveredDecisionIDs is the set of this run's own decision request IDs ANY
-// attempt has already been shown - durable, from this run's own append-only
-// event journal, never inferred from a timestamp. An attempt that delivered
-// a decision and then failed still counts: delivery is not completion (#508
-// review P4b §3), so the SAME decision is never redelivered through a
-// SECOND operation merely because the first one did not succeed.
-func (s *runState) deliveredDecisionIDs() map[string]bool {
+// decisionDeliveryEffect is the one shared shell both invokeExecution exit
+// points use to journal this attempt's own decision delivery (#508 P4b
+// review B3): a reached-worker exit that cannot durably represent its
+// delivery becomes a failure instead of silently forgetting it, and an
+// exit that never reached the worker is untouched.
+func (r *EngineeringRuntime) decisionDeliveryEffect(admission DecisionResumptionAdmission, own, shown []orchestration.DecisionResolution,
+	operationID string, attempt int, contractRevision, candidateSubject string, reached bool, events []journalEntry) ([]journalEntry, *effect) {
+	if !reached {
+		return events, nil
+	}
+	entry, ok, err := decisionDeliveryEntry(admission, own, shown, operationID, attempt, contractRevision, candidateSubject)
+	if err != nil {
+		return events, &effect{state: OperationFailed, events: events, result: executionRecord{
+			mutationResult: mutationResult{FailureClass: FailureUnknown},
+			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
+		}}
+	}
+	if ok {
+		events = append(events, entry)
+	}
+	return events, nil
+}
+
+// deliveredDecisionIDsFromEvents computes the delivered-ID set from a run's
+// own append-only event journal, FAILING CLOSED on any EventDecisionsDelivered
+// payload present but unreadable (#508 review: "distinguish legacy absence
+// from present-but-invalid evidence"): a real delivery this build cannot
+// decode must never be silently forgotten and treated as though it never
+// happened, which is why this runs once in load() (which already fails the
+// whole pass on a corrupt projection) rather than being swallowed inside a
+// pure bind function that has no error to return.
+func deliveredDecisionIDsFromEvents(events []EngineeringEvent) (map[string]bool, error) {
 	delivered := map[string]bool{}
-	for _, event := range s.events {
+	for _, event := range events {
 		if event.Type != EventDecisionsDelivered {
 			continue
 		}
 		payload, err := decodePayload[DecisionsDeliveredPayload](event.Payload)
 		if err != nil {
-			continue // malformed historical payload never blocks the run on it
+			return nil, fmt.Errorf("a decision-delivery event exists but cannot be decoded: %w", err)
 		}
 		for _, d := range payload.Decisions {
 			delivered[d.RequestID] = true
 		}
 	}
-	return delivered
+	return delivered, nil
+}
+
+// deliveredDecisionIDs is the set of this run's own decision request IDs ANY
+// attempt has already been shown - precomputed once in load() via
+// deliveredDecisionIDsFromEvents, never inferred from a timestamp. An
+// attempt that delivered a decision and then failed still counts: delivery
+// is not completion (#508 review P4b §3), so the SAME decision is never
+// redelivered through a SECOND operation merely because the first one did
+// not succeed.
+func (s *runState) deliveredDecisionIDs() map[string]bool {
+	return s.deliveredOwnDecisionIDs
 }
 
 // undeliveredResolvedOwnDecisions is this run's own resolved, live decision
@@ -174,47 +280,55 @@ func (s *runState) unresumedDecisionResumeBinding() (string, bool) {
 	return decisionResumeBinding(s.contractRevision(), s.projection.CandidateRevision, undelivered), true
 }
 
-// decisionResumeStillValid re-derives, from a FRESH store read taken
-// immediately before this attempt is given any context, the binding a
-// decision-resumed operation would get RIGHT NOW, and compares it against
-// the binding this exact operation already carries. A mismatch - a decision
-// superseded, a newer one now claiming the coalesced set, or the candidate
-// subject having moved since this operation was created - means its claim
-// no longer holds, and it is refused rather than dispatched with context
-// that would contradict its own admitted binding (#508 review P4b §6).
+// DecisionResumptionAdmissionSchemaVersion versions the durable admission
+// record decision_store.go's AdmitDecisionResumption writes.
+const DecisionResumptionAdmissionSchemaVersion = "0.1"
+
+// DecisionResumptionAdmission is the ONE pinned, insert-once snapshot a
+// decision-resumed operation is authorized to resume for (#508 review
+// B1/B2). The zero value (Decisions nil) means "no admission exists yet for
+// this operation."
+type DecisionResumptionAdmission struct {
+	SchemaVersion    string              `json:"schema_version"`
+	OperationID      string              `json:"operation_id"`
+	Binding          string              `json:"binding"`
+	Decisions        []DeliveredDecision `json:"decisions"`
+	ContractRevision string              `json:"contract_revision,omitempty"`
+	CandidateSubject string              `json:"candidate_subject,omitempty"`
+	AdmittedAt       time.Time           `json:"admitted_at"`
+}
+
+// admitDecisionResumption is invokeExecution's dispatch-time gate for a
+// decision-resumed operation (#508 review B1/B2), called once, immediately
+// before any context is assembled for it. Every other operation kind or
+// binding returns (zero value, nil) at once.
 //
-// This re-read is compared against an already-admitted, immutable binding;
-// it is not a second atomic transaction guarding that binding's own
-// creation. The existing AcquireOperation lease fence (sqlite_store.go)
-// already serializes which driver may run this exact operation at all; this
-// check runs once more, later, immediately before that driver commits to
-// inviting a provider into this exact context - the closest this
-// architecture's existing scheduler gets to a dispatch-time fence, reusing
-// its own store reads rather than adding a second one.
-//
-// Nil means proceed. Every operation whose binding is not decision-resumed
-// returns immediately, at the cost of one store read only for the one
-// binding shape that needs it.
-func (r *EngineeringRuntime) decisionResumeStillValid(state *runState, operation RunOperation) *effect {
+// SQLiteOperationStore.AdmitDecisionResumption is idempotent-first-wins,
+// exactly like admitHandoff/InsertDecisionResolution beside it: an EXISTING
+// admission for this exact operation ID is returned UNCHANGED regardless of
+// current decision state, which is what makes a RETRY of the same operation
+// - after its own first attempt already delivered this exact set - proceed
+// under its own original envelope instead of being refused as "stale"
+// against its own prior delivery (review B1). With no existing admission,
+// the run's current undeliveredResolvedOwnDecisions() is proposed and
+// validated FRESH, inside the store's own BEGIN IMMEDIATE transaction
+// (review B2): a decision superseded, or its subject moved, before this
+// moment refuses the whole admission; nothing after it can retroactively
+// invalidate what was just pinned.
+func (r *EngineeringRuntime) admitDecisionResumption(state *runState, operation RunOperation) (DecisionResumptionAdmission, *effect) {
 	binding := bindingOf(operation)
 	if !strings.HasPrefix(binding, decisionResumptionPrefix) {
-		return nil
+		return DecisionResumptionAdmission{}, nil
 	}
-	fresh, err := r.deps.Store.ResolvedOwnDecisionRequests(state.run.ID)
+	proposed := state.undeliveredResolvedOwnDecisions()
+	admission, err := r.deps.Store.AdmitDecisionResumption(operation.ID, binding,
+		state.contractRevision(), state.projection.CandidateRevision, proposed, r.deps.Clock.Now())
 	if err != nil {
-		return &effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureUnknown},
-			Diagnostic: r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{},
-				fmt.Errorf("revalidating this decision-resumed operation's own decision set: %w", err)),
-		}}
-	}
-	undelivered := undeliveredOf(fresh, state.deliveredDecisionIDs())
-	if len(undelivered) == 0 || decisionResumeBinding(state.contractRevision(), state.projection.CandidateRevision, undelivered) != binding {
-		cause := errors.New("this decision-resumed operation's own decision set or candidate subject no longer matches current durable state")
-		return &effect{state: OperationFailed, result: executionRecord{
+		cause := fmt.Errorf("this decision-resumed operation's own decision set or candidate subject no longer matches current durable state: %w", err)
+		return DecisionResumptionAdmission{}, &effect{state: OperationFailed, result: executionRecord{
 			mutationResult: mutationResult{FailureClass: FailureDecisionBindingStale},
 			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureDecisionBindingStale, ExecutionResult{}, cause),
 		}}
 	}
-	return nil
+	return admission, nil
 }
