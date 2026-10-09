@@ -4,9 +4,71 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
 
 	"github.com/bogdaniel/zenchron-engineering/review"
 )
+
+// reviewRemediationBindingInvariants re-establishes EVERY invariant an
+// admission must satisfy to be treated as authorized remediation for run,
+// independent of how or when the row was written: its referenced decision is
+// REQUEST_CHANGES and agrees with the admission's own claimed subject; the
+// RUN ITSELF - never merely the admission's claim - published the exact PR
+// number and is worked by the exact producer agent the decision names; and
+// the admission's FindingSignatures are EXACTLY the decision's own blocking
+// findings, never an invented or substituted set.
+//
+// This is the one place "is this admission actually good" is answered,
+// called both when a row is written (CreateReviewRemediationAdmission) and
+// whenever one is read back as a candidate for execution
+// (pendingReviewRemediationKeys). The second call site is what closes the
+// gap the first alone cannot: a direct CreateReviewRemediationAdmission call
+// for a DIFFERENT, otherwise-valid REQUEST_CHANGES decision - a different PR
+// number, at the same repository and head, naming the SAME run and producer
+// - would still pass a check that only compares the admission against its
+// own referenced decision, because that decision and that admission agree
+// with EACH OTHER; it is the run's actual published PR, re-read fresh at
+// consumption time, that such a forged pair can never agree with.
+func reviewRemediationBindingInvariants(decision review.Decision, admission ReviewRemediationAdmission, run EngineeringRun, projection RunProjection) error {
+	if decision.Verdict != review.VerdictRequestChanges {
+		return fmt.Errorf("decision %s verdict is %q, not %q", decision.ID, decision.Verdict, review.VerdictRequestChanges)
+	}
+	if decision.RunID != admission.RunID || decision.Subject.Repository != admission.Repository ||
+		decision.Subject.PRNumber != admission.PRNumber || decision.Subject.HeadSHA != admission.HeadSHA {
+		return fmt.Errorf("admission %s disagrees with its own referenced decision %s's subject", admission.DecisionID, decision.ID)
+	}
+	if run.Repository != admission.Repository {
+		return fmt.Errorf("run %s's own repository %q disagrees with admission %s's claimed %q", run.ID, run.Repository, admission.DecisionID, admission.Repository)
+	}
+	if projection.PullRequest == nil || projection.PullRequest.Number != admission.PRNumber {
+		return fmt.Errorf("run %s's own runtime-recorded pull request is not #%d", run.ID, admission.PRNumber)
+	}
+	if decision.ProducerAgentID == "" || run.AgentID != decision.ProducerAgentID {
+		return fmt.Errorf("run %s's own agent %q disagrees with decision %s's claimed producer %q", run.ID, run.AgentID, decision.ID, decision.ProducerAgentID)
+	}
+	want := blockingFindingSignatures(decision.Findings)
+	got := append([]string(nil), admission.FindingSignatures...)
+	sort.Strings(got)
+	if !slices.Equal(want, got) {
+		return fmt.Errorf("admission %s's finding signatures disagree with decision %s's actual blocking findings", admission.DecisionID, decision.ID)
+	}
+	return nil
+}
+
+// blockingFindingSignatures is the sorted set of signatures a decision's
+// blocking findings carry - the one authoritative value an admission's own
+// FindingSignatures must equal exactly.
+func blockingFindingSignatures(findings []review.Finding) []string {
+	var signatures []string
+	for _, finding := range findings {
+		if finding.Severity == review.SeverityBlocking {
+			signatures = append(signatures, finding.Signature)
+		}
+	}
+	sort.Strings(signatures)
+	return signatures
+}
 
 // CreateReviewRemediationAdmission writes admission ONCE, globally, keyed by
 // its DecisionID (#474). A decision already admitted - by this caller, by a
@@ -17,13 +79,14 @@ import (
 //
 // This table is now the sole authorization source bindExecutionInvoke's
 // deferred wiring will trust, so it must never accept a row that is merely
-// self-consistent: every insert re-reads the decision admission.DecisionID
-// actually names and refuses unless that decision is REQUEST_CHANGES and its
-// own Subject/RunID agree with what the admission claims. review_decisions
-// is insert-only and never rewritten (review/decision.go), so this read is
-// safe without a transaction: the decision cannot change out from under this
-// check between the read and the insert. This closes the gap AdmitReviewRemediation's
-// own checks cannot: AdmitReviewRemediation is the one INTENDED caller, but
+// self-consistent with the decision it names: every insert re-reads that
+// decision AND the named run's own durable state and runs
+// reviewRemediationBindingInvariants before committing. review_decisions is
+// insert-only and never rewritten (review/decision.go), so reading it here
+// is safe without a transaction; the run's own state can change concurrently,
+// but that only ever makes this check MORE conservative; it cannot be raced
+// into wrongly approving. This closes the gap AdmitReviewRemediation's own
+// checks cannot: AdmitReviewRemediation is the one INTENDED caller, but
 // nothing in Go stops another caller in this package from calling this
 // exported method directly with a hand-built, structurally valid but
 // unauthorized document - the write itself must refuse that, not merely the
@@ -39,15 +102,23 @@ func (s *SQLiteOperationStore) CreateReviewRemediationAdmission(admission Review
 	if !found {
 		return ReviewRemediationAdmission{}, false, fmt.Errorf("review remediation admission %s names a decision that does not exist", admission.DecisionID)
 	}
-	if decision.Verdict != review.VerdictRequestChanges {
-		return ReviewRemediationAdmission{}, false, fmt.Errorf(
-			"review remediation admission %s names decision %s whose verdict is %q, not %q",
-			admission.DecisionID, decision.ID, decision.Verdict, review.VerdictRequestChanges)
+	run, found, err := s.Run(admission.RunID)
+	if err != nil {
+		return ReviewRemediationAdmission{}, false, err
 	}
-	if decision.RunID != admission.RunID || decision.Subject.Repository != admission.Repository ||
-		decision.Subject.PRNumber != admission.PRNumber || decision.Subject.HeadSHA != admission.HeadSHA {
-		return ReviewRemediationAdmission{}, false, fmt.Errorf(
-			"review remediation admission %s disagrees with its own referenced decision %s's subject", admission.DecisionID, decision.ID)
+	if !found {
+		return ReviewRemediationAdmission{}, false, fmt.Errorf("review remediation admission %s names a run that does not exist", admission.DecisionID)
+	}
+	events, err := s.Events(admission.RunID)
+	if err != nil {
+		return ReviewRemediationAdmission{}, false, err
+	}
+	projection, err := Project(events)
+	if err != nil {
+		return ReviewRemediationAdmission{}, false, err
+	}
+	if err := reviewRemediationBindingInvariants(decision, admission, run, projection); err != nil {
+		return ReviewRemediationAdmission{}, false, fmt.Errorf("review remediation admission %s refused: %w", admission.DecisionID, err)
 	}
 	document, err := CanonicalJSON(admission)
 	if err != nil {

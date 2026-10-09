@@ -336,3 +336,125 @@ func TestReviewRemediationAdmissionsForRunRefusesAnIndexDocumentDisagreement(t *
 		t.Fatal("expected a refusal for a row whose indexed run_id disagrees with its own document")
 	}
 }
+
+// Exact #7/#8 same-SHA direct-store bypass: a REQUEST_CHANGES decision for a
+// PR the run never published, submitted directly to the store API rather
+// than through AdmitReviewRemediation, must be refused at the WRITE - and,
+// even if it somehow landed, must never surface as a pending key at the
+// READ - because the run's own runtime-recorded PR is #7, not #8, matching
+// commit and producer notwithstanding.
+func TestCreateReviewRemediationAdmissionRefusesAPRTheRunNeverPublished(t *testing.T) {
+	f := newAdmissionFixture(t)
+	const otherPRNumber = 8
+	subject := review.Subject{Repository: testRepo.String(), PRNumber: otherPRNumber, HeadSHA: f.headSHA}
+	id, err := review.DecisionID(subject, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := review.Decision{
+		SchemaVersion: review.SchemaVersion, ID: id, Subject: subject, RunID: f.runID,
+		ProducerAgentID: "codex", ReviewerAgentID: "claude", Verdict: review.VerdictRequestChanges,
+		Findings: []review.Finding{blockingFinding("f1")}, CreatedAt: f.clock.Now(),
+	}
+	if _, _, err := f.store.CreateReviewDecision(decision); err != nil {
+		t.Fatal(err)
+	}
+	forged := ReviewRemediationAdmission{
+		SchemaVersion: reviewRemediationAdmissionSchemaVersion, DecisionID: decision.ID, RunID: f.runID,
+		Repository: testRepo.String(), PRNumber: otherPRNumber, HeadSHA: f.headSHA,
+		FindingSignatures: []string{"f1"}, AdmittedAt: f.clock.Now(),
+	}
+	if _, _, err := f.store.CreateReviewRemediationAdmission(forged); err == nil {
+		t.Fatal("expected the store to refuse an admission for a PR the run never published, even at the same commit and producer")
+	}
+
+	state, err := f.runtime().load(f.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := state.pendingReviewRemediationKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pendingReviewRemediationKeys() = %v, want none: run %s never published PR #%d", pending, f.runID, otherPRNumber)
+	}
+}
+
+// A genuine BLOCK decision's own findings are the only ones that may ever
+// authorize remediation - an admission cannot substitute invented or
+// unrelated finding signatures for the decision's actual blocking ones.
+func TestCreateReviewRemediationAdmissionRefusesForgedFindingSignatures(t *testing.T) {
+	f := newAdmissionFixture(t)
+	decision := f.seedDecision(f.headSHA, "claude", review.VerdictRequestChanges, blockingFinding("the real blocking finding"))
+	forged := ReviewRemediationAdmission{
+		SchemaVersion: reviewRemediationAdmissionSchemaVersion, DecisionID: decision.ID, RunID: f.runID,
+		Repository: testRepo.String(), PRNumber: admissionTestPRNumber, HeadSHA: f.headSHA,
+		FindingSignatures: []string{"an invented finding nobody ever reviewed"}, AdmittedAt: f.clock.Now(),
+	}
+	if _, _, err := f.store.CreateReviewRemediationAdmission(forged); err == nil {
+		t.Fatal("expected the store to refuse an admission whose finding signatures disagree with the decision's actual blocking findings")
+	}
+
+	state, err := f.runtime().load(f.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := state.pendingReviewRemediationKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pendingReviewRemediationKeys() = %v, want none: the forged finding signatures were never authorized", pending)
+	}
+}
+
+// Read-side defense in depth, exercised independently of the write guard: a
+// row that violates a binding invariant but exists anyway (written directly
+// via raw SQL, bypassing CreateReviewRemediationAdmission entirely - the one
+// path its own write-time check cannot see) must still never surface as a
+// pending key.
+func TestPendingReviewRemediationKeysRefusesARowWrittenAroundTheWriteGuard(t *testing.T) {
+	f := newAdmissionFixture(t)
+	const otherPRNumber = 8
+	subject := review.Subject{Repository: testRepo.String(), PRNumber: otherPRNumber, HeadSHA: f.headSHA}
+	id, err := review.DecisionID(subject, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := review.Decision{
+		SchemaVersion: review.SchemaVersion, ID: id, Subject: subject, RunID: f.runID,
+		ProducerAgentID: "codex", ReviewerAgentID: "claude", Verdict: review.VerdictRequestChanges,
+		Findings: []review.Finding{blockingFinding("f1")}, CreatedAt: f.clock.Now(),
+	}
+	if _, _, err := f.store.CreateReviewDecision(decision); err != nil {
+		t.Fatal(err)
+	}
+	admission := ReviewRemediationAdmission{
+		SchemaVersion: reviewRemediationAdmissionSchemaVersion, DecisionID: decision.ID, RunID: f.runID,
+		Repository: testRepo.String(), PRNumber: otherPRNumber, HeadSHA: f.headSHA,
+		FindingSignatures: []string{"f1"}, AdmittedAt: f.clock.Now(),
+	}
+	document, err := CanonicalJSON(admission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bypasses CreateReviewRemediationAdmission's write-time check entirely -
+	// the only way to model a row the write guard never saw.
+	if _, err := f.store.db.Exec(`INSERT INTO review_remediation_admissions (decision_id, run_id, admitted_unix_nano, document) VALUES (?, ?, ?, ?)`,
+		admission.DecisionID, admission.RunID, admission.AdmittedAt.UnixNano(), string(document)); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := f.runtime().load(f.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := state.pendingReviewRemediationKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pendingReviewRemediationKeys() = %v, want none: run %s never published PR #%d", pending, f.runID, otherPRNumber)
+	}
+}

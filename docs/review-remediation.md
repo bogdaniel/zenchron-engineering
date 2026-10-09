@@ -186,25 +186,54 @@ and schedules nothing (`TestAdmitReviewRemediationTouchesNoOperation`).
 Admission is a fact; turning a fact into a scheduled, budgeted invocation
 remains entirely the existing reconciler's job.
 
-### The table defends itself
+### The table defends itself - at both ends, with one shared check
 
 `AdmitReviewRemediation` is the one INTENDED writer, but it is not the only
 POSSIBLE one: nothing in Go stops other code in this package from calling
-the exported `CreateReviewRemediationAdmission` directly with a hand-built,
-internally self-consistent document. Because this table is now the sole
-authorization source the deferred dispatch wiring will trust, the write
-itself re-reads the decision `admission.DecisionID` names - immutable,
-insert-only, so this read needs no transaction to stay valid up to the
-insert - and refuses unless that decision is `REQUEST_CHANGES` and its own
-`Subject`/`RunID` agree with what the admission claims
-(`TestCreateReviewRemediationAdmissionRefusesANonBlockingDecision`: a durable
-`APPROVE` decision ID plus invented `FindingSignatures` is refused outright,
-never silently returned as a runnable key later). The read side
-(`ReviewRemediationAdmissionsForRun`) separately refuses a row whose indexed
-`run_id` column disagrees with its own document's claimed `RunID`
+the exported `CreateReviewRemediationAdmission` directly with a hand-built
+document. An earlier version of this defense only checked that the admission
+was *self-consistent with the decision it names* - verdict is
+`REQUEST_CHANGES`, and the admission's own claimed subject/run agree with
+that decision's. That is not enough: a direct caller can construct a
+**different**, otherwise perfectly valid `REQUEST_CHANGES` decision - for a
+**different** PR number, at the same repository and head, naming the
+**same** run and producer - and an admission built from it passes that
+check trivially, because the decision and the admission agree with each
+other. What they cannot agree with is the run's own actual history.
+
+`reviewRemediationBindingInvariants` (`runtime/review_remediation_store.go`)
+is the one function that closes this: it re-reads the run's own durable
+state (never trusts the admission's claim) and checks, together, that the
+decision is `REQUEST_CHANGES`; the admission agrees with that decision's
+subject and run; the run's **own runtime-recorded publication**
+(`RunProjection.PullRequest.Number`, folded from its own journal) is the
+exact PR number the admission claims; the run's **own** `AgentID` is the
+decision's claimed producer; and the admission's `FindingSignatures` are
+**exactly** the decision's own blocking findings, sorted - never an invented
+or substituted set.
+
+This one function is called at BOTH ends, so a row written through either
+path is held to the same complete standard:
+
+- **at the write** (`CreateReviewRemediationAdmission`), reading the
+  referenced decision and the named run's events fresh before ever
+  inserting (`TestCreateReviewRemediationAdmissionRefusesAPRTheRunNeverPublished`,
+  `TestCreateReviewRemediationAdmissionRefusesForgedFindingSignatures`,
+  `TestCreateReviewRemediationAdmissionRefusesANonBlockingDecision`);
+- **at the read** (`pendingReviewRemediationKeys`), using the already-loaded
+  `runState`'s own `run`/`projection` - no extra I/O beyond fetching the
+  referenced decision - so a row that somehow exists anyway (a raw SQL
+  insert bypassing the writer entirely, modeling corruption or a write path
+  this table's own guard has not yet been taught about) still can never
+  surface as an executable binding
+  (`TestPendingReviewRemediationKeysRefusesARowWrittenAroundTheWriteGuard`).
+
+The read side also separately refuses a row whose indexed `run_id` column
+disagrees with its own document's claimed `RunID`
 (`TestReviewRemediationAdmissionsForRunRefusesAnIndexDocumentDisagreement`),
 mirroring the identity cross-check `ReviewPublication` already makes for its
-own `DecisionID`.
+own `DecisionID` - a prerequisite sanity check before the full invariant
+function is even worth running against a row.
 
 ## Deferred wiring (not yet applied - see below)
 
@@ -317,8 +346,9 @@ picks this up once #546 lands:
 
 Split across two files by concern (`runtime/review_remediation_test.go`:
 fixture, positive path, idempotency/concurrency/restart, and the B1-B4
-regressions below; `runtime/review_remediation_refusal_test.go`: the
-remaining ordinary refusal reasons), both run with `-race`:
+regressions below; `runtime/review_remediation_refusal_test.go`: ordinary
+refusal reasons plus the R1/R2 bypass-closing regressions), both run with
+`-race`:
 
 - no decision; `APPROVE`/`COMMENT_ONLY` not routed as block; publication
   disabled/absent still admits; stale subject (PR moved); forged
@@ -343,20 +373,29 @@ remaining ordinary refusal reasons), both run with `-race`:
 - a run whose wall budget is exhausted but whose persisted disposition has
   not caught up yet (no reconciliation tick has run since) is refused (B4);
 - a decision for a PR this run never published, even at the same commit and
-  with the same producer agent, is refused (R1); a durable admission row
-  referencing an `APPROVE` decision, and a row whose indexed `run_id`
-  disagrees with its own document, are both refused at the store layer
-  regardless of caller (R2).
+  with the same producer agent, is refused at the gate (R1); the shared
+  `reviewRemediationBindingInvariants` check closes the same gap at the
+  store layer too, independent of which caller writes or reads: a durable
+  admission row referencing an `APPROVE` decision, one whose finding
+  signatures are invented rather than the decision's actual blocking ones,
+  one for a PR the run never published (submitted directly to the store
+  API, bypassing the gate entirely), and one whose indexed `run_id` disagrees
+  with its own document, are all refused - at the write where possible, and
+  independently re-verified at the read for a row that exists anyway
+  (written around the write guard, modeling corruption) (R2).
 
-Seven guards were each deliberately inverted, confirmed to break their exact
+Twelve guards were each deliberately inverted, confirmed to break their exact
 corresponding test, and restored: the independence re-check, the staleness
 re-confirmation (B2), the producer-identity check (B3), the fresh-conditions
-check (B4), the run-published-this-PR check (R1), the decision-verdict write
-guard (R2), the index/document integrity read guard (R2), and the `ON
-CONFLICT DO NOTHING` idempotent insert (all three idempotency/concurrency/
-restart tests, which failed with a raw `UNIQUE constraint failed` once
-removed - proving the guard, not just an application-level check, is
-load-bearing).
+check (B4), the gate-level run-published-this-PR check (R1), and - inside the
+shared `reviewRemediationBindingInvariants` function, each broken and tested
+independently at both its write-time and read-time call sites where
+applicable - the run-published-this-PR invariant, the finding-signature
+equality invariant, the decision-verdict invariant, the index/document
+integrity check, and the `ON CONFLICT DO NOTHING` idempotent insert (all
+three idempotency/concurrency/restart tests, which failed with a raw `UNIQUE
+constraint failed` once removed - proving the guard, not just an
+application-level check, is load-bearing).
 
 Deferred to the reconciler/operations wiring above, and therefore not yet
 independently testable end-to-end: the full H1-committed-and-published →

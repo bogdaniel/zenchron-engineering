@@ -394,9 +394,26 @@ func (s *runState) pendingReviewRemediationKeys() ([]string, error) {
 	head := s.projection.Head()
 	keys := make([]string, 0, len(admissions))
 	for _, admission := range admissions {
-		if admission.HeadSHA == head {
-			keys = append(keys, admission.DecisionID)
+		if admission.HeadSHA != head {
+			continue
 		}
+		// Re-establishes every binding invariant - never trusts that a row
+		// existing under this run's own id means it is actually good for
+		// it. CreateReviewRemediationAdmission already checks this at write
+		// time; re-checking here is what makes a row written through ANY
+		// OTHER path - a direct store call, for instance - unable to become
+		// an executable binding merely by existing in this table.
+		decision, found, err := s.rt.deps.Store.ReviewDecision(admission.DecisionID)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+		if reviewRemediationBindingInvariants(decision, admission, s.run, s.projection) != nil {
+			continue
+		}
+		keys = append(keys, admission.DecisionID)
 	}
 	sort.Strings(keys)
 	return keys, nil
