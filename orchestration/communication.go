@@ -114,7 +114,24 @@ type MessageDraft struct {
 	SubjectHandoff string `json:"subject_handoff,omitempty"`
 	Purpose        string `json:"purpose,omitempty"`
 	Category       string `json:"category,omitempty"`
-	Body           string `json:"body"`
+	// ExpectedOutcomeKind, when set on a DecisionRequest, is the ONLY
+	// outcome kind #508's ResolveDecision will accept for it - allow_deny,
+	// selected_option or text - prescribed by the asker, never chosen by
+	// whoever answers it (#508 review P4c). Absent is a legacy or
+	// deliberately open-ended question: ResolveDecision then accepts any of
+	// the three bounded outcome kinds, exactly as it did before this member
+	// existed - every request #473 admitted before P4c decodes with this
+	// member absent and is unaffected.
+	ExpectedOutcomeKind string `json:"expected_outcome_kind,omitempty"`
+	// PermittedOptions is the closed, exhaustive set of values a
+	// selected_option answer may take - required when ExpectedOutcomeKind is
+	// selected_option, forbidden otherwise. It is frozen into the admitted,
+	// insert-only EngineeringMessage: no later message, including one that
+	// supersedes this request, can widen an already-admitted request's own
+	// set, and nothing a resolving caller supplies can override it either -
+	// ResolveDecision reads it only from the durable request itself.
+	PermittedOptions []string `json:"permitted_options,omitempty"`
+	Body             string   `json:"body"`
 }
 
 // DecodeMessageReport strictly decodes and validates one document: exactly
@@ -198,7 +215,62 @@ func validateDraft(d MessageDraft) error {
 	if d.Category != "" && d.Category != FindingDefect && d.Category != FindingRisk && d.Category != FindingInconsistency {
 		return fmt.Errorf("finding category %q must be %q, %q or %q", d.Category, FindingDefect, FindingRisk, FindingInconsistency)
 	}
+	if d.Kind == KindDecisionRequest {
+		return validateDecisionRequestShape(d.ExpectedOutcomeKind, d.PermittedOptions)
+	}
+	if d.ExpectedOutcomeKind != "" || len(d.PermittedOptions) > 0 {
+		return fmt.Errorf("a %s may not carry expected_outcome_kind or permitted_options", d.Kind)
+	}
 	return nil
+}
+
+// MaxDecisionRequestOptions bounds one decision_request's own permitted-
+// option set - a closed, exhaustive menu an authority selects from, never an
+// open-ended list a worker could use to smuggle an unbounded document.
+const MaxDecisionRequestOptions = 20
+
+// validateDecisionRequestShape is #508 review P4c's grammar enforcement: a
+// decision_request MAY prescribe the only outcome kind that may answer it,
+// and selected_option MUST then also prescribe its own closed, exhaustive,
+// deduplicated option set. Absent (kind == "") is a legacy or deliberately
+// open-ended question - every #473 request admitted before this member
+// existed decodes with it absent and is validated exactly as it always was;
+// an unrecognized kind, or a malformed/missing/oversized option set, fails
+// closed rather than being interpreted.
+func validateDecisionRequestShape(kind string, options []string) error {
+	if kind == "" {
+		if len(options) > 0 {
+			return errors.New("permitted_options requires expected_outcome_kind to be selected_option")
+		}
+		return nil
+	}
+	switch kind {
+	case DecisionAllowDeny, DecisionText:
+		if len(options) > 0 {
+			return fmt.Errorf("a %s decision_request may not carry permitted_options", kind)
+		}
+		return nil
+	case DecisionSelectedOption:
+		if len(options) == 0 {
+			return errors.New("a selected_option decision_request requires its permitted_options")
+		}
+		if len(options) > MaxDecisionRequestOptions {
+			return fmt.Errorf("a decision_request names %d permitted options, above the %d bound", len(options), MaxDecisionRequestOptions)
+		}
+		seen := make(map[string]bool, len(options))
+		for _, option := range options {
+			if err := boundedDecisionText("permitted option", option, maxDecisionOptionBytes); err != nil {
+				return err
+			}
+			if seen[option] {
+				return fmt.Errorf("permitted option %q is repeated", option)
+			}
+			seen[option] = true
+		}
+		return nil
+	default:
+		return fmt.Errorf("decision_request expected_outcome_kind %q is not %q, %q or %q", kind, DecisionAllowDeny, DecisionSelectedOption, DecisionText)
+	}
 }
 
 func messageText(name, value string, limit int) error {
@@ -215,7 +287,8 @@ func messageText(name, value string, limit int) error {
 }
 
 // EngineeringMessage is the durable, immutable record of one admitted
-// message. Everything except Purpose, Category and Body is runtime-owned.
+// message. Everything except Purpose, Category, Body, ExpectedOutcomeKind
+// and PermittedOptions is runtime-owned.
 type EngineeringMessage struct {
 	SchemaVersion string          `json:"schema_version"`
 	ID            string          `json:"id"`
@@ -228,7 +301,13 @@ type EngineeringMessage struct {
 	Supersedes    string          `json:"supersedes,omitempty"`
 	Purpose       string          `json:"purpose,omitempty"`
 	Category      string          `json:"category,omitempty"`
-	Body          string          `json:"body"`
+	// ExpectedOutcomeKind and PermittedOptions are the asker's own frozen
+	// answer-shape prescription (#508 review P4c; see MessageDraft). Copied
+	// verbatim at admission and never again - the insert-only table this
+	// becomes a row of is what makes "never widened after admission" true.
+	ExpectedOutcomeKind string   `json:"expected_outcome_kind,omitempty"`
+	PermittedOptions    []string `json:"permitted_options,omitempty"`
+	Body                string   `json:"body"`
 	// DocumentSHA256 is the digest of the exact slot document journalled when
 	// the producing invocation completed.
 	DocumentSHA256 string    `json:"document_sha256"`
@@ -293,7 +372,8 @@ func (m EngineeringMessage) Target() string {
 
 func (m EngineeringMessage) draft() MessageDraft {
 	draft := MessageDraft{Kind: m.Kind, Target: m.Target(), InReplyTo: m.InReplyTo, Supersedes: m.Supersedes,
-		Purpose: m.Purpose, Category: m.Category, Body: m.Body}
+		Purpose: m.Purpose, Category: m.Category, ExpectedOutcomeKind: m.ExpectedOutcomeKind,
+		PermittedOptions: m.PermittedOptions, Body: m.Body}
 	if m.Subject != nil {
 		draft.SubjectHandoff = m.Subject.Handoff
 	}

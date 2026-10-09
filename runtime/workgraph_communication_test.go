@@ -46,7 +46,7 @@ func TestAWorkGraphUnitOnlySeesItsOwnScopedMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rendered, err := communicationContext(fixture.store, run)
+	rendered, _, err := communicationContext(fixture.store, run, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

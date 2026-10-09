@@ -65,3 +65,32 @@ func TestWorkGraphRefusesAMalformedRequestBeforeSendingIt(t *testing.T) {
 		t.Fatalf("a work graph was accepted with no supervisor to own its runs: %v", err)
 	}
 }
+
+// TestWorkGraphHoldAndResolveRefuseAMalformedRequestBeforeSendingIt is #508's
+// CLI boundary: hold and resolve both name TWO subjects before any flag, and
+// neither reaches a supervisor without one running to own the durable state.
+func TestWorkGraphHoldAndResolveRefuseAMalformedRequestBeforeSendingIt(t *testing.T) {
+	for name, args := range map[string][]string{
+		"hold, no unit":            {"workgraph", "hold", "graph-1"},
+		"hold, no graph":           {"workgraph", "hold"},
+		"hold, flag as unit":       {"workgraph", "hold", "graph-1", "--note", "x"},
+		"resolve, no outcome":      {"workgraph", "resolve", "message-1"},
+		"resolve, no request":      {"workgraph", "resolve"},
+		"resolve, flag as outcome": {"workgraph", "resolve", "message-1", "--note", "x"},
+	} {
+		code, err := autonomy(args, offlineOverrides(), &bytes.Buffer{})
+		if err == nil || code != runtime.ExitInvalid || err.Error() != workgraphUsage {
+			t.Errorf("%s: code=%d err=%v, want the usage refusal", name, code, err)
+		}
+	}
+	dir, configPath, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git")
+	t.Chdir(dir)
+	if _, err := autonomy([]string{"workgraph", "hold", "graph-1", "unit-a", "--note", "sign-off", "--config", configPath},
+		offlineOverrides(), &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "serve") {
+		t.Fatalf("a hold was accepted with no supervisor to own the graph: %v", err)
+	}
+	if _, err := autonomy([]string{"workgraph", "resolve", "message-1", "allow", "--config", configPath},
+		offlineOverrides(), &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "serve") {
+		t.Fatalf("a resolution was accepted with no supervisor to own the work it unblocks: %v", err)
+	}
+}

@@ -111,6 +111,8 @@
         "runtime/driver_leases.go",
         "runtime/capacity*.go",
         "runtime/reconciler.go",
+        "runtime/execution_continuation_budget.go",
+        "runtime/external_wait_reasons.go",
         "runtime/run_policy.go",
         "runtime/deterministic_retry*.go",
         "runtime/disposition.go",
@@ -121,6 +123,7 @@
         "runtime/driver_leases_test.go",
         "runtime/capacity*_test.go",
         "runtime/reconciler_test.go",
+        "runtime/execution_continuation_budget_test.go",
         "runtime/run_policy_test.go",
         "runtime/deterministic_*_test.go",
         "runtime/retry_routing_test.go",
@@ -202,6 +205,19 @@
       ],
       "tests": [
         "runtime/workgraph*_test.go"
+      ]
+    },
+    {
+      "name": "decision",
+      "why": "Durable, authorized DecisionResolution (#508): the external-authority half of the DecisionRequest lifecycle, and the WorkGraph unit hold #472's readiness-owner seam.",
+      "race": true,
+      "sources": [
+        "runtime/decision*.go",
+        "orchestration/decision_resolution.go",
+        "orchestration/workgraph_hold.go"
+      ],
+      "tests": [
+        "runtime/decision*_test.go"
       ]
     },
     {
