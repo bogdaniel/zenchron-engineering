@@ -359,6 +359,23 @@ clone from the governed remote instead, through the same credential-bound
 Git boundary a candidate clone already uses
 (`CreatePlanningWorkspaceFromRemote`), when `Source` is empty.
 
+**B3's required follow-up - verification capacity.** `RunIndependentReview`
+invokes a full reviewer provider but is bound to no run's own operation row,
+so it sits outside the scheduler's durable `AcquireOperation` capacity
+accounting (#85) entirely. `driveOne` drives each run in its own goroutine;
+without a bound, as many concurrent reviewer invocations could run as
+`MaxConcurrentRuns` allows, uncounted against any operator ceiling.
+`Supervisor.reviewSlots` is an in-process, non-durable semaphore sized by
+`MaxConcurrentVerifications` - the SAME operator-configured verification
+ceiling every engine's own scheduler already enforces, read once from
+`SupervisorPolicy` in `composition.supervisor` exactly where
+`MaxConcurrentRuns`/`MaxConcurrentObservations` already are. A pass that
+finds no free slot skips the trigger for that run THIS pass only - never
+queued, never retried within the same tick, never reported as an error -
+exactly as idempotent as every other call to `ReconcileReviewRemediation`.
+This is explicitly not a second scheduler and not a durable permit: no
+state survives a restart, and none needs to.
+
 **Test-fixture fix along the way**: `FakeGitHubAdapter.PullRequest` returned
 a `HeadSHA` frozen at `CreatePullRequest` time and never refreshed - real
 GitHub reports whatever the branch currently points at with no separate
@@ -591,7 +608,10 @@ application-level check, is load-bearing).
   reporting, and no reliance on in-process state across a simulated restart;
   `TestRunIndependentReviewClonesFromTheGovernedRemoteWithNoSourceCheckout`
   and `TestRunIndependentReviewRefusesWithNeitherSourceNorRemote` prove the
-  remote-clone fallback.
+  remote-clone fallback; `TestReviewTriggerRespectsMaxConcurrentVerifications`
+  proves the capacity bound - two runs, a ceiling of one, the second run's
+  trigger skipped (never queued, never reported as an error) for the whole
+  pass while the first holds the only slot.
 
 **Still deferred, and why:** the WorkGraph review-readiness gate (section 8
 below - a cross-package schema change layered above this now-complete
