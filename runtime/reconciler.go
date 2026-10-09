@@ -54,10 +54,19 @@ const (
 	OpAssuranceSemantic = "assurance.semantic"
 	OpAuthorityEvaluate = "authority.evaluate"
 	OpBaseIntegrate     = "base.integrate"
-	OpCandidatePush     = "candidate.push"
-	OpPullRequestCreate = "pull_request.create"
-	OpPullRequestUpdate = "pull_request.update"
-	OpGitHubObserve     = "github.observe"
+	// OpIntegrationCompose is the deterministic Git composition for a
+	// WorkGraph unit explicitly marked orchestration.ExecutionKindIntegrationCompose
+	// (#475): composing its exact consumed admitted inputs instead of an
+	// ordinary execution invocation. See bindIntegrationCompose.
+	OpIntegrationCompose = "integration.compose"
+	// OpIntegrationHandoffAdmit defers an integration_compose unit's handoff
+	// report until its own fresh assurance has passed (#475 review B2). See
+	// bindIntegrationHandoffAdmit.
+	OpIntegrationHandoffAdmit = "integration.handoff_admit"
+	OpCandidatePush           = "candidate.push"
+	OpPullRequestCreate       = "pull_request.create"
+	OpPullRequestUpdate       = "pull_request.update"
+	OpGitHubObserve           = "github.observe"
 	// OpHandoffRepair is the one result-only correction of a refused
 	// orchestration handoff (#492, handoff_repair.go).
 	OpHandoffRepair = "handoff.repair"
@@ -216,6 +225,11 @@ type runState struct {
 	// deliveredOwnDecisionIDs: load() fails closed on a corrupt decision-
 	// delivery event rather than forgetting it; see deliveredDecisionIDsFromEvents.
 	deliveredOwnDecisionIDs map[string]bool
+	// origin is the WorkGraph unit execution (#472) this run's batch exists to
+	// perform, when it exists - read once per load so every pure bind function
+	// can read it without a store call of its own. nil for an ordinary batch
+	// or plan-stage run, exactly as Orchestration itself is.
+	origin *orchestration.BatchOrigin
 }
 
 func (r *EngineeringRuntime) load(runID string) (*runState, error) {
@@ -246,9 +260,13 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 	if err != nil {
 		return nil, err
 	}
+	origin, err := r.workUnitOrigin(run)
+	if err != nil {
+		return nil, err
+	}
 	state := &runState{
 		rt: r, run: run, snapshot: snapshot, events: events, projection: projection,
-		resolvedOwnDecisions: resolvedOwnDecisions, deliveredOwnDecisionIDs: deliveredOwnDecisionIDs,
+		resolvedOwnDecisions: resolvedOwnDecisions, deliveredOwnDecisionIDs: deliveredOwnDecisionIDs, origin: origin,
 		// A DIFFERENT CONTROLLER IS STILL THE DEFAULT REFUSAL. What changed
 		// with #234 is that one specific transition can be converted from
 		// drift into an admitted succession by evidence in this run's own
@@ -257,6 +275,26 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 	}
 	state.collectSources()
 	return state, nil
+}
+
+// workUnitOrigin reads the WorkGraph unit, if any, this run's batch exists to
+// perform (#472) - the same batch.Origin workUnit() reads for the invocation's
+// upstream context, read once here so every pure bind function can consult
+// it (bindIntegrationCompose, the bindExecutionInvoke integrator guard)
+// without a store call of its own.
+//
+// ponytail: one extra read per orchestrated run per reconcile pass; fine at
+// current scale, fold into load()'s existing Run/Events reads if this ever
+// shows up in a profile.
+func (r *EngineeringRuntime) workUnitOrigin(run EngineeringRun) (*orchestration.BatchOrigin, error) {
+	if run.Orchestration == nil || run.Orchestration.BatchID == "" {
+		return nil, nil
+	}
+	batch, found, err := r.deps.Store.OrchestrationBatch(run.Orchestration.BatchID)
+	if err != nil || !found {
+		return nil, err
+	}
+	return batch.Origin, nil
 }
 
 // collectSources folds the run's succeeded source observations into the state,
@@ -1007,11 +1045,13 @@ var operationSpecs = []operationSpec{
 	{OpGitHubObserve, bindGitHubObserve},
 	{OpContractCompile, bindContractCompile},
 	{OpCandidateCreate, bindCandidateCreate},
+	{OpIntegrationCompose, bindIntegrationCompose},
 	{OpExecutionInvoke, bindExecutionInvoke},
 	{OpRemediationGofmt, bindRemediationGofmt},
 	{OpCandidateCommit, bindCandidateCommit},
 	{OpHandoffRepair, bindHandoffRepair},
 	{OpAssuranceGo, bindAssuranceGo},
+	{OpIntegrationHandoffAdmit, bindIntegrationHandoffAdmit},
 	{OpAssuranceSemantic, bindAssuranceSemantic},
 	{OpBaseIntegrate, bindBaseIntegrate},
 	{OpAuthorityEvaluate, bindAuthorityEvaluate},
@@ -1133,7 +1173,49 @@ func bindCandidateCreate(s *runState) (string, bool) {
 	return s.pinnedBase(), true
 }
 
+// bindIntegrationCompose is the deterministic composition gate for a
+// WorkGraph integration unit (#475): the run's own origin names a unit whose
+// execution kind is orchestration.ExecutionKindIntegrationCompose -
+// explicitly, and only the WorkGraph author/compiler decided that, never
+// inferred from Role, purpose, issue title or provider prose. Role identifies
+// who is qualified to perform a unit; ExecutionKind identifies which
+// algorithm its run uses, and the two are independent: a RoleIntegrator unit
+// with no ExecutionKind set is an ordinary provider-executed unit.
+//
+// Its binding is the exact consumed input set's digest, the same digest the
+// WorkGraph itself activated this unit against (orchestration.WorkUnitBatchID
+// already binds the run to it). A restarted or retried attempt therefore
+// replans the identical operation; an input set that changed would be a
+// different run entirely; one that is activated against inputs since
+// superseded is not this binding's question - the WorkGraph's own
+// exact-subject invalidation already governs that, before any run is reused.
+func bindIntegrationCompose(s *runState) (string, bool) {
+	if s.origin == nil || s.origin.ExecutionKind != orchestration.ExecutionKindIntegrationCompose {
+		return "", false
+	}
+	if key, wanted := bindCandidateCreate(s); !wanted || !s.satisfied(OpCandidateCreate, key) {
+		return "", false
+	}
+	digest, err := s.origin.Inputs.Digest()
+	if err != nil {
+		return "", false
+	}
+	return digest, true
+}
+
 func bindExecutionInvoke(s *runState) (string, bool) {
+	// A WORK GRAPH UNIT EXPLICITLY MARKED integration_compose (#475) never
+	// receives a free-form engineering invocation: its whole producer stage
+	// is the deterministic composition bindIntegrationCompose performs
+	// instead. The guard is explicit and structural - the unit's own
+	// execution kind, decided once by the WorkGraph author/compiler at
+	// adoption and frozen the moment it was activated - never inferred from
+	// Role, this issue's purpose, or anything a provider wrote. An ordinary
+	// RoleIntegrator unit (ExecutionKind absent or "provider") falls through
+	// unchanged below: Role alone never suppresses a provider invocation.
+	if s.origin != nil && s.origin.ExecutionKind == orchestration.ExecutionKindIntegrationCompose {
+		return "", false
+	}
 	if s.projection.Contract == (Ref{}) {
 		return "", false
 	}
@@ -1255,6 +1337,45 @@ func bindAssuranceGo(s *runState) (string, bool) {
 		return "", false
 	}
 	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree + "|" + s.contractRevision(), true
+}
+
+// bindIntegrationHandoffAdmit is the deferred handoff-report step for a
+// WorkGraph integration_compose unit (#475 review B2): composeIntegration's
+// own commit never reports a handoff, because a successful Git composition
+// is not acceptance. This operation becomes wanted only once the composed
+// head's OWN fresh assurance has actually PASSED - never merely "ran" (an
+// assurance verdict that is not a passing candidate verdict settles the run
+// through its own existing route; this never fires for it). Only then does
+// handoffCommitOf/admitOrchestratedHandoff have anything to consider
+// admissible. This is strictly additional to whatever an ordinary unit's own
+// handoff timing already is; it changes nothing about that generic path.
+func bindIntegrationHandoffAdmit(s *runState) (string, bool) {
+	if s.origin == nil || s.origin.ExecutionKind != orchestration.ExecutionKindIntegrationCompose {
+		return "", false
+	}
+	if s.projection.CandidateRevision == "" {
+		return "", false
+	}
+	a := s.projection.Assurance
+	if a == nil || a.Stale || !a.Passed {
+		return "", false
+	}
+	// #475 review N3: fresh-evidence-before-handoff applies to the WHOLE
+	// required assurance set for this exact contract, not only the
+	// automated verifier - an integration unit is never exempt. Mirrors
+	// bindAssuranceSemantic's own "is semantic evidence required at all"
+	// test exactly, so a contract with no semantic claim (or no configured
+	// producer) is unaffected, and this never invents a second verification
+	// engine: it only waits for the SAME semantic pass every other unit's
+	// handoff already implicitly waits for by settling goal_state_reached
+	// only once bindAssuranceSemantic itself has nothing left to plan.
+	if s.rt.deps.SemanticAssurance != nil && len(s.semanticClaims()) > 0 {
+		semantic := s.projection.SemanticAssurance
+		if semantic == nil || semantic.Stale || !semantic.Passed {
+			return "", false
+		}
+	}
+	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree, true
 }
 
 // bindAssuranceSemantic plans an INDEPENDENT semantic assurance invocation when

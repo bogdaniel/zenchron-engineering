@@ -202,10 +202,12 @@
       "why": "The durable WorkGraph, its binding and dependency delivery.",
       "sources": [
         "runtime/workgraph*.go",
-        "orchestration/workgraph*.go"
+        "orchestration/workgraph*.go",
+        "runtime/integration_dispatch.go"
       ],
       "tests": [
-        "runtime/workgraph*_test.go"
+        "runtime/workgraph*_test.go",
+        "runtime/compose_integration_recovery_test.go"
       ]
     },
     {

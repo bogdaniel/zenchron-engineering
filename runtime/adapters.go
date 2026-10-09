@@ -431,6 +431,19 @@ const (
 	FailureWorkspaceIntegrity      FailureClass = "workspace_integrity_violation"
 	FailureBaseIntegrationConflict FailureClass = "base_integration_conflict"
 	FailureFlaky                   FailureClass = "flaky_verification"
+	// FailureIntegrationConflict is a WorkGraph integration unit's (#475)
+	// deterministic composition blocked - a Git textual conflict, or a clean
+	// merge whose independent assurance then failed (semantic/uncertain).
+	// Unlike FailureBaseIntegrationConflict it never routes to the provider:
+	// an integrator unit never receives implementation authority, so there is
+	// no producer remediation to dispatch it to.
+	FailureIntegrationConflict FailureClass = "integration_conflict"
+	// FailureIntegrationInvalidated is one consumed input this attempt could
+	// not read at its admitted subject - superseded, unreadable, or not a
+	// descendant of the verified base. A retry re-reads live state and may
+	// legitimately still find it true; exhausting the attempt budget fails
+	// the run, which the WorkGraph's own dependents already fail closed on.
+	FailureIntegrationInvalidated FailureClass = "integration_invalidated"
 	// FailureFeedbackUnresolved is an invocation delivered admitted feedback
 	// that returned without discharging it: the workspace it left behind is
 	// unchanged, and it did not state (or failed to bind) an explicit
@@ -551,6 +564,14 @@ func RouteFailure(c FailureClass) FailureRoute {
 		FailureProviderNoProgress, FailureFeedbackUnresolved, FailureCheckpointContinuationUnresolved,
 		FailureReviewerProtocolIncomplete, FailureProviderBackgroundWorkUnresolved, FailureConnectivity,
 		FailureDecisionBindingStale:
+		return RouteRetry
+	// An integration unit never gets a producer to remediate it (#475): its
+	// whole producer stage is deterministic composition, not a free-form
+	// invocation. A bounded retry re-reads live state through the same
+	// unconditional live-currency check every attempt makes; exhausting the
+	// attempt budget is what makes either class terminal, same as any other
+	// bounded retry here.
+	case FailureIntegrationConflict, FailureIntegrationInvalidated:
 		return RouteRetry
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess

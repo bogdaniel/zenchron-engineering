@@ -41,6 +41,7 @@ type orchestrationHandoffStore interface {
 	RefuseHandoff(string, string, string, string, time.Time) error
 	AdmitHandoff(orchestration.EngineeringHandoff) (bool, error)
 	AdmitCheckpointHandoff(orchestration.EngineeringHandoff, int64) (bool, error)
+	AdmitIntegratedHandoff(orchestration.EngineeringHandoff, orchestration.WorkUnitInputs) (bool, error)
 }
 
 func loadHandoffRecords(store orchestrationHandoffStore, runID string) (handoffRecords, error) {
@@ -218,6 +219,23 @@ func admitOrchestratedHandoff(store orchestrationHandoffStore, stateDir string, 
 			AgentID: run.AgentID, OperationID: reported.RepairOperationID, Attempt: reported.RepairAttempt,
 		}
 	}
+	if batch.Origin != nil && batch.Origin.ExecutionKind == orchestration.ExecutionKindIntegrationCompose {
+		// The exact upstream handoff identities this unit consumed are bound
+		// INTO the same conditional INSERT as the admission itself (#475
+		// review B3): SQLite evaluates the WHERE clause and the row write as
+		// one statement, so there is no separate read-then-write window a
+		// concurrent supersession could land in. A lost insert here is a
+		// real refusal, never silently retried forever: the one recorded
+		// decision is what later passes find.
+		inserted, err := store.AdmitIntegratedHandoff(handoff, batch.Origin.Inputs)
+		if err != nil {
+			return err
+		}
+		if !inserted {
+			return refuse("a consumed input was superseded between the live freshness check and the atomic handoff admission")
+		}
+		return nil
+	}
 	if commit.event == EventCandidateCheckpointed {
 		// The snapshot proves the binding; SQLite must keep that proof current
 		// through insertion despite journal appends by other run drivers.
@@ -247,6 +265,21 @@ type handoffCommit struct {
 func handoffCommitOf(operations map[string]RunOperation, events []EngineeringEvent, reportingID string) (handoffCommit, string, error) {
 	if commit, ok := succeededOperation(operations, OpCandidateCommit, operationKey(OpCandidateCommit, reportingID)); ok {
 		return handoffCommit{commit.ID, EventCandidateCommitted}, "", nil
+	}
+	// A WORK GRAPH INTEGRATION UNIT (#475) commits its own merge result
+	// directly - the commit already exists in Git when composition succeeds,
+	// so there is no separate uncommitted diff for a candidate.commit
+	// operation to turn into one - but its handoff report is journalled by a
+	// SEPARATE, LATER operation (OpIntegrationHandoffAdmit, review B2),
+	// reached only once its own fresh assurance has passed. The commit this
+	// binds to is therefore this run's own succeeded OpIntegrationCompose,
+	// never the reporting operation itself.
+	if op, ok := operations[reportingID]; ok && op.Kind == OpIntegrationHandoffAdmit && op.State == Succeeded {
+		for _, candidate := range operations {
+			if candidate.Kind == OpIntegrationCompose && candidate.State == Succeeded {
+				return handoffCommit{candidate.ID, EventCandidateCommitted}, "", nil
+			}
+		}
 	}
 	checkpoint, ok := completedCheckpoint(operations[reportingID])
 	if !ok {

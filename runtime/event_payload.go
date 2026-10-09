@@ -552,6 +552,13 @@ type AssuranceObservedPayload struct {
 	// obligation may be discharged while another is not.
 	Semantic     bool              `json:"semantic,omitempty"`
 	ClaimResults map[string]string `json:"claim_results,omitempty"`
+	// IntegrationOriginalFailureClass is the fresh verifier's OWN class,
+	// preserved when a WorkGraph integration_compose unit's FailureClass
+	// above has been reclassified to FailureIntegrationConflict (#475 B5) so
+	// the actual verdict - FailureCompileTest, FailureVerification, whatever
+	// the verifier actually said - is never lost to the runtime's own
+	// retry-routing relabeling. Empty for every other observation.
+	IntegrationOriginalFailureClass FailureClass `json:"integration_original_failure_class,omitempty"`
 }
 
 // AuthorityEvaluatedPayload records a #7 decision reference for one action.
