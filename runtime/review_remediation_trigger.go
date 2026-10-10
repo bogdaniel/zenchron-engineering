@@ -102,3 +102,19 @@ func (r *EngineeringRuntime) ReconcileReviewRemediationForRun(ctx context.Contex
 	}
 	return &outcome, admission, nil
 }
+
+// ReviewBudget is the finite provider budget #474's automatic trigger binds
+// every independent review invocation to (R6): the SAME operator-configured
+// envelope every other unattended invocation resolves through
+// RunBudgets.defaults() - planningWallLimit does the identical thing for
+// InvokePlanner's own unattended, run-less invocation. defaults() never
+// leaves either member at zero: zero would mean the provider may stall
+// forever, the exact condition #238 exists to remove, and an unattended
+// automatic reviewer is precisely the shape #238 was about. A review has no
+// per-call narrowing input the way a plan stage states one for planning, so
+// the configured envelope is used directly rather than narrowed against
+// anything.
+func (r *EngineeringRuntime) ReviewBudget() ProviderBudget {
+	defaults := r.deps.Budgets.defaults()
+	return ProviderBudget{WallLimit: defaults.WallLimit, InactivityLimit: defaults.ProviderInactivityLimit}
+}

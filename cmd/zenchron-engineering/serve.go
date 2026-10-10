@@ -431,6 +431,11 @@ func (c *composition) reviewTrigger() func(context.Context, *runtime.Engineering
 			},
 			StateDir: c.config.StateDir, Remote: remote, Credentials: c.credentials,
 			ControllerID: controllerIdentity(), Clock: runtime.RealClock{},
+			// #474 R6: the SAME finite, never-zero operator envelope
+			// every other unattended invocation (planning, producers)
+			// is bound to - an unattended automatic reviewer with no
+			// wall or inactivity bound is exactly the #238 shape.
+			Budgets: engine.ReviewBudget(),
 		}
 		_, _, err = engine.ReconcileReviewRemediationForRun(ctx, run.ID, port, c.reviewerAgent)
 		return err

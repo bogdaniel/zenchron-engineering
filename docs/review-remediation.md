@@ -397,6 +397,24 @@ already states for its own sibling resource. This is still explicitly not
 a second scheduler: it is the EXISTING one ceiling, with a third consumer
 counted into the same formula.
 
+**R6 - the automatic reviewer had no finite provider budget.**
+`composition.reviewTrigger` built `SupervisorReviewPort` without setting
+its `Budgets` field, so `RunIndependentReview` → `InvokeReviewer` carried a
+ZERO `ProviderBudget` straight into the `ExecutionRequest` the provider
+actually executes under - no wall deadline, no inactivity watchdog, for an
+invocation running fully unattended. This is the exact #238 shape
+(`RunBudgets.defaults()`'s own doc comment: "zero means this provider may
+stall forever") in the one path that had never been bound to it, and a
+hanging reviewer would now also hold its R5 verification-capacity claim
+for as long as it liked. `EngineeringRuntime.ReviewBudget()` resolves the
+SAME operator-configured envelope every other unattended invocation relies
+on, through `RunBudgets.defaults()` - `planningWallLimit` does the
+identical thing for `InvokePlanner`'s own run-less, unattended invocation,
+and `defaults()` never leaves either member at zero. A review has no
+per-call narrowing input the way a plan stage states one for planning, so
+the configured envelope is used directly; `composition.reviewTrigger` now
+sets `Budgets: engine.ReviewBudget()`.
+
 **Test-fixture fix along the way**: `FakeGitHubAdapter.PullRequest` returned
 a `HeadSHA` frozen at `CreatePullRequest` time and never refreshed - real
 GitHub reports whatever the branch currently points at with no separate
@@ -728,6 +746,11 @@ application-level check, is load-bearing).
   durable capacity bound directly against the real scheduler/store: both
   directions of exclusion, cross-controller visibility, and the
   death-and-expiry reclaim rule.
+- `TestReviewBudgetIsAlwaysFinite` and
+  `TestReviewBudgetUsesTheOperatorConfiguredEnvelope` (R6) prove
+  `ReviewBudget()` never returns zero, with or without an operator
+  configuration, mirroring `planningWallLimit`'s own regression
+  (`TestAnUnbudgetedPlanningInvocationStillHasADeadline`).
 
 **Still deferred, and why:** the residual external-head TOCTOU between this
 gate's last freshness check and its SQLite commit (explicitly documented
