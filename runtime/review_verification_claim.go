@@ -127,34 +127,39 @@ func (s *SQLiteOperationStore) ReleaseReviewVerificationClaim(id string) error {
 }
 
 // claimReviewVerificationSlot reclaims abandoned claims first - the same
-// ordering AcquireVerification already uses - then releases any EXPIRED
-// claim THIS SAME (owner, runID) pair already holds (#474 R9) before
-// attempting a fresh one.
+// ordering AcquireVerification already uses - then attempts a fresh claim.
 //
-// #474 R11: expiry, not merely the (owner, runID) match, is what makes this
-// safe. Owner is a single process instance's lifetime identity
-// (host/pid/start-token, NewRuntimeOwner): two DIFFERENT processes can
-// never collide on it, and ReconcileReviewRemediationForRun's only caller
-// (driveOne) never drives the same run twice concurrently within one
-// process (Supervisor.admit's inflight set) - so an UNEXPIRED claim for
-// this EXACT (owner, runID) pair can never be a live concurrent sibling
-// under the wiring this scheduler is actually used with today. But
-// claimReviewVerificationSlot is a reusable primitive, not entitled to
-// assume a caller it cannot see will always honor that: requiring expiry
-// first means that even if some future or misbehaving caller DID invoke it
-// twice for the same pair while the first genuinely still held the slot,
-// this call could still never destroy that still-active hold - only a
-// claim already past its own bounded TTL, exactly like any other expiring
-// lease in this system, is ever released here. A release that failed
-// leaves its claim recoverable within at most one TTL (bounded, never
-// permanent); a release that is still correctly held stays held.
+// #474 R11 (second re-review, #5478592498): an EARLIER version of this
+// also self-healed - unconditionally releasing any EXISTING claim matching
+// the SAME (owner, runID) pair once merely EXPIRED, reasoning that pair
+// could never be legitimately concurrent under this scheduler's only real
+// caller today. That reasoning is true, but expiry is a WALL-CLOCK
+// deadline, never proof a specific invocation has actually finished: the
+// reviewer's own bounded provider budget (ReviewBudget().WallLimit) does
+// not cover every external operation in RunIndependentReview's full
+// lifecycle (workspace cloning, GitHub round trips), so a genuinely
+// still-running, still-alive invocation could still be in flight past its
+// claim's expiry. Self-heal deleted such a claim on nothing but elapsed
+// time, never checking whether its owner was actually dead - exactly the
+// "expiration is not completion proof" gap. It is removed rather than
+// patched: requiring death too would make it do nothing
+// reclaimReviewVerificationClaims (called just above, for every claim
+// regardless of owner or run) does not already do, so there is no distinct
+// behavior left to keep. A release that failed (#474 R9) is recoverable
+// once its owning controller is both expired AND reported dead - the SAME
+// bound every other resource in this system already accepts (#490's own
+// VerificationPermit has no self-heal either) - never instantly on the
+// very next call for the same pair, which is precisely the guarantee this
+// fix removes because it cannot be proven safe.
 //
 // ttl is the caller's own actual review wall-clock budget (#474 R11): the
 // claim's real expiry is whichever is LARGER of ttl and
 // reviewVerificationClaimTTL, so a short or zero-valued ttl can never
 // produce a claim that expires before the system's own minimum bound,
 // and a longer operator-configured review budget can never be undercut
-// by a shorter fixed constant.
+// by a shorter fixed constant. This bounds how long an abandoned claim
+// held by a owner PROVEN dead may still block capacity; it is not, by
+// itself, proof of abandonment - death is what proves that.
 //
 // ok is false exactly when either ceiling is genuinely held by someone
 // else: never queued, never retried within this call, exactly as
@@ -172,18 +177,6 @@ func (s Scheduler) claimReviewVerificationSlot(owner, runID string, ttl time.Dur
 		return ReviewVerificationClaim{}, false, err
 	}
 	now := s.Clock.Now()
-	existing, err := store.ReviewVerificationClaims()
-	if err != nil {
-		return ReviewVerificationClaim{}, false, err
-	}
-	for _, leaked := range existing {
-		if leaked.ControllerOwner != owner || leaked.RunID != runID || now.Before(leaked.ExpiresAt) {
-			continue
-		}
-		if err := store.ReleaseReviewVerificationClaim(leaked.ID); err != nil {
-			return ReviewVerificationClaim{}, false, err
-		}
-	}
 	claim := ReviewVerificationClaim{
 		ID: "review-verification-" + rand.Text(), ControllerOwner: owner, RunID: runID,
 		RequestedAt: now, ExpiresAt: now.Add(ttl),

@@ -283,7 +283,11 @@ func TestLatestReviewDecisionRefusesAnIndexedTimestampDisagreement(t *testing.T)
 	// above. No legitimate CreateReviewDecision call can produce this
 	// disagreement; it models the same storage-layer corruption R10 already
 	// guards the repository/pr_number columns against, here for the column
-	// that decides ordering itself.
+	// that decides ordering itself. Ranking by the DOCUMENT's own CreatedAt
+	// (#474 R12, second re-review) means this forged index cannot make the
+	// genuinely older APPROVE outrank the genuinely newer BLOCK at all - the
+	// attack is fully neutralized, not merely refused: BLOCK, which is
+	// itself perfectly coherent, is still returned normally.
 	approveSubject := review.Subject{Repository: "zenchron/fixture", PRNumber: 7, HeadSHA: "head1"}
 	approveID, err := review.DecisionID(approveSubject, "reviewer-2")
 	if err != nil {
@@ -307,8 +311,70 @@ func TestLatestReviewDecisionRefusesAnIndexedTimestampDisagreement(t *testing.T)
 		t.Fatal(err)
 	}
 
+	latest, found, err := store.LatestReviewDecision(subject.Repository, subject.PRNumber)
+	if err != nil || !found {
+		t.Fatalf("LatestReviewDecision: found=%v err=%v", found, err)
+	}
+	if latest.ID != block.ID {
+		t.Fatalf("latest.ID = %q, want the genuinely newer BLOCK %q - the forged-newer-looking APPROVE must never win by its corrupted index", latest.ID, block.ID)
+	}
+}
+
+// TestLatestReviewDecisionRefusesWhenTheGenuinelyLatestRowIsItselfCorrupted
+// is R12's exact named reproduction (review #5478592498): a newer BLOCK
+// whose OWN indexed timestamp is corrupted DOWNWARD. Document-level ranking
+// still correctly identifies it as latest (ranking never consults the
+// index), so it is still selected - and its OWN corruption is then caught
+// by the per-row check, refusing rather than silently returning the
+// uncorrupted but genuinely OLDER APPROVE in its place.
+func TestLatestReviewDecisionRefusesWhenTheGenuinelyLatestRowIsItselfCorrupted(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteOperationStore: %v", err)
+	}
+	defer store.Close()
+
+	subject := review.Subject{Repository: "zenchron/fixture", PRNumber: 7, HeadSHA: "head1"}
+	approveID, err := review.DecisionID(subject, "reviewer-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approve := review.Decision{
+		SchemaVersion: review.SchemaVersion, ID: approveID, Subject: subject, RunID: "run-1",
+		ProducerAgentID: "codex", ReviewerAgentID: "reviewer-2", Verdict: review.VerdictApprove,
+		CreatedAt: time.Unix(1700000100, 0).UTC(),
+	}
+	if _, _, err := store.CreateReviewDecision(approve); err != nil {
+		t.Fatal(err)
+	}
+
+	// A genuinely NEWER BLOCK, by its own document's CreatedAt - but
+	// INDEXED with a created_unix_nano forged OLDER than the APPROVE above.
+	blockID, err := review.DecisionID(subject, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trueCreatedAt := time.Unix(1700000200, 0).UTC() // genuinely NEWER than the approve
+	block := review.Decision{
+		SchemaVersion: review.SchemaVersion, ID: blockID, Subject: subject, RunID: "run-1",
+		ProducerAgentID: "codex", ReviewerAgentID: "claude", Verdict: review.VerdictRequestChanges,
+		Findings:  []review.Finding{{Severity: review.SeverityBlocking, Signature: "f1"}},
+		CreatedAt: trueCreatedAt,
+	}
+	document, err := CanonicalJSON(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedIndexedTimestamp := time.Unix(1700000050, 0).UnixNano() // forged OLDER than the approve
+	if _, err := store.db.Exec(`INSERT INTO review_decisions (id, repository, pr_number, head_sha, run_id, created_unix_nano, document)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		block.ID, subject.Repository, subject.PRNumber, subject.HeadSHA, block.RunID,
+		forgedIndexedTimestamp, string(document)); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, found, err := store.LatestReviewDecision(subject.Repository, subject.PRNumber); err == nil || found {
-		t.Fatalf("expected the indexed-timestamp disagreement to be refused rather than read as the latest decision, got found=%v err=%v", found, err)
+		t.Fatalf("expected the genuinely latest (but self-corrupted) BLOCK to be refused rather than letting the older APPROVE stand in for it, got found=%v err=%v", found, err)
 	}
 }
 

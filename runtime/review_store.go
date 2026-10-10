@@ -155,57 +155,104 @@ func (s *SQLiteOperationStore) ReviewDecisionsForPullRequest(repository string, 
 // current question is always "what did the LAST independent review of this PR
 // conclude", never an arbitrary earlier one.
 func (s *SQLiteOperationStore) LatestReviewDecision(repository string, prNumber int) (review.Decision, bool, error) {
-	var id, headSHA, runID, document string
-	var createdUnixNano int64
-	err := s.db.QueryRow(`SELECT id, head_sha, run_id, created_unix_nano, document FROM review_decisions
-		WHERE repository = ? AND pr_number = ? ORDER BY created_unix_nano DESC, id DESC LIMIT 1`,
-		repository, prNumber).Scan(&id, &headSHA, &runID, &createdUnixNano, &document)
-	if errors.Is(err, sql.ErrNoRows) {
+	// #474 R12 (second re-review, #5478592498): this no longer orders by
+	// the INDEXED created_unix_nano and takes LIMIT 1 - that trusted the
+	// index to have ranked rows correctly before this function ever saw
+	// them. A genuinely NEWER decision (a BLOCK) whose own indexed
+	// timestamp is corrupted DOWNWARD would sort below an older,
+	// uncorrupted decision (an APPROVE) and never be fetched at all, so a
+	// per-row index-vs-document check could only ever validate the row it
+	// was GIVEN - and validate the wrong one perfectly.
+	//
+	// Every row for this (repository, prNumber) is read instead, and
+	// "latest" is decided by comparing each DECODED document's OWN
+	// CreatedAt/ID directly - the index is used for NOTHING in this
+	// ranking. Only the row that wins by that document-level comparison is
+	// then validated against its own indexed columns. This closes R12 in
+	// both directions: corrupting an index UPWARD cannot make an older row
+	// outrank a genuinely newer one (ranking never consults it), and
+	// corrupting it DOWNWARD cannot make a genuinely newer row escape
+	// scrutiny (it still wins by its own document and is validated
+	// regardless) - it can only ever cause ITS OWN row to fail validation,
+	// never let a different row be picked in its place, and never prevent
+	// an entirely unrelated, later, uncorrupted decision from being read
+	// normally once one exists.
+	rows, err := s.db.Query(`SELECT id, head_sha, run_id, created_unix_nano, document FROM review_decisions
+		WHERE repository = ? AND pr_number = ?`, repository, prNumber)
+	if err != nil {
+		return review.Decision{}, false, err
+	}
+	defer rows.Close()
+
+	type candidate struct {
+		id, headSHA, runID string
+		createdUnixNano    int64
+		decision           review.Decision
+	}
+	var winner candidate
+	var found bool
+	for rows.Next() {
+		var row candidate
+		var document string
+		if err := rows.Scan(&row.id, &row.headSHA, &row.runID, &row.createdUnixNano, &document); err != nil {
+			return review.Decision{}, false, err
+		}
+		row.decision, err = decodeReviewDecision(document)
+		if err != nil {
+			return review.Decision{}, false, err
+		}
+		if !found || isNewerReviewDecision(row.decision, winner.decision) {
+			winner, found = row, true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return review.Decision{}, false, err
+	}
+	if !found {
 		return review.Decision{}, false, nil
 	}
-	if err != nil {
-		return review.Decision{}, false, err
-	}
-	decision, err := decodeReviewDecision(document)
-	if err != nil {
-		return review.Decision{}, false, err
-	}
-	// #474 R10: the row was found by its INDEXED (repository, pr_number)
-	// columns - the same two columns a raw-SQL write could set independently
-	// of the document's own embedded Subject. Trusting the index alone would
-	// let a corrupted or forged row, indexed under THIS repository/PR but
-	// whose document claims an unrelated one (while still carrying a
-	// genuinely valid RunID/ProducerAgentID/ReviewerAgentID/head for THAT
-	// other subject), read as a coherent decision for this PR. Fail closed
-	// on any disagreement, exactly as ReviewDecision(id) already does for
-	// its own id-vs-document check.
+
+	decision := winner.decision
+	// #474 R10: the winning row was found by its INDEXED (repository,
+	// pr_number) columns - the same two columns a raw-SQL write could set
+	// independently of the document's own embedded Subject. Trusting the
+	// index alone would let a corrupted or forged row, indexed under THIS
+	// repository/PR but whose document claims an unrelated one, read as a
+	// coherent decision for this PR. Fail closed on any disagreement,
+	// exactly as ReviewDecision(id) already does for its own
+	// id-vs-document check.
 	if decision.Subject.Repository != repository || decision.Subject.PRNumber != prNumber {
 		return review.Decision{}, false, &ReviewDecisionIndexMismatchError{
 			Repository: repository, PRNumber: prNumber,
 			DecisionRepository: decision.Subject.Repository, DecisionPRNumber: decision.Subject.PRNumber,
 		}
 	}
-	// #474 R12: repository/pr_number are not the only indexed columns this
-	// query trusts. `created_unix_nano` is the ORDER BY column that decides
-	// which row is "latest" in the first place - a row whose INDEXED
-	// timestamp is corrupted to read newer than it truly is could make an
-	// older APPROVE sort ahead of, and incorrectly supersede, a genuinely
-	// newer BLOCK, with its document's own CreatedAt never checked against
-	// what sorted it there. `id`, `head_sha` and `run_id` are indexed
-	// identity columns with the same exposure. Every one is checked against
-	// the document that was supposedly read FROM it, fail-closed on any
-	// disagreement.
+	// #474 R12: `id`, `head_sha`, `run_id` and `created_unix_nano` are the
+	// remaining indexed columns with the same index-vs-document exposure,
+	// each checked against the document that was supposedly read FROM it,
+	// fail-closed on any disagreement.
 	switch {
-	case decision.ID != id:
+	case decision.ID != winner.id:
 		return review.Decision{}, false, &ReviewDecisionOrderingMismatchError{Field: "id", Repository: repository, PRNumber: prNumber}
-	case decision.Subject.HeadSHA != headSHA:
+	case decision.Subject.HeadSHA != winner.headSHA:
 		return review.Decision{}, false, &ReviewDecisionOrderingMismatchError{Field: "head_sha", Repository: repository, PRNumber: prNumber}
-	case decision.RunID != runID:
+	case decision.RunID != winner.runID:
 		return review.Decision{}, false, &ReviewDecisionOrderingMismatchError{Field: "run_id", Repository: repository, PRNumber: prNumber}
-	case decision.CreatedAt.UnixNano() != createdUnixNano:
+	case decision.CreatedAt.UnixNano() != winner.createdUnixNano:
 		return review.Decision{}, false, &ReviewDecisionOrderingMismatchError{Field: "created_unix_nano", Repository: repository, PRNumber: prNumber}
 	}
 	return decision, true, nil
+}
+
+// isNewerReviewDecision reports whether a is strictly more recent than b,
+// by the SAME "created_unix_nano DESC, id DESC" ordering the SQL query
+// itself used to express, now applied to each document's OWN decoded
+// fields rather than to the index that read them.
+func isNewerReviewDecision(a, b review.Decision) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.ID > b.ID
 }
 
 // ReviewDecisionOrderingMismatchError is LatestReviewDecision's #474 R12

@@ -263,16 +263,18 @@ func TestAnOrdinaryVerificationAcquisitionReclaimsADeadReviewClaim(t *testing.T)
 	}
 }
 
-// TestAFailedReleaseIsRecoveredOnceExpiredByTheNextClaimForTheSameOwnerAndRun
-// is R9's idempotent-retry requirement, narrowed by #474 R11: a leaked
-// claim for the SAME (owner, runID) pair - simulated here by never
-// releasing it - is recoverable within at most one TTL, never permanently
-// stuck, but ONLY once it is actually EXPIRED. Expiry, not merely the
-// (owner, runID) match, is what makes self-heal safe against a genuinely
-// concurrent sibling call that might still legitimately hold it (see
-// TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires for the
-// negative case this guards).
-func TestAFailedReleaseIsRecoveredOnceExpiredByTheNextClaimForTheSameOwnerAndRun(t *testing.T) {
+// TestAFailedReleaseIsRecoveredOnceExpiredAndDeadByTheNextClaimForTheSameOwnerAndRun
+// is R9's idempotent-retry requirement, as narrowed by #474 R11's second
+// re-review (#5478592498): a leaked claim - simulated here by never
+// releasing it - is recoverable within at most one TTL once its owner is
+// ALSO provably dead, never on expiry alone. An EARLIER version of this
+// recovered it the instant the same (owner, runID) pair attempted a fresh
+// claim, merely once expired - removed because expiry is a wall-clock
+// deadline, never proof a specific invocation actually finished (see
+// TestASameOwnerAndRunClaimIsNeverSelfHealedWhileStillAlive for the
+// negative case this guards: a live owner's claim is never freed merely
+// because it is expired).
+func TestAFailedReleaseIsRecoveredOnceExpiredAndDeadByTheNextClaimForTheSameOwnerAndRun(t *testing.T) {
 	store, err := OpenSQLiteOperationStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -282,7 +284,7 @@ func TestAFailedReleaseIsRecoveredOnceExpiredByTheNextClaimForTheSameOwnerAndRun
 	clock := &fakeClock{now: time.Unix(100, 0)}
 	s := Scheduler{
 		Store: store, Clock: clock, Owner: "controller-a", LeaseDuration: time.Minute,
-		Liveness: alwaysAlive(), MaxConcurrentRuns: 10, MaxConcurrentVerifications: 1,
+		Liveness: neverAlive(), MaxConcurrentRuns: 10, MaxConcurrentVerifications: 1,
 	}
 	leaked, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-1", 0)
 	if err != nil || !claimed {
@@ -295,26 +297,27 @@ func TestAFailedReleaseIsRecoveredOnceExpiredByTheNextClaimForTheSameOwnerAndRun
 		t.Fatal(err)
 	}
 	if !claimedAgain {
-		t.Fatal("expected the same (owner, run) pair's next claim attempt to recover a leaked, EXPIRED claim, never treat it as permanently held")
+		t.Fatal("expected the same (owner, run) pair's next claim attempt to recover a leaked, expired AND dead claim, never treat it as permanently held")
 	}
 	if healed.ID == leaked.ID {
 		t.Fatal("the recovered claim reused the SAME id as the leaked one")
 	}
 }
 
-// TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires is #474 R11's
-// required regression: a review of #5478443739 found that self-heal
-// unconditionally deleted ANY claim matching (owner, runID), trusting that
-// pair alone could never be concurrently held - true under this scheduler's
-// only real caller today (ReconcileReviewRemediationForRun, serialized per
-// run by Supervisor.admit's inflight set, under a per-process-unique
-// Owner), but not something claimReviewVerificationSlot is entitled to
-// assume about every caller. This proves the primitive's OWN safety net: an
-// UNEXPIRED claim for the exact same (owner, runID) pair - standing in for
-// a genuinely concurrent sibling still actively holding it - is never
-// released by a second attempt, which is refused exactly as it would be
-// refused by anyone else's claim holding the only slot.
-func TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires(t *testing.T) {
+// TestASameOwnerAndRunClaimIsNeverSelfHealedWhileStillAlive is #474 R11's
+// required regression, across two re-reviews (#5478443739 then
+// #5478592498): an earlier self-heal mechanism unconditionally deleted any
+// existing claim matching (owner, runID) once merely EXPIRED, which could
+// free a still-legitimately-running claim - expiry is a wall-clock
+// deadline, never proof an invocation has actually finished (the
+// reviewer's own provider budget does not cover every external operation
+// in its full lifecycle). Self-heal was removed rather than patched: a
+// fresh attempt for the SAME pair while the existing claim's owner is
+// reported ALIVE must be refused exactly as anyone else's claim holding
+// the only slot would be, however long it has been held, relying solely
+// on the general death-AND-expiry reclaim every other resource in this
+// system already uses.
+func TestASameOwnerAndRunClaimIsNeverSelfHealedWhileStillAlive(t *testing.T) {
 	store, err := OpenSQLiteOperationStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -331,15 +334,16 @@ func TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires(t *testing.T) {
 		t.Fatalf("the first claim: claimed=%v err=%v", claimed, err)
 	}
 
+	// Long past the claim's own TTL, with the owner still reported alive:
+	// a fresh attempt for the exact same pair is still refused.
+	clock.now = clock.now.Add(10 * reviewVerificationClaimTTL)
 	if _, claimedAgain, err := s.claimReviewVerificationSlot("controller-a", "run-1", 0); err != nil {
 		t.Fatal(err)
 	} else if claimedAgain {
-		t.Fatal("a second attempt for the SAME (owner, runID) pair deleted and replaced a still-active, unexpired claim")
+		t.Fatal("a second attempt for the SAME (owner, runID) pair deleted and replaced a still-reported-alive claim merely because it had expired")
 	}
 
-	// The original claim must still be exactly the one holding the slot -
-	// self-heal did not touch it at all, not merely "replaced it with an
-	// equivalent one".
+	// The original claim must still be exactly the one holding the slot.
 	remaining, err := store.ReviewVerificationClaims()
 	if err != nil {
 		t.Fatal(err)
@@ -353,11 +357,13 @@ func TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires(t *testing.T) {
 // #474 R11's required "live but expired [by the fixed minimum]" regression:
 // a review bound to an operator-configured budget LONGER than
 // reviewVerificationClaimTTL must not have its claim treated as abandoned
-// merely because that shorter fixed minimum elapsed. Both reclaim paths -
-// the general reclaimReviewVerificationClaims (death+expiry) a plain
-// Scheduler.Next already exercises, and claimReviewVerificationSlot's own
-// same-pair self-heal - must respect the LONGER ttl the caller actually
-// claimed with, never the fixed constant alone.
+// merely because that shorter fixed minimum elapsed. The general
+// death-AND-expiry reclaim (reclaimReviewVerificationClaims, the same path
+// a plain Scheduler.Next tick exercises) must respect the LONGER ttl the
+// caller actually claimed with, never the fixed constant alone - and,
+// consistent with R11's second re-review, recovery still requires the
+// owner be reported dead even once that longer budget has genuinely
+// elapsed.
 func TestALiveReviewWithALongerBudgetIsNotReclaimedAtTheFixedMinimumTTL(t *testing.T) {
 	store, err := OpenSQLiteOperationStore(t.TempDir())
 	if err != nil {
@@ -402,22 +408,25 @@ func TestALiveReviewWithALongerBudgetIsNotReclaimedAtTheFixedMinimumTTL(t *testi
 		t.Fatalf("the general reclaim path freed a claim still within its own longer budget: claims = %+v", remaining)
 	}
 
-	// Self-heal for the exact same (owner, runID) pair must likewise refuse:
-	// the claim is not yet expired BY ITS OWN TTL, regardless of the fixed
-	// minimum having elapsed.
+	// A fresh attempt for the exact same (owner, runID) pair must likewise
+	// refuse: the claim is not yet expired BY ITS OWN longer TTL, and the
+	// shared verification ceiling (occupied by the still-present claim)
+	// refuses a second one regardless.
 	if _, claimedAgain, err := live.claimReviewVerificationSlot("controller-a", "run-1", longBudget); err != nil {
 		t.Fatal(err)
 	} else if claimedAgain {
-		t.Fatal("self-heal released a claim still within its own longer budget merely because the fixed minimum TTL had elapsed")
+		t.Fatal("a claim still within its own longer budget was released merely because the fixed minimum TTL had elapsed")
 	}
 
-	// Once the review's OWN actual budget has genuinely elapsed, it is
-	// correctly reclaimable again (both paths already proven elsewhere for
-	// the ordinary, fixed-minimum case).
+	// Once the review's OWN actual budget has genuinely elapsed AND its
+	// owner is reported dead, it is correctly reclaimable again (#474 R11,
+	// second re-review: expiry alone is never enough, even past the
+	// review's own real budget - death is required too, exactly as for
+	// every other claim in this system).
 	clock.now = clock.now.Add(longBudget)
-	if _, claimedAfterRealExpiry, err := live.claimReviewVerificationSlot("controller-a", "run-1", longBudget); err != nil {
+	if _, claimedAfterRealExpiry, err := dead.claimReviewVerificationSlot("controller-a", "run-1", longBudget); err != nil {
 		t.Fatal(err)
 	} else if !claimedAfterRealExpiry {
-		t.Fatal("expected the claim to be recoverable once its own actual, longer budget had elapsed")
+		t.Fatal("expected the claim to be recoverable once its own actual, longer budget had elapsed and its owner was reported dead")
 	}
 }

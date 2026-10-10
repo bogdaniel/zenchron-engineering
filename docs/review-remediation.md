@@ -496,7 +496,8 @@ one:
 `TestAReviewVerificationClaimBlocksAnOrdinaryWorkOperation` (R8),
 `TestAnOrdinaryVerificationAcquisitionReclaimsADeadReviewClaim`,
 `TestALiveOwnersExpiredClaimIsNotReclaimed`,
-`TestAFailedReleaseIsRecoveredOnceExpiredByTheNextClaimForTheSameOwnerAndRun`,
+`TestAFailedReleaseIsRecoveredOnceExpiredAndDeadByTheNextClaimForTheSameOwnerAndRun`
+(renamed since - see the later correction requiring death too),
 and `TestReconcileReviewRemediationForRunSurfacesAReleaseFailure` (R9, the
 last in `runtime/review_remediation_trigger_test.go`, the rest in
 `runtime/review_verification_claim_test.go`), and
@@ -561,9 +562,11 @@ all closed with no new mechanism:
   operator sees both the reviewer's own failure and a release failure,
   never only whichever happened to be assigned first.
 
-`TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires` (R11) proves an
-unexpired same-pair claim is never touched, down to asserting the exact
-claim row is untouched, not merely "replaced with an equivalent one".
+`TestASameOwnerAndRunClaimIsNeverSelfHealedWhileStillAlive` (R11; later
+renamed from its original form, which required only expiry - see the
+further correction below) proves an unexpired same-pair claim is never
+touched, down to asserting the exact claim row is untouched, not merely
+"replaced with an equivalent one".
 `TestReconcileReviewRemediationForRunSurfacesBothTheReviewerAndReleaseFailure`
 (R9 follow-up) proves both failures survive in the combined error. Every
 new guard here was likewise deliberately disabled, confirmed to fail its
@@ -611,17 +614,81 @@ check) found R11 was not yet complete, plus one new gap:
 
 `TestALiveReviewWithALongerBudgetIsNotReclaimedAtTheFixedMinimumTTL` (R11
 follow-up) proves a claim within its own longer, caller-supplied budget is
-reclaimed by neither the general death+expiry path nor self-heal merely
-because the fixed 15-minute minimum elapsed, and is correctly reclaimable
-once its own real budget does.
-`TestLatestReviewDecisionRefusesAnIndexedTimestampDisagreement` (R12)
-proves the named forged-timestamp scenario directly: a genuinely older
-`APPROVE`, indexed with a timestamp forged newer than an existing `BLOCK`,
-is refused rather than read as the pull request's latest decision.
+not reclaimed by the general death+expiry path merely because the fixed
+15-minute minimum elapsed (recovery, once its owner is also reported dead,
+is proven in the same test - see the further correction below for why
+expiry alone is never enough even past this longer budget).
+`TestLatestReviewDecisionRefusesAnIndexedTimestampDisagreement` (R12; its
+assertion is strengthened below once ranking stops trusting the index at
+all) proves the named forged-timestamp scenario directly: a genuinely
+older `APPROVE`, indexed with a timestamp forged newer than an existing
+`BLOCK`, never wins.
 `TestLatestReviewDecisionStillPicksTheGenuinelyLatestDecision` proves the
 coherent case is unaffected, and
 `TestLatestReviewDecisionRefusesEveryOtherIndexedFieldDisagreement` covers
 `id`/`head_sha`/`run_id` the same way. Every new guard was again
+deliberately disabled, confirmed to fail its exact test, then restored.
+
+A THIRD exact-head re-review (#5478592498) found the R11 follow-up above
+was still not safe, and that R12's fix had a mirror-image gap of its own -
+both closed by narrowing, not adding:
+
+- **R11, second correction - expiry still never proves completion.** Even
+  with the TTL tied to `ReviewBudget().WallLimit`, self-heal remained
+  time-based: it deleted any claim matching the same `(owner, runID)` pair
+  once merely expired, without checking whether its owner was actually
+  dead. The reviewer's own provider budget does not cover every external
+  operation in `RunIndependentReview`'s full lifecycle (workspace cloning,
+  GitHub round trips), so a genuinely still-running, still-alive invocation
+  could still be in flight past its claim's expiry - "expired" is a
+  wall-clock deadline, never proof a specific invocation has finished.
+  Self-heal is REMOVED rather than patched again: requiring death too would
+  make it do nothing `reclaimReviewVerificationClaims` (already called at
+  the top of `claimReviewVerificationSlot`, for every claim regardless of
+  owner or run) does not already do, so there was no distinct behavior left
+  worth keeping. A release failure (#474 R9) is now recoverable once its
+  owning controller is both expired AND reported dead - the same bound
+  every other resource in this system already accepts (#490's own
+  `VerificationPermit` has no self-heal either) - never instantly on the
+  very next call for the same pair, because that instant guarantee is
+  precisely what could not be proven safe.
+- **R12, second correction - a MIRROR-IMAGE timestamp attack escaped the
+  first fix.** The first R12 fix still trusted `ORDER BY created_unix_nano
+  DESC LIMIT 1` to find the candidate row to validate, which only ever
+  protects a row AFTER the index has already (correctly or not) picked it.
+  If a genuinely NEWER decision (a `BLOCK`) has its OWN indexed timestamp
+  corrupted DOWNWARD, it sorts BELOW an older, uncorrupted decision (an
+  `APPROVE`) and is never even fetched - the per-row check can only
+  validate the row it is given, and validates the wrong one perfectly,
+  silently returning the older `APPROVE` as "latest." `LatestReviewDecision`
+  no longer orders by the index at all: it reads every row for the
+  `(repository, prNumber)`, decodes each document, and determines "latest"
+  by comparing each document's OWN `CreatedAt`/`ID` directly - the index is
+  used for NOTHING in that ranking, only for validating whichever row wins
+  by that document-level comparison. This closes both directions at once:
+  corrupting an index UPWARD cannot make an older row outrank a genuinely
+  newer one (ranking never consults it), and corrupting it DOWNWARD cannot
+  make a genuinely newer row escape scrutiny either (it still wins by its
+  own document and is validated regardless, then correctly refused for its
+  own corruption) - and, importantly, it no longer matters that review
+  decisions are never deleted (#233 acceptance C): a corrupted row that
+  never again wins by document comparison stays harmless forever, rather
+  than permanently poisoning every future read for that pull request.
+
+`TestASameOwnerAndRunClaimIsNeverSelfHealedWhileStillAlive` (R11, replacing
+the now-removed self-heal's own test) proves a claim is refused forever
+while its owner is reported alive, however long past its TTL.
+`TestAFailedReleaseIsRecoveredOnceExpiredAndDeadByTheNextClaimForTheSameOwnerAndRun`
+proves recovery still works once the owner is ALSO dead.
+`TestLatestReviewDecisionRefusesAnIndexedTimestampDisagreement` is
+rewritten to prove the attack is fully NEUTRALIZED (the genuinely newer,
+uncorrupted `BLOCK` is returned normally, not merely refused), and
+`TestLatestReviewDecisionRefusesWhenTheGenuinelyLatestRowIsItselfCorrupted`
+is the new mirror-image regression naming the exact reproduction
+(review #5478592498): a newer `BLOCK` with its OWN indexed timestamp
+corrupted downward is still correctly identified as latest by document
+ranking, and then correctly refused for its own corruption rather than
+silently yielding the older `APPROVE`. Every guard here was again
 deliberately disabled, confirmed to fail its exact test, then restored.
 
 ## Independent-review re-review hardening (B1, B2)
@@ -977,24 +1044,36 @@ application-level check, is load-bearing).
   pre-existing "indexed row/document mismatch" sub-test is the CI
   regression this interacted with, now passing again through
   `*ReviewDecisionIndexMismatchError`/`errors.As` classification.
-- `TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires` (R11) proves
-  self-heal never releases a still-unexpired same-`(owner, runID)` claim,
-  asserting the exact row is untouched.
-  `TestReconcileReviewRemediationForRunSurfacesBothTheReviewerAndRelease-
-  Failure` (R9 follow-up, `runtime/review_remediation_trigger_test.go`)
-  proves a reviewer failure and a release failure both survive in the
-  combined `errors.Join`ed error.
+- `TestASameOwnerAndRunClaimIsNeverSelfHealedWhileStillAlive` (R11) proves
+  a same-`(owner, runID)` claim is never released while its owner is
+  reported alive, however long past its TTL - self-heal (which required
+  only expiry) was removed rather than fixed again.
+  `TestAFailedReleaseIsRecoveredOnceExpiredAndDeadByTheNextClaimForThe-
+  SameOwnerAndRun` proves recovery still works once the owner is ALSO
+  dead, the same bound every other resource in this system already
+  accepts. `TestReconcileReviewRemediationForRunSurfacesBothTheReviewerAnd-
+  ReleaseFailure` (R9 follow-up,
+  `runtime/review_remediation_trigger_test.go`) proves a reviewer failure
+  and a release failure both survive in the combined `errors.Join`ed
+  error.
 - `TestALiveReviewWithALongerBudgetIsNotReclaimedAtTheFixedMinimumTTL` (R11
   follow-up) proves a claim within its own longer, caller-supplied `ttl`
-  survives both the general reclaim path and self-heal past the fixed
-  15-minute minimum, and is reclaimable once its own real budget elapses.
+  survives the general death+expiry reclaim path past the fixed 15-minute
+  minimum, reclaimable only once BOTH its own real budget elapses AND its
+  owner is reported dead.
 - `TestLatestReviewDecisionRefusesAnIndexedTimestampDisagreement`,
+  `TestLatestReviewDecisionRefusesWhenTheGenuinelyLatestRowIsItselfCorrupted`,
   `TestLatestReviewDecisionStillPicksTheGenuinelyLatestDecision` and
   `TestLatestReviewDecisionRefusesEveryOtherIndexedFieldDisagreement` (R12,
-  `runtime/review_store_test.go`) prove `LatestReviewDecision` cross-checks
-  all six indexed columns against the document, including the exact named
-  scenario: an older `APPROVE` with a forged, newer-looking indexed
-  timestamp never overrides a genuinely newer `BLOCK`.
+  `runtime/review_store_test.go`) prove `LatestReviewDecision` ranks
+  decisions by each document's OWN `CreatedAt`/`ID` rather than the index,
+  then cross-checks all six indexed columns against the winning document -
+  closing BOTH directions of the named scenario: an older `APPROVE` with a
+  forged, newer-looking indexed timestamp never outranks a genuinely newer
+  `BLOCK` (the attack is neutralized, not merely refused), and a genuinely
+  newer `BLOCK` whose OWN indexed timestamp is corrupted downward is still
+  correctly identified as latest and then correctly refused for its own
+  corruption, never silently yielding the older `APPROVE` in its place.
 
 **Still deferred, and why:** the residual external-head TOCTOU between this
 gate's last freshness check and its SQLite commit (explicitly documented
