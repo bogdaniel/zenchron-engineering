@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -103,6 +104,117 @@ func TestProductAndWorkGraphWireSchemasAndAssociation(t *testing.T) {
 
 	wire(t, a, "/v1/products/unknown", "GET", a.Token, "error", 404)
 	wire(t, a, "/v1/workgraphs/unknown", "GET", a.Token, "error", 404)
+}
+
+// nextHref extracts the href of this page's "next" pager link, the way a
+// browser actually would - by reading the rendered anchor, not by
+// recomputing what the test thinks the offset ought to be. Empty means no
+// next link was rendered.
+func nextHref(t *testing.T, body []byte) string {
+	t.Helper()
+	m := regexp.MustCompile(`href="([^"]+)">next`).FindSubmatch(body)
+	if m == nil {
+		return ""
+	}
+	return string(m[1])
+}
+
+// prevHref is nextHref's complement for the "previous" pager link.
+func prevHref(t *testing.T, body []byte) string {
+	t.Helper()
+	m := regexp.MustCompile(`href="([^"]+)">.*previous`).FindSubmatch(body)
+	if m == nil {
+		return ""
+	}
+	return string(m[1])
+}
+
+// TestProductDetailNextAndPreviousLinksActuallyAdvanceThePage is the #550
+// review's exact regression: a rendered pager link must use the SAME query
+// parameter the handler reads back (graphs_offset, not offset) - otherwise
+// the URL changes but the handler keeps serving page one. This follows the
+// REAL rendered href, the way a browser click would, rather than
+// reconstructing what the test believes the next URL should be.
+func TestProductDetailNextAndPreviousLinksActuallyAdvanceThePage(t *testing.T) {
+	dir := t.TempDir()
+	store, err := rt.OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(600, 0).UTC()
+	p := product.Product{SchemaVersion: product.ProductSchemaVersion, Revision: 1, Repositories: []string{"acme/repo"}, CreatedAt: at}
+	p.Name = "checkout"
+	if p.ID, err = product.ProductID(p.Name); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AdoptProductRevision(p); err != nil {
+		t.Fatal(err)
+	}
+	const total = webPageSize + 1
+	var lastGraphID string
+	for i := range total {
+		at := at.Add(time.Duration(i) * time.Second)
+		graph, err := orchestration.WorkGraphProposal{Name: fmt.Sprintf("graph-%03d", i), Revision: 1, Units: []orchestration.WorkUnit{
+			{ID: "a", Purpose: "do the work", Role: "implementer", Issue: 2000 + i},
+		}}.Compose("acme/repo", "claude", "operator@example", at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.AdoptWorkGraphRevision(graph); err != nil {
+			t.Fatal(err)
+		}
+		association, err := product.NewGraphAssociation(p.ID, graph.ID, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.AssociateWorkGraph(association); err != nil {
+			t.Fatal(err)
+		}
+		if i == total-1 {
+			lastGraphID = graph.ID
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := rt.OpenReadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	a := &API{Store: reader, Token: "test-token", ControllerRoot: filepath.Join(dir, "controller"), Now: func() time.Time { return at }}
+	w := webFrom(a)
+
+	first := getWeb(t, w, "/products/"+p.ID, a.Token, 200)
+	if bytes.Contains(first, []byte(lastGraphID)) {
+		t.Fatalf("the 101st graph must not appear on page one: %s", first)
+	}
+	if prevHref(t, first) != "" {
+		t.Fatalf("page one must offer no previous link, got %q", prevHref(t, first))
+	}
+	next := nextHref(t, first)
+	if next == "" {
+		t.Fatal("page one must offer a next link")
+	}
+	if !strings.Contains(next, "graphs_offset=") {
+		t.Fatalf("the rendered next link must use the SAME query parameter the handler reads (graphs_offset): %q", next)
+	}
+
+	second := getWeb(t, w, next, a.Token, 200)
+	if !bytes.Contains(second, []byte(lastGraphID)) {
+		t.Fatalf("following the real next link must actually advance to the 101st graph, got: %s", second)
+	}
+	if nextHref(t, second) != "" {
+		t.Fatalf("the final (second) page must offer no next link, got %q", nextHref(t, second))
+	}
+	back := prevHref(t, second)
+	if back == "" {
+		t.Fatal("the second page must offer a previous link")
+	}
+	returned := getWeb(t, w, back, a.Token, 200)
+	if bytes.Contains(returned, []byte(lastGraphID)) {
+		t.Fatalf("following the real previous link must return to page one, got: %s", returned)
+	}
 }
 
 // TestProductAndWorkGraphListsPaginateWithStableBoundaries proves F4's

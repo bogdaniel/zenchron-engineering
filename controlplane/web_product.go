@@ -27,14 +27,17 @@ func pageOffset(r *http.Request, key string) (offset int64, ok bool) {
 }
 
 // pageLinks builds the prev/next link for a bounded list page: path is the
-// bare route ("/products"), offset is the CURRENT page's, and hasMore says
-// whether a next page exists. An empty string means no link.
-func pageLinks(path string, offset int64, hasMore bool) (prev, next string) {
+// bare route ("/products"), key is the SAME query parameter name the
+// handler reads back with pageOffset (an offset link whose key the handler
+// does not read is a link to the first page, silently - see #550 review),
+// offset is the CURRENT page's, and hasMore says whether a next page
+// exists. An empty string means no link.
+func pageLinks(path, key string, offset int64, hasMore bool) (prev, next string) {
 	link := func(o int64) string {
 		if o == 0 {
 			return path
 		}
-		return fmt.Sprintf("%s?offset=%d", path, o)
+		return fmt.Sprintf("%s?%s=%d", path, key, o)
 	}
 	if offset > 0 {
 		prev = link(max(0, offset-webPageSize))
@@ -68,7 +71,7 @@ func (w *Web) handleProducts(rw http.ResponseWriter, r *http.Request) {
 	for _, p := range products {
 		out = append(out, ProductSummary{ID: p.ID, Name: p.Name, Revision: p.Revision, Repositories: p.Repositories})
 	}
-	prev, next := pageLinks("/products", offset, hasMore)
+	prev, next := pageLinks("/products", "offset", offset, hasMore)
 	w.render(rw, productsTemplate, productsData{ObservedAt: w.now(), Products: out, Offset: offset, PrevLink: prev, NextLink: next})
 }
 
@@ -88,7 +91,7 @@ func (w *Web) handleProductDetail(rw http.ResponseWriter, r *http.Request) {
 	detail, status, _ := readProductDetail(w.Store, r.PathValue("id"), int(offset), webPageSize)
 	switch status {
 	case 200:
-		prev, next := pageLinks("/products/"+detail.ID, offset, detail.GraphsHasMore)
+		prev, next := pageLinks("/products/"+detail.ID, "graphs_offset", offset, detail.GraphsHasMore)
 		w.render(rw, productDetailTemplate, productDetailData{ObservedAt: w.now(), Product: detail, PrevLink: prev, NextLink: next})
 	case 404:
 		w.renderNotFound(rw)
@@ -120,7 +123,7 @@ func (w *Web) handleWorkGraphs(rw http.ResponseWriter, r *http.Request) {
 	for _, g := range graphs {
 		out = append(out, WorkGraphSummary{ID: g.ID, Repository: g.Repository, AgentID: g.AgentID, Name: g.Name, Revision: g.Revision})
 	}
-	prev, next := pageLinks("/workgraphs", offset, hasMore)
+	prev, next := pageLinks("/workgraphs", "offset", offset, hasMore)
 	w.render(rw, workGraphsTemplate, workGraphsData{ObservedAt: w.now(), Graphs: out, Offset: offset, PrevLink: prev, NextLink: next})
 }
 
