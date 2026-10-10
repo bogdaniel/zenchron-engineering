@@ -1515,7 +1515,7 @@ func (v BaselineGoVerifier) ProducedEvidenceClasses() []domain.EvidenceClass {
 }
 
 func (v BaselineGoVerifier) Definition() string {
-	d, _ := Digest(struct{ Name, Version string }{"baseline-go-offline", "gofmt-vet-test-v2"})
+	d, _ := Digest(struct{ Name, Version string }{"baseline-go-offline", "gofmt-vet-test-v3"})
 	return d
 }
 func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest) (AssuranceResult, error) {
