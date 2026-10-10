@@ -74,6 +74,26 @@ func (s *SQLiteOperationStore) AssociatedProduct(graphID string) (string, bool, 
 	return productID, err == nil, err
 }
 
+// AssociatedGraphs reads every graph id associated with a product, the
+// reverse of AssociatedProduct.
+func (s *SQLiteOperationStore) AssociatedGraphs(productID string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT graph_id FROM product_graph_associations
+		WHERE product_id = ? ORDER BY associated_unix_nano ASC, graph_id ASC`, productID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var graphIDs []string
+	for rows.Next() {
+		var graphID string
+		if err := rows.Scan(&graphID); err != nil {
+			return nil, err
+		}
+		graphIDs = append(graphIDs, graphID)
+	}
+	return graphIDs, rows.Err()
+}
+
 // currentWorkGraphTx mirrors runtime.WorkGraph (workgraph_store.go), but takes
 // a sqlExecutor so AssociateWorkGraph can read it inside its own transaction
 // instead of racing a second, separate read against the same table.

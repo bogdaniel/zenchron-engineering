@@ -62,6 +62,18 @@ type PlanStageDetail struct {
 	// bundle or authority decision and human evidence it references, never a
 	// run of its own.
 	Gate *PlanGateRefs `json:"gate,omitempty"`
+	// Review is this stage's latest recorded verdict, present only when the
+	// stage is a reviewer. It names the exact candidate/tree the verdict is
+	// about - staleness against a newer upstream head is not implied.
+	Review *PlanStageReviewDTO `json:"review,omitempty"`
+}
+
+type PlanStageReviewDTO struct {
+	Verdict   string   `json:"verdict"`
+	Reason    string   `json:"reason,omitempty"`
+	Findings  []string `json:"findings,omitempty"`
+	Candidate string   `json:"candidate"`
+	Tree      string   `json:"tree"`
 }
 
 type PlanGateRefs struct {
@@ -156,6 +168,12 @@ func planDetailProjection(v rt.PlanView) PlanDetail {
 				s.Gate = &PlanGateRefs{
 					Claims: slices.Clone(g.Claims), Evidence: refDTO(g.Evidence), Decision: refDTO(g.Decision),
 					HumanEvidenceID: g.HumanEvidenceID, ProvenHeads: slices.Clone(g.ProvenHeads),
+				}
+			}
+			if r := p.Review; r != nil {
+				s.Review = &PlanStageReviewDTO{
+					Verdict: r.Verdict, Reason: r.Reason, Findings: slices.Clone(r.Findings),
+					Candidate: r.Candidate, Tree: r.Tree,
 				}
 			}
 		}

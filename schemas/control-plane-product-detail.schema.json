@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "product_id",
+    "name",
+    "revision",
+    "repositories",
+    "graphs"
+  ],
+  "properties": {
+    "product_id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "integer"
+    },
+    "repositories": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision"
+      ],
+      "properties": {
+        "revision": {
+          "type": "integer"
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "revision"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          }
+        },
+        "context_policy": {
+          "type": "string"
+        },
+        "settings": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "graphs": {
+      "type": "array",
+      "items": {
+        "$ref": "control-plane-workgraph-detail.schema.json"
+      }
+    }
+  }
+}

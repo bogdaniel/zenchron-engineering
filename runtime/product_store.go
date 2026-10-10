@@ -102,6 +102,34 @@ func (s *SQLiteOperationStore) CurrentProduct(productID string) (product.Product
 	return currentProductTx(s.db, productID)
 }
 
+// Products reads every product's current revision, oldest product first.
+//
+// ponytail: reads every product's current revision each call; fine for an
+// operator's tens of products, index by name if products ever number in the
+// thousands.
+func (s *SQLiteOperationStore) Products() ([]product.Product, error) {
+	rows, err := s.db.Query(`SELECT document FROM product_revisions AS current
+		WHERE revision = (SELECT MAX(revision) FROM product_revisions WHERE product_id = current.product_id)
+		ORDER BY created_unix_nano ASC, product_id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var products []product.Product
+	for rows.Next() {
+		var document string
+		if err := rows.Scan(&document); err != nil {
+			return nil, err
+		}
+		p, err := decodeProduct(document)
+		if err != nil {
+			return nil, err
+		}
+		products = append(products, p)
+	}
+	return products, rows.Err()
+}
+
 func productRevisionTx(db sqlExecutor, productID string, revision int) (product.Product, bool, error) {
 	var document string
 	err := db.QueryRow(`SELECT document FROM product_revisions WHERE product_id = ? AND revision = ?`,

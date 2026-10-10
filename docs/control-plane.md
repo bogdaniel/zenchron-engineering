@@ -26,6 +26,30 @@ The read routes are GET (the two governed POST routes are in "Governed actions" 
 | `/v1/runs/{id}/events?after=0&limit=100` | Run-local event metadata |
 | `/v1/runs/{id}/stream` | Per-run SSE: snapshot, then events (below) |
 | `/v1/plans/{id}` | Plan summary, revisions and stage counts |
+| `/v1/plans/{id}/detail` | Plan stages, dependencies, bindings, review verdicts and budget envelope |
+| `/v1/products` | Product (#476) summaries: identity, revision, repositories |
+| `/v1/products/{id}` | One product's current configuration and every associated WorkGraph's full detail (see `/v1/workgraphs/{id}` below) - the Product Workspace's one-page entry point (#479) |
+| `/v1/workgraphs` | WorkGraph (#472) summaries |
+| `/v1/workgraphs/{id}` | One WorkGraph's units, frontier, independent-review state, each unit's full run detail and its own open #473 decisions |
+
+### Product Workspace (#479)
+
+`/v1/products/{id}` and `/v1/workgraphs/{id}` (and their console pages below)
+are read-only aggregations over four existing, separately-owned projections -
+Product (#476), WorkGraph (#472), EngineeringRun (#470/#392) and the typed
+communication protocol (#473) - never a second truth store. A WorkGraph with
+no product association yet simply has none; nothing is fabricated.
+
+Every open decision - a `#473 decision_request` message, or a Plan
+`human_decision_gate`'s `Decision` ref shown at `/v1/plans/{id}/detail` - is
+shown exactly as durably recorded, with **no resolve action**: #508
+(`DecisionResolution`) exists and has a real governed path
+(`Supervisor.ResolveDecision`, reached today only from the CLI's `autonomy
+workgraph resolve <request-id> <outcome>`), but #398's `governedControl`
+allowlist is still frozen at exactly `stop`/`plan-reject` (see "Governed
+actions" below) and does not reach it. Resolving a decision from this console
+would require expanding that frozen allowlist, which is its own review, not
+an implementation detail of this one - see #398.
 
 Limits are 1–500. Event pages return `next_after` and `has_more`; pass
 `next_after` as the next exclusive `after`. SQLite fetches at most `limit+1`
@@ -141,6 +165,11 @@ or SQLite handle for it:
 | `/overview` | controller dimensions (durable consistency, serving, projection, role, admission), fleet counts by disposition and held material, plans |
 | `/runs` | the fleet, filterable by `?status=active\|waiting\|failed\|completed\|cancelled\|held` and `?source=owner/repo#123` |
 | `/runs/{id}` | one run's full detail: worker, candidate, controller identity, current operation (live vs. journal), held material, assurance, publication authority, authority request, budgets and attempts, and a paginated causal event timeline (`?after=`, via the same bounded `EventsPage`) |
+| `/plans/{id}` | one plan revision's stages, dependencies, bindings, review verdicts and budget envelope |
+| `/products` | every adopted Product |
+| `/products/{id}` | the Product Workspace: one product's repositories, current configuration, and every associated WorkGraph's units/runs/review-state/open-decisions on one page |
+| `/workgraphs` | every adopted WorkGraph |
+| `/workgraphs/{id}` | one WorkGraph's engineering-oriented drill-down: units, frontier, independent-review state, per-unit run detail and open decisions |
 
 A browser cannot attach `Authorization` on a plain navigation, so the console
 accepts the same token via a cookie instead: open any console page, paste

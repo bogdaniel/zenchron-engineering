@@ -293,6 +293,10 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{id}/stream", a.stream)
 	mux.HandleFunc("GET /v1/plans/{id}", a.plan)
 	mux.HandleFunc("GET /v1/plans/{id}/detail", a.planDetail)
+	mux.HandleFunc("GET /v1/products", a.products)
+	mux.HandleFunc("GET /v1/products/{id}", a.product)
+	mux.HandleFunc("GET /v1/workgraphs", a.workGraphs)
+	mux.HandleFunc("GET /v1/workgraphs/{id}", a.workGraph)
 	mux.HandleFunc("POST /v1/runs/{id}/stop", a.stop)
 	mux.HandleFunc("POST /v1/plans/{id}/reject", a.reject)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

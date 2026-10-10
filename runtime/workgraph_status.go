@@ -55,6 +55,10 @@ type WorkGraphUnitView struct {
 	// AwaitingDecision is a readiness hold from an owner outside the graph.
 	AwaitingDecision *orchestration.DecisionWait `json:"awaiting_decision,omitempty"`
 	RunID            string                      `json:"run_id,omitempty"`
+	// BatchID is the unit's own one-issue batch (orchestration.WorkUnitBatchID):
+	// the #473 message scope a reader must use to find this unit's open
+	// decisions, since one graph's units do not share a message scope.
+	BatchID string `json:"batch_id,omitempty"`
 	// Child is the child run's own #470 projection, when this unit is
 	// activated. The graph does not restate what that view already says.
 	Child *OrchestrationItemView `json:"child,omitempty"`
@@ -158,7 +162,7 @@ func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now 
 		}
 		if activation, activated := activations[unit.ID]; activated {
 			child := children[unit.ID]
-			out.RunID, out.Child, out.Output = activation.RunID, &child, facts[unit.ID].Output
+			out.RunID, out.BatchID, out.Child, out.Output = activation.RunID, activation.BatchID, &child, facts[unit.ID].Output
 		}
 		view.Counts.Add(out.State)
 		view.Units = append(view.Units, out)

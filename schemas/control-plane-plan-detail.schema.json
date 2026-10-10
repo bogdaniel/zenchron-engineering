@@ -155,6 +155,39 @@
                 }
               }
             }
+          },
+          "review": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "verdict",
+              "candidate",
+              "tree"
+            ],
+            "properties": {
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "accepted",
+                  "blocked"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "findings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "candidate": {
+                "type": "string"
+              },
+              "tree": {
+                "type": "string"
+              }
+            }
           }
         }
       }

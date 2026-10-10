@@ -167,6 +167,10 @@ func TestPagesDeclareLiveRegionsAndNeverRenderLive(t *testing.T) {
 		{"overview", overviewTemplate, overviewData{}, []string{"overview-live"}},
 		{"runs", runsTemplate, runsData{}, []string{"runs-meta", "runs-table"}},
 		{"run detail", runDetailTemplate, runDetailData{Status: RunDetail{ID: "r"}}, []string{"run-live"}},
+		{"products", productsTemplate, productsData{}, []string{"products-meta", "products-table"}},
+		{"product detail", productDetailTemplate, productDetailData{Product: ProductDetail{ID: "p"}}, []string{"product-live"}},
+		{"work graphs", workGraphsTemplate, workGraphsData{}, []string{"workgraphs-meta", "workgraphs-table"}},
+		{"work graph detail", workGraphDetailTemplate, workGraphDetailData{Graph: WorkGraphDetail{ID: "g"}}, []string{"workgraph-live"}},
 	}
 	for _, p := range pages {
 		out := renderTemplate(t, p.tmpl, p.data)

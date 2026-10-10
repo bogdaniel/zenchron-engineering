@@ -1,0 +1,31 @@
+{{define "title"}}work graphs{{end}}
+{{define "content"}}
+<section class="panel">
+  <h1>work graphs</h1>
+  <p class="meta" id="workgraphs-meta" data-live>observed {{fmtTime .ObservedAt}} · {{len .Graphs}} graph{{if ne (len .Graphs) 1}}s{{end}}</p>
+  <table class="runs" id="workgraphs-table" data-live>
+    <thead>
+      <tr>
+        <th>graph</th>
+        <th>name</th>
+        <th>repository</th>
+        <th>agent</th>
+        <th>revision</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Graphs}}
+      <tr>
+        <td><a class="mono" href="/workgraphs/{{.ID}}">{{.ID}}</a></td>
+        <td>{{.Name}}</td>
+        <td>{{.Repository}}</td>
+        <td class="mono">{{.AgentID}}</td>
+        <td>{{.Revision}}</td>
+      </tr>
+      {{else}}
+      <tr><td colspan="5" class="empty">no work graph has been adopted yet</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}

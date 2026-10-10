@@ -1,0 +1,29 @@
+{{define "title"}}products{{end}}
+{{define "content"}}
+<section class="panel">
+  <h1>products</h1>
+  <p class="meta" id="products-meta" data-live>observed {{fmtTime .ObservedAt}} · {{len .Products}} product{{if ne (len .Products) 1}}s{{end}}</p>
+  <table class="runs" id="products-table" data-live>
+    <thead>
+      <tr>
+        <th>product</th>
+        <th>name</th>
+        <th>revision</th>
+        <th>repositories</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Products}}
+      <tr>
+        <td><a class="mono" href="/products/{{.ID}}">{{.ID}}</a></td>
+        <td>{{.Name}}</td>
+        <td>{{.Revision}}</td>
+        <td>{{range .Repositories}}<span class="pill mono">{{.}}</span> {{else}}<span class="muted">none</span>{{end}}</td>
+      </tr>
+      {{else}}
+      <tr><td colspan="4" class="empty">no product has been adopted yet</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
