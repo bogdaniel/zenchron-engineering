@@ -108,6 +108,9 @@ func (s *Supervisor) adoptRevision(proposed orchestration.WorkGraph) error {
 		}
 		return nil
 	case found:
+		if current.ObjectivePlan != nil {
+			return errors.New("an objective work graph is compiled through its plan, not an operator graph mutation")
+		}
 		activations, err := s.deps.Store.WorkUnitActivations(proposed.ID)
 		if err != nil {
 			return err
@@ -139,6 +142,10 @@ func (s *Supervisor) reconcileWorkGraphs() []string {
 	}
 	var problems []string
 	for _, graph := range graphs {
+		// The plan owns assignments, gates and aggregate budget.
+		if graph.ObjectivePlan != nil {
+			continue
+		}
 		problems = append(problems, s.activateGraphFrontier(graph.ID)...)
 	}
 	return problems

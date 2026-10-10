@@ -250,6 +250,29 @@ declare a `plan` stage kind. Both refusals are in the schemas.
 
 ## Approval
 
+### Objective-bound operational graphs
+
+`autonomy orchestrate objective <existing-issue>` requires the owning supervisor.
+It proposes through the existing planner and binds a durable WorkGraph to the
+exact stored plan revision and digest. Binding grants no execution authority:
+the normal approval of the exact revision, plan digest and assignment digest
+remains necessary. Candidate stages execute through graph-backed ordinary runs;
+review stages and typed gates retain plan-owned semantics. The command has no
+flat orchestration fallback. A started objective graph's immutable plan binding
+cannot be replaced by another proposal.
+
+`PlanStage` and `TemplateStage` optionally carry `execution_kind`, with values
+`provider` and `integration_compose`. Omission preserves ordinary provider
+execution. Explicit composition requires an `agent` stage with role `integrator`
+and at least two dependencies. Gates and planner-role stages cannot select an
+execution algorithm. Role never implies composition. The field is planning
+input until validated and approved; it grants no additional authority.
+
+These optional JSON fields preserve existing artifacts when absent. New
+objective graph bindings and explicit algorithms require a compatible build;
+older controllers must not adopt their persisted state. There is no new
+scheduler, policy system or dependency.
+
 A proposed plan never executes because it parsed. The lifecycle is:
 
 ```text

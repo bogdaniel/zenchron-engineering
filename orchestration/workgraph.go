@@ -75,6 +75,9 @@ type WorkGraph struct {
 	RequestedBy string     `json:"requested_by,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	Units       []WorkUnit `json:"units"`
+	// ObjectivePlan binds candidate-producing units to an immutable plan.
+	// Only the runtime compiler sets it; ordinary graph proposals cannot.
+	ObjectivePlan *domain.PlanRef `json:"objective_plan,omitempty"`
 }
 
 // WorkUnit is one bounded engineering responsibility and the dependencies whose
@@ -258,6 +261,9 @@ func (p WorkGraphProposal) Compose(repository, agentID, requestedBy string, at t
 // deterministic admission check: a mutation proposed by a model is admitted only
 // by passing this and ValidateMutation, never by being plausible.
 func (g WorkGraph) Validate() error {
+	if g.ObjectivePlan != nil && (strings.TrimSpace(g.ObjectivePlan.ID) == "" || g.ObjectivePlan.Revision < 1 || strings.TrimSpace(g.ObjectivePlan.Digest) == "") {
+		return errors.New("an objective work graph binds an exact plan revision and digest")
+	}
 	if g.SchemaVersion != WorkGraphSchemaVersion {
 		return fmt.Errorf("work graph schema version %q is not %q", g.SchemaVersion, WorkGraphSchemaVersion)
 	}
@@ -319,7 +325,7 @@ func (g WorkGraph) Validate() error {
 		// its own bound child execution, and the runtime allows one live run
 		// per issue, so one of them could never start - a graph that can never
 		// finish, refused when it is proposed rather than discovered later.
-		if other, taken := issues[unit.Issue]; taken {
+		if other, taken := issues[unit.Issue]; taken && g.ObjectivePlan == nil {
 			return fmt.Errorf("work units %q and %q both perform issue %d, which can have one live run", other, unit.ID, unit.Issue)
 		}
 		issues[unit.Issue] = unit.ID
@@ -365,6 +371,9 @@ func (g WorkGraph) Validate() error {
 // activation records and their child runs are untouched by it, and a run's
 // budget is the run's own.
 func ValidateMutation(current, next WorkGraph, activated map[string]bool) error {
+	if current.ObjectivePlan != nil || next.ObjectivePlan != nil {
+		return errors.New("objective graph revisions are governed by their immutable plan binding")
+	}
 	if err := next.Validate(); err != nil {
 		return err
 	}

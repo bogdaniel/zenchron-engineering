@@ -208,6 +208,13 @@
         },
         "substitutes_role": {
           "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/role"
+        },
+        "execution_kind": {
+          "type": "string",
+          "enum": [
+            "provider",
+            "integration_compose"
+          ]
         }
       }
     },

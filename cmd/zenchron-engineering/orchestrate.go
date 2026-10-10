@@ -14,7 +14,7 @@ import (
 )
 
 const orchestrateUsage = "usage: zenchron-engineering autonomy orchestrate " +
-	"{issues <n> <n>... --agent <id> [--repo owner/name] [--text]|status <batch> [--text]} [--config <path>]"
+	"{objective <issue> [--agent <id>] [--template <id>]|issues <n> <n>... --agent <id> [--repo owner/name] [--text]|status <batch> [--text]} [--config <path>]"
 
 // autonomyOrchestrate is basic explicit orchestration (#470): hand a running
 // supervisor a bounded set of existing issues and one agent ONCE, and read the
@@ -24,6 +24,27 @@ func autonomyOrchestrate(args []string, stdout io.Writer) (int, error) {
 		return runtime.ExitInvalid, errors.New(orchestrateUsage)
 	}
 	switch args[0] {
+	case "objective":
+		issue, err := strconv.Atoi(args[1])
+		if err != nil || issue <= 0 {
+			return runtime.ExitInvalid, fmt.Errorf("objective issue must be a positive integer, got %q", args[1])
+		}
+		flags, err := parseAutonomyFlags(args[2:])
+		if err != nil {
+			return runtime.ExitInvalid, err
+		}
+		config, err := loadOrchestrationConfig(flags)
+		if err != nil {
+			return runtime.ExitInvalid, err
+		}
+		if !runtime.SupervisorRunning(config.StateDir) {
+			return runtime.ExitInvalid, errors.New("objective orchestration needs its owning supervisor; run `zenchron-engineering serve` first")
+		}
+		flags.ObjectiveWorkflow = true
+		if delegated, code, err := delegatePlanRevision(flags, autonomyOverrides{}, "", issue, stdout); delegated {
+			return code, err
+		}
+		return runtime.ExitInvalid, errors.New("the objective's supervisor stopped before intake; restart it and submit again")
 	case "issues":
 		var issues []int
 		rest := args[1:]
