@@ -203,11 +203,13 @@
       "sources": [
         "runtime/workgraph*.go",
         "orchestration/workgraph*.go",
-        "runtime/integration_dispatch.go"
+        "runtime/integration_dispatch.go",
+        "runtime/objective_workgraph.go"
       ],
       "tests": [
         "runtime/workgraph*_test.go",
-        "runtime/compose_integration_recovery_test.go"
+        "runtime/compose_integration_recovery_test.go",
+        "runtime/objective_workgraph_test.go"
       ]
     },
     {
@@ -244,13 +246,15 @@
       "sources": [
         "runtime/plan_*.go",
         "runtime/planner.go",
-        "planning/*.go"
+        "planning/*.go",
+        "runtime/planner_proposal.go"
       ],
       "tests": [
         "runtime/plan_*_test.go",
         "runtime/planner*_test.go",
         "runtime/planning_*_test.go",
-        "runtime/sixth_dogfood_test.go"
+        "runtime/sixth_dogfood_test.go",
+        "runtime/objective_workgraph_test.go"
       ]
     },
     {
@@ -428,11 +432,13 @@
       "sources": [
         "runtime/tool_*.go",
         "runtime/sandbox.go",
-        "runtime/toolchain_probe.go"
+        "runtime/toolchain_probe.go",
+        "runtime/go_assurance_environment.go"
       ],
       "tests": [
         "runtime/tool_*_test.go",
-        "runtime/sandbox*_test.go"
+        "runtime/sandbox*_test.go",
+        "runtime/go_assurance_environment_test.go"
       ]
     },
     {
