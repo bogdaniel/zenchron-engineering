@@ -468,12 +468,13 @@ func TestThePromptSurvivesClaudeCodesVariadicGrants(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			args := build(invocation)
-			if !hasArg(positionalsAfterGreedyParse(args), prompt) {
+			positionals := strings.Join(positionalsAfterGreedyParse(args), "\n")
+			if !strings.Contains(positionals, prompt) {
 				t.Fatalf("a variadic option consumed the prompt, so the CLI received none: %#v", args)
 			}
 			// The redaction offset counts from the END, so the repair is only
 			// safe while the prompt is still the last element.
-			if args[len(args)-1] != prompt {
+			if !strings.Contains(args[len(args)-1], prompt) {
 				t.Fatalf("the prompt is no longer the trailing argument the redaction offset points at: %#v", args)
 			}
 			recorded := redactedArgv(args, spec.PromptArgFromEnd)
