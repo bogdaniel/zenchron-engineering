@@ -172,15 +172,6 @@
                   "blocked"
                 ]
               },
-              "reason": {
-                "type": "string"
-              },
-              "findings": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              },
               "candidate": {
                 "type": "string"
               },

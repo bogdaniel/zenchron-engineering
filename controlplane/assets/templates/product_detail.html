@@ -17,37 +17,27 @@
   </table>
 </section>
 
-{{range $p.Graphs}}
-{{$g := .}}
 <section class="panel">
-  <h2><a href="/workgraphs/{{$g.ID}}">{{$g.Name}}</a> <span class="muted mono">{{$g.ID}}</span></h2>
-  <p class="meta">{{$g.Repository}} · agent <span class="mono">{{$g.AgentID}}</span> · revision {{$g.Revision}}
-    · {{index $g.Counts "completed"}} completed / {{index $g.Counts "total"}} units
-    · {{index $g.Counts "blocked"}} blocked
-    · {{index $g.Counts "awaiting_decision"}} awaiting decision</p>
+  <h2>associated work graphs</h2>
+  <p class="muted">each graph's full unit/run/review/decision detail is on its own page - this list stays cheap to refresh regardless of how many units a graph has.</p>
   <table class="runs">
     <thead>
-      <tr><th>unit</th><th>role</th><th>state</th><th>review</th><th>open decisions</th><th>run</th><th>pull request</th></tr>
+      <tr><th>graph</th><th>name</th><th>repository</th><th>agent</th><th>revision</th></tr>
     </thead>
     <tbody>
-      {{range $g.Units}}
+      {{range $p.Graphs}}
       <tr>
-        <td class="mono">{{.UnitID}}</td>
-        <td>{{.Role}}</td>
-        <td><span data-state="{{.State}}">{{.State}}</span>{{if .Reason}}<div class="muted">{{.Reason}}</div>{{end}}</td>
-        <td>{{if .RequiresReview}}{{if .ReviewApproved}}<span data-state="accepted">approved</span>{{else}}<span data-state="blocked">pending</span>{{end}}{{else}}<span class="muted">not required</span>{{end}}</td>
-        <td>{{if .OpenDecisions}}<span class="badge held">{{len .OpenDecisions}} open</span>{{else if .Hold}}<span class="badge held">held</span>{{else}}<span class="muted">none</span>{{end}}</td>
-        <td>{{if .Run}}<a class="mono" href="/runs/{{.Run.ID}}">{{.Run.ID}}</a>{{else}}<span class="muted">not started</span>{{end}}</td>
-        <td>{{with .Run}}{{with .PullRequest}}#{{.Number}} <span class="muted">{{.State}}</span>{{else}}<span class="muted">—</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
+        <td><a class="mono" href="/workgraphs/{{.ID}}">{{.ID}}</a></td>
+        <td>{{.Name}}</td>
+        <td>{{.Repository}}</td>
+        <td class="mono">{{.AgentID}}</td>
+        <td>{{.Revision}}</td>
       </tr>
       {{else}}
-      <tr><td colspan="7" class="empty">this graph has no units</td></tr>
+      <tr><td colspan="5" class="empty">no work graph is associated with this product yet</td></tr>
       {{end}}
     </tbody>
   </table>
 </section>
-{{else}}
-<section class="panel"><p class="empty muted">no work graph is associated with this product yet</p></section>
-{{end}}
 </div>
 {{end}}

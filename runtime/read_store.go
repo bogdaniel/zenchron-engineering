@@ -8,6 +8,7 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 	"github.com/bogdaniel/zenchron-engineering/product"
+	"github.com/bogdaniel/zenchron-engineering/review"
 )
 
 // ReadStore exposes projections only. Its private SQLite handle is opened in
@@ -133,4 +134,11 @@ func (s *ReadStore) AssociatedProduct(graphID string) (string, bool, error) {
 // AssociatedGraphs reads every WorkGraph id associated with a Product (#476).
 func (s *ReadStore) AssociatedGraphs(productID string) ([]string, error) {
 	return s.store.AssociatedGraphs(productID)
+}
+
+// LatestReviewDecision reads the latest independent review decision for one
+// pull request (#474), the same durable fact WorkGraphStatus's own
+// ReviewApproved predicate already reads.
+func (s *ReadStore) LatestReviewDecision(repository string, prNumber int) (review.Decision, bool, error) {
+	return s.store.LatestReviewDecision(repository, prNumber)
 }

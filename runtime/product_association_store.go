@@ -74,11 +74,19 @@ func (s *SQLiteOperationStore) AssociatedProduct(graphID string) (string, bool, 
 	return productID, err == nil, err
 }
 
+// maxAssociatedGraphs bounds one product's associated-graph read, the same
+// operator-scale ceiling WorkGraphs() itself accepts without an index.
+//
+// ponytail: reads up to this many rows per call; fine for an operator's tens
+// of graphs per product, index by product_id if a product's graphs ever
+// number in the thousands.
+const maxAssociatedGraphs = 200
+
 // AssociatedGraphs reads every graph id associated with a product, the
-// reverse of AssociatedProduct.
+// reverse of AssociatedProduct, bounded by maxAssociatedGraphs.
 func (s *SQLiteOperationStore) AssociatedGraphs(productID string) ([]string, error) {
 	rows, err := s.db.Query(`SELECT graph_id FROM product_graph_associations
-		WHERE product_id = ? ORDER BY associated_unix_nano ASC, graph_id ASC`, productID)
+		WHERE product_id = ? ORDER BY associated_unix_nano ASC, graph_id ASC LIMIT ?`, productID, maxAssociatedGraphs)
 	if err != nil {
 		return nil, err
 	}

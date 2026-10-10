@@ -37,20 +37,17 @@ func TestProductDetailProjectionCarriesConfigurationAndNoConfiguration(t *testin
 	}
 }
 
-// TestProductDetailTemplateRendersAssociatedGraph exercises the embedded
-// per-graph unit table a product owner reads without drilling into
-// /workgraphs/{id} first.
+// TestProductDetailTemplateRendersAssociatedGraph exercises the lightweight
+// associated-graph list a product owner reads before drilling into
+// /workgraphs/{id} - this page never embeds a graph's own units/runs, which
+// is exactly what keeps it cheap to refresh regardless of graph size.
 func TestProductDetailTemplateRendersAssociatedGraph(t *testing.T) {
 	data := productDetailData{Product: ProductDetail{
 		ID: "product-1", Name: "checkout", Repositories: []string{"acme/repo"},
-		Graphs: []WorkGraphDetail{{
-			ID: "graph-1", Name: "checkout graph", Repository: "acme/repo", AgentID: "claude",
-			Counts: map[string]int{"total": 1, "completed": 0, "blocked": 1, "awaiting_decision": 0},
-			Units:  []WorkGraphUnitDetail{{UnitID: "a", Role: "implementer", State: "blocked", Reason: "waiting on b"}},
-		}},
+		Graphs: []WorkGraphSummary{{ID: "graph-1", Name: "checkout graph", Repository: "acme/repo", AgentID: "claude", Revision: 1}},
 	}}
 	out := renderTemplate(t, productDetailTemplate, data)
-	for _, want := range []string{"checkout graph", `href="/workgraphs/graph-1"`, "waiting on b"} {
+	for _, want := range []string{"checkout graph", `href="/workgraphs/graph-1"`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered product detail lacks %q", want)
 		}

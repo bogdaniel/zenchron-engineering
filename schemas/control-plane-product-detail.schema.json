@@ -65,7 +65,32 @@
     "graphs": {
       "type": "array",
       "items": {
-        "$ref": "control-plane-workgraph-detail.schema.json"
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "graph_id",
+          "repository",
+          "agent_id",
+          "name",
+          "revision"
+        ],
+        "properties": {
+          "graph_id": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          }
+        }
       }
     }
   }

@@ -3,14 +3,30 @@ package runtime
 // #479's acceptance scenario, proved end to end through exactly the read
 // paths controlplane's ReadStore exposes: a Product (#476) with one
 // associated WorkGraph (#472) whose units A and B implement in parallel, C
-// integrates and depends on both, A is independent-review-gated so one
-// REQUEST_CHANGES (the BLOCK) and one APPROVE (the remediation) is what
-// actually releases C - never A's own completion alone - and C itself asks
-// one #473 DecisionRequest that an authorized operator resolves through the
-// real #508 governed action, never a worker self-answer. Every fact is
-// re-read through a fresh ReadStore opened after the writer closes, proving
-// restart safety through the exact boundary the Product Workspace console
-// uses.
+// integrates and depends on both. A is independent-review-gated: one
+// REQUEST_CHANGES decision (the BLOCK) does not release C, and only a fresh
+// independent APPROVE of the EXACT SAME admitted commit (reviewApprovedFor's
+// own exact-commit binding, runtime/workgraph_status.go) releases it. This is
+// #472/#474's durable readiness GATE transitioning - never A's own
+// completion alone - not #474's producer remediation lifecycle: it does not
+// have A produce a second candidate H2, request a fresh independent review
+// of H2, or invalidate a stale H1 decision against a newer head. That
+// producer-remediation path is #474's own ownership and is proved by its own
+// test suite (runtime/review_remediation_e2e_test.go and friends); nothing
+// here asserts it.
+//
+// C itself asks one #473 DecisionRequest that an authorized operator
+// resolves through the real #508 governed action (never a worker
+// self-answer). Every fact - including that the resolved decision no longer
+// reads as open - is re-read through a fresh ReadStore opened after the
+// writer closes, proving restart safety through the exact ReadStore methods
+// the Product Workspace console calls. The console's own HTTP route is
+// additionally exercised, with a real resolved decision hidden through it,
+// in controlplane's own
+// TestWorkGraphDetailHidesAResolvedDecisionThroughTheRealHTTPRouteAfterRestart
+// - this test cannot call that route itself without an import cycle
+// (controlplane imports runtime; this file needs runtime's own unexported
+// fleet/messaging test fixtures, so it must stay in package runtime).
 
 import (
 	"context"

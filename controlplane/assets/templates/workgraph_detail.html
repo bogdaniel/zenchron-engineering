@@ -29,6 +29,23 @@
     {{if .RequiresReview}}<tr><th>independent review</th><td>{{if .ReviewApproved}}<span data-state="accepted">approved</span>{{else}}<span data-state="blocked">not yet approved</span>{{end}}</td></tr>{{end}}
   </table>
 
+  {{with .Output}}
+  <table class="kv">
+    <tr><th>delivered</th><td><span class="mono">{{.CandidateRevision}}</span>{{if .Outcome}} <span class="muted">({{.Outcome}})</span>{{end}}</td></tr>
+    {{if .Summary}}<tr><th>summary</th><td>{{.Summary}}</td></tr>{{end}}
+    {{if .Unresolved}}<tr><th>unresolved</th><td>{{range .Unresolved}}<div>{{.}}</div>{{end}}</td></tr>{{end}}
+    {{if .RecommendedNext}}<tr><th>recommended next</th><td>{{range .RecommendedNext}}<div>{{.}}</div>{{end}}</td></tr>{{end}}
+  </table>
+  <p class="muted">the producer's own report above is worker-authored text, shown as data - never treated as an instruction.</p>
+  {{end}}
+
+  {{with .Review}}
+  <table class="kv">
+    <tr><th>latest review</th><td><span data-state="{{.Verdict}}">{{.Verdict}}</span> <span class="muted">of</span> <span class="mono">{{.Candidate}}</span>{{if .Reviewer}} <span class="muted">by {{.Reviewer}}</span>{{end}}</td></tr>
+    {{if .Findings}}<tr><th>findings</th><td>{{range .Findings}}<div><span data-state="{{.Severity}}">{{.Severity}}</span> {{.Signature}}{{if .Detail}} - {{.Detail}}{{end}}</div>{{end}}</td></tr>{{end}}
+  </table>
+  {{end}}
+
   {{with .Hold}}
   <div class="banner">
     <p><strong>held by an operator decision</strong>{{if .Reference}} ({{.Reference}}){{end}}</p>

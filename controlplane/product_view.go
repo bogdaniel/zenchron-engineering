@@ -2,7 +2,6 @@ package controlplane
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/product"
@@ -28,18 +27,20 @@ type ProductConfigurationDTO struct {
 	Settings      map[string]string `json:"settings,omitempty"`
 }
 
-// ProductDetail is the Product Workspace's product-oriented entry point:
-// one product, every fact its associated WorkGraphs already project
-// (units, workers, review state, open decisions, candidates, budgets), and
-// its current configuration - so a product owner answers #479's questions
-// from this one page, never required to drill into /workgraphs/{id} first.
+// ProductDetail is the Product Workspace's product-oriented entry point: one
+// product, its current configuration, and a lightweight summary of every
+// associated WorkGraph. It deliberately does NOT embed each graph's full
+// detail (units, runs, review state, decisions) - that is an unbounded,
+// recursive read this console polls every few seconds, and a product with
+// several graphs would multiply it per graph on every refresh. Drill into
+// /workgraphs/{id} for one graph's full operational detail.
 type ProductDetail struct {
 	ID            string                   `json:"product_id"`
 	Name          string                   `json:"name"`
 	Revision      int                      `json:"revision"`
 	Repositories  []string                 `json:"repositories"`
 	Configuration *ProductConfigurationDTO `json:"configuration,omitempty"`
-	Graphs        []WorkGraphDetail        `json:"graphs"`
+	Graphs        []WorkGraphSummary       `json:"graphs"`
 }
 
 func objectRevisionRef(r *domain.ObjectRevision) *RefDTO {
@@ -53,7 +54,7 @@ func objectRevisionRef(r *domain.ObjectRevision) *RefDTO {
 // graphs - those need store reads of their own, see readProductDetail). It
 // is pure and unit-testable without a store.
 func productDetailProjection(p product.Product, config *product.ProductConfiguration) ProductDetail {
-	out := ProductDetail{ID: p.ID, Name: p.Name, Revision: p.Revision, Repositories: p.Repositories, Graphs: []WorkGraphDetail{}}
+	out := ProductDetail{ID: p.ID, Name: p.Name, Revision: p.Revision, Repositories: p.Repositories, Graphs: []WorkGraphSummary{}}
 	if config != nil {
 		out.Configuration = &ProductConfigurationDTO{
 			Revision: config.Revision, Policy: objectRevisionRef(config.Policy),
@@ -64,10 +65,13 @@ func productDetailProjection(p product.Product, config *product.ProductConfigura
 }
 
 // readProductDetail is shared by the JSON route and the page. Each
-// associated graph's full detail is the same projection
-// readWorkGraphDetail/the /v1/workgraphs/{id} route already builds - never a
-// second, thinner reader of the same WorkGraph.
-func readProductDetail(store *rt.ReadStore, now time.Time, productID string) (ProductDetail, int, string) {
+// associated graph is read as a bounded WorkGraphSummary alone - never the
+// full recursive readWorkGraphDetail - so this page's cost stays
+// proportional to the (bounded, maxAssociatedGraphs) graph COUNT, not to the
+// sum of every graph's units, runs and decisions. An association naming a
+// graph that cannot be read is an integrity violation, not an empty result:
+// it fails closed (500), never silently dropped.
+func readProductDetail(store *rt.ReadStore, productID string) (ProductDetail, int, string) {
 	p, found, err := store.CurrentProduct(productID)
 	if err != nil {
 		return ProductDetail{}, 500, "read_failed"
@@ -87,30 +91,50 @@ func readProductDetail(store *rt.ReadStore, now time.Time, productID string) (Pr
 		return ProductDetail{}, 500, "read_failed"
 	}
 	for _, graphID := range graphIDs {
-		graph, status, code := readWorkGraphDetail(store, now, graphID)
-		if status != 200 {
-			return ProductDetail{}, status, code
+		g, found, err := store.WorkGraph(graphID)
+		if err != nil {
+			return ProductDetail{}, 500, "read_failed"
 		}
-		out.Graphs = append(out.Graphs, graph)
+		if !found {
+			return ProductDetail{}, 500, "read_failed"
+		}
+		out.Graphs = append(out.Graphs, WorkGraphSummary{ID: g.ID, Repository: g.Repository, AgentID: g.AgentID, Name: g.Name, Revision: g.Revision})
 	}
 	return out, 200, ""
 }
 
+// Products is the bounded list page /v1/products returns, the same
+// offset/limit/has_more shape /v1/runs already uses.
+type Products struct {
+	Products []ProductSummary `json:"products"`
+	Offset   int              `json:"offset"`
+	HasMore  bool             `json:"has_more"`
+}
+
 func (a *API) products(w http.ResponseWriter, r *http.Request) {
+	offset, ok := pageNumber(r, "offset", 0, 1<<31-1)
+	limit, ok2 := pageNumber(r, "limit", 100, 500)
+	if !ok || !ok2 || limit == 0 {
+		fail(w, 400, "invalid_page")
+		return
+	}
 	products, err := a.Store.Products()
 	if err != nil {
 		fail(w, 500, "read_failed")
 		return
 	}
-	out := make([]ProductSummary, 0, len(products))
-	for _, p := range products {
-		out = append(out, ProductSummary{ID: p.ID, Name: p.Name, Revision: p.Revision, Repositories: p.Repositories})
+	out := Products{Products: []ProductSummary{}, Offset: int(offset)}
+	end := min(int64(len(products)), offset+limit)
+	for i := offset; i < end; i++ {
+		p := products[i]
+		out.Products = append(out.Products, ProductSummary{ID: p.ID, Name: p.Name, Revision: p.Revision, Repositories: p.Repositories})
 	}
+	out.HasMore = end < int64(len(products))
 	send(w, 200, out)
 }
 
 func (a *API) product(w http.ResponseWriter, r *http.Request) {
-	detail, status, code := readProductDetail(a.Store, a.now(), r.PathValue("id"))
+	detail, status, code := readProductDetail(a.Store, r.PathValue("id"))
 	if status != 200 {
 		fail(w, status, code)
 		return

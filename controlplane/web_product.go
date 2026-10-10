@@ -38,7 +38,7 @@ type productDetailData struct {
 }
 
 func (w *Web) handleProductDetail(rw http.ResponseWriter, r *http.Request) {
-	detail, status, _ := readProductDetail(w.Store, w.now(), r.PathValue("id"))
+	detail, status, _ := readProductDetail(w.Store, r.PathValue("id"))
 	switch status {
 	case 200:
 		w.render(rw, productDetailTemplate, productDetailData{ObservedAt: w.now(), Product: detail})

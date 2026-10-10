@@ -65,15 +65,17 @@ type PlanStageDetail struct {
 	// Review is this stage's latest recorded verdict, present only when the
 	// stage is a reviewer. It names the exact candidate/tree the verdict is
 	// about - staleness against a newer upstream head is not implied.
+	// Deliberately excludes Reason/Findings: PlanDetail's own boundary
+	// already excludes plan objective/rationale/stage reason/reasoning
+	// payload as unbounded reviewer/worker-authored prose, and a reviewer's
+	// free-text reason and findings are that same risk class.
 	Review *PlanStageReviewDTO `json:"review,omitempty"`
 }
 
 type PlanStageReviewDTO struct {
-	Verdict   string   `json:"verdict"`
-	Reason    string   `json:"reason,omitempty"`
-	Findings  []string `json:"findings,omitempty"`
-	Candidate string   `json:"candidate"`
-	Tree      string   `json:"tree"`
+	Verdict   string `json:"verdict"`
+	Candidate string `json:"candidate"`
+	Tree      string `json:"tree"`
 }
 
 type PlanGateRefs struct {
@@ -171,10 +173,7 @@ func planDetailProjection(v rt.PlanView) PlanDetail {
 				}
 			}
 			if r := p.Review; r != nil {
-				s.Review = &PlanStageReviewDTO{
-					Verdict: r.Verdict, Reason: r.Reason, Findings: slices.Clone(r.Findings),
-					Candidate: r.Candidate, Tree: r.Tree,
-				}
+				s.Review = &PlanStageReviewDTO{Verdict: r.Verdict, Candidate: r.Candidate, Tree: r.Tree}
 			}
 		}
 		out.Stages = append(out.Stages, s)
