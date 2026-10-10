@@ -75,19 +75,6 @@ type SupervisorDependencies struct {
 	// predict which class a run's next operation is.
 	MaxConcurrentRuns         int
 	MaxConcurrentObservations int
-	// MaxConcurrentVerifications bounds concurrent ReviewTrigger invocations
-	// (#474's own follow-up to B3): an independent review invokes a full
-	// reviewer PROVIDER, the same weight as an execution.invoke or an
-	// assurance verification, but it is bound to no run's own operation row
-	// and so sits outside the scheduler's durable AcquireOperation
-	// accounting entirely. driveOne's own goroutine-per-run concurrency would
-	// otherwise let as many reviewer invocations run at once as
-	// MaxConcurrentRuns allows, uncounted against any operator ceiling. This
-	// reuses the EXISTING verification capacity class (#85/#490) as an
-	// in-process, non-durable semaphore - never a second scheduler, never a
-	// durable permit: a tick that finds no slot simply skips the trigger this
-	// pass, exactly as idempotent as every other call to it.
-	MaxConcurrentVerifications int
 	// PollInterval is how often a quiet supervisor looks again.
 	PollInterval time.Duration
 	// Discovery is the OPTIONAL automatic issue-intake policy. Nil means
@@ -229,11 +216,6 @@ type Supervisor struct {
 	// "after the drain returns nothing new is admitted" false by construction.
 	// See work_admission.go.
 	admission *workAdmissionGate
-	// reviewSlots bounds concurrent ReviewTrigger invocations to
-	// MaxConcurrentVerifications - an in-process semaphore, acquired
-	// non-blockingly (a full ceiling simply skips the trigger this pass,
-	// never blocks a run's own ordinary drive on a review slot).
-	reviewSlots chan struct{}
 	// reconciler maintains this controller's own generation state, one attempt
 	// per pass. It is bound AFTER construction because the cycle is real: the
 	// supervisor owns the admission gate, the controller service needs that
@@ -338,7 +320,6 @@ func NewSupervisor(d SupervisorDependencies) (*Supervisor, error) {
 	// authorized - and a request can only lower it.
 	d.MaxConcurrentRuns = resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.MaxConcurrentRuns)
 	d.MaxConcurrentObservations = resolveMaxConcurrentObservations(d.MaxConcurrentObservations)
-	d.MaxConcurrentVerifications = resolveMaxConcurrentVerifications(d.MaxConcurrentVerifications)
 	return &Supervisor{
 		deps: d, engines: map[string]*engineSlot{}, inflight: map[string]struct{}{}, lastTurn: map[string]time.Time{}, freed: make(chan struct{}, 1),
 		// A supervisor admits work from the start unless it is the successor
@@ -346,9 +327,6 @@ func NewSupervisor(d SupervisorDependencies) (*Supervisor, error) {
 		// and is opened by EnableWorkAdmission once the durable record says it
 		// is the active generation.
 		admission: newWorkAdmissionGate(!d.WorkAdmissionWithheld),
-		// Sized once, fixed for the process's lifetime: see
-		// MaxConcurrentVerifications.
-		reviewSlots: make(chan struct{}, d.MaxConcurrentVerifications),
 	}, nil
 }
 
@@ -994,20 +972,16 @@ func (s *Supervisor) driveOne(ctx context.Context, run EngineeringRun) (RunOutco
 		observed = &observation
 	}
 	// #474 B3: before Reconcile, so an admission this pass is visible to the
-	// SAME pass's dispatch rather than a full poll interval later. Bounded
-	// by reviewSlots (the follow-up #474's own re-review required): a full
-	// verification ceiling skips the trigger THIS pass rather than running
-	// an unbounded reviewer or blocking this run's own ordinary drive on a
-	// slot a sibling run's review is holding.
+	// SAME pass's dispatch rather than a full poll interval later.
+	// Verification capacity (#474 R5) is bounded by ReviewTrigger's own
+	// durable claim against the scheduler's authoritative
+	// MaxConcurrentVerifications ceiling - never a Supervisor-local
+	// semaphore, so an ordinary assurance/verification operation and a
+	// reviewer invocation can never together exceed it, and the bound
+	// holds across restart and between controllers.
 	if s.deps.ReviewTrigger != nil {
-		select {
-		case s.reviewSlots <- struct{}{}:
-			triggerErr := s.deps.ReviewTrigger(ctx, engine, run)
-			<-s.reviewSlots
-			if triggerErr != nil {
-				result.ReviewTriggerError = boundedDetail(triggerErr.Error())
-			}
-		default:
+		if triggerErr := s.deps.ReviewTrigger(ctx, engine, run); triggerErr != nil {
+			result.ReviewTriggerError = boundedDetail(triggerErr.Error())
 		}
 	}
 	outcome, err := engine.Reconcile(ctx, run.ID)

@@ -387,14 +387,10 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 		// The supervisor's turn envelope is the sum of both class ceilings;
 		// the engines' schedulers enforce each one durably (#85).
 		MaxConcurrentObservations: observations,
-		// Bounds concurrent ReviewTrigger invocations (#474's own follow-up
-		// to B3) - the SAME operator-configured verification ceiling every
-		// engine's own scheduler already uses, never a second ceiling.
-		MaxConcurrentVerifications: policy.MaxConcurrentVerifications,
-		PollInterval:               time.Duration(policy.PollIntervalSeconds) * time.Second,
-		Discovery:                  discovery,
-		Agents:                     c.agents,
-		WorkUnitHolds:              c.store.WorkGraphHolds, // #508's seam
+		PollInterval:              time.Duration(policy.PollIntervalSeconds) * time.Second,
+		Discovery:                 discovery,
+		Agents:                    c.agents,
+		WorkUnitHolds:             c.store.WorkGraphHolds, // #508's seam
 		AgentProber: func(agent runtime.ResolvedAgent) runtime.AgentProber {
 			return runtime.AgentProberFor(agent, c.artifacts, operatorHome())
 		},

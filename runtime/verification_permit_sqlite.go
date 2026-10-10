@@ -9,8 +9,13 @@ import (
 
 var errVerificationNotAcquired = errors.New("verification transition was not acquired")
 
-// verificationCountSQL is the same resource count for assurance acquisition
-// and nested tool acquisition. Neither drops a held grant on clock expiry.
+// verificationCountSQL is the same resource count for assurance
+// acquisition, nested tool acquisition, and an independent-review trigger's
+// claim (#474 R5) - the one shared formula every verification-capacity
+// consumer is counted by and checked against. Neither a permit nor a
+// review claim drops its held slot on clock expiry; both are reclaimed
+// explicitly (reclaimVerificationPermits, reclaimReviewVerificationClaims),
+// never by this count alone.
 func verificationCountSQL() (string, []any) {
 	args := make([]any, 0, len(verificationKinds))
 	for _, kind := range verificationKinds {
@@ -21,7 +26,8 @@ func verificationCountSQL() (string, []any) {
 		WHERE json_extract(document, '$.state') IN ('leased','running')
 		AND json_extract(document, '$.lease') IS NOT NULL
 		AND json_extract(document, '$.kind') IN (` + kinds + `)) +
-		(SELECT COUNT(*) FROM verification_permits WHERE json_extract(document, '$.state') = 'granted')`, args
+		(SELECT COUNT(*) FROM verification_permits WHERE json_extract(document, '$.state') = 'granted') +
+		(SELECT COUNT(*) FROM review_verification_claims)`, args
 }
 
 func (s *SQLiteOperationStore) VerificationPermit(id string) (VerificationPermit, int64, bool, error) {

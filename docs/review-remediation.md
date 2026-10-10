@@ -359,22 +359,43 @@ clone from the governed remote instead, through the same credential-bound
 Git boundary a candidate clone already uses
 (`CreatePlanningWorkspaceFromRemote`), when `Source` is empty.
 
-**B3's required follow-up - verification capacity.** `RunIndependentReview`
-invokes a full reviewer provider but is bound to no run's own operation row,
-so it sits outside the scheduler's durable `AcquireOperation` capacity
-accounting (#85) entirely. `driveOne` drives each run in its own goroutine;
-without a bound, as many concurrent reviewer invocations could run as
-`MaxConcurrentRuns` allows, uncounted against any operator ceiling.
-`Supervisor.reviewSlots` is an in-process, non-durable semaphore sized by
-`MaxConcurrentVerifications` - the SAME operator-configured verification
-ceiling every engine's own scheduler already enforces, read once from
-`SupervisorPolicy` in `composition.supervisor` exactly where
-`MaxConcurrentRuns`/`MaxConcurrentObservations` already are. A pass that
-finds no free slot skips the trigger for that run THIS pass only - never
-queued, never retried within the same tick, never reported as an error -
-exactly as idempotent as every other call to `ReconcileReviewRemediation`.
-This is explicitly not a second scheduler and not a durable permit: no
-state survives a restart, and none needs to.
+**B3's required follow-up - verification capacity (R5: durable, not
+in-process).** `RunIndependentReview` invokes a full reviewer provider but
+is bound to no run's own operation row, so it sits outside the scheduler's
+durable `AcquireOperation` capacity accounting (#490) entirely. `driveOne`
+drives each run in its own goroutine; without a bound, as many concurrent
+reviewer invocations could run as `MaxConcurrentRuns` allows, uncounted
+against any operator ceiling.
+
+An EARLIER version of this fix was a `Supervisor`-local, in-process
+`reviewSlots` channel. An independent re-review correctly rejected it: two
+UNCOORDINATED counters sharing the same name is not the same as one
+authoritative ceiling. With `MaxConcurrentVerifications=1`, one durable
+`OpAssuranceGo` could hold the SQL-side slot while the separate in-process
+channel handed out its own, unrelated slot to a reviewer - two
+verifier-cost operations running under a ceiling of one, and the bound
+vanished entirely on restart or between two controllers, since an
+in-process channel is exactly the state that does not survive either.
+
+`ReconcileReviewRemediationForRun` now claims a `ReviewVerificationClaim` -
+one row in a new `review_verification_claims` table - before doing
+anything else, and releases it on every return path. `verificationCountSQL`
+(`runtime/verification_permit_sqlite.go`), the ONE shared formula
+`AcquireOperation` already checks for every ordinary verification-class
+operation and `Scheduler.VerificationSaturated` already checks for every
+nested `VerificationPermit`, now adds a third additive term: the count of
+open `review_verification_claims` rows. A durable assurance operation
+holding the only slot refuses a new claim; a claim holding the only slot
+refuses a new assurance operation's acquisition; both are visible to every
+controller sharing the store, immediately, restart or no restart - this is
+real SQLite state, not a goroutine's channel. An abandoned claim (its
+owning controller died mid-review) is reclaimed only once it is BOTH past
+its own TTL AND its controller is reported dead by the SAME `OwnerLiveness`
+ordinary operation leases and nested permits already use - "death and
+expiry are both required," the exact rule `reclaimVerificationPermit`
+already states for its own sibling resource. This is still explicitly not
+a second scheduler: it is the EXISTING one ceiling, with a third consumer
+counted into the same formula.
 
 **Test-fixture fix along the way**: `FakeGitHubAdapter.PullRequest` returned
 a `HeadSHA` frozen at `CreatePullRequest` time and never refreshed - real
@@ -699,10 +720,14 @@ application-level check, is load-bearing).
   reporting, and no reliance on in-process state across a simulated restart;
   `TestRunIndependentReviewClonesFromTheGovernedRemoteWithNoSourceCheckout`
   and `TestRunIndependentReviewRefusesWithNeitherSourceNorRemote` prove the
-  remote-clone fallback; `TestReviewTriggerRespectsMaxConcurrentVerifications`
-  proves the capacity bound - two runs, a ceiling of one, the second run's
-  trigger skipped (never queued, never reported as an error) for the whole
-  pass while the first holds the only slot.
+  remote-clone fallback.
+- `TestAssuranceOperationBlocksAReviewVerificationClaim`,
+  `TestReviewVerificationClaimBlocksAnAssuranceOperation`,
+  `TestReviewVerificationClaimIsVisibleAcrossControllers` and
+  `TestAnAbandonedReviewVerificationClaimIsReclaimed` (R5) prove the
+  durable capacity bound directly against the real scheduler/store: both
+  directions of exclusion, cross-controller visibility, and the
+  death-and-expiry reclaim rule.
 
 **Still deferred, and why:** the residual external-head TOCTOU between this
 gate's last freshness check and its SQLite commit (explicitly documented

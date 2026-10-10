@@ -618,6 +618,21 @@ CREATE TABLE review_remediation_admissions (
 	document           TEXT NOT NULL
 );
 CREATE INDEX review_remediation_admissions_by_run ON review_remediation_admissions(run_id);
+`, `
+-- A durable, restart-visible claim that one independent-review trigger
+-- invocation occupies a verification-capacity slot (#474 R5). An
+-- independent review invokes a full reviewer provider - the same
+-- capacity-class weight as an ordinary verification operation - but is
+-- bound to no run's own operation row, so it has no other way to
+-- participate in the SAME MaxConcurrentVerifications ceiling
+-- verificationCountSQL already enforces for both durable verification
+-- operations and nested VerificationPermits. Counted additively into that
+-- SAME formula; never a second ceiling, never a second scheduler.
+CREATE TABLE review_verification_claims (
+	id       TEXT PRIMARY KEY,
+	revision INTEGER NOT NULL,
+	document TEXT NOT NULL
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.

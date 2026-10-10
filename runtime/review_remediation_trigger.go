@@ -83,6 +83,19 @@ func (r *EngineeringRuntime) ReconcileReviewRemediationForRun(ctx context.Contex
 	if err != nil {
 		return nil, nil, err
 	}
+	// #474 R5: a durable verification-capacity claim, participating in the
+	// SAME ceiling every ordinary assurance/verification operation and
+	// nested VerificationPermit already share - never a second, uncoordinated
+	// counter. No free slot this pass is a clean no-op, exactly as
+	// idempotent as every other call here: the next tick tries again.
+	claim, claimed, err := r.scheduler.claimReviewVerificationSlot(r.scheduler.Owner)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !claimed {
+		return nil, nil, nil
+	}
+	defer func() { _ = r.scheduler.releaseReviewVerificationSlot(claim.ID) }()
 	outcome, admission, err := r.ReconcileReviewRemediation(ctx, port, repo, state.projection.PullRequest.Number, reviewerAgentID)
 	if err != nil {
 		return nil, nil, err

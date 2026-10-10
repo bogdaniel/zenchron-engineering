@@ -485,7 +485,19 @@ func (s Scheduler) VerificationSaturated(runID string) (bool, error) {
 			}
 		}
 	}
-	return len(verifying)+nested >= s.MaxConcurrentVerifications, nil
+	// #474 R5: an independent-review trigger's durable claim is the same
+	// verification-capacity weight as a nested permit, counted into the
+	// SAME ceiling verificationCountSQL already enforces for the SQL-side
+	// acquisition path.
+	reviewing := 0
+	if store, ok := s.Store.(ReviewVerificationClaimStore); ok {
+		claims, err := store.ReviewVerificationClaims()
+		if err != nil {
+			return false, err
+		}
+		reviewing = len(claims)
+	}
+	return len(verifying)+nested+reviewing >= s.MaxConcurrentVerifications, nil
 }
 
 // reclaimAbandoned drops the lease of one leased or running operation that NO
