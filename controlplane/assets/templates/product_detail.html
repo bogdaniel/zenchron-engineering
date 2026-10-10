@@ -1,0 +1,47 @@
+{{define "title"}}{{.Product.Name}}{{end}}
+{{define "content"}}
+{{$p := .Product}}
+<div id="product-live" data-live>
+<section class="panel">
+  <p class="breadcrumb"><a href="/overview">overview</a> / <a href="/products">products</a> / <span class="mono">{{$p.ID}}</span></p>
+  <h1>{{$p.Name}}</h1>
+  <p class="meta">observed {{fmtTime .ObservedAt}} · revision {{$p.Revision}}</p>
+  <table class="kv">
+    <tr><th>repositories</th><td>{{range $p.Repositories}}<span class="pill mono">{{.}}</span> {{else}}<span class="muted">none</span>{{end}}</td></tr>
+    {{with $p.Configuration}}
+    <tr><th>policy</th><td>{{with .Policy}}<span class="mono">{{.ID}}</span>{{else}}<span class="muted">product default</span>{{end}}</td></tr>
+    <tr><th>context policy</th><td>{{if .ContextPolicy}}<span class="mono">{{.ContextPolicy}}</span>{{else}}<span class="muted">default</span>{{end}}</td></tr>
+    {{else}}
+    <tr><th>configuration</th><td><span class="muted">no configuration adopted yet</span></td></tr>
+    {{end}}
+  </table>
+</section>
+
+<section class="panel">
+  <h2>associated work graphs</h2>
+  <p class="muted">each graph's full unit/run/review/decision detail is on its own page - this list stays cheap to refresh regardless of how many units a graph has.</p>
+  <table class="runs">
+    <thead>
+      <tr><th>graph</th><th>name</th><th>repository</th><th>agent</th><th>revision</th></tr>
+    </thead>
+    <tbody>
+      {{range $p.Graphs}}
+      <tr>
+        <td><a class="mono" href="/workgraphs/{{.ID}}">{{.ID}}</a></td>
+        <td>{{.Name}}</td>
+        <td>{{.Repository}}</td>
+        <td class="mono">{{.AgentID}}</td>
+        <td>{{.Revision}}</td>
+      </tr>
+      {{else}}
+      <tr><td colspan="5" class="empty">no work graph is associated with this product yet</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  <nav class="pager">
+    {{if .PrevLink}}<a href="{{.PrevLink}}">&larr; previous</a>{{end}}
+    {{if .NextLink}}<a href="{{.NextLink}}">next &rarr;</a>{{end}}
+  </nav>
+</section>
+</div>
+{{end}}

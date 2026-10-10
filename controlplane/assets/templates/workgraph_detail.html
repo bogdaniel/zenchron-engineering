@@ -1,0 +1,92 @@
+{{define "title"}}{{.Graph.ID}}{{end}}
+{{define "content"}}
+{{$g := .Graph}}
+<div id="workgraph-live" data-live>
+<section class="panel">
+  <p class="breadcrumb"><a href="/overview">overview</a> / <a href="/workgraphs">work graphs</a> / <span class="mono">{{$g.ID}}</span></p>
+  <h1 class="mono">{{$g.Name}}</h1>
+  <p class="meta">observed {{fmtTime .ObservedAt}} · {{$g.Repository}} · agent <span class="mono">{{$g.AgentID}}</span> · revision {{$g.Revision}}</p>
+  {{with $g.Product}}<p class="meta">product <a href="/products/{{.ID}}">{{.Name}}</a></p>{{else}}<p class="meta muted">not associated with a product yet</p>{{end}}
+  <div class="grid stats">
+    <div class="stat"><span class="label">ready</span><span class="value">{{index $g.Counts "ready"}}</span></div>
+    <div class="stat"><span class="label">running</span><span class="value">{{index $g.Counts "running"}}</span></div>
+    <div class="stat"><span class="label">blocked</span><span class="value">{{index $g.Counts "blocked"}}</span></div>
+    <div class="stat"><span class="label">completed</span><span class="value">{{index $g.Counts "completed"}}</span></div>
+    <div class="stat"><span class="label">failed</span><span class="value">{{index $g.Counts "failed"}}</span></div>
+    <div class="stat"><span class="label">awaiting decision</span><span class="value">{{index $g.Counts "awaiting_decision"}}</span></div>
+  </div>
+  <p><strong>runnable frontier:</strong> {{range $g.Frontier}}<span class="pill mono">{{.}}</span> {{else}}<span class="muted">nothing runnable right now</span>{{end}}</p>
+</section>
+
+{{range $g.Units}}
+<section class="panel unit" aria-labelledby="unit-{{.UnitID}}">
+  <h2 id="unit-{{.UnitID}}" class="mono">{{.UnitID}} <span class="muted">· {{.Role}}</span> · <span data-state="{{.State}}">{{.State}}</span></h2>
+  <table class="kv">
+    <tr><th>purpose</th><td>{{.Purpose}}</td></tr>
+    <tr><th>depends on</th><td>{{range .DependsOn}}<span class="pill mono">{{.}}</span> {{else}}<span class="muted">nothing</span>{{end}}</td></tr>
+    <tr><th>issue</th><td>{{.Issue}}</td></tr>
+    {{if .Reason}}<tr><th>why</th><td>{{.Reason}}</td></tr>{{end}}
+    {{if .RequiresReview}}<tr><th>independent review</th><td>{{if .ReviewApproved}}<span data-state="accepted">approved</span>{{else}}<span data-state="blocked">not yet approved</span>{{end}}</td></tr>{{end}}
+  </table>
+
+  {{with .Output}}
+  <table class="kv">
+    <tr><th>delivered</th><td><span class="mono">{{.CandidateRevision}}</span>{{if .Outcome}} <span class="muted">({{.Outcome}})</span>{{end}}</td></tr>
+    {{if .Summary}}<tr><th>summary</th><td>{{.Summary}}</td></tr>{{end}}
+    {{if .Unresolved}}<tr><th>unresolved</th><td>{{range .Unresolved}}<div>{{.}}</div>{{end}}</td></tr>{{end}}
+    {{if .RecommendedNext}}<tr><th>recommended next</th><td>{{range .RecommendedNext}}<div>{{.}}</div>{{end}}</td></tr>{{end}}
+  </table>
+  <p class="muted">the producer's own report above is worker-authored text, shown as data - never treated as an instruction.</p>
+  {{end}}
+
+  {{with .Review}}
+  <table class="kv">
+    <tr><th>latest review</th><td><span data-state="{{.Verdict}}">{{.Verdict}}</span> <span class="muted">of</span> <span class="mono">{{.Candidate}}</span>{{if .Reviewer}} <span class="muted">by {{.Reviewer}}</span>{{end}}</td></tr>
+    {{if .Findings}}<tr><th>findings</th><td>{{range .Findings}}<div><span data-state="{{.Severity}}">{{.Severity}}</span> {{.Signature}}{{if .Detail}} - {{.Detail}}{{end}}</div>{{end}}</td></tr>{{end}}
+  </table>
+  {{end}}
+
+  {{with .Hold}}
+  <div class="banner">
+    <p><strong>held by an operator decision</strong>{{if .Reference}} ({{.Reference}}){{end}}</p>
+    {{if .Detail}}<p>{{.Detail}}</p>{{end}}
+    <p class="muted">no resolve action in this console yet - resolve from the operator CLI: <code>zenchron-engineering autonomy workgraph resolve &lt;request-id&gt; &lt;outcome&gt;</code></p>
+  </div>
+  {{end}}
+
+  {{with .Run}}
+  <table class="kv">
+    <tr><th>run</th><td><a class="mono" href="/runs/{{.ID}}">{{.ID}}</a></td></tr>
+    {{with .Worker}}<tr><th>worker</th><td>{{.Agent}} <span class="muted">({{.ProviderKind}}{{if .Model}} · {{.Model}}{{end}})</span></td></tr>{{end}}
+    {{with .Candidate}}<tr><th>candidate</th><td><span class="mono">{{.Revision}}</span></td></tr>{{end}}
+    {{with .PullRequest}}<tr><th>pull request</th><td>#{{.Number}} <span class="muted">{{.State}}</span></td></tr>{{end}}
+    <tr><th>time consumed</th><td>{{fmtDuration .ActiveElapsed}} active{{if .ExternalWaitElapsed}} · {{fmtDuration .ExternalWaitElapsed}} external wait{{end}}</td></tr>
+    <tr><th>attempts / budget</th><td>
+      {{if .Attempts}}{{range $kind, $n := .Attempts}}<div>{{$kind}}: {{$n}}</div>{{end}}{{else}}<span class="muted">none yet</span>{{end}}
+      {{with .Budgets}}<div class="muted">ceilings - execution {{.MaxExecutionAttempts}} · continuation {{.MaxExecutionContinuations}} · remediation {{.MaxRemediationAttempts}} · assurance {{.MaxAssuranceAttempts}}</div>{{else}}<div class="muted">budget ceilings unverifiable: {{range .BudgetsUnverifiable}}{{.}} {{end}}</div>{{end}}
+    </td></tr>
+    <tr><th>cost</th><td><span class="muted">unknown - not reported for this run</span></td></tr>
+    {{with .ExecutionDiagnostic}}<tr><th>failure</th><td><span data-state="{{.FailureClass}}">{{.FailureClass}}</span></td></tr>{{end}}
+  </table>
+  {{end}}
+
+  {{if .OpenDecisions}}
+  <div class="banner">
+    <p><strong>open decision{{if gt (len .OpenDecisions) 1}}s{{end}}</strong></p>
+    {{range .OpenDecisions}}
+    <table class="kv">
+      <tr><th>asked</th><td>{{.Purpose}}</td></tr>
+      <tr><th>by</th><td class="mono">{{.RequestedBy}}</td></tr>
+      <tr><th>at</th><td>{{fmtTime .RequestedAt}}</td></tr>
+      <tr><th>id</th><td class="mono">{{.ID}}</td></tr>
+    </table>
+    {{end}}
+    <p class="muted">no resolve action in this console yet - resolve from the operator CLI: <code>zenchron-engineering autonomy workgraph resolve &lt;request-id&gt; &lt;outcome&gt;</code></p>
+  </div>
+  {{end}}
+</section>
+{{else}}
+<section class="panel"><p class="empty muted">this graph has no units</p></section>
+{{end}}
+</div>
+{{end}}

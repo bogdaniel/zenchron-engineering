@@ -46,6 +46,7 @@
       <tr><th>provider kind</th><td>{{if .ProviderKind}}{{.ProviderKind}}{{else}}<span class="muted">—</span>{{end}}</td></tr>
       <tr><th>trust mode</th><td>{{if .TrustMode}}{{.TrustMode}}{{else}}<span class="muted">—</span>{{end}}</td></tr>
       <tr><th>run</th><td>{{if .RunID}}<a class="mono" href="/runs/{{.RunID}}">{{.RunID}}</a>{{else}}<span class="muted">none yet</span>{{end}}</td></tr>
+      {{with .Review}}<tr><th>review verdict</th><td><span data-state="{{.Verdict}}">{{.Verdict}}</span> <span class="muted">of</span> <span class="mono">{{.Candidate}}</span></td></tr>{{end}}
       {{else}}
       <tr><th>run</th><td><span class="muted">a gate creates no run</span></td></tr>
       {{with .Gate}}

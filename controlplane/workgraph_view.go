@@ -1,0 +1,318 @@
+package controlplane
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
+	"github.com/bogdaniel/zenchron-engineering/review"
+	rt "github.com/bogdaniel/zenchron-engineering/runtime"
+)
+
+// WorkGraphSummary is one WorkGraph (#472) as a list sees it.
+type WorkGraphSummary struct {
+	ID         string `json:"graph_id"`
+	Repository string `json:"repository"`
+	AgentID    string `json:"agent_id"`
+	Name       string `json:"name"`
+	Revision   int    `json:"revision"`
+}
+
+// WorkGraphDetail is one WorkGraph's current revision through its units -
+// the Product Workspace's engineering-oriented drill-down. Product is the
+// #476 product this graph is associated with, when any; a graph adopted
+// before any association exists has none, never a fabricated one.
+type WorkGraphDetail struct {
+	ID         string                `json:"graph_id"`
+	Repository string                `json:"repository"`
+	AgentID    string                `json:"agent_id"`
+	Name       string                `json:"name"`
+	Revision   int                   `json:"revision"`
+	Frontier   []string              `json:"frontier,omitempty"`
+	Counts     map[string]int        `json:"counts"`
+	Units      []WorkGraphUnitDetail `json:"units"`
+	Product    *ProductSummary       `json:"product,omitempty"`
+}
+
+// WorkGraphUnitDetail is one unit, its own already-projected facts
+// (rt.WorkGraphUnitView), its child run's full detail when it has one (the
+// same runDetailProjection /v1/runs/{id} already renders - never
+// re-derived), and the unit's own open #473 decisions.
+type WorkGraphUnitDetail struct {
+	UnitID         string   `json:"unit_id"`
+	Purpose        string   `json:"purpose"`
+	Role           string   `json:"role"`
+	ExecutionKind  string   `json:"execution_kind,omitempty"`
+	Issue          int      `json:"issue"`
+	DependsOn      []string `json:"depends_on,omitempty"`
+	State          string   `json:"state"`
+	Reason         string   `json:"reason,omitempty"`
+	RequiresReview bool     `json:"requires_review,omitempty"`
+	ReviewApproved bool     `json:"review_approved,omitempty"`
+	// Hold is a #508 operator gate on this unit before its first activation.
+	// A unit with no row here is simply not held.
+	Hold *DecisionWaitRef `json:"hold,omitempty"`
+	Run  *RunDetail       `json:"run,omitempty"`
+	// Output is the exact subject of this unit's own admitted handoff: what
+	// it actually delivered. Outcome/Summary/Unresolved/RecommendedNext are
+	// the producer's own report - worker-authored, rendered as plain text,
+	// never reinterpreted as instructions or markup.
+	Output *UnitOutputRef `json:"output,omitempty"`
+	// Review is the latest independent review decision for this unit's
+	// bound pull request (#474), present only when RequiresReview. It is
+	// supplementary evidence beside the authoritative ReviewApproved bool
+	// above - never a second computation of it - so an operator can see
+	// which exact commit a REQUEST_CHANGES or APPROVE verdict was about.
+	Review        *ReviewDecisionRef `json:"review,omitempty"`
+	OpenDecisions []DecisionRef      `json:"open_decisions,omitempty"`
+}
+
+// UnitOutputRef is one admitted handoff's exact subject and the producer's
+// own report about it (orchestration.UnitOutput).
+type UnitOutputRef struct {
+	HandoffID         string   `json:"handoff_id"`
+	CandidateRevision string   `json:"candidate_revision"`
+	CandidateTree     string   `json:"candidate_tree"`
+	Outcome           string   `json:"outcome,omitempty"`
+	Summary           string   `json:"summary,omitempty"`
+	Unresolved        []string `json:"unresolved,omitempty"`
+	RecommendedNext   []string `json:"recommended_next,omitempty"`
+}
+
+// ReviewDecisionRef is one independent reviewer's verdict (review.Decision):
+// bounded, typed findings only - never plan-stage free-form reasoning (see
+// PlanStageReviewDTO, which deliberately excludes that).
+type ReviewDecisionRef struct {
+	Verdict   string             `json:"verdict"`
+	Candidate string             `json:"candidate"`
+	Reviewer  string             `json:"reviewer,omitempty"`
+	Findings  []ReviewFindingRef `json:"findings,omitempty"`
+}
+
+type ReviewFindingRef struct {
+	Severity  string `json:"severity"`
+	Signature string `json:"signature"`
+	Detail    string `json:"detail,omitempty"`
+}
+
+// DecisionWaitRef is a #508 WorkUnitHold's readiness-hold projection.
+type DecisionWaitRef struct {
+	Reference string `json:"reference,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+}
+
+// DecisionRef is one open #473 DecisionRequest: a question only a human or
+// designated authority may answer. It has no resolution in this console
+// (#398's governed action allowlist does not include decision-resolve) -
+// docs/control-plane.md and the console page say where to resolve it.
+type DecisionRef struct {
+	ID          string    `json:"id"`
+	Purpose     string    `json:"purpose,omitempty"`
+	Body        string    `json:"body,omitempty"`
+	RequestedBy string    `json:"requested_by,omitempty"`
+	RequestedAt time.Time `json:"requested_at"`
+}
+
+// workGraphUnitDetailProjection projects one unit. run, review and decisions
+// are nil-safe lookups the caller supplies, so this stays pure and
+// unit-testable without a store.
+func workGraphUnitDetailProjection(unit rt.WorkGraphUnitView, run *RunDetail, latestReview *review.Decision, decisions []DecisionRef) WorkGraphUnitDetail {
+	out := WorkGraphUnitDetail{
+		UnitID: unit.UnitID, Purpose: unit.Purpose, Role: string(unit.Role),
+		ExecutionKind: string(unit.ExecutionKind), Issue: unit.Issue, DependsOn: unit.DependsOn,
+		State: string(unit.State), Reason: unit.Reason,
+		RequiresReview: unit.RequiresReview, ReviewApproved: unit.ReviewApproved,
+		Run: run, OpenDecisions: decisions,
+	}
+	if hold := unit.AwaitingDecision; hold != nil {
+		out.Hold = &DecisionWaitRef{Reference: hold.Reference, Detail: hold.Detail}
+	}
+	if o := unit.Output; o != nil {
+		out.Output = &UnitOutputRef{
+			HandoffID: o.HandoffID, CandidateRevision: o.CandidateRevision, CandidateTree: o.CandidateTree,
+			Outcome: o.Outcome, Summary: o.Summary, Unresolved: o.Unresolved, RecommendedNext: o.RecommendedNext,
+		}
+	}
+	if latestReview != nil {
+		ref := &ReviewDecisionRef{
+			Verdict: string(latestReview.Verdict), Candidate: latestReview.Subject.HeadSHA, Reviewer: latestReview.ReviewerAgentID,
+		}
+		for _, f := range latestReview.Findings {
+			ref.Findings = append(ref.Findings, ReviewFindingRef{Severity: string(f.Severity), Signature: f.Signature, Detail: f.Detail})
+		}
+		out.Review = ref
+	}
+	return out
+}
+
+// decisionRefProjection projects one open #473 message as a DecisionRef.
+func decisionRefProjection(m orchestration.EngineeringMessage) DecisionRef {
+	return DecisionRef{ID: m.ID, Purpose: m.Purpose, Body: m.Body, RequestedBy: m.Source.Unit, RequestedAt: m.AdmittedAt}
+}
+
+// workGraphDetailProjection assembles one graph's detail. runOf, reviewOf and
+// decisionsOf are the only store-touching inputs; everything else is pure,
+// mirroring planDetailProjection's shape.
+func workGraphDetailProjection(view rt.WorkGraphView, product *ProductSummary,
+	runOf func(runID string) (*RunDetail, error), reviewOf func(prNumber int) (*review.Decision, error),
+	decisionsOf func(batchID string) ([]orchestration.EngineeringMessage, error)) (WorkGraphDetail, error) {
+	out := WorkGraphDetail{
+		ID: view.GraphID, Repository: view.Repository, AgentID: view.AgentID, Name: view.Name,
+		Revision: view.Revision, Frontier: view.Frontier, Product: product,
+		Counts: map[string]int{
+			"total": view.Counts.Total, "ready": view.Counts.Ready, "blocked": view.Counts.Blocked,
+			"invalidated": view.Counts.Invalidated, "unknown": view.Counts.Unknown,
+			"awaiting_decision": view.Counts.AwaitingDecision,
+			"running":           view.Counts.Activated.Running,
+			"handoff_pending":   view.Counts.Activated.HandoffPending,
+			"completed":         view.Counts.Activated.Completed,
+			"failed":            view.Counts.Activated.Failed,
+			"stopped":           view.Counts.Activated.Stopped,
+		},
+	}
+	for _, unit := range view.Units {
+		var run *RunDetail
+		var latestReview *review.Decision
+		var decisions []DecisionRef
+		if unit.RunID != "" {
+			r, err := runOf(unit.RunID)
+			if err != nil {
+				return WorkGraphDetail{}, err
+			}
+			run = r
+		}
+		if unit.RequiresReview && unit.Child != nil && unit.Child.PullRequest != 0 {
+			r, err := reviewOf(unit.Child.PullRequest)
+			if err != nil {
+				return WorkGraphDetail{}, err
+			}
+			latestReview = r
+		}
+		if unit.BatchID != "" {
+			messages, err := decisionsOf(unit.BatchID)
+			if err != nil {
+				return WorkGraphDetail{}, err
+			}
+			for _, m := range messages {
+				decisions = append(decisions, decisionRefProjection(m))
+			}
+		}
+		out.Units = append(out.Units, workGraphUnitDetailProjection(unit, run, latestReview, decisions))
+	}
+	return out, nil
+}
+
+// unresolvedOpenDecisions reads a batch's open #473 messages through the
+// store, then drops any that a #508 DecisionResolution already answers:
+// OrchestrationStatus's own OpenDecisions is message-liveness-only and does
+// not itself know about a resolution.
+func unresolvedOpenDecisions(store *rt.ReadStore, now time.Time) func(batchID string) ([]orchestration.EngineeringMessage, error) {
+	return func(batchID string) ([]orchestration.EngineeringMessage, error) {
+		view, err := store.OrchestrationStatus(batchID, now)
+		if err != nil {
+			return nil, err
+		}
+		var open []orchestration.EngineeringMessage
+		for _, message := range view.OpenDecisions {
+			_, resolved, err := store.DecisionResolution(message.ID)
+			if err != nil {
+				return nil, err
+			}
+			if !resolved {
+				open = append(open, message)
+			}
+		}
+		return open, nil
+	}
+}
+
+// readWorkGraphDetail is shared by the JSON route and the page, exactly as
+// readPlanDetail is for plans. Existence is checked FIRST and separately
+// from the full projection: a corrupt or unreadable graph is a read failure
+// (500), never indistinguishable from an unknown one (404) - the same
+// distinction readPlanDetail's PlanRefusedError already draws for plans.
+func readWorkGraphDetail(store *rt.ReadStore, now time.Time, graphID string) (WorkGraphDetail, int, string) {
+	if _, found, err := store.WorkGraph(graphID); err != nil {
+		return WorkGraphDetail{}, 500, "read_failed"
+	} else if !found {
+		return WorkGraphDetail{}, 404, "not_found"
+	}
+	view, err := store.WorkGraphStatus(graphID, now)
+	if err != nil {
+		return WorkGraphDetail{}, 500, "read_failed"
+	}
+	var product *ProductSummary
+	if productID, found, err := store.AssociatedProduct(graphID); err != nil {
+		return WorkGraphDetail{}, 500, "read_failed"
+	} else if found {
+		p, productFound, err := store.CurrentProduct(productID)
+		if err != nil {
+			return WorkGraphDetail{}, 500, "read_failed"
+		}
+		if !productFound {
+			// An association pointing at a product that does not exist is an
+			// integrity violation the store's own write-time checks should
+			// have prevented - fail closed rather than silently showing no
+			// association.
+			return WorkGraphDetail{}, 500, "read_failed"
+		}
+		product = &ProductSummary{ID: p.ID, Name: p.Name, Revision: p.Revision, Repositories: p.Repositories}
+	}
+	runOf := func(runID string) (*RunDetail, error) {
+		status, err := store.Status(runID, now)
+		if err != nil {
+			return nil, err
+		}
+		detail := runDetailProjection(status)
+		return &detail, nil
+	}
+	reviewOf := func(prNumber int) (*review.Decision, error) {
+		decision, found, err := store.LatestReviewDecision(view.Repository, prNumber)
+		if err != nil || !found {
+			return nil, err
+		}
+		return &decision, nil
+	}
+	detail, err := workGraphDetailProjection(view, product, runOf, reviewOf, unresolvedOpenDecisions(store, now))
+	if err != nil {
+		return WorkGraphDetail{}, 500, "read_failed"
+	}
+	return detail, 200, ""
+}
+
+// WorkGraphs is the bounded list page /v1/workgraphs returns, the same
+// offset/limit/has_more shape /v1/runs already uses - backed by a
+// database-level LIMIT/OFFSET, never a full table scan trimmed in Go.
+type WorkGraphs struct {
+	WorkGraphs []WorkGraphSummary `json:"workgraphs"`
+	Offset     int                `json:"offset"`
+	HasMore    bool               `json:"has_more"`
+}
+
+func (a *API) workGraphs(w http.ResponseWriter, r *http.Request) {
+	offset, ok := pageNumber(r, "offset", 0, 1<<31-1)
+	limit, ok2 := pageNumber(r, "limit", 100, 500)
+	if !ok || !ok2 || limit == 0 {
+		fail(w, 400, "invalid_page")
+		return
+	}
+	graphs, hasMore, err := a.Store.WorkGraphs(int(offset), int(limit))
+	if err != nil {
+		fail(w, 500, "read_failed")
+		return
+	}
+	out := WorkGraphs{WorkGraphs: []WorkGraphSummary{}, Offset: int(offset), HasMore: hasMore}
+	for _, g := range graphs {
+		out.WorkGraphs = append(out.WorkGraphs, WorkGraphSummary{ID: g.ID, Repository: g.Repository, AgentID: g.AgentID, Name: g.Name, Revision: g.Revision})
+	}
+	send(w, 200, out)
+}
+
+func (a *API) workGraph(w http.ResponseWriter, r *http.Request) {
+	detail, status, code := readWorkGraphDetail(a.Store, a.now(), r.PathValue("id"))
+	if status != 200 {
+		fail(w, status, code)
+		return
+	}
+	send(w, 200, detail)
+}

@@ -74,6 +74,37 @@ func (s *SQLiteOperationStore) AssociatedProduct(graphID string) (string, bool, 
 	return productID, err == nil, err
 }
 
+// AssociatedGraphs reads one bounded page of graph ids associated with a
+// product, the reverse of AssociatedProduct: a database-level LIMIT/OFFSET,
+// never a silently truncated full read. hasMore is true when a (limit+1)th
+// row exists beyond the page returned, so a caller can show it (or page
+// into it) rather than present a 201st association as if it did not exist.
+func (s *SQLiteOperationStore) AssociatedGraphs(productID string, offset, limit int) ([]string, bool, error) {
+	rows, err := s.db.Query(`SELECT graph_id FROM product_graph_associations
+		WHERE product_id = ? ORDER BY associated_unix_nano ASC, graph_id ASC LIMIT ? OFFSET ?`,
+		productID, limit+1, offset)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	var graphIDs []string
+	for rows.Next() {
+		var graphID string
+		if err := rows.Scan(&graphID); err != nil {
+			return nil, false, err
+		}
+		graphIDs = append(graphIDs, graphID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(graphIDs) > limit
+	if hasMore {
+		graphIDs = graphIDs[:limit]
+	}
+	return graphIDs, hasMore, nil
+}
+
 // currentWorkGraphTx mirrors runtime.WorkGraph (workgraph_store.go), but takes
 // a sqlExecutor so AssociateWorkGraph can read it inside its own transaction
 // instead of racing a second, separate read against the same table.

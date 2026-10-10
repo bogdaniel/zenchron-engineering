@@ -95,3 +95,71 @@ func TestAssociateWorkGraphRequiresBothSidesToExist(t *testing.T) {
 		t.Fatal("associating a product that was never adopted should be refused")
 	}
 }
+
+// TestAssociatedGraphsPaginatesWithoutSilentTruncation proves a product with
+// MORE associations than one page never loses one: paging through
+// AssociatedGraphs with a small limit recovers every association exactly
+// once, hasMore is true for every page but the last, and the LIMIT/OFFSET
+// bound is a database-level query, not a result silently trimmed after a
+// full read - the one thing the earlier maxAssociatedGraphs cap got wrong.
+func TestAssociatedGraphsPaginatesWithoutSilentTruncation(t *testing.T) {
+	_, store, _ := openPair(t)
+	now := time.Unix(1700000000, 0).UTC()
+	productA := composeProduct(t, "storefront", 1, []string{"acme/shared-lib"}, now)
+	if _, _, err := store.AdoptProductRevision(productA); err != nil {
+		t.Fatal(err)
+	}
+	const total = 201
+	want := map[string]bool{}
+	for i := range total {
+		graph := adoptedGraph(t, store, "graph-"+string(rune('a'+i%26))+string(rune('0'+i/26)), 2000+i, now)
+		association, err := product.NewGraphAssociation(productA.ID, graph.ID, now.Add(time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.AssociateWorkGraph(association); err != nil {
+			t.Fatal(err)
+		}
+		want[graph.ID] = true
+	}
+
+	const pageSize = 100
+	got := map[string]bool{}
+	var pages int
+	for offset := 0; ; offset += pageSize {
+		page, hasMore, err := store.AssociatedGraphs(productA.ID, offset, pageSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		for _, id := range page {
+			if got[id] {
+				t.Fatalf("graph %s returned on more than one page", id)
+			}
+			got[id] = true
+		}
+		if !hasMore {
+			if len(page) == 0 || len(page) > pageSize {
+				t.Fatalf("final page has %d entries, want 1..%d", len(page), pageSize)
+			}
+			break
+		}
+		if len(page) != pageSize {
+			t.Fatalf("a page reporting hasMore must be full: got %d, want %d", len(page), pageSize)
+		}
+		if pages > total/pageSize+2 {
+			t.Fatal("hasMore never became false - pagination never terminates")
+		}
+	}
+	if pages != 3 {
+		t.Fatalf("201 associations at page size 100 must take exactly 3 pages, took %d", pages)
+	}
+	if len(got) != total {
+		t.Fatalf("paging recovered %d of %d associations - some were silently dropped", len(got), total)
+	}
+	for id := range want {
+		if !got[id] {
+			t.Fatalf("association %s was never returned by any page", id)
+		}
+	}
+}

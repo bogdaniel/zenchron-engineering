@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "graph_id",
+    "repository",
+    "agent_id",
+    "name",
+    "revision",
+    "counts",
+    "units"
+  ],
+  "properties": {
+    "graph_id": {
+      "type": "string"
+    },
+    "repository": {
+      "type": "string"
+    },
+    "agent_id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "integer"
+    },
+    "frontier": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer"
+      }
+    },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product_id",
+        "name",
+        "revision",
+        "repositories"
+      ],
+      "properties": {
+        "product_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "repositories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "units": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "unit_id",
+          "purpose",
+          "role",
+          "issue",
+          "state"
+        ],
+        "properties": {
+          "unit_id": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "execution_kind": {
+            "type": "string"
+          },
+          "issue": {
+            "type": "integer"
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "state": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "requires_review": {
+            "type": "boolean"
+          },
+          "review_approved": {
+            "type": "boolean"
+          },
+          "hold": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "reference": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          },
+          "run": {
+            "$ref": "control-plane-run.schema.json"
+          },
+          "output": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "handoff_id",
+              "candidate_revision",
+              "candidate_tree"
+            ],
+            "properties": {
+              "handoff_id": {
+                "type": "string"
+              },
+              "candidate_revision": {
+                "type": "string"
+              },
+              "candidate_tree": {
+                "type": "string"
+              },
+              "outcome": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              },
+              "unresolved": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "recommended_next": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "review": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "verdict",
+              "candidate"
+            ],
+            "properties": {
+              "verdict": {
+                "type": "string"
+              },
+              "candidate": {
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              },
+              "findings": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "severity",
+                    "signature"
+                  ],
+                  "properties": {
+                    "severity": {
+                      "type": "string"
+                    },
+                    "signature": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "open_decisions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "requested_at"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "purpose": {
+                  "type": "string"
+                },
+                "body": {
+                  "type": "string"
+                },
+                "requested_by": {
+                  "type": "string"
+                },
+                "requested_at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
