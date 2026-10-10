@@ -1734,6 +1734,9 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 			}
 		}
 		if !wanted {
+			if class, failing := state.currentHeadFailure(); failing && RouteFailure(class) == RouteProviderRemediation {
+				return r.settle(state, Failed, "no_progress")
+			}
 			return r.settle(state, waitingOr(live, Waiting), waitingReason(reason, ReasonGoalStateReached))
 		}
 		if err := state.validate(desired, live); err != nil {
