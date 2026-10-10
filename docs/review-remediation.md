@@ -496,15 +496,77 @@ one:
 `TestAReviewVerificationClaimBlocksAnOrdinaryWorkOperation` (R8),
 `TestAnOrdinaryVerificationAcquisitionReclaimsADeadReviewClaim`,
 `TestALiveOwnersExpiredClaimIsNotReclaimed`,
-`TestAFailedReleaseIsRecoveredByTheNextClaimForTheSameOwnerAndRun`, and
-`TestReconcileReviewRemediationForRunSurfacesAReleaseFailure` (R9, the last
-in `runtime/review_remediation_trigger_test.go`, the rest in
+`TestAFailedReleaseIsRecoveredOnceExpiredByTheNextClaimForTheSameOwnerAndRun`,
+and `TestReconcileReviewRemediationForRunSurfacesAReleaseFailure` (R9, the
+last in `runtime/review_remediation_trigger_test.go`, the rest in
 `runtime/review_verification_claim_test.go`), and
 `TestACorruptedReviewDecisionIndexNeverReleasesADependent` (R10,
 `runtime/workgraph_test.go`) are the new regressions. Every new guard - both
 directions of the R8 work-ceiling check, `Scheduler.Next`'s review-claim
 reclaim, the R9 self-heal, the release-error surfacing, and the R10
 index-vs-document check - was deliberately disabled, confirmed to fail its
+exact test, then restored.
+
+A re-review at the next head found a CI regression and two further gaps,
+all closed with no new mechanism:
+
+- **CI regression - R10's fail-closed check broke an EXISTING typed-error
+  contract.** `AdmitReviewRemediation` already had its own equivalent
+  check (`decision.Subject.Repository != repo.String() || ...`) producing
+  a typed `*ReviewRemediationRefusedError{Reason:
+  ReviewRemediationRefusedSubjectMismatch}` for exactly this corrupted-row
+  shape, proven by a PRE-EXISTING test
+  (`TestAdmitReviewRemediationRefusesSubjectAndProducerMismatches`). R10's
+  new check in `LatestReviewDecision` fired first, one layer earlier, and
+  returned a bare error that caller's existing test could not classify -
+  `go` and `evidence` both failed on this one test. The fix is additive,
+  not a weakening: `LatestReviewDecision`'s integrity check is unchanged
+  and still fails closed for every caller; the failure is now a typed
+  `*ReviewDecisionIndexMismatchError` carrying the disagreeing values, and
+  `AdmitReviewRemediation`'s two `port.LatestDecision` call sites
+  recognize it via `errors.As` and route it through the SAME existing
+  `ReviewRemediationRefusedSubjectMismatch` refusal their own check already
+  produces - one fact, one typed shape, regardless of which layer caught
+  it. `reviewApprovedFor` (WorkGraph), which has no check of its own,
+  needs no change: any non-nil error already fails it closed.
+- **R11 - claim self-heal trusted (owner, runID) alone, not expiry.**
+  `claimReviewVerificationSlot`'s self-heal released ANY existing claim
+  matching the SAME `(owner, runID)` pair unconditionally, reasoning that
+  pair could never be legitimately concurrent. That reasoning holds under
+  this scheduler's only real caller today - `Owner` is a single process
+  instance's lifetime identity (`host/pid/start-token`, `NewRuntimeOwner`,
+  so two different processes can never collide on it), and
+  `ReconcileReviewRemediationForRun`'s only caller (`driveOne`) never
+  drives the same run twice concurrently within one process
+  (`Supervisor.admit`'s `inflight` set) - but `claimReviewVerificationSlot`
+  is a reusable scheduler primitive, not entitled to assume every caller,
+  present or future, honors an invariant it does not itself enforce. A
+  genuinely concurrent sibling call for the same pair would have its
+  still-active claim deleted and replaced, freeing capacity while the
+  original reviewer remained active. Self-heal now ALSO requires the
+  existing claim be past its own `ExpiresAt` before releasing it - the
+  exact same bounded-TTL rule every other expiring lease in this system
+  already accepts, so a still-active, unexpired claim (whoever holds it)
+  is never released; only a genuinely leaked one, past its own grace
+  period, ever is. A release failure is therefore recoverable within at
+  most one TTL - bounded, never permanent - rather than instantly on the
+  very next call.
+- **R9 follow-up - a release failure could be hidden by the reviewer's own
+  failure.** `ReconcileReviewRemediationForRun`'s deferred release only set
+  `err` from a release failure when `err == nil` - when the review ITSELF
+  had already failed, its own release failure was silently discarded
+  rather than staying visible alongside it. The defer now uses
+  `errors.Join` (the same pattern `cli_agent.go`'s own
+  `executeErr = errors.Join(executeErr, stop())` already uses), so an
+  operator sees both the reviewer's own failure and a release failure,
+  never only whichever happened to be assigned first.
+
+`TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires` (R11) proves an
+unexpired same-pair claim is never touched, down to asserting the exact
+claim row is untouched, not merely "replaced with an equivalent one".
+`TestReconcileReviewRemediationForRunSurfacesBothTheReviewerAndReleaseFailure`
+(R9 follow-up) proves both failures survive in the combined error. Every
+new guard here was likewise deliberately disabled, confirmed to fail its
 exact test, then restored.
 
 ## Independent-review re-review hardening (B1, B2)
@@ -844,18 +906,29 @@ application-level check, is load-bearing).
   plain assurance-tick `Scheduler.Next` call - no review activity involved
   at all - reclaims a dead, expired claim;
   `TestALiveOwnersExpiredClaimIsNotReclaimed` proves expiry alone, with the
-  owner reported alive, never does; `TestAFailedReleaseIsRecoveredByTheNext-
-  ClaimForTheSameOwnerAndRun` proves the same `(owner, runID)` pair's next
-  attempt self-heals a leaked claim; `TestReconcileReviewRemediationFor-
-  RunSurfacesAReleaseFailure` proves a release failure reaches the caller
-  as this call's own error rather than being discarded (R9, all four in
-  `runtime/review_verification_claim_test.go` except the last, in
-  `runtime/review_remediation_trigger_test.go`).
+  owner reported alive, never does; `TestAFailedReleaseIsRecoveredOnceExpired-
+  ByTheNextClaimForTheSameOwnerAndRun` proves the same `(owner, runID)`
+  pair's next attempt self-heals a leaked claim once it has expired;
+  `TestReconcileReviewRemediationForRunSurfacesAReleaseFailure` proves a
+  release failure reaches the caller as this call's own error rather than
+  being discarded (R9, all four in `runtime/review_verification_claim_test.go`
+  except the last, in `runtime/review_remediation_trigger_test.go`).
 - `TestACorruptedReviewDecisionIndexNeverReleasesADependent` (R10,
   `runtime/workgraph_test.go`) proves a review_decisions row indexed under
   the unit's real `(repository, PR)` but whose document claims an
   unrelated subject - otherwise passing every R4 identity check - never
-  releases a dependent, while a coherent decision still does.
+  releases a dependent, while a coherent decision still does;
+  `TestAdmitReviewRemediationRefusesSubjectAndProducerMismatches`'s
+  pre-existing "indexed row/document mismatch" sub-test is the CI
+  regression this interacted with, now passing again through
+  `*ReviewDecisionIndexMismatchError`/`errors.As` classification.
+- `TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires` (R11) proves
+  self-heal never releases a still-unexpired same-`(owner, runID)` claim,
+  asserting the exact row is untouched.
+  `TestReconcileReviewRemediationForRunSurfacesBothTheReviewerAndRelease-
+  Failure` (R9 follow-up, `runtime/review_remediation_trigger_test.go`)
+  proves a reviewer failure and a release failure both survive in the
+  combined `errors.Join`ed error.
 
 **Still deferred, and why:** the residual external-head TOCTOU between this
 gate's last freshness check and its SQLite commit (explicitly documented

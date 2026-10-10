@@ -163,6 +163,22 @@ func (e *ReviewRemediationRefusedError) Error() string {
 func (r *EngineeringRuntime) AdmitReviewRemediation(ctx context.Context, port ReviewPort, repo GitHubRepo, prNumber int) (ReviewRemediationAdmission, bool, error) {
 	decision, found, err := port.LatestDecision(repo, prNumber)
 	if err != nil {
+		// #474 R10/CI: a store-level index-vs-document integrity failure is
+		// exactly the same fact this gate's own subject check below already
+		// classifies - a decision whose claimed subject disagrees with the
+		// requested one - just caught one layer earlier, before `decision`
+		// could even be populated. Route it through the SAME typed refusal
+		// rather than surfacing an opaque error this caller cannot classify;
+		// the integrity check itself is unchanged and still fail-closed for
+		// every other caller, which has no check of its own to defer to.
+		var mismatch *ReviewDecisionIndexMismatchError
+		if errors.As(err, &mismatch) {
+			return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+				Reason: ReviewRemediationRefusedSubjectMismatch,
+				Detail: fmt.Sprintf("a stored decision indexed under %s#%d disagrees with its own document (names %s#%d)",
+					mismatch.Repository, mismatch.PRNumber, mismatch.DecisionRepository, mismatch.DecisionPRNumber),
+			}
+		}
 		return ReviewRemediationAdmission{}, false, err
 	}
 	if !found {
@@ -218,6 +234,14 @@ func (r *EngineeringRuntime) AdmitReviewRemediation(ctx context.Context, port Re
 	// this subject is still exactly the one being authorized.
 	reconfirm, found, err := port.LatestDecision(repo, prNumber)
 	if err != nil {
+		var mismatch *ReviewDecisionIndexMismatchError
+		if errors.As(err, &mismatch) {
+			return ReviewRemediationAdmission{}, false, &ReviewRemediationRefusedError{
+				Reason: ReviewRemediationRefusedSubjectMismatch,
+				Detail: fmt.Sprintf("a stored decision indexed under %s#%d disagrees with its own document (names %s#%d)",
+					mismatch.Repository, mismatch.PRNumber, mismatch.DecisionRepository, mismatch.DecisionPRNumber),
+			}
+		}
 		return ReviewRemediationAdmission{}, false, err
 	}
 	if !found || reconfirm.ID != decision.ID {

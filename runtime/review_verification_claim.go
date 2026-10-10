@@ -117,16 +117,27 @@ func (s *SQLiteOperationStore) ReleaseReviewVerificationClaim(id string) error {
 }
 
 // claimReviewVerificationSlot reclaims abandoned claims first - the same
-// ordering AcquireVerification already uses - then releases any claim THIS
-// SAME (owner, runID) pair already holds (#474 R9) before attempting a
-// fresh one. A review claim is never held across two separate calls here
-// by design (claim, do the review, release, every single call) - an
-// existing one found at entry is always a LEAK from an earlier call whose
-// own release failed, owned by a controller that is, by definition, alive
-// right now (it is making this call). reclaimReviewVerificationClaims's
-// "dead AND expired" rule can never free that: only this controller
-// retrying its own release can, which is what makes a failed release
-// idempotently retryable rather than a permanent capacity loss.
+// ordering AcquireVerification already uses - then releases any EXPIRED
+// claim THIS SAME (owner, runID) pair already holds (#474 R9) before
+// attempting a fresh one.
+//
+// #474 R11: expiry, not merely the (owner, runID) match, is what makes this
+// safe. Owner is a single process instance's lifetime identity
+// (host/pid/start-token, NewRuntimeOwner): two DIFFERENT processes can
+// never collide on it, and ReconcileReviewRemediationForRun's only caller
+// (driveOne) never drives the same run twice concurrently within one
+// process (Supervisor.admit's inflight set) - so an UNEXPIRED claim for
+// this EXACT (owner, runID) pair can never be a live concurrent sibling
+// under the wiring this scheduler is actually used with today. But
+// claimReviewVerificationSlot is a reusable primitive, not entitled to
+// assume a caller it cannot see will always honor that: requiring expiry
+// first means that even if some future or misbehaving caller DID invoke it
+// twice for the same pair while the first genuinely still held the slot,
+// this call could still never destroy that still-active hold - only a
+// claim already past its own bounded TTL, exactly like any other expiring
+// lease in this system, is ever released here. A release that failed
+// leaves its claim recoverable within at most one TTL (bounded, never
+// permanent); a release that is still correctly held stays held.
 //
 // ok is false exactly when either ceiling is genuinely held by someone
 // else: never queued, never retried within this call, exactly as
@@ -140,19 +151,19 @@ func (s Scheduler) claimReviewVerificationSlot(owner, runID string) (ReviewVerif
 	if err := s.reclaimReviewVerificationClaims(); err != nil {
 		return ReviewVerificationClaim{}, false, err
 	}
+	now := s.Clock.Now()
 	existing, err := store.ReviewVerificationClaims()
 	if err != nil {
 		return ReviewVerificationClaim{}, false, err
 	}
 	for _, leaked := range existing {
-		if leaked.ControllerOwner != owner || leaked.RunID != runID {
+		if leaked.ControllerOwner != owner || leaked.RunID != runID || now.Before(leaked.ExpiresAt) {
 			continue
 		}
 		if err := store.ReleaseReviewVerificationClaim(leaked.ID); err != nil {
 			return ReviewVerificationClaim{}, false, err
 		}
 	}
-	now := s.Clock.Now()
 	claim := ReviewVerificationClaim{
 		ID: "review-verification-" + rand.Text(), ControllerOwner: owner, RunID: runID,
 		RequestedAt: now, ExpiresAt: now.Add(reviewVerificationClaimTTL),

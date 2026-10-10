@@ -263,36 +263,88 @@ func TestAnOrdinaryVerificationAcquisitionReclaimsADeadReviewClaim(t *testing.T)
 	}
 }
 
-// TestAFailedReleaseIsRecoveredByTheNextClaimForTheSameOwnerAndRun is R9's
-// idempotent-retry requirement: claimReviewVerificationSlot is always
-// called, review performed, released - every single call - for one
-// (owner, runID) pair never legitimately overlapping itself. An existing
-// claim found for that EXACT pair at entry is therefore always a leak from
-// an earlier call whose own release failed (simulated here by never
-// releasing it), owned by a controller that is, by definition, alive right
-// now. The next attempt for the SAME pair must recover it rather than
-// treat it as permanently held.
-func TestAFailedReleaseIsRecoveredByTheNextClaimForTheSameOwnerAndRun(t *testing.T) {
+// TestAFailedReleaseIsRecoveredOnceExpiredByTheNextClaimForTheSameOwnerAndRun
+// is R9's idempotent-retry requirement, narrowed by #474 R11: a leaked
+// claim for the SAME (owner, runID) pair - simulated here by never
+// releasing it - is recoverable within at most one TTL, never permanently
+// stuck, but ONLY once it is actually EXPIRED. Expiry, not merely the
+// (owner, runID) match, is what makes self-heal safe against a genuinely
+// concurrent sibling call that might still legitimately hold it (see
+// TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires for the
+// negative case this guards).
+func TestAFailedReleaseIsRecoveredOnceExpiredByTheNextClaimForTheSameOwnerAndRun(t *testing.T) {
 	store, err := OpenSQLiteOperationStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
 
-	s := verificationScheduler(store, "controller-a", 10, 1)
+	clock := &fakeClock{now: time.Unix(100, 0)}
+	s := Scheduler{
+		Store: store, Clock: clock, Owner: "controller-a", LeaseDuration: time.Minute,
+		Liveness: alwaysAlive(), MaxConcurrentRuns: 10, MaxConcurrentVerifications: 1,
+	}
 	leaked, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-1")
 	if err != nil || !claimed {
 		t.Fatalf("the first claim: claimed=%v err=%v", claimed, err)
 	}
 
+	clock.now = clock.now.Add(reviewVerificationClaimTTL + time.Minute)
 	healed, claimedAgain, err := s.claimReviewVerificationSlot("controller-a", "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !claimedAgain {
-		t.Fatal("expected the same (owner, run) pair's next claim attempt to recover a leaked claim, never treat it as permanently held")
+		t.Fatal("expected the same (owner, run) pair's next claim attempt to recover a leaked, EXPIRED claim, never treat it as permanently held")
 	}
 	if healed.ID == leaked.ID {
 		t.Fatal("the recovered claim reused the SAME id as the leaked one")
+	}
+}
+
+// TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires is #474 R11's
+// required regression: a review of #5478443739 found that self-heal
+// unconditionally deleted ANY claim matching (owner, runID), trusting that
+// pair alone could never be concurrently held - true under this scheduler's
+// only real caller today (ReconcileReviewRemediationForRun, serialized per
+// run by Supervisor.admit's inflight set, under a per-process-unique
+// Owner), but not something claimReviewVerificationSlot is entitled to
+// assume about every caller. This proves the primitive's OWN safety net: an
+// UNEXPIRED claim for the exact same (owner, runID) pair - standing in for
+// a genuinely concurrent sibling still actively holding it - is never
+// released by a second attempt, which is refused exactly as it would be
+// refused by anyone else's claim holding the only slot.
+func TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	clock := &fakeClock{now: time.Unix(100, 0)}
+	s := Scheduler{
+		Store: store, Clock: clock, Owner: "controller-a", LeaseDuration: time.Minute,
+		Liveness: alwaysAlive(), MaxConcurrentRuns: 10, MaxConcurrentVerifications: 1,
+	}
+	active, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-1")
+	if err != nil || !claimed {
+		t.Fatalf("the first claim: claimed=%v err=%v", claimed, err)
+	}
+
+	if _, claimedAgain, err := s.claimReviewVerificationSlot("controller-a", "run-1"); err != nil {
+		t.Fatal(err)
+	} else if claimedAgain {
+		t.Fatal("a second attempt for the SAME (owner, runID) pair deleted and replaced a still-active, unexpired claim")
+	}
+
+	// The original claim must still be exactly the one holding the slot -
+	// self-heal did not touch it at all, not merely "replaced it with an
+	// equivalent one".
+	remaining, err := store.ReviewVerificationClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != active.ID {
+		t.Fatalf("claims = %+v, want exactly the original claim %q untouched", remaining, active.ID)
 	}
 }

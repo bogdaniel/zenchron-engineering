@@ -178,11 +178,35 @@ func (s *SQLiteOperationStore) LatestReviewDecision(repository string, prNumber 
 	// on any disagreement, exactly as ReviewDecision(id) already does for
 	// its own id-vs-document check.
 	if decision.Subject.Repository != repository || decision.Subject.PRNumber != prNumber {
-		return review.Decision{}, false, fmt.Errorf(
-			"stored review decision indexed under %s#%d disagrees with its own document (names %s#%d)",
-			repository, prNumber, decision.Subject.Repository, decision.Subject.PRNumber)
+		return review.Decision{}, false, &ReviewDecisionIndexMismatchError{
+			Repository: repository, PRNumber: prNumber,
+			DecisionRepository: decision.Subject.Repository, DecisionPRNumber: decision.Subject.PRNumber,
+		}
 	}
 	return decision, true, nil
+}
+
+// ReviewDecisionIndexMismatchError is LatestReviewDecision's #474 R10
+// fail-closed integrity failure: a row found by its indexed (repository,
+// pr_number) columns whose own document disagrees with them. It is typed,
+// not a bare error, so a caller that already has an equivalent identity
+// check of its own against the SAME (repository, prNumber) it queried with
+// (AdmitReviewRemediation's existing decision.Subject comparison) can
+// recognize it via errors.As and route through that existing, more
+// specific refusal rather than surfacing an opaque failure the caller
+// cannot classify. A caller with no check of its own (WorkGraph's
+// reviewApprovedFor) needs no special handling: any non-nil error already
+// fails it closed.
+type ReviewDecisionIndexMismatchError struct {
+	Repository         string
+	PRNumber           int
+	DecisionRepository string
+	DecisionPRNumber   int
+}
+
+func (e *ReviewDecisionIndexMismatchError) Error() string {
+	return fmt.Sprintf("stored review decision indexed under %s#%d disagrees with its own document (names %s#%d)",
+		e.Repository, e.PRNumber, e.DecisionRepository, e.DecisionPRNumber)
 }
 
 func decodeReviewDecision(document string) (review.Decision, error) {

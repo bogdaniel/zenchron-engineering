@@ -87,8 +87,9 @@ func (releaseFailingStore) ReleaseReviewVerificationClaim(string) error {
 // discarded the way `_ = r.scheduler.releaseReviewVerificationSlot(...)`
 // once did. The claim leaking here is exactly what
 // claimReviewVerificationSlot's own self-heal (proven in
-// TestAFailedReleaseIsRecoveredByTheNextClaimForTheSameOwnerAndRun) makes
-// idempotently retryable rather than a permanent capacity loss.
+// TestAFailedReleaseIsRecoveredOnceExpiredByTheNextClaimForTheSameOwnerAndRun,
+// bounded by one TTL since #474 R11) makes recoverable rather than a
+// permanent capacity loss.
 func TestReconcileReviewRemediationForRunSurfacesAReleaseFailure(t *testing.T) {
 	f := newAdmissionFixture(t)
 	rt := &EngineeringRuntime{
@@ -106,5 +107,45 @@ func TestReconcileReviewRemediationForRunSurfacesAReleaseFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "releasing the review verification claim") {
 		t.Fatalf("error %q does not attribute the failure to releasing the review verification claim", err.Error())
+	}
+}
+
+// failingNeedsReviewPort is stubReviewPort with NeedsReview returning a
+// distinguishable error, so ReconcileReviewRemediation itself fails before
+// any decision is read - the review's own failure, independent of
+// anything capacity-related.
+type failingNeedsReviewPort struct{ stubReviewPort }
+
+func (failingNeedsReviewPort) NeedsReview(context.Context, GitHubRepo, int) (bool, error) {
+	return false, errors.New("simulated reviewer failure")
+}
+
+// TestReconcileReviewRemediationForRunSurfacesBothTheReviewerAndReleaseFailure
+// is R9's follow-up (noted alongside R11 in review #5478443739): when the
+// review ITSELF fails and releasing its capacity claim ALSO fails, both
+// must stay visible. The prior shape only ever surfaced the release
+// failure when `err == nil`, silently discarding the release failure
+// whenever the reviewer had already failed - exactly backwards from what
+// an operator needs to see.
+func TestReconcileReviewRemediationForRunSurfacesBothTheReviewerAndReleaseFailure(t *testing.T) {
+	f := newAdmissionFixture(t)
+	rt := &EngineeringRuntime{
+		deps: Dependencies{Store: f.store, Clock: f.clock, GitHub: f.fake},
+		scheduler: Scheduler{
+			Store: releaseFailingStore{f.store}, Clock: f.clock, Owner: "controller-x",
+			LeaseDuration: time.Minute, Liveness: neverAlive(),
+			MaxConcurrentRuns: 10, MaxConcurrentVerifications: 10,
+		},
+	}
+
+	_, _, err := rt.ReconcileReviewRemediationForRun(context.Background(), f.runID, failingNeedsReviewPort{}, "reviewer-1")
+	if err == nil {
+		t.Fatal("expected an error combining the reviewer's own failure and the release failure")
+	}
+	if !strings.Contains(err.Error(), "simulated reviewer failure") {
+		t.Fatalf("error %q lost the reviewer's own failure", err.Error())
+	}
+	if !strings.Contains(err.Error(), "releasing the review verification claim") {
+		t.Fatalf("error %q lost the release failure", err.Error())
 	}
 }

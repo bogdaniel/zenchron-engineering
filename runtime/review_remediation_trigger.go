@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/bogdaniel/zenchron-engineering/review"
@@ -98,15 +99,18 @@ func (r *EngineeringRuntime) ReconcileReviewRemediationForRun(ctx context.Contex
 	if !claimed {
 		return nil, nil, nil
 	}
-	// #474 R9: a release failure is surfaced rather than swallowed - never
-	// overriding a more informative error the call itself already produced,
-	// but never silently lost either when the review otherwise succeeded.
-	// claimReviewVerificationSlot's own leaked-claim release, on this exact
-	// (owner, runID) pair's NEXT call, is what makes that failure
-	// idempotently retryable rather than a permanent capacity loss.
+	// #474 R9: a release failure is surfaced rather than swallowed, and
+	// stays visible even when the review itself ALSO failed - joined, never
+	// one error silently discarding the other, so an operator reading this
+	// can see both the reviewer's own failure and that its capacity claim
+	// also failed to release. claimReviewVerificationSlot's own
+	// leaked-claim self-heal, on this exact (owner, runID) pair's NEXT call
+	// once this claim expires (#474 R11: only once expired, never on the
+	// mere pair match alone), is what makes that failure recoverable within
+	// one bounded TTL rather than a permanent capacity loss.
 	defer func() {
-		if releaseErr := r.scheduler.releaseReviewVerificationSlot(claim.ID); releaseErr != nil && err == nil {
-			err = fmt.Errorf("releasing the review verification claim: %w", releaseErr)
+		if releaseErr := r.scheduler.releaseReviewVerificationSlot(claim.ID); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("releasing the review verification claim: %w", releaseErr))
 		}
 	}()
 	var reconcileOutcome ReviewOutcome
