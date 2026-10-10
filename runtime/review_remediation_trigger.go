@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/bogdaniel/zenchron-engineering/review"
 )
@@ -71,7 +72,7 @@ func (r *EngineeringRuntime) ReconcileReviewRemediation(ctx context.Context, por
 // supervisor's existing per-run tick (driveOne, same cadence
 // ObserveFeedback already runs on) call the automatic trigger by run id
 // alone, without reaching into the run's projection itself.
-func (r *EngineeringRuntime) ReconcileReviewRemediationForRun(ctx context.Context, runID string, port ReviewPort, reviewerAgentID string) (*ReviewOutcome, *ReviewRemediationAdmission, error) {
+func (r *EngineeringRuntime) ReconcileReviewRemediationForRun(ctx context.Context, runID string, port ReviewPort, reviewerAgentID string) (outcome *ReviewOutcome, admission *ReviewRemediationAdmission, err error) {
 	state, err := r.load(runID)
 	if err != nil {
 		return nil, nil, err
@@ -83,24 +84,38 @@ func (r *EngineeringRuntime) ReconcileReviewRemediationForRun(ctx context.Contex
 	if err != nil {
 		return nil, nil, err
 	}
-	// #474 R5: a durable verification-capacity claim, participating in the
-	// SAME ceiling every ordinary assurance/verification operation and
-	// nested VerificationPermit already share - never a second, uncoordinated
-	// counter. No free slot this pass is a clean no-op, exactly as
-	// idempotent as every other call here: the next tick tries again.
-	claim, claimed, err := r.scheduler.claimReviewVerificationSlot(r.scheduler.Owner)
-	if err != nil {
-		return nil, nil, err
+	// #474 R5/R8: a durable claim against BOTH shared capacity ceilings -
+	// verification AND work (an independent review is read-only but still
+	// provider work) - participating in the SAME counts every ordinary
+	// operation and nested VerificationPermit already share, never a
+	// second, uncoordinated counter. No free slot this pass is a clean
+	// no-op, exactly as idempotent as every other call here: the next tick
+	// tries again.
+	claim, claimed, claimErr := r.scheduler.claimReviewVerificationSlot(r.scheduler.Owner, runID)
+	if claimErr != nil {
+		return nil, nil, claimErr
 	}
 	if !claimed {
 		return nil, nil, nil
 	}
-	defer func() { _ = r.scheduler.releaseReviewVerificationSlot(claim.ID) }()
-	outcome, admission, err := r.ReconcileReviewRemediation(ctx, port, repo, state.projection.PullRequest.Number, reviewerAgentID)
+	// #474 R9: a release failure is surfaced rather than swallowed - never
+	// overriding a more informative error the call itself already produced,
+	// but never silently lost either when the review otherwise succeeded.
+	// claimReviewVerificationSlot's own leaked-claim release, on this exact
+	// (owner, runID) pair's NEXT call, is what makes that failure
+	// idempotently retryable rather than a permanent capacity loss.
+	defer func() {
+		if releaseErr := r.scheduler.releaseReviewVerificationSlot(claim.ID); releaseErr != nil && err == nil {
+			err = fmt.Errorf("releasing the review verification claim: %w", releaseErr)
+		}
+	}()
+	var reconcileOutcome ReviewOutcome
+	reconcileOutcome, admission, err = r.ReconcileReviewRemediation(ctx, port, repo, state.projection.PullRequest.Number, reviewerAgentID)
 	if err != nil {
 		return nil, nil, err
 	}
-	return &outcome, admission, nil
+	outcome = &reconcileOutcome
+	return outcome, admission, nil
 }
 
 // ReviewBudget is the finite provider budget #474's automatic trigger binds

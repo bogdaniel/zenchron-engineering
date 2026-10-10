@@ -165,7 +165,24 @@ func (s *SQLiteOperationStore) LatestReviewDecision(repository string, prNumber 
 		return review.Decision{}, false, err
 	}
 	decision, err := decodeReviewDecision(document)
-	return decision, err == nil, err
+	if err != nil {
+		return review.Decision{}, false, err
+	}
+	// #474 R10: the row was found by its INDEXED (repository, pr_number)
+	// columns - the same two columns a raw-SQL write could set independently
+	// of the document's own embedded Subject. Trusting the index alone would
+	// let a corrupted or forged row, indexed under THIS repository/PR but
+	// whose document claims an unrelated one (while still carrying a
+	// genuinely valid RunID/ProducerAgentID/ReviewerAgentID/head for THAT
+	// other subject), read as a coherent decision for this PR. Fail closed
+	// on any disagreement, exactly as ReviewDecision(id) already does for
+	// its own id-vs-document check.
+	if decision.Subject.Repository != repository || decision.Subject.PRNumber != prNumber {
+		return review.Decision{}, false, fmt.Errorf(
+			"stored review decision indexed under %s#%d disagrees with its own document (names %s#%d)",
+			repository, prNumber, decision.Subject.Repository, decision.Subject.PRNumber)
+	}
+	return decision, true, nil
 }
 
 func decodeReviewDecision(document string) (review.Decision, error) {

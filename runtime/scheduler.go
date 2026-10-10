@@ -364,6 +364,15 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 	if err := s.reclaimVerificationPermits(); err != nil {
 		return nil, err
 	}
+	// #474 R9: an ordinary verification-slot acquisition must be able to
+	// free a dead, expired review-verification claim exactly as it already
+	// frees a dead, expired nested VerificationPermit - claimReviewVerificationSlot's
+	// own reclaim is not enough, since nothing here guarantees a review
+	// trigger ever runs again for a given repository to reach it (no active
+	// PR, or no --reviewer-agent configured at all).
+	if err := s.reclaimReviewVerificationClaims(); err != nil {
+		return nil, err
+	}
 	if pending, err := s.VerificationCleanupPending(runID); err != nil || pending {
 		return nil, err
 	}

@@ -30,6 +30,44 @@ func verificationCountSQL() (string, []any) {
 		(SELECT COUNT(*) FROM review_verification_claims)`, args
 }
 
+// reviewClaimRunCountSQL is the distinct-run-id count of open review
+// verification claims (#474 R8): an independent review is read-only but
+// still provider WORK, which #85 classifies as bounded by BOTH
+// max_concurrent_verifications (verificationCountSQL already covers this)
+// AND max_concurrent_runs - a review claim carries no run_operations row
+// of its own for the ordinary work-ceiling count to see, so this is added
+// wherever that count is. excludeRunID is the SAME run a caller already
+// excludes from its own ordinary-operations count, applied here too so an
+// operation never double-counts the review claim it is itself about to
+// hold (or just released).
+func reviewClaimRunCountSQL(excludeRunID string) (string, []any) {
+	return `(SELECT COUNT(DISTINCT json_extract(document, '$.run_id')) FROM review_verification_claims
+		WHERE json_extract(document, '$.run_id') IS NOT NULL AND json_extract(document, '$.run_id') <> ?)`,
+		[]any{excludeRunID}
+}
+
+// workCountSQL is the distinct-run-id WORK-capacity-class occupancy count
+// (#85): every ordinary leased/running operation whose kind is NOT an
+// observation kind, plus every open review verification claim's own run
+// (#474 R8) - ClaimReviewVerificationSlot's own ceiling check, since a
+// review claim is never observation-class work.
+func workCountSQL(excludeRunID string) (string, []any) {
+	kinds := observationKindList()
+	args := make([]any, 0, len(kinds)+1)
+	args = append(args, excludeRunID)
+	for _, kind := range kinds {
+		args = append(args, kind)
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(kinds)), ",")
+	claimSQL, claimArgs := reviewClaimRunCountSQL(excludeRunID)
+	args = append(args, claimArgs...)
+	return `(SELECT COUNT(DISTINCT run_id) FROM run_operations
+		WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased','running')
+		AND json_extract(document, '$.lease') IS NOT NULL
+		AND COALESCE(json_extract(document, '$.kind') IN (` + placeholders + `), 0) = 0) +
+		` + claimSQL, args
+}
+
 func (s *SQLiteOperationStore) VerificationPermit(id string) (VerificationPermit, int64, bool, error) {
 	var document string
 	var revision int64

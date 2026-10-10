@@ -781,3 +781,74 @@ func TestAReviewGatedUnitBlocksItsDependentUntilIndependentApproval(t *testing.T
 		t.Fatalf("b never completed once a was approved: %+v", final.unit(t, "b"))
 	}
 }
+
+// seedCorruptedReviewDecisionIndex writes a review_decisions row directly
+// through SQL, bypassing CreateReviewDecision entirely: a fully valid,
+// self-consistent Decision document for ANOTHER subject (foreignRepo,
+// foreignPR), but INDEXED under repository/prNumber - the exact columns
+// LatestReviewDecision's query filters by. It simulates the one thing
+// CreateReviewDecision's own atomic write prevents but a raw SQL
+// corruption, replication bug, or migration defect would not: an indexed
+// row whose own document disagrees with the index that found it.
+func seedCorruptedReviewDecisionIndex(t *testing.T, store *SQLiteOperationStore, repository string, prNumber int, foreignRepo string, foreignPR int, headSHA, runID, producerAgentID, reviewerID string, at time.Time) {
+	t.Helper()
+	foreignSubject := review.Subject{Repository: foreignRepo, PRNumber: foreignPR, HeadSHA: headSHA}
+	id, err := review.DecisionID(foreignSubject, reviewerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := review.Decision{
+		SchemaVersion: review.SchemaVersion, ID: id, Subject: foreignSubject, RunID: runID,
+		ProducerAgentID: producerAgentID, ReviewerAgentID: reviewerID, Verdict: review.VerdictApprove, CreatedAt: at,
+	}
+	if err := decision.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	document, err := CanonicalJSON(decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO review_decisions (id, repository, pr_number, head_sha, run_id, created_unix_nano, document)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		decision.ID, repository, prNumber, headSHA, runID, at.UnixNano(), string(document)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestACorruptedReviewDecisionIndexNeverReleasesADependent is #474 R10's
+// required regression: a row indexed under THIS unit's real (repository,
+// PR), but whose document claims an unrelated subject - while still
+// carrying a genuinely valid RunID/ProducerAgentID/ReviewerAgentID and the
+// exact right head commit for ITS OWN (foreign) subject, so every other R4
+// check alone would accept it - must never release a dependent unit. A
+// subsequent coherent, non-corrupted decision for the SAME exact commit
+// still releases it normally.
+func TestACorruptedReviewDecisionIndexNeverReleasesADependent(t *testing.T) {
+	fixture := newFleetFixture(t, 4)
+	supervisor := fixture.supervisor()
+	view := fixture.adoptGraph(supervisor, "claude", 1, graphReviewGated())
+	repo, err := ParseGitHubRepo("acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	settled := fixture.driveGraph(supervisor, view.GraphID, nil)
+	a := settled.unit(t, "a")
+	if a.State != orchestration.UnitState(orchestration.ItemCompleted) {
+		t.Fatalf("a never completed: %+v", a)
+	}
+	h1, prNumber := a.Output.CandidateRevision, a.Child.PullRequest
+
+	seedCorruptedReviewDecisionIndex(t, fixture.store, repo.String(), prNumber,
+		"acme/unrelated", 999, h1, a.RunID, a.Child.AgentID, "reviewer-corrupt", fixture.clock.Now())
+	afterCorrupted := fixture.graph(view.GraphID)
+	if got := afterCorrupted.unit(t, "b").State; got != orchestration.UnitBlocked {
+		t.Fatalf("b = %s after an index-vs-document subject mismatch, want still blocked", got)
+	}
+
+	seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, h1, a.RunID, a.Child.AgentID, "reviewer-coherent", review.VerdictApprove, fixture.clock.Now().Add(time.Minute))
+	afterCoherent := fixture.graph(view.GraphID)
+	if got := afterCoherent.unit(t, "b").State; got != orchestration.UnitReady {
+		t.Fatalf("b = %s after a coherent independent APPROVE of the exact commit, want ready: %+v", got, afterCoherent.unit(t, "b"))
+	}
+}

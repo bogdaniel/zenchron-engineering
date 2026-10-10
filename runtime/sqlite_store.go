@@ -906,7 +906,18 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 	for _, kind := range observation {
 		args = append(args, kind)
 	}
-	args = append(args, acquiringObservation, ceiling)
+	// #474 R8: an independent-review claim is read-only but still provider
+	// WORK (#85), bounded by max_concurrent_runs exactly as any other
+	// work-class operation is - never only by max_concurrent_verifications.
+	// It carries no run_operations row for the count just above to see, so
+	// its own run is added here, zeroed by the CASE when acquiring
+	// observation-class capacity instead (a review claim is never
+	// observation-class work).
+	reviewClaimSQL, reviewClaimArgs := reviewClaimRunCountSQL(op.RunID)
+	args = append(args, acquiringObservation)
+	args = append(args, acquiringObservation)
+	args = append(args, reviewClaimArgs...)
+	args = append(args, ceiling)
 	// The verification ceiling (#490) is asked only of a verification
 	// operation, and counted exactly as the class ceiling is: other runs
 	// holding a leased verification operation, read from the document's kind.
@@ -932,10 +943,11 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 		  AND NOT EXISTS (SELECT 1 FROM verification_permits AS held
 		       WHERE json_extract(held.document, '$.state') = 'granted'
 		         AND json_extract(held.document, '$.parent.RunID') = run_operations.run_id)
-		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations
+		  AND ((SELECT COUNT(DISTINCT run_id) FROM run_operations
 		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
 		         AND json_extract(document, '$.lease') IS NOT NULL
-		         AND COALESCE(json_extract(document, '$.kind') IN (`+kinds+`), 0) = ?) < ?
+		         AND COALESCE(json_extract(document, '$.kind') IN (`+kinds+`), 0) = ?)
+		       + (CASE WHEN ? = 0 THEN `+reviewClaimSQL+` ELSE 0 END)) < ?
 		  AND (? = 0 OR (`+count+`) < ?)`,
 		args...)
 	if err != nil {

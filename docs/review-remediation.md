@@ -423,6 +423,90 @@ ever pushed a SECOND commit to an already-published PR through the real
 reconciler loop, so nothing had surfaced this. Fixed to re-read the live ref
 on every `PullRequest` call.
 
+A further independent exact-head re-review of R5's durable claim found
+three more gaps, each closed in the existing mechanism rather than a new
+one:
+
+- **R8 - a review claim counted toward the verification ceiling but not
+  the mandatory work ceiling.** #85 classifies a verification-class
+  operation as ALSO work, bounded by `max_concurrent_runs` as well as
+  `max_concurrent_verifications` - `AcquireOperation`'s own existing SQL
+  already enforces both for every ordinary operation it admits. A review
+  claim carries no `run_operations` row, so it never went through that
+  statement at all: with `MaxConcurrentRuns=1`, an ordinary
+  `OpExecutionInvoke` holding the sole work slot did not stop a
+  `ReviewVerificationClaim` from being granted concurrently, and a granted
+  claim did not stop a NEW run's ordinary work operation from acquiring the
+  same slot either. `ReviewVerificationClaim` now carries the producing
+  `RunID` it is attributed to, and two new shared SQL helpers
+  (`runtime/verification_permit_sqlite.go`) extend the existing formula
+  pattern: `reviewClaimRunCountSQL` is the distinct-run count of open claims
+  excluding one run, and `workCountSQL` is that count added to the existing
+  work-occupancy count. `AcquireOperation`'s work-ceiling check now adds
+  this term (zeroed when the acquisition itself is observation-class, since
+  a review claim is never observation work); `ClaimReviewVerificationSlot`
+  checks the SAME `workCountSQL` bound in the identical atomic `INSERT ...
+  WHERE` statement it already used for the verification ceiling. One
+  shared formula, two consumers, never a second ceiling.
+- **R9 - an abandoned claim was reclaimed only when another review ran, and
+  a release failure was silently discarded.** `reclaimReviewVerificationClaims`
+  (the "dead and expired" rule) was previously called only from
+  `claimReviewVerificationSlot` itself - a repository that stops publishing
+  PRs, or a controller never configured with `--reviewer-agent`, has no
+  path that ever reaches it again, so a dead claim could starve
+  `max_concurrent_verifications` permanently. `Scheduler.Next` - the
+  ordinary verification/assurance acquisition path, called on every tick
+  regardless of review activity - now also calls it, exactly mirroring how
+  it already calls `reclaimVerificationPermits`. Separately,
+  `ReconcileReviewRemediationForRun`'s deferred release
+  (`_ = r.scheduler.releaseReviewVerificationSlot(claim.ID)`) discarded its
+  own error: a release that failed left a claim "owned" by a controller
+  that is, by definition, alive right now (it is the one that just made the
+  call) - `reclaimReviewVerificationClaims`'s death-and-expiry rule can
+  never free that, since the owner never died. `claimReviewVerificationSlot`
+  now self-heals: before attempting a fresh claim, it releases any existing
+  claim matching the SAME `(owner, runID)` pair, which is always safe
+  because that exact pair is never legitimately held across two separate
+  calls by design (claim, review, release, every single call) - an existing
+  one at entry is always a leak from an earlier call's own failed release.
+  `ReconcileReviewRemediationForRun` also now uses named returns so a
+  release failure surfaces as the call's own error rather than being
+  swallowed, which is what makes a failed release idempotently retryable
+  (the next call for the same pair heals it) instead of a permanent
+  capacity loss.
+- **R10 - a review decision was trusted by its index alone, never checked
+  against its own document.** `LatestReviewDecision(repository, prNumber)`
+  found its row by the `repository`/`pr_number` COLUMNS alone and decoded
+  whatever document sat there, never checking that the document's own
+  `Subject.Repository`/`Subject.PRNumber` agreed with what was queried -
+  unlike `ReviewDecision(id)`, which already checks `decision.ID != id`
+  against its own document for exactly this reason. A row corrupted,
+  mis-migrated, or written by anything other than `CreateReviewDecision`'s
+  own atomic insert - indexed under THIS unit's real `(repository, PR)` but
+  whose document claims an unrelated subject, while still carrying a
+  genuinely valid `RunID`/`ProducerAgentID`/`ReviewerAgentID` and the exact
+  right head commit FOR THAT OTHER subject (passing every other R4 check)
+  - would read as a coherent decision and incorrectly release a dependent
+  unit. `LatestReviewDecision` now fails closed on any index-vs-document
+  disagreement, the same shape `ReviewDecision(id)`'s own check already
+  takes; `reviewApprovedFor`'s caller already treats a `LatestReviewDecision`
+  error as unreadable and refuses to release (no new branch needed there).
+
+`TestAnOrdinaryWorkOperationBlocksAReviewVerificationClaim` and
+`TestAReviewVerificationClaimBlocksAnOrdinaryWorkOperation` (R8),
+`TestAnOrdinaryVerificationAcquisitionReclaimsADeadReviewClaim`,
+`TestALiveOwnersExpiredClaimIsNotReclaimed`,
+`TestAFailedReleaseIsRecoveredByTheNextClaimForTheSameOwnerAndRun`, and
+`TestReconcileReviewRemediationForRunSurfacesAReleaseFailure` (R9, the last
+in `runtime/review_remediation_trigger_test.go`, the rest in
+`runtime/review_verification_claim_test.go`), and
+`TestACorruptedReviewDecisionIndexNeverReleasesADependent` (R10,
+`runtime/workgraph_test.go`) are the new regressions. Every new guard - both
+directions of the R8 work-ceiling check, `Scheduler.Next`'s review-claim
+reclaim, the R9 self-heal, the release-error surfacing, and the R10
+index-vs-document check - was deliberately disabled, confirmed to fail its
+exact test, then restored.
+
 ## Independent-review re-review hardening (B1, B2)
 
 Two gaps an independent exact-head re-review found in the wiring above,
@@ -751,6 +835,27 @@ application-level check, is load-bearing).
   `ReviewBudget()` never returns zero, with or without an operator
   configuration, mirroring `planningWallLimit`'s own regression
   (`TestAnUnbudgetedPlanningInvocationStillHasADeadline`).
+- `TestAnOrdinaryWorkOperationBlocksAReviewVerificationClaim` and
+  `TestAReviewVerificationClaimBlocksAnOrdinaryWorkOperation` (R8) prove
+  both directions of the work-ceiling exclusion between an ordinary work
+  operation and a review claim, independent of verification-ceiling
+  headroom.
+- `TestAnOrdinaryVerificationAcquisitionReclaimsADeadReviewClaim` proves a
+  plain assurance-tick `Scheduler.Next` call - no review activity involved
+  at all - reclaims a dead, expired claim;
+  `TestALiveOwnersExpiredClaimIsNotReclaimed` proves expiry alone, with the
+  owner reported alive, never does; `TestAFailedReleaseIsRecoveredByTheNext-
+  ClaimForTheSameOwnerAndRun` proves the same `(owner, runID)` pair's next
+  attempt self-heals a leaked claim; `TestReconcileReviewRemediationFor-
+  RunSurfacesAReleaseFailure` proves a release failure reaches the caller
+  as this call's own error rather than being discarded (R9, all four in
+  `runtime/review_verification_claim_test.go` except the last, in
+  `runtime/review_remediation_trigger_test.go`).
+- `TestACorruptedReviewDecisionIndexNeverReleasesADependent` (R10,
+  `runtime/workgraph_test.go`) proves a review_decisions row indexed under
+  the unit's real `(repository, PR)` but whose document claims an
+  unrelated subject - otherwise passing every R4 identity check - never
+  releases a dependent, while a coherent decision still does.
 
 **Still deferred, and why:** the residual external-head TOCTOU between this
 gate's last freshness check and its SQLite commit (explicitly documented

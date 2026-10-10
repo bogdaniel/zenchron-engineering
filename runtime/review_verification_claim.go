@@ -20,15 +20,22 @@ import (
 )
 
 // ReviewVerificationClaim is the durable fact behind one held slot.
+// RunID is the producer run the review is FOR (#474 R8): a review claim
+// carries no run_operations row of its own, so this is what the shared
+// work-ceiling count (workCountSQL/reviewClaimRunCountSQL) attributes it
+// to - an independent review is read-only but still provider work,
+// bounded by max_concurrent_runs exactly as any other provider invocation
+// already is.
 type ReviewVerificationClaim struct {
 	ID              string    `json:"id"`
 	ControllerOwner string    `json:"controller_owner"`
+	RunID           string    `json:"run_id"`
 	RequestedAt     time.Time `json:"requested_at"`
 	ExpiresAt       time.Time `json:"expires_at"`
 }
 
 func (c ReviewVerificationClaim) validate() error {
-	if c.ID == "" || c.ControllerOwner == "" || c.RequestedAt.IsZero() || c.ExpiresAt.Before(c.RequestedAt) {
+	if c.ID == "" || c.ControllerOwner == "" || c.RunID == "" || c.RequestedAt.IsZero() || c.ExpiresAt.Before(c.RequestedAt) {
 		return errors.New("incomplete review verification claim")
 	}
 	return nil
@@ -44,7 +51,7 @@ const reviewVerificationClaimTTL = 15 * time.Minute
 // review-trigger claims, mirroring VerificationPermitStore's own shape.
 type ReviewVerificationClaimStore interface {
 	ReviewVerificationClaims() ([]ReviewVerificationClaim, error)
-	ClaimReviewVerificationSlot(claim ReviewVerificationClaim, ceiling int) (bool, error)
+	ClaimReviewVerificationSlot(claim ReviewVerificationClaim, maxRuns, maxVerifications int) (bool, error)
 	ReleaseReviewVerificationClaim(id string) error
 }
 
@@ -70,25 +77,30 @@ func (s *SQLiteOperationStore) ReviewVerificationClaims() ([]ReviewVerificationC
 }
 
 // ClaimReviewVerificationSlot inserts claim in the SAME statement that
-// checks it keeps verificationCountSQL's shared count at or under ceiling -
-// one atomic write, never a separate read-then-write race between two
-// controllers.
-func (s *SQLiteOperationStore) ClaimReviewVerificationSlot(claim ReviewVerificationClaim, ceiling int) (bool, error) {
+// checks it keeps BOTH shared ceilings - verificationCountSQL AND
+// workCountSQL (#474 R8: a review is read-only but still provider work,
+// bounded by max_concurrent_runs too, never only max_concurrent_verifications)
+// - at or under their respective bounds. One atomic write, never a
+// separate read-then-write race between two controllers.
+func (s *SQLiteOperationStore) ClaimReviewVerificationSlot(claim ReviewVerificationClaim, maxRuns, maxVerifications int) (bool, error) {
 	if err := claim.validate(); err != nil {
 		return false, err
 	}
-	if ceiling < 1 {
-		return false, errors.New("a verification ceiling below one claims nothing")
+	if maxRuns < 1 || maxVerifications < 1 {
+		return false, errors.New("a work or verification ceiling below one claims nothing")
 	}
 	document, err := CanonicalJSON(claim)
 	if err != nil {
 		return false, err
 	}
-	count, args := verificationCountSQL()
-	execArgs := append([]any{claim.ID, string(document)}, args...)
-	execArgs = append(execArgs, ceiling)
+	verificationSQL, verificationArgs := verificationCountSQL()
+	workSQL, workArgs := workCountSQL(claim.RunID)
+	execArgs := append([]any{claim.ID, string(document)}, verificationArgs...)
+	execArgs = append(execArgs, maxVerifications)
+	execArgs = append(execArgs, workArgs...)
+	execArgs = append(execArgs, maxRuns)
 	result, err := s.db.Exec(`INSERT INTO review_verification_claims (id, revision, document)
-		SELECT ?, 1, ? WHERE (`+count+`) < ?`, execArgs...)
+		SELECT ?, 1, ? WHERE (`+verificationSQL+`) < ? AND (`+workSQL+`) < ?`, execArgs...)
 	if err != nil {
 		return false, err
 	}
@@ -105,12 +117,21 @@ func (s *SQLiteOperationStore) ReleaseReviewVerificationClaim(id string) error {
 }
 
 // claimReviewVerificationSlot reclaims abandoned claims first - the same
-// ordering AcquireVerification already uses - then attempts a fresh claim
-// for owner under the scheduler's own durable ceiling. ok is false exactly
-// when every slot is genuinely held: never queued, never retried within
-// this call, exactly as idempotent as every other call into
-// ReconcileReviewRemediation.
-func (s Scheduler) claimReviewVerificationSlot(owner string) (ReviewVerificationClaim, bool, error) {
+// ordering AcquireVerification already uses - then releases any claim THIS
+// SAME (owner, runID) pair already holds (#474 R9) before attempting a
+// fresh one. A review claim is never held across two separate calls here
+// by design (claim, do the review, release, every single call) - an
+// existing one found at entry is always a LEAK from an earlier call whose
+// own release failed, owned by a controller that is, by definition, alive
+// right now (it is making this call). reclaimReviewVerificationClaims's
+// "dead AND expired" rule can never free that: only this controller
+// retrying its own release can, which is what makes a failed release
+// idempotently retryable rather than a permanent capacity loss.
+//
+// ok is false exactly when either ceiling is genuinely held by someone
+// else: never queued, never retried within this call, exactly as
+// idempotent as every other call into ReconcileReviewRemediation.
+func (s Scheduler) claimReviewVerificationSlot(owner, runID string) (ReviewVerificationClaim, bool, error) {
 	s = s.defaults()
 	store, ok := s.Store.(ReviewVerificationClaimStore)
 	if !ok {
@@ -119,12 +140,24 @@ func (s Scheduler) claimReviewVerificationSlot(owner string) (ReviewVerification
 	if err := s.reclaimReviewVerificationClaims(); err != nil {
 		return ReviewVerificationClaim{}, false, err
 	}
+	existing, err := store.ReviewVerificationClaims()
+	if err != nil {
+		return ReviewVerificationClaim{}, false, err
+	}
+	for _, leaked := range existing {
+		if leaked.ControllerOwner != owner || leaked.RunID != runID {
+			continue
+		}
+		if err := store.ReleaseReviewVerificationClaim(leaked.ID); err != nil {
+			return ReviewVerificationClaim{}, false, err
+		}
+	}
 	now := s.Clock.Now()
 	claim := ReviewVerificationClaim{
-		ID: "review-verification-" + rand.Text(), ControllerOwner: owner,
+		ID: "review-verification-" + rand.Text(), ControllerOwner: owner, RunID: runID,
 		RequestedAt: now, ExpiresAt: now.Add(reviewVerificationClaimTTL),
 	}
-	claimed, err := store.ClaimReviewVerificationSlot(claim, s.MaxConcurrentVerifications)
+	claimed, err := store.ClaimReviewVerificationSlot(claim, s.MaxConcurrentRuns, s.MaxConcurrentVerifications)
 	if err != nil || !claimed {
 		return ReviewVerificationClaim{}, false, err
 	}
