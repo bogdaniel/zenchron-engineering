@@ -208,6 +208,9 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	if err := s.RefuseConfigurationHold(input.PlanID); err != nil {
 		return domain.EngineeringPlan{}, err
 	}
+	if err := s.refuseStartedObjectiveRevision(input.PlanID); err != nil {
+		return domain.EngineeringPlan{}, err
+	}
 	existing, found, err := s.Store.Plan(input.PlanID)
 	if err != nil {
 		return domain.EngineeringPlan{}, err

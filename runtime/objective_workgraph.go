@@ -53,14 +53,8 @@ func (s PlanService) BindObjectivePlan(plan domain.EngineeringPlan, issue int) (
 		if *current.ObjectivePlan == *graph.ObjectivePlan {
 			return current.ID, nil
 		}
-		batches, err := s.Store.OrchestrationBatches()
-		if err != nil {
+		if err := s.refuseStartedObjectiveRevision(plan.ID); err != nil {
 			return "", err
-		}
-		for _, batch := range batches {
-			if batch.Origin != nil && batch.Origin.GraphID == current.ID {
-				return "", errors.New("objective graph has started work; its immutable plan binding cannot be replaced")
-			}
 		}
 		if plan.Revision <= current.ObjectivePlan.Revision {
 			return "", errors.New("objective graph requires a newer unstarted plan revision")
@@ -153,6 +147,26 @@ func objectiveGraphFor(store *SQLiteOperationStore, planID string) (*orchestrati
 		result = graph
 	}
 	return result, nil
+}
+
+// A claimed objective child already binds the approved plan, even when a
+// crash has not yet persisted its run. Refuse before proposal writes can
+// supersede that approval while leaving the operational graph behind.
+func (s PlanService) refuseStartedObjectiveRevision(planID string) error {
+	graph, err := objectiveGraphFor(s.Store, planID)
+	if err != nil || graph == nil {
+		return err
+	}
+	batches, err := s.Store.OrchestrationBatches()
+	if err != nil {
+		return err
+	}
+	for _, batch := range batches {
+		if batch.Origin != nil && batch.Origin.GraphID == graph.ID {
+			return &PlanRefusedError{PlanID: planID, Detail: "objective graph has started work; its immutable plan binding cannot be replaced"}
+		}
+	}
+	return nil
 }
 
 // startObjectiveStage retains the plan reconciler's frozen assignment and

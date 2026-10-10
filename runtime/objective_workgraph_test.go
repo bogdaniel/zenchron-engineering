@@ -312,6 +312,18 @@ func TestObjectiveReproposalRetainsHistoryAndRefusesStartedGraph(t *testing.T) {
 	if _, _, err := fixture.store.CreateOrchestrationBatch(batch); err != nil {
 		t.Fatal(err)
 	}
+	_, err = fixture.service.Propose(context.Background(), ProposeInput{
+		PlanID: fixture.plan.ID, Objective: "A repeated intake must preserve started objective authority.",
+		Subject: next.Subject, Contract: planFixtureContract(fixture.phase8Fixture), Issue: fixture.issue,
+		Model: domain.ProjectModel{SchemaVersion: domain.SchemaVersion, ID: "project", Revision: "1", Subject: next.Subject},
+	})
+	if err == nil || !strings.Contains(err.Error(), "objective graph has started work") {
+		t.Fatalf("proposal did not refuse a claimed objective child before persistence: %v", err)
+	}
+	latest, found, err := fixture.store.Plan(fixture.plan.ID)
+	if err != nil || !found || latest.Revision != 2 || latest.Digest != next.Digest {
+		t.Fatalf("refused repeated intake changed latest plan: %+v, %v", latest, err)
+	}
 	third := next
 	third.Revision = 3
 	previous = next.Revision
