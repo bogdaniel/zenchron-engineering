@@ -281,7 +281,8 @@ func readWorkGraphDetail(store *rt.ReadStore, now time.Time, graphID string) (Wo
 }
 
 // WorkGraphs is the bounded list page /v1/workgraphs returns, the same
-// offset/limit/has_more shape /v1/runs already uses.
+// offset/limit/has_more shape /v1/runs already uses - backed by a
+// database-level LIMIT/OFFSET, never a full table scan trimmed in Go.
 type WorkGraphs struct {
 	WorkGraphs []WorkGraphSummary `json:"workgraphs"`
 	Offset     int                `json:"offset"`
@@ -295,18 +296,15 @@ func (a *API) workGraphs(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_page")
 		return
 	}
-	graphs, err := a.Store.WorkGraphs()
+	graphs, hasMore, err := a.Store.WorkGraphs(int(offset), int(limit))
 	if err != nil {
 		fail(w, 500, "read_failed")
 		return
 	}
-	out := WorkGraphs{WorkGraphs: []WorkGraphSummary{}, Offset: int(offset)}
-	end := min(int64(len(graphs)), offset+limit)
-	for i := offset; i < end; i++ {
-		g := graphs[i]
+	out := WorkGraphs{WorkGraphs: []WorkGraphSummary{}, Offset: int(offset), HasMore: hasMore}
+	for _, g := range graphs {
 		out.WorkGraphs = append(out.WorkGraphs, WorkGraphSummary{ID: g.ID, Repository: g.Repository, AgentID: g.AgentID, Name: g.Name, Revision: g.Revision})
 	}
-	out.HasMore = end < int64(len(graphs))
 	send(w, 200, out)
 }
 

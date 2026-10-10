@@ -7,7 +7,9 @@
     "name",
     "revision",
     "repositories",
-    "graphs"
+    "graphs",
+    "graphs_offset",
+    "graphs_has_more"
   ],
   "properties": {
     "product_id": {
@@ -92,6 +94,12 @@
           }
         }
       }
+    },
+    "graphs_offset": {
+      "type": "integer"
+    },
+    "graphs_has_more": {
+      "type": "boolean"
     }
   }
 }

@@ -3,6 +3,8 @@ package controlplane
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -101,6 +103,134 @@ func TestProductAndWorkGraphWireSchemasAndAssociation(t *testing.T) {
 
 	wire(t, a, "/v1/products/unknown", "GET", a.Token, "error", 404)
 	wire(t, a, "/v1/workgraphs/unknown", "GET", a.Token, "error", 404)
+}
+
+// TestProductAndWorkGraphListsPaginateWithStableBoundaries proves F4's
+// second and third gaps are closed: both JSON list routes page in stable,
+// non-overlapping, exhaustive boundaries (never materializing more than
+// limit+1 rows per call, since the bound is a SQL LIMIT/OFFSET - see
+// Products/WorkGraphsPage), reject an invalid or over-bound limit exactly
+// like /v1/runs already does, and the HTML console pages carry working
+// previous/next navigation across real multiple pages instead of rendering
+// every row unbounded.
+func TestProductAndWorkGraphListsPaginateWithStableBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	store, err := rt.OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(500, 0).UTC()
+	// One more than webPageSize, so the console's own fixed page size (which
+	// takes no limit query parameter) genuinely spans two pages too - not
+	// only the JSON routes, which can be exercised at any limit.
+	const total = webPageSize + 1
+	for i := range total {
+		at := at.Add(time.Duration(i) * time.Second)
+		name := fmt.Sprintf("product-%03d", i)
+		p := product.Product{SchemaVersion: product.ProductSchemaVersion, Revision: 1, Repositories: []string{"acme/repo"}, CreatedAt: at}
+		p.Name = name
+		if p.ID, err = product.ProductID(name); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.AdoptProductRevision(p); err != nil {
+			t.Fatal(err)
+		}
+		graph, err := orchestration.WorkGraphProposal{Name: fmt.Sprintf("graph-%03d", i), Revision: 1, Units: []orchestration.WorkUnit{
+			{ID: "a", Purpose: "do the work", Role: "implementer", Issue: 1000 + i},
+		}}.Compose("acme/repo", "claude", "operator@example", at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.AdoptWorkGraphRevision(graph); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := rt.OpenReadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	a := &API{Store: reader, Token: "test-token", ControllerRoot: filepath.Join(dir, "controller"), Now: func() time.Time { return at }}
+	w := webFrom(a)
+
+	for _, route := range []struct{ path, idField, schema string }{
+		{"/v1/products", "product_id", "product"}, {"/v1/workgraphs", "graph_id", "workgraph"},
+	} {
+		seen := map[string]bool{}
+		offset, pages := 0, 0
+		listKey := "products"
+		if route.idField == "graph_id" {
+			listKey = "workgraphs"
+		}
+		for {
+			body := wire(t, a, fmt.Sprintf("%s?offset=%d&limit=50", route.path, offset), "GET", a.Token, route.schema, 200)
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(body, &raw); err != nil {
+				t.Fatal(err)
+			}
+			var hasMore bool
+			if err := json.Unmarshal(raw["has_more"], &hasMore); err != nil {
+				t.Fatal(err)
+			}
+			var rows []map[string]any
+			if err := json.Unmarshal(raw[listKey], &rows); err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) == 0 {
+				t.Fatalf("%s offset %d returned no rows", route.path, offset)
+			}
+			for _, row := range rows {
+				id, _ := row[route.idField].(string)
+				if seen[id] {
+					t.Fatalf("%s: id %s returned on more than one page", route.path, id)
+				}
+				seen[id] = true
+			}
+			pages++
+			if !hasMore {
+				break
+			}
+			if len(rows) != 50 {
+				t.Fatalf("%s: a page reporting has_more must be full: got %d", route.path, len(rows))
+			}
+			offset += 50
+			if pages > total {
+				t.Fatalf("%s: pagination never terminated", route.path)
+			}
+		}
+		if len(seen) != total {
+			t.Fatalf("%s: paging recovered %d of %d rows", route.path, len(seen), total)
+		}
+		if pages < 2 {
+			t.Fatalf("%s: expected at least 2 pages at limit=50 for %d rows, got %d", route.path, total, pages)
+		}
+
+		wire(t, a, route.path+"?limit=0", "GET", a.Token, "error", 400)
+		wire(t, a, route.path+"?limit=501", "GET", a.Token, "error", 400)
+	}
+
+	// The HTML console lists are bounded too, with real next/previous
+	// navigation across the same two pages - not every row rendered
+	// unbounded on every refresh.
+	for _, console := range []string{"/products", "/workgraphs"} {
+		first := getWeb(t, w, console, a.Token, 200)
+		if !strings.Contains(string(first), fmt.Sprintf(`href="%s?offset=%d"`, console, webPageSize)) {
+			t.Fatalf("%s: first page must link to a second page, got: %s", console, first)
+		}
+		if strings.Contains(string(first), `previous`) {
+			t.Fatalf("%s: first page must not offer a previous link", console)
+		}
+		second := getWeb(t, w, fmt.Sprintf("%s?offset=%d", console, webPageSize), a.Token, 200)
+		if !strings.Contains(string(second), fmt.Sprintf(`href="%s"`, console)) {
+			t.Fatalf("%s: second page must link back to the first, got: %s", console, second)
+		}
+		if strings.Contains(string(second), `next &rarr;`) {
+			t.Fatalf("%s: second (final) page must not offer a next link", console)
+		}
+	}
 }
 
 // rawExec runs one statement directly against runtime.db, bypassing every

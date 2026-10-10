@@ -10,17 +10,56 @@
 package controlplane
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 )
 
+// webPageSize is this console's one page size: every bounded list here -
+// /products, /workgraphs, and one product's associated-graph list - pages
+// at this size, so there is one mental model instead of a per-page default.
+const webPageSize = 100
+
+// pageOffset reads ?offset= (default 0), bounded the same way every other
+// page on this boundary is.
+func pageOffset(r *http.Request, key string) (offset int64, ok bool) {
+	return pageNumber(r, key, 0, 1<<31-1)
+}
+
+// pageLinks builds the prev/next link for a bounded list page: path is the
+// bare route ("/products"), offset is the CURRENT page's, and hasMore says
+// whether a next page exists. An empty string means no link.
+func pageLinks(path string, offset int64, hasMore bool) (prev, next string) {
+	link := func(o int64) string {
+		if o == 0 {
+			return path
+		}
+		return fmt.Sprintf("%s?offset=%d", path, o)
+	}
+	if offset > 0 {
+		prev = link(max(0, offset-webPageSize))
+	}
+	if hasMore {
+		next = link(offset + webPageSize)
+	}
+	return prev, next
+}
+
 type productsData struct {
 	ObservedAt time.Time
 	Products   []ProductSummary
+	Offset     int64
+	PrevLink   string
+	NextLink   string
 }
 
 func (w *Web) handleProducts(rw http.ResponseWriter, r *http.Request) {
-	products, err := w.Store.Products()
+	offset, ok := pageOffset(r, "offset")
+	if !ok {
+		w.renderNotFound(rw)
+		return
+	}
+	products, hasMore, err := w.Store.Products(int(offset), webPageSize)
 	if err != nil {
 		w.renderError(rw, err)
 		return
@@ -29,19 +68,28 @@ func (w *Web) handleProducts(rw http.ResponseWriter, r *http.Request) {
 	for _, p := range products {
 		out = append(out, ProductSummary{ID: p.ID, Name: p.Name, Revision: p.Revision, Repositories: p.Repositories})
 	}
-	w.render(rw, productsTemplate, productsData{ObservedAt: w.now(), Products: out})
+	prev, next := pageLinks("/products", offset, hasMore)
+	w.render(rw, productsTemplate, productsData{ObservedAt: w.now(), Products: out, Offset: offset, PrevLink: prev, NextLink: next})
 }
 
 type productDetailData struct {
 	ObservedAt time.Time
 	Product    ProductDetail
+	PrevLink   string
+	NextLink   string
 }
 
 func (w *Web) handleProductDetail(rw http.ResponseWriter, r *http.Request) {
-	detail, status, _ := readProductDetail(w.Store, r.PathValue("id"))
+	offset, ok := pageOffset(r, "graphs_offset")
+	if !ok {
+		w.renderNotFound(rw)
+		return
+	}
+	detail, status, _ := readProductDetail(w.Store, r.PathValue("id"), int(offset), webPageSize)
 	switch status {
 	case 200:
-		w.render(rw, productDetailTemplate, productDetailData{ObservedAt: w.now(), Product: detail})
+		prev, next := pageLinks("/products/"+detail.ID, offset, detail.GraphsHasMore)
+		w.render(rw, productDetailTemplate, productDetailData{ObservedAt: w.now(), Product: detail, PrevLink: prev, NextLink: next})
 	case 404:
 		w.renderNotFound(rw)
 	default:
@@ -52,10 +100,18 @@ func (w *Web) handleProductDetail(rw http.ResponseWriter, r *http.Request) {
 type workGraphsData struct {
 	ObservedAt time.Time
 	Graphs     []WorkGraphSummary
+	Offset     int64
+	PrevLink   string
+	NextLink   string
 }
 
 func (w *Web) handleWorkGraphs(rw http.ResponseWriter, r *http.Request) {
-	graphs, err := w.Store.WorkGraphs()
+	offset, ok := pageOffset(r, "offset")
+	if !ok {
+		w.renderNotFound(rw)
+		return
+	}
+	graphs, hasMore, err := w.Store.WorkGraphs(int(offset), webPageSize)
 	if err != nil {
 		w.renderError(rw, err)
 		return
@@ -64,7 +120,8 @@ func (w *Web) handleWorkGraphs(rw http.ResponseWriter, r *http.Request) {
 	for _, g := range graphs {
 		out = append(out, WorkGraphSummary{ID: g.ID, Repository: g.Repository, AgentID: g.AgentID, Name: g.Name, Revision: g.Revision})
 	}
-	w.render(rw, workGraphsTemplate, workGraphsData{ObservedAt: w.now(), Graphs: out})
+	prev, next := pageLinks("/workgraphs", offset, hasMore)
+	w.render(rw, workGraphsTemplate, workGraphsData{ObservedAt: w.now(), Graphs: out, Offset: offset, PrevLink: prev, NextLink: next})
 }
 
 type workGraphDetailData struct {

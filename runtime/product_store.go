@@ -102,32 +102,38 @@ func (s *SQLiteOperationStore) CurrentProduct(productID string) (product.Product
 	return currentProductTx(s.db, productID)
 }
 
-// Products reads every product's current revision, oldest product first.
-//
-// ponytail: reads every product's current revision each call; fine for an
-// operator's tens of products, index by name if products ever number in the
-// thousands.
-func (s *SQLiteOperationStore) Products() ([]product.Product, error) {
+// Products reads one bounded page of every product's current revision,
+// oldest product first: a database-level LIMIT/OFFSET, never a full scan
+// trimmed in Go. hasMore is true when a (limit+1)th row exists beyond the
+// page returned, the same cursor contract control-plane's event pages use.
+func (s *SQLiteOperationStore) Products(offset, limit int) ([]product.Product, bool, error) {
 	rows, err := s.db.Query(`SELECT document FROM product_revisions AS current
 		WHERE revision = (SELECT MAX(revision) FROM product_revisions WHERE product_id = current.product_id)
-		ORDER BY created_unix_nano ASC, product_id ASC`)
+		ORDER BY created_unix_nano ASC, product_id ASC LIMIT ? OFFSET ?`, limit+1, offset)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var products []product.Product
 	for rows.Next() {
 		var document string
 		if err := rows.Scan(&document); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		p, err := decodeProduct(document)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		products = append(products, p)
 	}
-	return products, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(products) > limit
+	if hasMore {
+		products = products[:limit]
+	}
+	return products, hasMore, nil
 }
 
 func productRevisionTx(db sqlExecutor, productID string, revision int) (product.Product, bool, error) {

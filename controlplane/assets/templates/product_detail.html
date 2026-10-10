@@ -38,6 +38,10 @@
       {{end}}
     </tbody>
   </table>
+  <nav class="pager">
+    {{if .PrevLink}}<a href="{{.PrevLink}}">&larr; previous</a>{{end}}
+    {{if .NextLink}}<a href="{{.NextLink}}">next &rarr;</a>{{end}}
+  </nav>
 </section>
 </div>
 {{end}}

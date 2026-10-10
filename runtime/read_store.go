@@ -77,8 +77,12 @@ func (s *ReadStore) Controller(root string, observe func() (LiveControllerSnapsh
 	return DescribeControllerStatus(s.store, root, observe, now)
 }
 
-// WorkGraphs lists every WorkGraph's current revision (#472).
-func (s *ReadStore) WorkGraphs() ([]orchestration.WorkGraph, error) { return s.store.WorkGraphs() }
+// WorkGraphs lists one bounded, database-paged slice of every WorkGraph's
+// current revision (#472). hasMore is true when a page beyond this one
+// exists.
+func (s *ReadStore) WorkGraphs(offset, limit int) ([]orchestration.WorkGraph, bool, error) {
+	return s.store.WorkGraphsPage(offset, limit)
+}
 
 // WorkGraph reads one WorkGraph's current revision (#472).
 func (s *ReadStore) WorkGraph(graphID string) (orchestration.WorkGraph, bool, error) {
@@ -111,8 +115,12 @@ func (s *ReadStore) DecisionResolution(requestID string) (orchestration.Decision
 	return s.store.DecisionResolutionByRequestID(requestID)
 }
 
-// Products lists every Product's current revision (#476).
-func (s *ReadStore) Products() ([]product.Product, error) { return s.store.Products() }
+// Products lists one bounded, database-paged slice of every Product's
+// current revision (#476). hasMore is true when a page beyond this one
+// exists.
+func (s *ReadStore) Products(offset, limit int) ([]product.Product, bool, error) {
+	return s.store.Products(offset, limit)
+}
 
 // CurrentProduct reads a Product's current revision (#476).
 func (s *ReadStore) CurrentProduct(productID string) (product.Product, bool, error) {
@@ -131,9 +139,11 @@ func (s *ReadStore) AssociatedProduct(graphID string) (string, bool, error) {
 	return s.store.AssociatedProduct(graphID)
 }
 
-// AssociatedGraphs reads every WorkGraph id associated with a Product (#476).
-func (s *ReadStore) AssociatedGraphs(productID string) ([]string, error) {
-	return s.store.AssociatedGraphs(productID)
+// AssociatedGraphs reads one bounded, database-paged slice of WorkGraph ids
+// associated with a Product (#476). hasMore is true when a page beyond this
+// one exists - a 201st association is reported, never silently dropped.
+func (s *ReadStore) AssociatedGraphs(productID string, offset, limit int) ([]string, bool, error) {
+	return s.store.AssociatedGraphs(productID, offset, limit)
 }
 
 // LatestReviewDecision reads the latest independent review decision for one

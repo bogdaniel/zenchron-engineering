@@ -28,12 +28,15 @@ type ProductConfigurationDTO struct {
 }
 
 // ProductDetail is the Product Workspace's product-oriented entry point: one
-// product, its current configuration, and a lightweight summary of every
-// associated WorkGraph. It deliberately does NOT embed each graph's full
-// detail (units, runs, review state, decisions) - that is an unbounded,
-// recursive read this console polls every few seconds, and a product with
-// several graphs would multiply it per graph on every refresh. Drill into
-// /workgraphs/{id} for one graph's full operational detail.
+// product, its current configuration, and one bounded, database-paged page
+// of its associated WorkGraphs as lightweight summaries. It deliberately
+// does NOT embed each graph's full detail (units, runs, review state,
+// decisions) - that is an unbounded, recursive read this console polls
+// every few seconds, and a product with several graphs would multiply it
+// per graph on every refresh. Drill into /workgraphs/{id} for one graph's
+// full operational detail. GraphsHasMore is true when a page of
+// associations beyond GraphsOffset exists - a 201st association is
+// reported, never silently dropped.
 type ProductDetail struct {
 	ID            string                   `json:"product_id"`
 	Name          string                   `json:"name"`
@@ -41,6 +44,8 @@ type ProductDetail struct {
 	Repositories  []string                 `json:"repositories"`
 	Configuration *ProductConfigurationDTO `json:"configuration,omitempty"`
 	Graphs        []WorkGraphSummary       `json:"graphs"`
+	GraphsOffset  int                      `json:"graphs_offset"`
+	GraphsHasMore bool                     `json:"graphs_has_more"`
 }
 
 func objectRevisionRef(r *domain.ObjectRevision) *RefDTO {
@@ -67,11 +72,12 @@ func productDetailProjection(p product.Product, config *product.ProductConfigura
 // readProductDetail is shared by the JSON route and the page. Each
 // associated graph is read as a bounded WorkGraphSummary alone - never the
 // full recursive readWorkGraphDetail - so this page's cost stays
-// proportional to the (bounded, maxAssociatedGraphs) graph COUNT, not to the
-// sum of every graph's units, runs and decisions. An association naming a
-// graph that cannot be read is an integrity violation, not an empty result:
-// it fails closed (500), never silently dropped.
-func readProductDetail(store *rt.ReadStore, productID string) (ProductDetail, int, string) {
+// proportional to the page SIZE, not to the sum of every graph's units,
+// runs and decisions, and the association read itself is a database-level
+// LIMIT/OFFSET, never a full scan. An association naming a graph that
+// cannot be read is an integrity violation, not an empty result: it fails
+// closed (500), never silently dropped.
+func readProductDetail(store *rt.ReadStore, productID string, offset, limit int) (ProductDetail, int, string) {
 	p, found, err := store.CurrentProduct(productID)
 	if err != nil {
 		return ProductDetail{}, 500, "read_failed"
@@ -86,10 +92,12 @@ func readProductDetail(store *rt.ReadStore, productID string) (ProductDetail, in
 		config = &c
 	}
 	out := productDetailProjection(p, config)
-	graphIDs, err := store.AssociatedGraphs(productID)
+	out.GraphsOffset = offset
+	graphIDs, hasMore, err := store.AssociatedGraphs(productID, offset, limit)
 	if err != nil {
 		return ProductDetail{}, 500, "read_failed"
 	}
+	out.GraphsHasMore = hasMore
 	for _, graphID := range graphIDs {
 		g, found, err := store.WorkGraph(graphID)
 		if err != nil {
@@ -104,7 +112,8 @@ func readProductDetail(store *rt.ReadStore, productID string) (ProductDetail, in
 }
 
 // Products is the bounded list page /v1/products returns, the same
-// offset/limit/has_more shape /v1/runs already uses.
+// offset/limit/has_more shape /v1/runs already uses - backed by a
+// database-level LIMIT/OFFSET, never a full table scan trimmed in Go.
 type Products struct {
 	Products []ProductSummary `json:"products"`
 	Offset   int              `json:"offset"`
@@ -118,23 +127,34 @@ func (a *API) products(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_page")
 		return
 	}
-	products, err := a.Store.Products()
+	products, hasMore, err := a.Store.Products(int(offset), int(limit))
 	if err != nil {
 		fail(w, 500, "read_failed")
 		return
 	}
-	out := Products{Products: []ProductSummary{}, Offset: int(offset)}
-	end := min(int64(len(products)), offset+limit)
-	for i := offset; i < end; i++ {
-		p := products[i]
+	out := Products{Products: []ProductSummary{}, Offset: int(offset), HasMore: hasMore}
+	for _, p := range products {
 		out.Products = append(out.Products, ProductSummary{ID: p.ID, Name: p.Name, Revision: p.Revision, Repositories: p.Repositories})
 	}
-	out.HasMore = end < int64(len(products))
 	send(w, 200, out)
 }
 
+// productDetailPage bounds the GET /v1/products/{id} and /products/{id}
+// query's graphs_offset/graphs_limit the same way every other bounded page
+// here does.
+func productDetailPage(r *http.Request) (offset, limit int64, ok bool) {
+	offset, ok1 := pageNumber(r, "graphs_offset", 0, 1<<31-1)
+	limit, ok2 := pageNumber(r, "graphs_limit", 100, 500)
+	return offset, limit, ok1 && ok2 && limit != 0
+}
+
 func (a *API) product(w http.ResponseWriter, r *http.Request) {
-	detail, status, code := readProductDetail(a.Store, r.PathValue("id"))
+	offset, limit, ok := productDetailPage(r)
+	if !ok {
+		fail(w, 400, "invalid_page")
+		return
+	}
+	detail, status, code := readProductDetail(a.Store, r.PathValue("id"), int(offset), int(limit))
 	if status != 200 {
 		fail(w, status, code)
 		return

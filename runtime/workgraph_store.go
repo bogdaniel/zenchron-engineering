@@ -135,6 +135,42 @@ func (s *SQLiteOperationStore) WorkGraphs() ([]orchestration.WorkGraph, error) {
 	return graphs, rows.Err()
 }
 
+// WorkGraphsPage reads one bounded page of every graph's current revision,
+// oldest graph first: a database-level LIMIT/OFFSET, never a full scan
+// trimmed in Go. hasMore is true when a (limit+1)th row exists beyond the
+// page returned. Unlike WorkGraphs - which the supervisor's own frontier
+// pass genuinely needs unbounded every tick - this is the presentation
+// surface's own bounded read, and never used by scheduling.
+func (s *SQLiteOperationStore) WorkGraphsPage(offset, limit int) ([]orchestration.WorkGraph, bool, error) {
+	rows, err := s.db.Query(`SELECT document FROM work_graph_revisions AS current
+		WHERE revision = (SELECT MAX(revision) FROM work_graph_revisions WHERE graph_id = current.graph_id)
+		ORDER BY created_unix_nano ASC, graph_id ASC LIMIT ? OFFSET ?`, limit+1, offset)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	var graphs []orchestration.WorkGraph
+	for rows.Next() {
+		var document string
+		if err := rows.Scan(&document); err != nil {
+			return nil, false, err
+		}
+		graph, err := decodeWorkGraph(document)
+		if err != nil {
+			return nil, false, err
+		}
+		graphs = append(graphs, graph)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(graphs) > limit
+	if hasMore {
+		graphs = graphs[:limit]
+	}
+	return graphs, hasMore, nil
+}
+
 func decodeWorkGraph(document string) (orchestration.WorkGraph, error) {
 	var graph orchestration.WorkGraph
 	if err := strictJSON([]byte(document), &graph); err != nil {
