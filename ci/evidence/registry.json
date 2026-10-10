@@ -211,6 +211,21 @@
       ]
     },
     {
+      "name": "product",
+      "why": "The ProductEngineeringEnvironment (#476): product identity, mutable configuration, graph association and the knowledge promotion ladder - durable SQLite state with its own revision-transition and promotion-consistency invariants, proved under concurrent writers.",
+      "race": true,
+      "sources": [
+        "runtime/product_store.go",
+        "runtime/product_knowledge_store.go",
+        "runtime/product_association_store.go",
+        "runtime/product_schema.go",
+        "product/*.go"
+      ],
+      "tests": [
+        "runtime/product_*_test.go"
+      ]
+    },
+    {
       "name": "decision",
       "why": "Durable, authorized DecisionResolution (#508): the external-authority half of the DecisionRequest lifecycle, and the WorkGraph unit hold #472's readiness-owner seam.",
       "race": true,
