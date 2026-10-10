@@ -14,6 +14,7 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
+	"github.com/bogdaniel/zenchron-engineering/review"
 )
 
 // WorkGraphView is one graph read through its units.
@@ -59,6 +60,12 @@ type WorkGraphUnitView struct {
 	Child *OrchestrationItemView `json:"child,omitempty"`
 	// Output is the exact subject of the admitted handoff this unit produced.
 	Output *orchestration.UnitOutput `json:"output,omitempty"`
+	// RequiresReview echoes the unit's own opt-in (#474); ReviewApproved is
+	// meaningful only when it is set, and true exactly when the latest
+	// independent decision for this unit's bound PR is APPROVE of the exact
+	// commit Output names.
+	RequiresReview bool `json:"requires_review,omitempty"`
+	ReviewApproved bool `json:"review_approved,omitempty"`
 }
 
 // WorkGraphStatus projects one graph's current revision. A unit whose child
@@ -119,6 +126,12 @@ func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now 
 				fact.Item, fact.Unreadable, fact.UnreadableReason = "", true, boundedDetail(err.Error())
 			}
 			fact.Output = output
+			if unit.RequiresReview && output != nil {
+				fact.ReviewApproved, err = reviewApprovedFor(store, graph.Repository, child.PullRequest, output.CandidateRevision, activation.RunID, child.AgentID)
+				if err != nil {
+					fact.Item, fact.Unreadable, fact.UnreadableReason = "", true, boundedDetail(err.Error())
+				}
+			}
 		}
 		facts[unit.ID] = fact
 	}
@@ -140,7 +153,8 @@ func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now 
 			UnitID: unit.ID, Purpose: unit.Purpose, Role: unit.Role, ExecutionKind: unit.ExecutionKind, Issue: unit.Issue,
 			DependsOn: unit.DependsOn, State: decided.State, Reason: decided.Reason,
 			InputsDigest: decided.InputsDigest, Inputs: decided.Inputs,
-			AwaitingDecision: decided.AwaitingDecision,
+			AwaitingDecision: decided.AwaitingDecision, RequiresReview: unit.RequiresReview,
+			ReviewApproved: unit.RequiresReview && facts[unit.ID].ReviewApproved,
 		}
 		if activation, activated := activations[unit.ID]; activated {
 			child := children[unit.ID]
@@ -178,4 +192,57 @@ func admittedOutput(tx *sql.Tx, runID, handoffID string) (*orchestration.UnitOut
 		}, nil
 	}
 	return nil, fmt.Errorf("run %s projects as completed on handoff %s, which is not admitted", runID, handoffID)
+}
+
+// reviewApprovedFor is #474's WorkGraph review-readiness predicate: whether
+// the LATEST independent review decision for (repository, prNumber) is
+// APPROVE and is bound to the EXACT commit this unit's own admitted handoff
+// transferred. It is deliberately NOT a live GitHub read: a unit's
+// satisfaction is a question about review of the EXACT output this unit
+// already produced, which the durable decision history answers completely
+// by itself - the same exact-commit binding reviewRemediationFindings
+// already keys delivery on, here keyed to the unit's own CandidateRevision
+// instead of the run's current head. A fresh candidate (a new admitted
+// handoff on this same unit's run) is a different CandidateRevision, so it
+// is unsatisfied again until a decision bound to THAT exact commit is also
+// APPROVE - "H1 approval never authorizes H2" falls out of this comparison
+// with no separate invalidation step.
+//
+// A REQUEST_CHANGES decision is never routed through this function at all:
+// it is #474's remediation admission's job, never this read-only gate's,
+// which only ever asks "is there a current APPROVE for this exact output".
+//
+// runID and producerAgentID are the unit's OWN activation and its child's
+// ACTUAL agent - never the decision's own claim about either (#474 R4). A
+// direct, hand-written review_decisions row is exactly as reachable here as
+// a hand-written review_remediation_admissions row is for a BLOCK, and
+// CreateReviewDecision's own validation never checks producer/reviewer
+// independence or which run a decision is actually for - review.Validate
+// deliberately leaves that to the caller, same as #233's own
+// CheckReviewIndependence does by construction elsewhere. This is the same
+// defense reviewRemediationBindingInvariants already applies to a BLOCK
+// admission, reusing the run/PR authority WorkGraphStatus already read,
+// never a second review engine and never an agent registry this read-only
+// path has no business resolving.
+func reviewApprovedFor(store *SQLiteOperationStore, repository string, prNumber int, candidateRevision, runID, producerAgentID string) (bool, error) {
+	latest, found, err := store.LatestReviewDecision(repository, prNumber)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	if latest.Verdict != review.VerdictApprove || latest.Subject.HeadSHA != candidateRevision {
+		return false, nil
+	}
+	if latest.RunID != runID {
+		return false, nil
+	}
+	if producerAgentID == "" || latest.ProducerAgentID != producerAgentID {
+		return false, nil
+	}
+	if latest.ReviewerAgentID == "" || latest.ReviewerAgentID == producerAgentID {
+		return false, nil
+	}
+	return true, nil
 }

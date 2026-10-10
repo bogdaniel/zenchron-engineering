@@ -149,6 +149,15 @@ func TestWorkGraphRefusesGraphsNothingCouldAdvance(t *testing.T) {
 			},
 			want: `"b" is an integration_compose unit; it names 1 dependencies, needing at least 2`,
 		},
+		"integration_compose requiring review": {
+			units: []WorkUnit{
+				{ID: "a", Purpose: "p", Role: domain.RoleImplementer, Issue: 1},
+				{ID: "b", Purpose: "p", Role: domain.RoleImplementer, Issue: 2},
+				{ID: "c", Purpose: "p", Role: domain.RoleIntegrator, ExecutionKind: ExecutionKindIntegrationCompose,
+					Issue: 3, DependsOn: []string{"a", "b"}, RequiresReview: true},
+			},
+			want: `"c" is an integration_compose unit; it has no independent review to require`,
+		},
 		"no issue": {
 			units: []WorkUnit{{ID: "a", Purpose: "p", Role: domain.RoleImplementer}},
 			want:  "a unit performs one existing issue",
@@ -278,6 +287,49 @@ func TestMutationValidationFreezesExecutionKind(t *testing.T) {
 	if err := ValidateMutation(current, composed(t, 2, reverted), activated); err == nil ||
 		!strings.Contains(err.Error(), `"c" has already been activated, so revision 2 may not change`) {
 		t.Fatalf("an activated unit's execution kind reverting to ordinary was not refused: %v", err)
+	}
+}
+
+// reviewGatedUnits is a->b, with a's RequiresReview the one thing that
+// varies across calls.
+func reviewGatedUnits(aRequiresReview bool) []WorkUnit {
+	return []WorkUnit{
+		{ID: "a", Purpose: "p", Role: domain.RoleImplementer, Issue: 1, RequiresReview: aRequiresReview},
+		{ID: "b", Purpose: "p", Role: domain.RoleImplementer, Issue: 2, DependsOn: []string{"a"}},
+	}
+}
+
+// TestMutationValidationFreezesRequiresReview is #474 R3's required
+// regression: RequiresReview is an authorization property, not cosmetic
+// metadata, so an ordinary AdoptWorkGraph revision must never be able to
+// remove (or add) it on a unit already activated - that would let a
+// dependent already held on an unresolved BLOCK become runnable, or an
+// already-running unit suddenly need a review nothing asked it to pass, by
+// nothing more than a normal graph mutation.
+func TestMutationValidationFreezesRequiresReview(t *testing.T) {
+	activated := map[string]bool{"a": true}
+
+	// true -> false after activation: the exact bypass the review named -
+	// b would become runnable with no APPROVE if this were accepted.
+	current := composed(t, 1, reviewGatedUnits(true))
+	if err := ValidateMutation(current, composed(t, 2, reviewGatedUnits(false)), activated); err == nil ||
+		!strings.Contains(err.Error(), `"a" has already been activated, so revision 2 may not change`) {
+		t.Fatalf("an activated unit's RequiresReview true->false was not refused: %v", err)
+	}
+
+	// false -> true after activation, for symmetry: a unit already running
+	// under no review obligation must not suddenly acquire one either.
+	currentUnreviewed := composed(t, 1, reviewGatedUnits(false))
+	if err := ValidateMutation(currentUnreviewed, composed(t, 2, reviewGatedUnits(true)), activated); err == nil ||
+		!strings.Contains(err.Error(), `"a" has already been activated, so revision 2 may not change`) {
+		t.Fatalf("an activated unit's RequiresReview false->true was not refused: %v", err)
+	}
+
+	// An UNACTIVATED unit's RequiresReview is ordinary planning input, not
+	// yet frozen, and revising it is exactly what proposing a new revision
+	// before activation is for.
+	if err := ValidateMutation(current, composed(t, 2, reviewGatedUnits(false)), map[string]bool{}); err != nil {
+		t.Fatalf("an unactivated unit's RequiresReview change was refused: %v", err)
 	}
 }
 

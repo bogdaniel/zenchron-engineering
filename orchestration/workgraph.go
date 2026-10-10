@@ -105,6 +105,15 @@ type WorkUnit struct {
 	// path a direct #470 submission uses.
 	Issue     int      `json:"issue"`
 	DependsOn []string `json:"depends_on,omitempty"`
+	// RequiresReview opts this unit into #474's review-readiness gate: its
+	// admitted handoff satisfies a dependent only once an independent
+	// decision for the exact bound commit is APPROVE, never merely on
+	// ItemCompleted. False (the default, so every graph that predates this
+	// field keeps its exact prior behavior and digest) means ordinary #472
+	// satisfaction, unchanged. Frozen once the unit is activated (sameUnit,
+	// ValidateMutation): an authorization property may not be revised away
+	// out from under a unit a dependent is already waiting on.
+	RequiresReview bool `json:"requires_review,omitempty"`
 }
 
 // WorkUnitExecutionKind is the closed, explicit discriminator for which
@@ -296,6 +305,13 @@ func (g WorkGraph) Validate() error {
 		if unit.effectiveExecutionKind() == ExecutionKindIntegrationCompose && len(unit.DependsOn) < 2 {
 			return fmt.Errorf("work unit %q is an integration_compose unit; it names %d dependencies, needing at least 2 exact admitted inputs", unit.ID, len(unit.DependsOn))
 		}
+		// An integration_compose unit's whole producer stage is deterministic
+		// Git composition over consumed inputs (#475); it invokes no provider
+		// and publishes no PR of its own, so it has no independent review to
+		// require - requiring one would simply never satisfy.
+		if unit.RequiresReview && unit.effectiveExecutionKind() == ExecutionKindIntegrationCompose {
+			return fmt.Errorf("work unit %q is an integration_compose unit; it has no independent review to require", unit.ID)
+		}
 		if unit.Issue <= 0 {
 			return fmt.Errorf("work unit %q names issue %d; a unit performs one existing issue", unit.ID, unit.Issue)
 		}
@@ -373,7 +389,7 @@ func ValidateMutation(current, next WorkGraph, activated map[string]bool) error 
 			return fmt.Errorf("work unit %q has already been activated, so revision %d may not remove it", unit.ID, next.Revision)
 		}
 		if !sameUnit(unit, proposed) {
-			return fmt.Errorf("work unit %q has already been activated, so revision %d may not change its issue, role, execution kind, purpose or dependencies", unit.ID, next.Revision)
+			return fmt.Errorf("work unit %q has already been activated, so revision %d may not change its issue, role, execution kind, purpose, dependencies or RequiresReview", unit.ID, next.Revision)
 		}
 	}
 	return nil
@@ -398,7 +414,12 @@ func boundedField(name, value string, limit int) error {
 
 func sameUnit(a, b WorkUnit) bool {
 	if a.Issue != b.Issue || a.Role != b.Role || a.effectiveExecutionKind() != b.effectiveExecutionKind() ||
-		a.Purpose != b.Purpose || len(a.DependsOn) != len(b.DependsOn) {
+		a.Purpose != b.Purpose || len(a.DependsOn) != len(b.DependsOn) ||
+		// #474 R3: RequiresReview is an authorization property, exactly like
+		// every other frozen field here - an activated unit mutating it away
+		// would let an ordinary AdoptWorkGraph revision remove B4's gate
+		// after the fact, with no forged store row anywhere.
+		a.RequiresReview != b.RequiresReview {
 		return false
 	}
 	left, right := sortedCopy(a.DependsOn), sortedCopy(b.DependsOn)

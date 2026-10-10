@@ -188,6 +188,11 @@ type autonomyFlags struct {
 	// Agent selects the named execution agent. Empty resolves the operator's
 	// configured default, which is what makes `run issue N` work unchanged.
 	Agent string
+	// ReviewerAgent, on `serve`, names the agent #474's automatic
+	// independent-review trigger uses. Empty disables the trigger entirely -
+	// an operator who names no reviewer gets exactly `serve`'s pre-#474
+	// behavior, never a silently-chosen default reviewer.
+	ReviewerAgent string
 	// Assign binds issues to agents for a batch, as issue -> agent id.
 	Assign map[int]string
 	// PermissionBypass explicitly requests the provider's unsafe permission
@@ -630,7 +635,10 @@ type composition struct {
 	sandbox          runtime.DockerSandbox
 	permissionBypass bool
 	providerInjected bool
-	release          func()
+	// reviewerAgent is #474 B3's opt-in: empty disables the automatic
+	// independent-review trigger entirely. See autonomyFlags.ReviewerAgent.
+	reviewerAgent string
+	release       func()
 }
 
 // newComposition is the wiring. Every failure here is a configuration or usage
@@ -769,8 +777,9 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		forge: forge, provider: provider, assurance: assurance, semantic: semantic,
 		agents: registry, agent: agent, feedback: feedback, planning: customization,
 		sandbox: sandbox, permissionBypass: flags.PermissionBypass, providerInjected: providerInjected,
-		storage: runtime.StateStorage{Dir: config.StateDir, CeilingBytes: config.Storage.MaxStateBytes},
-		release: release,
+		reviewerAgent: flags.ReviewerAgent,
+		storage:       runtime.StateStorage{Dir: config.StateDir, CeilingBytes: config.Storage.MaxStateBytes},
+		release:       release,
 	}, nil
 }
 
@@ -1190,6 +1199,8 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.Note = args[1]
 		case "--agent":
 			flags.Agent = args[1]
+		case "--reviewer-agent":
+			flags.ReviewerAgent = args[1]
 		case "--reason":
 			flags.Reason = args[1]
 		case "--template":

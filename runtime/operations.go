@@ -608,10 +608,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		}
 		if err != nil {
 			class, _ := candidateGuardFailureClass(err)
-			return effect{state: OperationFailed, result: executionRecord{
-				mutationResult: mutationResult{FailureClass: class},
-				Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, class, ExecutionResult{}, err),
-			}}
+			return r.executionFailureEffect(OperationFailed, execStageCandidateAdmission, class, err)
 		}
 		defer writer.Close()
 		ctx = withCandidateWriter(ctx, writer)
@@ -684,10 +681,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		return failed(err)
 	}
 	if err := assertExecutionSubject(state, workspace, purpose, subject); err != nil {
-		return effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureWorkspaceIntegrity},
-			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureWorkspaceIntegrity, ExecutionResult{}, err),
-		}}
+		return r.executionFailureEffect(OperationFailed, execStageWorkspaceSubject, FailureWorkspaceIntegrity, err)
 	}
 	// PROVIDER ADMISSION. The confidentiality decision has to be made before
 	// the producer exists, because admission is what it actually controls: once
@@ -698,10 +692,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// local prerequisite defect by spending a reasoning budget on it is the
 	// same mistake #46 was about, in a different place.
 	if err := ScanCandidateForCredentialValues(workspace.Dir); err != nil {
-		return effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureCandidateCredentialMaterial},
-			Diagnostic:     r.executionDiagnostic(execStageCandidateAdmission, FailureCandidateCredentialMaterial, ExecutionResult{}, err),
-		}}
+		return r.executionFailureEffect(OperationFailed, execStageCandidateAdmission, FailureCandidateCredentialMaterial, err)
 	}
 	// Admitted, applicable, undelivered reviewer feedback. It is assembled
 	// BEFORE the invocation so the same set that is delivered is the set that
@@ -729,6 +720,31 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		purpose = InvocationRemediation
 		findings = append(findings, feedbackFindings(feedback)...)
 	}
+	// #474: an unreadable admission table must never read as an empty queue.
+	reviewFindings, err := r.reviewRemediationFindings(state)
+	if err != nil {
+		return failed(err)
+	}
+	// #474 R7: an operation whose own binding exists SPECIFICALLY to
+	// remediate an admitted BLOCK, but whose fresh re-validation this
+	// attempt finds nothing left to remediate for, has had its whole
+	// justification revoked - most commonly by a newer same-head APPROVE
+	// (reviewRemediationFindings/reviewRemediationSuperseded correctly
+	// filter it, but bindExecutionInvoke's own #376-style retry rediscovery
+	// can still re-propose THIS exact operation by binding prefix alone).
+	// Treating the resulting empty findings as "ordinary invocation,
+	// proceed" would invoke the producer with no authorized review
+	// obligation at all. Refused here, before any workspace or provider
+	// preparation, under the SAME bounded-retry class a stale decision
+	// binding already uses.
+	if len(reviewFindings) == 0 && strings.HasPrefix(bindingOf(operation), reviewRemediationBindingPrefix) {
+		return r.executionFailureEffect(OperationFailed, execStageCandidateAdmission, FailureDecisionBindingStale,
+			errors.New("this operation's own review-remediation binding names an admission that is no longer the governing decision"))
+	}
+	if len(reviewFindings) > 0 && purpose != InvocationContinuation {
+		purpose = InvocationRemediation
+		findings = append(findings, reviewFindings...)
+	}
 	// The previous attempt of THIS operation, read from durable state. It is
 	// the same typed provenance the reattemptability rule consults, so nothing
 	// new decides what a retry may inherit, and a first attempt reads empty.
@@ -754,20 +770,14 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// is unchanged and takes the contract's own objective.
 	stage, err := r.planStage(state)
 	if err != nil {
-		return effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureUnknown},
-			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
-		}}
+		return *r.workspaceSubjectFailure(err)
 	}
 	// A WORK GRAPH unit's child run receives the exact admitted upstream
 	// handoffs its activation was bound to (#472). An ordinary orchestrated run
 	// and a plan stage run are unchanged: neither has a unit origin.
 	unit, err := r.workUnit(state)
 	if err != nil {
-		return effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureUnknown},
-			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
-		}}
+		return *r.workspaceSubjectFailure(err)
 	}
 	// THE PHYSICAL ATTEMPT IDENTITY of the invocation about to happen.
 	//
@@ -804,27 +814,20 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 		// it must not let a provider write under.
 		reserved, err := r.scheduler.ReserveAttemptIdentity(operation.ID, free)
 		if err != nil {
-			return effect{state: OperationFailed, result: executionRecord{
-				mutationResult: mutationResult{FailureClass: FailureUnknown},
-				Diagnostic:     r.executionDiagnostic(execStageProviderRequest, FailureUnknown, ExecutionResult{}, err),
-			}}
+			return r.executionFailureEffect(OperationFailed, execStageProviderRequest, FailureUnknown, err)
 		}
 		physicalAttempt = reserved.AttemptIdentity
 	}
+	attemptRef := ExecutionAttemptRef{RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt}
 	// THE REVIEWER RESULT SLOT, prepared before the invocation and only for a
 	// stage whose role produces a verdict. An implementer is given no path at
 	// all, so it has nowhere to write one: the authority is carried by the
 	// role, not by the ability to produce matching JSON.
 	reviewerResultPath := ""
 	if stage.producesVerdict() {
-		reviewerResultPath, err = PrepareReviewerResult(r.deps.StateDir, ExecutionAttemptRef{
-			RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
-		})
+		reviewerResultPath, err = PrepareReviewerResult(r.deps.StateDir, attemptRef)
 		if err != nil {
-			return effect{state: OperationFailed, result: executionRecord{
-				mutationResult: mutationResult{FailureClass: FailureUnknown},
-				Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
-			}}
+			return *r.workspaceSubjectFailure(err)
 		}
 	}
 	// THE FEEDBACK RESOLUTION SLOT, prepared before the invocation when this
@@ -836,14 +839,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// binds to nothing (#376).
 	feedbackResolutionPath := ""
 	if len(feedback) > 0 || purpose == InvocationContinuation {
-		feedbackResolutionPath, err = PrepareFeedbackResolution(r.deps.StateDir, ExecutionAttemptRef{
-			RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
-		})
+		feedbackResolutionPath, err = PrepareFeedbackResolution(r.deps.StateDir, attemptRef)
 		if err != nil {
-			return effect{state: OperationFailed, result: executionRecord{
-				mutationResult: mutationResult{FailureClass: FailureUnknown},
-				Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
-			}}
+			return *r.workspaceSubjectFailure(err)
 		}
 	}
 	// THE ORCHESTRATION HANDOFF SLOT (#470), prepared and emptied before the
@@ -866,14 +864,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// invocation whose contract obliges `go test` has to be able to EXECUTE the
 	// binary that command links, and the default temporary location is noexec
 	// inside this runtime's own sandbox.
-	scratchDir, err := ExecutionScratchDir(r.deps.StateDir, ExecutionAttemptRef{
-		RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt,
-	})
+	scratchDir, err := ExecutionScratchDir(r.deps.StateDir, attemptRef)
 	if err != nil {
-		return effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureUnknown},
-			Diagnostic:     r.executionDiagnostic(execStageWorkspaceSubject, FailureUnknown, ExecutionResult{}, err),
-		}}
+		return *r.workspaceSubjectFailure(err)
 	}
 	// THE NO-PROGRESS WINDOW THIS INVOCATION GETS: the run's PERSISTED bound
 	// less the silence already durably recorded against this operation.
@@ -901,12 +894,9 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			allowance = fmt.Sprintf(" plus the %s crash-recovery uncertainty allowance for progress the lost controller may not have written",
 				progressRecorderLag(inactivityLimit))
 		}
-		return effect{state: OperationFailed, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureProviderNoProgress},
-			Diagnostic: r.executionDiagnostic(execStageProviderRequest, FailureProviderNoProgress, ExecutionResult{},
-				fmt.Errorf("no provider progress has been recorded for %s, which exhausts the %s inactivity bound%s before this invocation could start",
-					ProviderSilence(operation, r.deps.Clock.Now()), inactivityLimit, allowance)),
-		}}
+		return r.executionFailureEffect(OperationFailed, execStageProviderRequest, FailureProviderNoProgress,
+			fmt.Errorf("no provider progress has been recorded for %s, which exhausts the %s inactivity bound%s before this invocation could start",
+				ProviderSilence(operation, r.deps.Clock.Now()), inactivityLimit, allowance))
 	}
 	// Observed progress is written back to the operation row, so "silent for"
 	// in status is a durable observation about the WORK rather than the age of
@@ -938,13 +928,15 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	if runStopObserved(executing) {
 		watch = endWatch()
 		watch.ended = true
-		return effect{state: OperationCancelled, result: executionRecord{
-			mutationResult: mutationResult{FailureClass: FailureRunCancelled},
-			Diagnostic:     r.executionDiagnostic(execStageProviderRequest, FailureRunCancelled, ExecutionResult{}, errStoppedBeforeProvider),
-		}}
+		return r.executionFailureEffect(OperationCancelled, execStageProviderRequest, FailureRunCancelled, errStoppedBeforeProvider)
 	}
-	executing = withVerificationExecution(executing, r.scheduler,
-		ExecutionAttemptRef{RunID: state.run.ID, OperationID: operation.ID, Attempt: physicalAttempt}, r.deps.StateDir)
+	// #474 B2: the last point before the provider actually starts, and the
+	// one check in this whole path that asks GitHub itself rather than the
+	// run's own last-observed projection.
+	if err := r.reviewRemediationLiveHeadCheck(ctx, state, reviewFindings); err != nil {
+		return r.executionFailureEffect(OperationFailed, execStageProviderRequest, FailureReviewRemediationStale, err)
+	}
+	executing = withVerificationExecution(executing, r.scheduler, attemptRef, r.deps.StateDir)
 	result, execErr := r.deps.Provider.Execute(executing, unit.apply(stage.apply(ExecutionRequest{
 		ReviewerResultPath:     reviewerResultPath,
 		FeedbackResolutionPath: feedbackResolutionPath,
@@ -1092,9 +1084,15 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// "nothing happened".
 	var resolutionErr error
 	if typed.Resolution != nil && execErr == nil && result.Failure == nil {
-		deliveredKeys := make([]string, 0, len(feedback))
+		deliveredKeys := make([]string, 0, len(feedback)+len(reviewFindings))
 		for _, item := range feedback {
 			deliveredKeys = append(deliveredKeys, item.Key)
+		}
+		// #474 B1: a delivered review-remediation finding is as much an
+		// obligation as GitHub feedback; a no-change resolution must name it
+		// too, under the same exact-match admitResolution already enforces.
+		for _, item := range reviewFindings {
+			deliveredKeys = append(deliveredKeys, item.Signature)
 		}
 		switch {
 		case purpose == InvocationContinuation:
@@ -1124,6 +1122,12 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// so the run keeps wanting a successor instead of silently stranding the
 	// obligation behind an operation the scheduler already considers settled.
 	feedbackUnresolved := len(feedback) > 0 && !record.Mutated && execErr == nil &&
+		result.Failure == nil && len(record.ResolvedFeedback) == 0
+	// THE SAME GATE (#474 B1), bound to an admitted independent-review BLOCK
+	// instead of GitHub feedback: left unchecked, a non-mutating return would
+	// satisfy the review-remediation|... binding forever with the reviewer's
+	// REQUEST_CHANGES never addressed.
+	reviewRemediationUnresolved := len(reviewFindings) > 0 && !record.Mutated && execErr == nil &&
 		result.Failure == nil && len(record.ResolvedFeedback) == 0
 	// THE REVIEWER PROTOCOL COMPLETION GATE (#374), the same shape as #376's
 	// feedback gate just above. A stage whose role produces a verdict crosses
@@ -1270,13 +1274,15 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 				}})
 			}
 		}
-		// feedbackUnresolved, reviewUnresolved and continuationUnresolved are
-		// excluded here deliberately: none of the three is a finished
-		// execution (#376, #374, #379) even though the provider itself
-		// reported success, so the exact subject it left behind must not
-		// become eligible to be treated as a finished candidate. The failure
-		// path below is what actually settles this attempt.
-		if !feedbackUnresolved && !reviewUnresolved && !continuationUnresolved {
+		// feedbackUnresolved, reviewRemediationUnresolved, reviewUnresolved and
+		// continuationUnresolved are excluded here deliberately: none of the
+		// four is a finished execution (#376, #474 B1, #374, #379) even though
+		// the provider itself reported success, so the exact subject it left
+		// behind must not become eligible to be treated as a finished
+		// candidate - and must not journal EventExecutionCompleted, which
+		// Project (runtime/projection.go) reads as exactly that claim. The
+		// failure path below is what actually settles this attempt.
+		if !feedbackUnresolved && !reviewRemediationUnresolved && !reviewUnresolved && !continuationUnresolved {
 			events = append(events, journalEntry{Type: EventExecutionCompleted, Payload: ExecutionCompletedPayload{
 				ProducerID:    producerID,
 				Purpose:       purpose,
@@ -1377,6 +1383,25 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 			cause = fmt.Errorf("the feedback resolution did not bind: %w", resolutionErr)
 		}
 		diagnostic := r.executionDiagnostic(execStageCandidateAdmission, FailureFeedbackUnresolved, result, cause)
+		state.admitSuccessor(diagnostic, operation, result.Invocation, false, true, r.deps.Clock.Now())
+		return effect{
+			state:  OperationFailed,
+			events: events,
+			result: executionRecord{
+				mutationResult: record,
+				PriorContext:   result.PriorContext,
+				Diagnostic:     diagnostic,
+			},
+		}
+	}
+	// #474 B1, same reason and same bounded retry as feedbackUnresolved above.
+	if reviewRemediationUnresolved {
+		record.FailureClass = FailureReviewRemediationUnresolved
+		cause := errors.New("the invocation neither changed the candidate nor stated an admitted no-change resolution for the review-remediation finding(s) it was delivered")
+		if resolutionErr != nil {
+			cause = fmt.Errorf("the review-remediation resolution did not bind: %w", resolutionErr)
+		}
+		diagnostic := r.executionDiagnostic(execStageCandidateAdmission, FailureReviewRemediationUnresolved, result, cause)
 		state.admitSuccessor(diagnostic, operation, result.Invocation, false, true, r.deps.Clock.Now())
 		return effect{
 			state:  OperationFailed,
@@ -1767,6 +1792,16 @@ const (
 	execStageProviderLoop       = "provider_loop"
 	execStageProviderResult     = "provider_result"
 )
+
+// executionFailureEffect is the repeated shape behind a typed invocation
+// outcome with no provider result: a terminal state, a failure class, the
+// diagnostic stage it died at, and the cause.
+func (r *EngineeringRuntime) executionFailureEffect(opState OperationState, stage string, class FailureClass, cause error) effect {
+	return effect{state: opState, result: executionRecord{
+		mutationResult: mutationResult{FailureClass: class},
+		Diagnostic:     r.executionDiagnostic(stage, class, ExecutionResult{}, cause),
+	}}
+}
 
 func (r *EngineeringRuntime) executionDiagnostic(stage string, class FailureClass, result ExecutionResult, cause error) *ExecutionDiagnostic {
 	diagnostic := &ExecutionDiagnostic{

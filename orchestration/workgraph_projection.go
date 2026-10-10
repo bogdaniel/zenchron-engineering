@@ -175,6 +175,12 @@ type UnitFacts struct {
 	// AwaitingDecision is a readiness hold reported by an owner outside this
 	// graph. A held unit is never runnable; see DecisionWait.
 	AwaitingDecision *DecisionWait
+	// ReviewApproved is whether an independent decision for Output's EXACT
+	// bound commit is APPROVE (#474), supplied by the runtime exactly like
+	// AwaitingDecision - this package performs no review read of its own.
+	// Meaningless, and never consulted, unless the unit declares
+	// RequiresReview.
+	ReviewApproved bool
 }
 
 // UnitProjection is one unit's decided state.
@@ -268,7 +274,15 @@ func ProjectWorkGraph(graph WorkGraph, facts map[string]UnitFacts) (WorkGraphPro
 				return WorkGraphProjection{}, fmt.Errorf("work unit %q is completed but names no admitted output", id)
 			}
 			projection.Units[id] = UnitProjection{State: state, InputsDigest: digest, Inputs: inputs}
-			satisfied[id] = fact.Item == ItemCompleted
+			// #474: a review-gated unit's admitted handoff satisfies a
+			// dependent only once ReviewApproved is also true for it - one
+			// additional predicate on the SAME satisfaction fact, never a
+			// second mechanism. The unit's own reported state is untouched
+			// (completed is still completed, #470's state, not renamed); only
+			// what downstream may consume from it is gated, and a dependent
+			// reads that through the existing "completed, no admitted
+			// handoff yet" blocked reason unsatisfiedReason already states.
+			satisfied[id] = fact.Item == ItemCompleted && (!unit.RequiresReview || fact.ReviewApproved)
 		}
 		// A unit nothing could still satisfy, decided once, and PROPAGATED: its
 		// own state says so, its child run ENDED without satisfying it, or it

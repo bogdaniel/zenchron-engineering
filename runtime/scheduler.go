@@ -364,6 +364,15 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 	if err := s.reclaimVerificationPermits(); err != nil {
 		return nil, err
 	}
+	// #474 R9: an ordinary verification-slot acquisition must be able to
+	// free a dead, expired review-verification claim exactly as it already
+	// frees a dead, expired nested VerificationPermit - claimReviewVerificationSlot's
+	// own reclaim is not enough, since nothing here guarantees a review
+	// trigger ever runs again for a given repository to reach it (no active
+	// PR, or no --reviewer-agent configured at all).
+	if err := s.reclaimReviewVerificationClaims(); err != nil {
+		return nil, err
+	}
 	if pending, err := s.VerificationCleanupPending(runID); err != nil || pending {
 		return nil, err
 	}
@@ -485,7 +494,19 @@ func (s Scheduler) VerificationSaturated(runID string) (bool, error) {
 			}
 		}
 	}
-	return len(verifying)+nested >= s.MaxConcurrentVerifications, nil
+	// #474 R5: an independent-review trigger's durable claim is the same
+	// verification-capacity weight as a nested permit, counted into the
+	// SAME ceiling verificationCountSQL already enforces for the SQL-side
+	// acquisition path.
+	reviewing := 0
+	if store, ok := s.Store.(ReviewVerificationClaimStore); ok {
+		claims, err := store.ReviewVerificationClaims()
+		if err != nil {
+			return false, err
+		}
+		reviewing = len(claims)
+	}
+	return len(verifying)+nested+reviewing >= s.MaxConcurrentVerifications, nil
 }
 
 // reclaimAbandoned drops the lease of one leased or running operation that NO

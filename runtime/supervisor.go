@@ -114,6 +114,11 @@ type SupervisorDependencies struct {
 	// ever been proposed. It is what the plan reconciler resolves assignments
 	// through, and it contacts nothing.
 	Plans PlanService
+	// ReviewTrigger is the OPTIONAL automatic #474 progression policy: nil
+	// disables it (Discovery/AgentProber's convention). Set, driveOne calls
+	// it once per run per pass, same cadence as ObserveFeedback, composing
+	// #233's ReviewPort with AdmitReviewRemediation.
+	ReviewTrigger func(ctx context.Context, engine *EngineeringRuntime, run EngineeringRun) error
 }
 
 // SupervisorReport is one tick's account of what the supervisor did.
@@ -191,6 +196,10 @@ type RunOutcome struct {
 	// same output, so an operator waiting for their review to reach a worker
 	// had no way to tell "nothing was said" from "nothing could be heard".
 	FeedbackError string `json:"feedback_error,omitempty"`
+	// ReviewTriggerError is FeedbackError's sibling for #474's automatic
+	// progression: driving continues regardless, and what is lost is only
+	// this pass's chance to notice or act on a review.
+	ReviewTriggerError string `json:"review_trigger_error,omitempty"`
 }
 
 // Supervisor owns the persistent runtime for one state directory.
@@ -961,6 +970,19 @@ func (s *Supervisor) driveOne(ctx context.Context, run EngineeringRun) (RunOutco
 		result.FeedbackError = boundedDetail(feedbackErr.Error())
 	} else {
 		observed = &observation
+	}
+	// #474 B3: before Reconcile, so an admission this pass is visible to the
+	// SAME pass's dispatch rather than a full poll interval later.
+	// Verification capacity (#474 R5) is bounded by ReviewTrigger's own
+	// durable claim against the scheduler's authoritative
+	// MaxConcurrentVerifications ceiling - never a Supervisor-local
+	// semaphore, so an ordinary assurance/verification operation and a
+	// reviewer invocation can never together exceed it, and the bound
+	// holds across restart and between controllers.
+	if s.deps.ReviewTrigger != nil {
+		if triggerErr := s.deps.ReviewTrigger(ctx, engine, run); triggerErr != nil {
+			result.ReviewTriggerError = boundedDetail(triggerErr.Error())
+		}
 	}
 	outcome, err := engine.Reconcile(ctx, run.ID)
 	if err != nil {

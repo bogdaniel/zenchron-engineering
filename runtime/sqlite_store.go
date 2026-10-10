@@ -605,6 +605,34 @@ CREATE TABLE review_publication_attempts (
 	decision_id       TEXT PRIMARY KEY REFERENCES review_decisions(id),
 	started_unix_nano INTEGER NOT NULL
 );
+`, `
+-- Durable, idempotent authorization to route one independent review's
+-- REQUEST_CHANGES decision into producer remediation (#474). One row per
+-- decision_id, ever: the primary key is what makes a second admission
+-- attempt for the same already-admitted decision a read, never a second
+-- remediation budget envelope or a second provider invocation.
+CREATE TABLE review_remediation_admissions (
+	decision_id        TEXT PRIMARY KEY REFERENCES review_decisions(id),
+	run_id             TEXT NOT NULL,
+	admitted_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
+CREATE INDEX review_remediation_admissions_by_run ON review_remediation_admissions(run_id);
+`, `
+-- A durable, restart-visible claim that one independent-review trigger
+-- invocation occupies a verification-capacity slot (#474 R5). An
+-- independent review invokes a full reviewer provider - the same
+-- capacity-class weight as an ordinary verification operation - but is
+-- bound to no run's own operation row, so it has no other way to
+-- participate in the SAME MaxConcurrentVerifications ceiling
+-- verificationCountSQL already enforces for both durable verification
+-- operations and nested VerificationPermits. Counted additively into that
+-- SAME formula; never a second ceiling, never a second scheduler.
+CREATE TABLE review_verification_claims (
+	id       TEXT PRIMARY KEY,
+	revision INTEGER NOT NULL,
+	document TEXT NOT NULL
+);
 `}
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
@@ -878,7 +906,18 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 	for _, kind := range observation {
 		args = append(args, kind)
 	}
-	args = append(args, acquiringObservation, ceiling)
+	// #474 R8: an independent-review claim is read-only but still provider
+	// WORK (#85), bounded by max_concurrent_runs exactly as any other
+	// work-class operation is - never only by max_concurrent_verifications.
+	// It carries no run_operations row for the count just above to see, so
+	// its own run is added here, zeroed by the CASE when acquiring
+	// observation-class capacity instead (a review claim is never
+	// observation-class work).
+	reviewClaimSQL, reviewClaimArgs := reviewClaimRunCountSQL(op.RunID)
+	args = append(args, acquiringObservation)
+	args = append(args, acquiringObservation)
+	args = append(args, reviewClaimArgs...)
+	args = append(args, ceiling)
 	// The verification ceiling (#490) is asked only of a verification
 	// operation, and counted exactly as the class ceiling is: other runs
 	// holding a leased verification operation, read from the document's kind.
@@ -904,10 +943,11 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 		  AND NOT EXISTS (SELECT 1 FROM verification_permits AS held
 		       WHERE json_extract(held.document, '$.state') = 'granted'
 		         AND json_extract(held.document, '$.parent.RunID') = run_operations.run_id)
-		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations
+		  AND ((SELECT COUNT(DISTINCT run_id) FROM run_operations
 		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
 		         AND json_extract(document, '$.lease') IS NOT NULL
-		         AND COALESCE(json_extract(document, '$.kind') IN (`+kinds+`), 0) = ?) < ?
+		         AND COALESCE(json_extract(document, '$.kind') IN (`+kinds+`), 0) = ?)
+		       + (CASE WHEN ? = 0 THEN `+reviewClaimSQL+` ELSE 0 END)) < ?
 		  AND (? = 0 OR (`+count+`) < ?)`,
 		args...)
 	if err != nil {

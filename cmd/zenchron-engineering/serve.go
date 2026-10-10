@@ -401,7 +401,45 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 				DefaultBranch: watchedDefaultBranch,
 			}, agent)
 		},
+		ReviewTrigger: c.reviewTrigger(),
 	})
+}
+
+// reviewTrigger builds #474 B3's automatic progression closure, or nil when
+// the operator named no reviewer (c.reviewerAgent empty): the trigger is
+// opt-in, never a silently-chosen default reviewer. It never authorizes
+// GitHub publication of the decision it reaches - #474's own gate never
+// consults publication state, so that is a separate operator decision, not
+// one this automatic path needs to make for itself.
+func (c *composition) reviewTrigger() func(context.Context, *runtime.EngineeringRuntime, runtime.EngineeringRun) error {
+	if c.reviewerAgent == "" {
+		return nil
+	}
+	return func(ctx context.Context, engine *runtime.EngineeringRuntime, run runtime.EngineeringRun) error {
+		repo, err := runtime.ParseGitHubRepo(run.Repository)
+		if err != nil {
+			return err
+		}
+		remote, err := runtime.GovernedRemote(repo.CloneURL())
+		if err != nil {
+			return err
+		}
+		port := &runtime.SupervisorReviewPort{
+			Store: c.store, GitHub: c.forge, ResolveAgent: c.agents.Agent,
+			ProviderFor: func(agent runtime.ResolvedAgent) (runtime.ExecutionProvider, error) {
+				return executionProvider(c.config, agent, c.artifacts, c.sandbox, c.permissionBypass), nil
+			},
+			StateDir: c.config.StateDir, Remote: remote, Credentials: c.credentials,
+			ControllerID: controllerIdentity(), Clock: runtime.RealClock{},
+			// #474 R6: the SAME finite, never-zero operator envelope
+			// every other unattended invocation (planning, producers)
+			// is bound to - an unattended automatic reviewer with no
+			// wall or inactivity bound is exactly the #238 shape.
+			Budgets: engine.ReviewBudget(),
+		}
+		_, _, err = engine.ReconcileReviewRemediationForRun(ctx, run.ID, port, c.reviewerAgent)
+		return err
+	}
 }
 
 // planService builds the plan lifecycle service for this composition.

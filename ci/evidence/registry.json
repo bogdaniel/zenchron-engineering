@@ -363,6 +363,11 @@
         "runtime/review_run.go",
         "runtime/review_store.go",
         "runtime/review_port.go",
+        "runtime/review_remediation.go",
+        "runtime/review_remediation_store.go",
+        "runtime/review_remediation_delivery.go",
+        "runtime/review_remediation_trigger.go",
+        "runtime/review_verification_claim.go",
         "review/*.go"
       ],
       "tests": [
@@ -376,7 +381,15 @@
         "runtime/review_run_test.go",
         "runtime/review_store_test.go",
         "runtime/review_port_test.go",
-        "runtime/review_concurrency_test.go"
+        "runtime/review_concurrency_test.go",
+        "runtime/review_remediation_test.go",
+        "runtime/review_remediation_refusal_test.go",
+        "runtime/review_remediation_binding_test.go",
+        "runtime/review_remediation_delivery_test.go",
+        "runtime/review_remediation_e2e_test.go",
+        "runtime/review_remediation_supervisor_test.go",
+        "runtime/review_remediation_trigger_test.go",
+        "runtime/review_verification_claim_test.go"
       ]
     },
     {

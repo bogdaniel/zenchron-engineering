@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -121,10 +122,17 @@ type RunIndependentReviewInput struct {
 	// CreatePlanningWorkspace already takes for planning, and the same
 	// reachability assumption: the operator/controller's local checkout (or
 	// its remote-tracking refs) already covers the commit being reviewed.
-	// Fetching an arbitrary PR head on demand is not solved here; see the
-	// #233 PR description's outstanding integration dependencies.
-	Source string
-	Clock  Clock
+	//
+	// Remote and Credentials are the fallback (#474 B3) for a caller with no
+	// such checkout - a long-running supervisor governing several
+	// repositories has no single operator cwd to assume. reviewWorkspace
+	// clones from Remote, through the SAME governed, credential-bound Git
+	// boundary a candidate clone already uses (CreatePlanningWorkspaceFromRemote),
+	// when Source is empty. Exactly one of the two must be supplied.
+	Source      string
+	Remote      RemoteIdentity
+	Credentials CredentialProvider
+	Clock       Clock
 
 	// Publish authorizes GitHub publication of the resulting decision. A
 	// review may be performed and recorded durably without it - #233
@@ -158,6 +166,27 @@ var reviewClaimTestHook func()
 // reviewClaimStaleAfter in real time - instead of sleeping and hoping a
 // shortened ticker has fired. Nil (and therefore free) outside that one test.
 var reviewClaimRenewedTestHook func()
+
+// reviewWorkspace materializes the exact PR head either from a local
+// checkout (Source) or, when none is supplied, from the governed remote
+// (#474 B3) - the same dual path CreatePlanningWorkspace and
+// CreatePlanningWorkspaceFromRemote already offer planning.
+// errReviewWorkspaceSource is reviewWorkspace's explicit, fail-fast refusal
+// when neither a local Source checkout nor a governed Remote was supplied -
+// distinct from whatever a clone attempt against an empty remote would
+// otherwise produce, so a caller sees exactly which boundary it missed
+// rather than a cloning command's own generic failure.
+var errReviewWorkspaceSource = errors.New("an independent review requires either a local Source checkout or a governed Remote to clone from")
+
+func reviewWorkspace(in RunIndependentReviewInput, reviewID, headSHA string) (*PlanningWorkspace, error) {
+	if in.Source != "" {
+		return CreatePlanningWorkspace(in.StateDir, reviewID, in.Source, headSHA, "")
+	}
+	if in.Remote.URL == "" {
+		return nil, errReviewWorkspaceSource
+	}
+	return CreatePlanningWorkspaceFromRemote(in.StateDir, reviewID, in.Remote, in.Credentials, headSHA)
+}
 
 // publishDecision publishes decision when requested, through the one
 // exclusive entry point (PublishReview itself now claims "publish:"+ID -
@@ -255,7 +284,7 @@ func RunIndependentReview(ctx context.Context, in RunIndependentReviewInput) (Ru
 		return existingOutcome(existing)
 	}
 
-	workspace, err := CreatePlanningWorkspace(in.StateDir, reviewID, in.Source, pr.HeadSHA, "")
+	workspace, err := reviewWorkspace(in, reviewID, pr.HeadSHA)
 	if err != nil {
 		return RunIndependentReviewOutput{}, err
 	}

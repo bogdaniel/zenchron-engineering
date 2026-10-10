@@ -82,9 +82,14 @@ type SupervisorReviewPort struct {
 	// ProviderFor resolves the execution provider for a reviewer agent. It is
 	// a function, not a fixed provider, because the reviewer named per call
 	// can be any registered agent.
-	ProviderFor  func(ResolvedAgent) (ExecutionProvider, error)
-	StateDir     string
-	Source       string
+	ProviderFor func(ResolvedAgent) (ExecutionProvider, error)
+	StateDir    string
+	Source      string
+	// Remote and Credentials are RunIndependentReviewInput's own fallback
+	// (#474 B3), passed straight through: a long-running supervisor governing
+	// several repositories has no single Source checkout to assume.
+	Remote       RemoteIdentity
+	Credentials  CredentialProvider
 	ControllerID string
 	Model        string
 	Budgets      ProviderBudget
@@ -111,7 +116,8 @@ func (p *SupervisorReviewPort) RequestReview(ctx context.Context, repo GitHubRep
 		Repo: repo, PRNumber: prNumber, Reviewer: reviewer, Provider: provider,
 		ResolveAgent: p.ResolveAgent, Store: p.Store, GitHub: p.GitHub,
 		StateDir: p.StateDir, ControllerID: p.ControllerID, Model: p.Model,
-		Budgets: p.Budgets, Source: p.Source, Clock: p.Clock, Publish: p.Publish,
+		Budgets: p.Budgets, Source: p.Source, Remote: p.Remote, Credentials: p.Credentials,
+		Clock: p.Clock, Publish: p.Publish,
 	})
 	outcome := ReviewOutcome{Decision: out.Decision}
 	if out.Publication != nil {
