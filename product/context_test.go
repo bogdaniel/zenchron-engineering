@@ -6,12 +6,14 @@ import (
 )
 
 // fakeStore is a Store with no database, used to prove CompileContext itself
-// never asks for a product other than the one it was given, and never applies
-// an unrecognized scope. runtime/product_store_test.go proves the same thing
-// end to end against the real SQLite store.
+// never asks for a product other than the one it was given, never applies an
+// unrecognized scope, and never conflates "at or below this scope rank" with
+// "visible to this caller". runtime/product_store_test.go and
+// runtime/product_context_fixture_test.go prove the same thing end to end
+// against the real SQLite store.
 type fakeStore struct {
 	products       map[string]Product
-	configurations map[string]ProductConfiguration
+	configurations map[string]map[int]ProductConfiguration
 	knowledge      map[string][]KnowledgeEntry
 	queried        []string
 }
@@ -24,14 +26,29 @@ func (f *fakeStore) CurrentProduct(productID string) (Product, bool, error) {
 
 func (f *fakeStore) CurrentConfiguration(productID string) (ProductConfiguration, bool, error) {
 	f.queried = append(f.queried, productID)
-	c, ok := f.configurations[productID]
+	revisions := f.configurations[productID]
+	best, ok := ProductConfiguration{}, false
+	for _, c := range revisions {
+		if !ok || c.Revision > best.Revision {
+			best, ok = c, true
+		}
+	}
+	return best, ok, nil
+}
+
+func (f *fakeStore) ConfigurationRevision(productID string, revision int) (ProductConfiguration, bool, error) {
+	f.queried = append(f.queried, productID)
+	c, ok := f.configurations[productID][revision]
 	return c, ok, nil
 }
 
-func (f *fakeStore) KnowledgeAtOrBelow(productID string, scope Scope) ([]KnowledgeEntry, error) {
+func (f *fakeStore) OwnedKnowledge(productID string, scope Scope, ownerRef string) ([]KnowledgeEntry, error) {
 	f.queried = append(f.queried, productID)
 	var out []KnowledgeEntry
 	for _, entry := range f.knowledge[productID] {
+		if entry.Provenance.Type == ProvenancePromotion || entry.OwnerRef != ownerRef {
+			continue
+		}
 		rank, err := compareScope(entry.Scope, scope)
 		if err != nil {
 			return nil, err
@@ -43,13 +60,31 @@ func (f *fakeStore) KnowledgeAtOrBelow(productID string, scope Scope) ([]Knowled
 	return out, nil
 }
 
-func twoOverlappingProducts(t *testing.T) *fakeStore {
+func (f *fakeStore) PromotedKnowledgeAtOrBelow(productID string, scope Scope) ([]KnowledgeEntry, error) {
+	f.queried = append(f.queried, productID)
+	var out []KnowledgeEntry
+	for _, entry := range f.knowledge[productID] {
+		if entry.Provenance.Type != ProvenancePromotion {
+			continue
+		}
+		rank, err := compareScope(entry.Scope, scope)
+		if err != nil {
+			return nil, err
+		}
+		if rank <= 0 {
+			out = append(out, entry)
+		}
+	}
+	return out, nil
+}
+
+func twoOverlappingProducts(t *testing.T) (*fakeStore, KnowledgeEntry, KnowledgeEntry) {
 	t.Helper()
 	at := time.Unix(1700000000, 0).UTC()
 	productA := composedProduct(t, "storefront", 1, []string{"acme/shared-platform-lib", "acme/storefront-web"})
 	productB := composedProduct(t, "checkout", 1, []string{"acme/shared-platform-lib", "acme/checkout-api"})
 
-	discoveryA, err := NewKnowledgeEntry(productA.ID, ScopeWorkUnit, "shared-platform-lib retry budget is 3",
+	discoveryA, err := NewKnowledgeEntry(productA.ID, ScopeWorkUnit, "run-storefront-1", "shared-platform-lib retry budget is 3",
 		Provenance{Type: ProvenanceAgentDiscovery, Producer: "run-storefront-1"}, at)
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +94,7 @@ func twoOverlappingProducts(t *testing.T) *fakeStore {
 		t.Fatal(err)
 	}
 
-	discoveryB, err := NewKnowledgeEntry(productB.ID, ScopeWorkUnit, "shared-platform-lib retry budget is 5",
+	discoveryB, err := NewKnowledgeEntry(productB.ID, ScopeWorkUnit, "run-checkout-1", "shared-platform-lib retry budget is 5",
 		Provenance{Type: ProvenanceAgentDiscovery, Producer: "run-checkout-1"}, at)
 	if err != nil {
 		t.Fatal(err)
@@ -69,17 +104,18 @@ func twoOverlappingProducts(t *testing.T) *fakeStore {
 		t.Fatal(err)
 	}
 
-	return &fakeStore{
+	store := &fakeStore{
 		products: map[string]Product{productA.ID: productA, productB.ID: productB},
 		knowledge: map[string][]KnowledgeEntry{
-			productA.ID: {promotedA},
-			productB.ID: {promotedB},
+			productA.ID: {discoveryA, promotedA},
+			productB.ID: {discoveryB, promotedB},
 		},
 	}
+	return store, promotedA, promotedB
 }
 
 func TestCompileContextIsolatesOverlappingProducts(t *testing.T) {
-	store := twoOverlappingProducts(t)
+	store, promotedA, _ := twoOverlappingProducts(t)
 	productAID, err := ProductID("storefront")
 	if err != nil {
 		t.Fatal(err)
@@ -89,11 +125,8 @@ func TestCompileContextIsolatesOverlappingProducts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(context.Knowledge) != 1 {
-		t.Fatalf("expected exactly one knowledge entry for storefront, got %d", len(context.Knowledge))
-	}
-	if context.Knowledge[0].Statement != "shared-platform-lib retry budget is 3" {
-		t.Fatalf("storefront's context leaked checkout's claim: %q", context.Knowledge[0].Statement)
+	if len(context.Knowledge) != 1 || context.Knowledge[0].ID != promotedA.ID {
+		t.Fatalf("expected exactly storefront's own promoted claim, got %+v", context.Knowledge)
 	}
 	for _, queried := range store.queried {
 		if queried != productAID {
@@ -110,7 +143,7 @@ func TestCompileContextRefusesMissingProduct(t *testing.T) {
 }
 
 func TestCompileContextRefusesUnknownScope(t *testing.T) {
-	store := twoOverlappingProducts(t)
+	store, _, _ := twoOverlappingProducts(t)
 	productAID, err := ProductID("storefront")
 	if err != nil {
 		t.Fatal(err)
@@ -120,17 +153,104 @@ func TestCompileContextRefusesUnknownScope(t *testing.T) {
 	}
 }
 
-func TestCompileContextOmitsKnowledgeAboveRequestedScope(t *testing.T) {
-	store := twoOverlappingProducts(t)
+func TestCompileContextRequiresOwnerReferenceAtNarrowScope(t *testing.T) {
+	store, _, _ := twoOverlappingProducts(t)
 	productAID, err := ProductID("storefront")
 	if err != nil {
 		t.Fatal(err)
 	}
-	context, err := CompileContext(store, ContextRequest{ProductID: productAID, Scope: ScopeWorkUnit})
+	if _, err := CompileContext(store, ContextRequest{ProductID: productAID, Scope: ScopeWorkUnit}); err == nil {
+		t.Fatal("a work_unit-scoped request with no owner reference should be refused")
+	}
+}
+
+func TestCompileContextNeverLeaksUnpromotedKnowledgeToWiderScope(t *testing.T) {
+	store, promotedA, _ := twoOverlappingProducts(t)
+	productAID, err := ProductID("storefront")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(context.Knowledge) != 0 {
-		t.Fatalf("a work_unit-scoped request should not see product-scoped knowledge, got %d entries", len(context.Knowledge))
+	// A product-scoped request sees the PROMOTED claim and nothing else - in
+	// particular, not the raw work_unit discovery it was promoted from, which
+	// would be the B3 leak (scope_rank <= requested with no promotion gate).
+	context, err := CompileContext(store, ContextRequest{ProductID: productAID, Scope: ScopeProduct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(context.Knowledge) != 1 || context.Knowledge[0].ID != promotedA.ID {
+		t.Fatalf("product-scoped context should contain only the promoted entry, got %+v", context.Knowledge)
+	}
+}
+
+func TestCompileContextIsolatesOwnersWithinTheSameProduct(t *testing.T) {
+	store, _, _ := twoOverlappingProducts(t)
+	productAID, err := ProductID("storefront")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(1700000000, 0).UTC()
+	otherOwner, err := NewKnowledgeEntry(productAID, ScopeWorkUnit, "run-storefront-2", "a different unit's claim",
+		Provenance{Type: ProvenanceAgentDiscovery, Producer: "run-storefront-2"}, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.knowledge[productAID] = append(store.knowledge[productAID], otherOwner)
+
+	context, err := CompileContext(store, ContextRequest{
+		ProductID: productAID, Scope: ScopeWorkUnit, OwnerRef: "run-storefront-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range context.Knowledge {
+		if entry.ID == otherOwner.ID {
+			t.Fatal("one work unit's context leaked another work unit's raw discovery within the same product")
+		}
+	}
+}
+
+func TestCompileContextPinsAnExactConfigurationRevision(t *testing.T) {
+	store, _, _ := twoOverlappingProducts(t)
+	productAID, err := ProductID("storefront")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(1700000000, 0).UTC()
+	revisionOne := ProductConfiguration{
+		SchemaVersion: ConfigurationSchemaVersion, ProductID: productAID, Revision: 1,
+		Settings: map[string]string{"tier": "standard"}, CreatedAt: at,
+	}
+	revisionTwo := ProductConfiguration{
+		SchemaVersion: ConfigurationSchemaVersion, ProductID: productAID, Revision: 2,
+		Settings: map[string]string{"tier": "premium"}, CreatedAt: at.Add(time.Hour),
+	}
+	store.configurations = map[string]map[int]ProductConfiguration{
+		productAID: {1: revisionOne, 2: revisionTwo},
+	}
+
+	pinned := 1
+	context, err := CompileContext(store, ContextRequest{
+		ProductID: productAID, Scope: ScopeProduct, ConfigurationRevision: &pinned,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if context.Configuration == nil || context.Configuration.Settings["tier"] != "standard" {
+		t.Fatalf("a bound caller pinning revision 1 should never see revision 2's settings, got %+v", context.Configuration)
+	}
+
+	current, err := CompileContext(store, ContextRequest{ProductID: productAID, Scope: ScopeProduct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Configuration == nil || current.Configuration.Settings["tier"] != "premium" {
+		t.Fatalf("an unpinned caller should see the current revision, got %+v", current.Configuration)
+	}
+
+	missing := 99
+	if _, err := CompileContext(store, ContextRequest{
+		ProductID: productAID, Scope: ScopeProduct, ConfigurationRevision: &missing,
+	}); err == nil {
+		t.Fatal("pinning a configuration revision that does not exist should fail closed")
 	}
 }

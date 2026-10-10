@@ -6,18 +6,18 @@ import (
 )
 
 func TestNewKnowledgeEntryRefusesScopesAboveWorkUnit(t *testing.T) {
-	_, err := NewKnowledgeEntry("product-acme", ScopeExecution, "the billing worker retries on 429",
+	_, err := NewKnowledgeEntry("product-acme", ScopeExecution, "run-7", "the billing worker retries on 429",
 		Provenance{Type: ProvenanceAgentDiscovery, Producer: "run-7"}, time.Unix(1700000000, 0).UTC())
 	if err != nil {
 		t.Fatalf("execution scope should be authorable directly: %v", err)
 	}
-	_, err = NewKnowledgeEntry("product-acme", ScopeWorkUnit, "the billing worker retries on 429",
+	_, err = NewKnowledgeEntry("product-acme", ScopeWorkUnit, "run-7", "the billing worker retries on 429",
 		Provenance{Type: ProvenanceAgentDiscovery, Producer: "run-7"}, time.Unix(1700000000, 0).UTC())
 	if err != nil {
 		t.Fatalf("work_unit scope should be authorable directly: %v", err)
 	}
 	for _, scope := range []Scope{ScopeFeature, ScopeProduct, ScopeOrganization} {
-		if _, err := NewKnowledgeEntry("product-acme", scope, "the billing worker retries on 429",
+		if _, err := NewKnowledgeEntry("product-acme", scope, "run-7", "the billing worker retries on 429",
 			Provenance{Type: ProvenanceAgentDiscovery, Producer: "run-7"}, time.Unix(1700000000, 0).UTC()); err == nil {
 			t.Fatalf("scope %q should require promotion, not direct authoring", scope)
 		}
@@ -25,16 +25,23 @@ func TestNewKnowledgeEntryRefusesScopesAboveWorkUnit(t *testing.T) {
 }
 
 func TestNewKnowledgeEntryRefusesPromotionProvenance(t *testing.T) {
-	_, err := NewKnowledgeEntry("product-acme", ScopeExecution, "claim",
+	_, err := NewKnowledgeEntry("product-acme", ScopeExecution, "run-7", "claim",
 		Provenance{Type: ProvenancePromotion, Producer: "someone"}, time.Unix(1700000000, 0).UTC())
 	if err == nil {
 		t.Fatal("a directly authored entry may not claim promotion provenance")
 	}
 }
 
+func TestNewKnowledgeEntryRequiresAnOwnerReference(t *testing.T) {
+	if _, err := NewKnowledgeEntry("product-acme", ScopeWorkUnit, "", "claim",
+		Provenance{Type: ProvenanceAgentDiscovery, Producer: "run-7"}, time.Unix(1700000000, 0).UTC()); err == nil {
+		t.Fatal("a work_unit-scoped entry with no owner reference should be refused")
+	}
+}
+
 func discoveredEntry(t *testing.T) KnowledgeEntry {
 	t.Helper()
-	entry, err := NewKnowledgeEntry("product-acme", ScopeWorkUnit, "the billing worker retries on 429",
+	entry, err := NewKnowledgeEntry("product-acme", ScopeWorkUnit, "run-7", "the billing worker retries on 429",
 		Provenance{Type: ProvenanceAgentDiscovery, Producer: "run-7"}, time.Unix(1700000000, 0).UTC())
 	if err != nil {
 		t.Fatal(err)
@@ -70,6 +77,9 @@ func TestPromotePreservesProvenanceAndLinksBack(t *testing.T) {
 	}
 	if promoted.Provenance.Type != ProvenancePromotion || promoted.Provenance.Producer != "lead@example" {
 		t.Fatalf("promoted entry should carry promotion provenance by the authorizer, got %+v", promoted.Provenance)
+	}
+	if promoted.OwnerRef != "" {
+		t.Fatalf("a promoted entry should carry no owner reference, got %q", promoted.OwnerRef)
 	}
 	if promoted.PromotedFrom == nil || *promoted.PromotedFrom != entry.ID {
 		t.Fatalf("promoted entry should link back to its source, got %+v", promoted.PromotedFrom)
@@ -112,6 +122,18 @@ func TestKnowledgeEntryValidateRefusesMalformedData(t *testing.T) {
 			e.PromotedFrom = &id
 			return e
 		}(),
+		"no owner reference at work_unit scope": func() KnowledgeEntry { e := entry; e.OwnerRef = ""; return e }(),
+		"owner reference on a feature-scoped entry": func() KnowledgeEntry {
+			e := entry
+			e.Scope = ScopeFeature
+			return e
+		}(),
+		"forged id": func() KnowledgeEntry { e := entry; e.ID = "knowledge-forged"; return e }(),
+		"tampered statement after id was computed": func() KnowledgeEntry {
+			e := entry
+			e.Statement = "the billing worker retries on 500"
+			return e
+		}(),
 	}
 	for name, e := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -119,5 +141,17 @@ func TestKnowledgeEntryValidateRefusesMalformedData(t *testing.T) {
 				t.Fatalf("%s: expected a validation error", name)
 			}
 		})
+	}
+}
+
+func TestKnowledgePromotionValidateRefusesAForgedID(t *testing.T) {
+	entry := discoveredEntry(t)
+	_, record, err := Promote(entry, ScopeProduct, "lead@example", time.Unix(1700000100, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.ID = "promotion-forged"
+	if err := record.Validate(); err == nil {
+		t.Fatal("a promotion record with a tampered id should be refused")
 	}
 }

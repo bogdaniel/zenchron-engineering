@@ -45,7 +45,15 @@ complete deterministic admission check; `ValidateProductMutation` is the gate
 a proposed next revision passes - it refuses removing or rebinding a
 repository an earlier revision already named, which is exactly the kind of
 change that would retroactively alter which product's context an existing
-graph association resolves through.
+graph association resolves through. The runtime store enforces this at the
+write boundary itself, inside one `BEGIN IMMEDIATE` transaction
+(`runtime/product_store.go`): the first revision must be 1, a later one must
+be exactly the successor of whatever is current, and `ValidateProductMutation`
+runs against that exact current revision before anything is written - a
+caller cannot skip the check by calling `AdoptProductRevision` directly, and
+two concurrent writers proposing disagreeing "next" revisions can never both
+succeed. The same pattern, plus a precondition that the product already
+exists, applies to `ProductConfiguration` revisions below.
 
 ## Mutable configuration, frozen history (`configuration.go`)
 
@@ -65,8 +73,9 @@ execution -> work_unit -> feature -> product -> organization
 ```
 
 A claim may be authored directly (`NewKnowledgeEntry`) only at `execution` or
-`work_unit` scope. Reaching `feature`, `product` or `organization` scope
-requires `Promote`, which:
+`work_unit` scope, and only bound to the exact `OwnerRef` (the execution or
+work unit) that produced it. Reaching `feature`, `product` or `organization`
+scope requires `Promote`, which:
 
 - refuses an empty `authorizedBy` - a claim never widens its own scope;
 - refuses a target scope that is not strictly above the source's;
@@ -74,10 +83,33 @@ requires `Promote`, which:
   `KnowledgePromotion` audit record, so an organization-scope claim can always
   be traced back to the agent discovery it started as.
 
+**Visibility is never "scope rank at or below the request".** That would let a
+product-scoped reader see every unpromoted agent discovery in the product -
+exactly the leak #476's acceptance refuses. Instead two separate reads exist
+(`Store.OwnedKnowledge`, `Store.PromotedKnowledgeAtOrBelow`): a raw discovery
+is visible to its own `OwnerRef` alone, at any scope; a wider-scope reader
+sees only entries that went through `Promote`, which carry no `OwnerRef` of
+their own. `RecordKnowledgeEntry` refuses a promotion-provenance entry
+outright, so the only way an entry gets an audit record is `RecordPromotion`,
+and `RecordPromotion` re-derives the claimed source from storage - its
+product, scope, provenance and statement - rather than trusting the caller's
+in-memory documents. `Validate` also recomputes and checks every entry's and
+every promotion record's own content id, so neither can be hand-crafted with
+an id that disagrees with its fields.
+
 There is no code path that lets a directly authored entry land above
-`work_unit` scope, and no code path that promotes without an explicit human
-authorizer. "Agent discovery never becomes organization truth automatically"
-is true by construction, not by convention.
+`work_unit` scope, and no code path that promotes without a non-empty
+`authorizedBy`. **What this does NOT yet mean**: `authorizedBy` is a
+caller-supplied identity string, exactly like every other `RequestedBy` field
+in this codebase (`Product.RequestedBy`, `WorkGraph.RequestedBy`) - it is not
+cryptographically verified against an authenticated session, because #476
+introduces no second authority or identity system, and no existing one in
+this repository fits a knowledge-promotion decision without being misused.
+Today's actual caller is always first-party Go code in this process; real
+authentication of "who" is deferred until a human-facing caller (#479, or an
+operator CLI) establishes identity the way `github.credential_mode` already
+does for the review loop, and that caller is expected to pass a verified
+identity through, not invent a new one here.
 
 ## Graph association (`association.go`)
 
@@ -86,7 +118,10 @@ its units resolve context against. It is an append-only fact, never a
 revision: associating a graph changes neither the graph nor the product. The
 runtime store enforces one product per graph with a single-column primary key
 on `graph_id` - the first association for a graph stands, and a conflicting
-second product claiming it is refused.
+second product claiming it is refused. It also verifies BOTH sides exist,
+inside the same transaction as the insert: a graph id that was never adopted,
+or a product id that was never adopted, is refused rather than stored as a
+disconnected identity nothing else can ever resolve.
 
 ## Context compilation (`context.go`) - the #480/#479 contract
 
@@ -94,12 +129,20 @@ second product claiming it is refused.
 type Store interface {
     CurrentProduct(productID string) (Product, bool, error)
     CurrentConfiguration(productID string) (ProductConfiguration, bool, error)
-    KnowledgeAtOrBelow(productID string, scope Scope) ([]KnowledgeEntry, error)
+    ConfigurationRevision(productID string, revision int) (ProductConfiguration, bool, error)
+    OwnedKnowledge(productID string, scope Scope, ownerRef string) ([]KnowledgeEntry, error)
+    PromotedKnowledgeAtOrBelow(productID string, scope Scope) ([]KnowledgeEntry, error)
 }
 
 type ContextRequest struct {
     ProductID string
     Scope     Scope
+    // OwnerRef is required at ScopeExecution/ScopeWorkUnit, so a caller can
+    // only ever see knowledge it authored itself.
+    OwnerRef string
+    // ConfigurationRevision pins the exact revision a bound caller already
+    // froze into its own contract. Nil means "current".
+    ConfigurationRevision *int
 }
 
 type ProductContext struct {
@@ -120,9 +163,13 @@ calls `product.CompileContext(store, request)` with no adapter in between.
 
 Every `Store` method is scoped by the exact `productID` `CompileContext` was
 given, and it is passed to every one of them - there is no step in this file
-that can read a sibling product's row. A missing product is an error, never
-an empty context, so a caller that named the wrong product id fails closed
-instead of silently seeing nothing.
+that can read a sibling product's row. A missing product, or a missing
+PINNED configuration revision, is an error, never an empty or substituted
+context: a caller that named the wrong product id, or whose frozen revision
+has somehow disappeared, fails closed instead of silently seeing nothing or
+silently seeing a newer configuration than the one it was bound to.
+`MaxContextKnowledgeEntries` bounds each of the owned and promoted reads, so
+a product with many entries cannot hand one caller an unbounded context.
 
 ## What #476 deliberately does not build
 
@@ -149,3 +196,17 @@ instead of silently seeing nothing.
   is its own; #476 does not compile or enforce `EngineeringPolicy` - it only
   carries a reference to one, exactly as #64's `ContractProvenance` already
   does for a run.
+- **No cross-product organization knowledge sharing.** `PromotedKnowledgeAtOrBelow`
+  is still scoped by one `productID`, so an entry explicitly promoted all the
+  way to `ScopeOrganization` is today visible only within the product that
+  promoted it, not reusable by a second product. The scope ladder's top step
+  is real (it survives Promote's direction check and is distinguishable from
+  `ScopeProduct`), but true cross-product sharing needs a separate,
+  explicitly governed read path with no product filter, which this batch
+  does not add. This is a reduction in #476's full scope, stated here rather
+  than left to be rediscovered: #476 is not closed by this PR alone.
+- **No cryptographically verified `authorizedBy` identity.** See the scope
+  ladder section above - it is a caller-asserted string today, consistent
+  with every other `RequestedBy` field in this codebase, not yet backed by an
+  authenticated session. Closing this needs a real caller establishing
+  identity, not new machinery here.

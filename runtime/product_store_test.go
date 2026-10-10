@@ -1,15 +1,19 @@
 package runtime
 
 // The durable half of #476, proved the same way #472's graph store is: a
-// revision is immutable, "current" is the highest one adopted, and every
-// claim holds across two independent handles on one database file, so no
-// process-local state is what makes these pass.
+// revision is immutable, "current" is the highest one adopted, the FULL
+// revision-transition invariant is enforced at the write boundary itself (not
+// merely available for a caller to call), and every claim holds across two
+// independent handles on one database file, so no process-local state is what
+// makes these pass.
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 	"github.com/bogdaniel/zenchron-engineering/product"
 )
 
@@ -69,6 +73,72 @@ func TestProductRevisionsAreAppendOnlyAcrossRestart(t *testing.T) {
 	}
 }
 
+// TestAdoptProductRevisionEnforcesTheFullTransitionInvariant is B1: the write
+// boundary itself refuses a non-initial first revision, a gap, and a revision
+// that would remove a repository an earlier one already named - not merely a
+// caller that remembered to call product.ValidateProductMutation first.
+func TestAdoptProductRevisionEnforcesTheFullTransitionInvariant(t *testing.T) {
+	_, first, _ := openPair(t)
+	now := time.Unix(1700000000, 0).UTC()
+
+	notOne := composeProduct(t, "acme-storefront", 2, []string{"acme/storefront-web"}, now)
+	if _, _, err := first.AdoptProductRevision(notOne); err == nil {
+		t.Fatal("a product's first-ever revision must be 1")
+	}
+
+	one := composeProduct(t, "acme-storefront", 1, []string{"acme/storefront-web"}, now)
+	if _, created, err := first.AdoptProductRevision(one); err != nil || !created {
+		t.Fatalf("adopt revision 1: created=%t err=%v", created, err)
+	}
+
+	gap := composeProduct(t, "acme-storefront", 3, []string{"acme/storefront-web"}, now)
+	if _, _, err := first.AdoptProductRevision(gap); err == nil {
+		t.Fatal("skipping from revision 1 straight to revision 3 should be refused")
+	}
+
+	removing := composeProduct(t, "acme-storefront", 2, []string{"acme/storefront-mobile"}, now)
+	if _, _, err := first.AdoptProductRevision(removing); err == nil {
+		t.Fatal("revision 2 removing revision 1's repository should be refused, even with no caller-side mutation check")
+	}
+}
+
+// TestAdoptProductRevisionSerializesConcurrentCompetingWriters is B1's
+// concurrency claim: two writers racing to adopt "the next revision" can
+// never both succeed with disagreeing content, across two independent store
+// handles, with no in-process lock making it work.
+func TestAdoptProductRevisionSerializesConcurrentCompetingWriters(t *testing.T) {
+	_, first, second := openPair(t)
+	now := time.Unix(1700000000, 0).UTC()
+	base := composeProduct(t, "acme-storefront", 1, []string{"acme/storefront-web"}, now)
+	if _, _, err := first.AdoptProductRevision(base); err != nil {
+		t.Fatal(err)
+	}
+
+	byFirst := composeProduct(t, "acme-storefront", 2, []string{"acme/storefront-web", "acme/storefront-mobile"}, now)
+	bySecond := composeProduct(t, "acme-storefront", 2, []string{"acme/storefront-web", "acme/storefront-api"}, now)
+
+	var wg sync.WaitGroup
+	results := make([]error, 2)
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _, results[0] = first.AdoptProductRevision(byFirst) }()
+	go func() { defer wg.Done(); _, _, results[1] = second.AdoptProductRevision(bySecond) }()
+	wg.Wait()
+
+	succeeded := 0
+	for _, err := range results {
+		if err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("exactly one of two competing revision-2 proposals should succeed, got %d", succeeded)
+	}
+	current, found, err := first.CurrentProduct(base.ID)
+	if err != nil || !found || current.Revision != 2 {
+		t.Fatalf("current revision = %d (found=%t err=%v)", current.Revision, found, err)
+	}
+}
+
 func baseConfigurationRevision(t *testing.T, productID string, revision int, at time.Time) product.ProductConfiguration {
 	t.Helper()
 	c := product.ProductConfiguration{
@@ -101,7 +171,7 @@ func TestProductConfigurationHistoryIsPreservedAndStaleRevisionsConflict(t *test
 
 	// Historical revision 1 is unchanged: changing current configuration does
 	// not rewrite a run's frozen history.
-	historical, found, err := first.ProductConfigurationRevision(p.ID, 1)
+	historical, found, err := first.ConfigurationRevision(p.ID, 1)
 	if err != nil || !found || historical.Settings["tier"] != "standard" {
 		t.Fatalf("configuration revision 1 was rewritten: found=%t settings=%v err=%v", found, historical.Settings, err)
 	}
@@ -117,6 +187,40 @@ func TestProductConfigurationHistoryIsPreservedAndStaleRevisionsConflict(t *test
 	if _, _, err := first.AdoptProductConfigurationRevision(stale); err == nil || !strings.Contains(err.Error(), "already adopted with different contents") {
 		t.Fatalf("err = %v, want a stale revision conflict", err)
 	}
+
+	// A gap (revision 4 when current is 2) is refused, not adopted as "next".
+	gap := baseConfigurationRevision(t, p.ID, 4, now.Add(2*time.Hour))
+	if _, _, err := first.AdoptProductConfigurationRevision(gap); err == nil {
+		t.Fatal("a configuration revision gap should be refused")
+	}
+}
+
+// TestAdoptProductConfigurationRevisionRequiresAnExistingProduct is part of
+// B5: the configuration adopter establishes product existence itself, rather
+// than trusting a caller to have checked.
+func TestAdoptProductConfigurationRevisionRequiresAnExistingProduct(t *testing.T) {
+	_, first, _ := openPair(t)
+	now := time.Unix(1700000000, 0).UTC()
+	orphan := baseConfigurationRevision(t, "product-does-not-exist", 1, now)
+	if _, _, err := first.AdoptProductConfigurationRevision(orphan); err == nil {
+		t.Fatal("adopting configuration for a product that was never adopted should be refused")
+	}
+}
+
+func adoptedGraph(t *testing.T, store *SQLiteOperationStore, name string, issue int, at time.Time) orchestration.WorkGraph {
+	t.Helper()
+	proposal := orchestration.WorkGraphProposal{Name: name, Revision: 1, Units: []orchestration.WorkUnit{
+		{ID: "a", Purpose: "do the work", Role: "implementer", Issue: issue},
+	}}
+	graph, err := proposal.Compose("acme/repo", "claude", "operator@example", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adopted, _, err := store.AdoptWorkGraphRevision(graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return adopted
 }
 
 func TestAssociateWorkGraphOneProductPerGraph(t *testing.T) {
@@ -130,8 +234,9 @@ func TestAssociateWorkGraphOneProductPerGraph(t *testing.T) {
 	if _, _, err := first.AdoptProductRevision(productB); err != nil {
 		t.Fatal(err)
 	}
+	graph := adoptedGraph(t, first, "launch-graph", 101, now)
 
-	association, err := product.NewGraphAssociation(productA.ID, "graph-launch", now)
+	association, err := product.NewGraphAssociation(productA.ID, graph.ID, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,16 +249,45 @@ func TestAssociateWorkGraphOneProductPerGraph(t *testing.T) {
 	}
 	// A DIFFERENT product claiming the same graph is refused, never a silent
 	// takeover of which product's context the graph's units now resolve.
-	conflicting, err := product.NewGraphAssociation(productB.ID, "graph-launch", now)
+	conflicting, err := product.NewGraphAssociation(productB.ID, graph.ID, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := second.AssociateWorkGraph(conflicting); err == nil {
 		t.Fatal("associating an already-claimed graph with a different product should be refused")
 	}
-	owner, found, err := first.AssociatedProduct("graph-launch")
+	owner, found, err := first.AssociatedProduct(graph.ID)
 	if err != nil || !found || owner != productA.ID {
 		t.Fatalf("associated product = %q (found=%t err=%v), want %q", owner, found, err, productA.ID)
+	}
+}
+
+// TestAssociateWorkGraphRequiresBothSidesToExist is B5: a nonexistent graph
+// or a nonexistent product is refused rather than stored as a disconnected
+// identity nothing else can ever resolve.
+func TestAssociateWorkGraphRequiresBothSidesToExist(t *testing.T) {
+	_, first, _ := openPair(t)
+	now := time.Unix(1700000000, 0).UTC()
+	productA := composeProduct(t, "storefront", 1, []string{"acme/shared-lib"}, now)
+	if _, _, err := first.AdoptProductRevision(productA); err != nil {
+		t.Fatal(err)
+	}
+
+	missingGraph, err := product.NewGraphAssociation(productA.ID, "graph-never-adopted", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.AssociateWorkGraph(missingGraph); err == nil {
+		t.Fatal("associating a work graph that was never adopted should be refused")
+	}
+
+	graph := adoptedGraph(t, first, "orphan-graph", 102, now)
+	missingProduct, err := product.NewGraphAssociation("product-never-adopted", graph.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.AssociateWorkGraph(missingProduct); err == nil {
+		t.Fatal("associating a product that was never adopted should be refused")
 	}
 }
 
@@ -185,6 +319,39 @@ func TestStoredProductIsRefusedWhenCorrupt(t *testing.T) {
 	}
 }
 
+func TestRecordKnowledgeEntryRefusesPromotionProvenanceAndMissingProduct(t *testing.T) {
+	_, first, _ := openPair(t)
+	now := time.Unix(1700000000, 0).UTC()
+	p := composeProduct(t, "acme-storefront", 1, []string{"acme/storefront-web"}, now)
+	if _, _, err := first.AdoptProductRevision(p); err != nil {
+		t.Fatal(err)
+	}
+
+	source, err := product.NewKnowledgeEntry(p.ID, product.ScopeWorkUnit, "run-1", "claim",
+		product.Provenance{Type: product.ProvenanceAgentDiscovery, Producer: "run-1"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged, _, err := product.Promote(source, product.ScopeProduct, "lead@example", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Writing a "promoted" entry through the DIRECT path, with no audit
+	// record, is the B2 bypass this refuses.
+	if _, err := first.RecordKnowledgeEntry(forged); err == nil {
+		t.Fatal("RecordKnowledgeEntry should refuse promotion-provenance entries; they must go through RecordPromotion")
+	}
+
+	orphan, err := product.NewKnowledgeEntry("product-does-not-exist", product.ScopeWorkUnit, "run-1", "claim",
+		product.Provenance{Type: product.ProvenanceAgentDiscovery, Producer: "run-1"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.RecordKnowledgeEntry(orphan); err == nil {
+		t.Fatal("recording knowledge for a product that was never adopted should be refused")
+	}
+}
+
 func TestRecordPromotionRefusesAMismatchedEntryAndRecord(t *testing.T) {
 	_, first, _ := openPair(t)
 	now := time.Unix(1700000000, 0).UTC()
@@ -192,7 +359,7 @@ func TestRecordPromotionRefusesAMismatchedEntryAndRecord(t *testing.T) {
 	if _, _, err := first.AdoptProductRevision(p); err != nil {
 		t.Fatal(err)
 	}
-	discovered, err := product.NewKnowledgeEntry(p.ID, product.ScopeWorkUnit, "claim",
+	discovered, err := product.NewKnowledgeEntry(p.ID, product.ScopeWorkUnit, "run-1", "claim",
 		product.Provenance{Type: product.ProvenanceAgentDiscovery, Producer: "run-1"}, now)
 	if err != nil {
 		t.Fatal(err)
@@ -204,5 +371,68 @@ func TestRecordPromotionRefusesAMismatchedEntryAndRecord(t *testing.T) {
 	record.PromotedEntryID = "knowledge-not-the-one-above"
 	if _, err := first.RecordPromotion(promoted, record); err == nil {
 		t.Fatal("a promotion record naming a different entry than the one given should be refused")
+	}
+}
+
+// TestRecordPromotionRefusesASourceThatWasNeverRecorded is B2: a caller
+// cannot fabricate a promotion whose claimed source entry does not actually
+// exist in storage.
+func TestRecordPromotionRefusesASourceThatWasNeverRecorded(t *testing.T) {
+	_, first, _ := openPair(t)
+	now := time.Unix(1700000000, 0).UTC()
+	p := composeProduct(t, "acme-storefront", 1, []string{"acme/storefront-web"}, now)
+	if _, _, err := first.AdoptProductRevision(p); err != nil {
+		t.Fatal(err)
+	}
+	discovered, err := product.NewKnowledgeEntry(p.ID, product.ScopeWorkUnit, "run-1", "claim",
+		product.Provenance{Type: product.ProvenanceAgentDiscovery, Producer: "run-1"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Never recorded through RecordKnowledgeEntry: nothing in storage backs it.
+	promoted, record, err := product.Promote(discovered, product.ScopeProduct, "lead@example", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.RecordPromotion(promoted, record); err == nil {
+		t.Fatal("promoting a source entry that was never recorded should be refused")
+	}
+}
+
+// TestRecordPromotionRefusesATamperedProductID is defense in depth for B2's
+// cross-product case. Promote() always sets a promoted entry's ProductID from
+// its real source, and content-derived ids make that binding tamper-evident:
+// RecordPromotion's own product/scope/provenance cross-check against the
+// stored source (product_knowledge_store.go) would also catch an untampered
+// forgery naming a foreign-product source directly - this proves the id
+// check alone already refuses the easier attack of editing the field in place.
+func TestRecordPromotionRefusesATamperedProductID(t *testing.T) {
+	_, first, _ := openPair(t)
+	now := time.Unix(1700000000, 0).UTC()
+	productA := composeProduct(t, "storefront", 1, []string{"acme/shared-lib"}, now)
+	productB := composeProduct(t, "checkout", 1, []string{"acme/shared-lib"}, now)
+	if _, _, err := first.AdoptProductRevision(productA); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := first.AdoptProductRevision(productB); err != nil {
+		t.Fatal(err)
+	}
+
+	sourceInA, err := product.NewKnowledgeEntry(productA.ID, product.ScopeWorkUnit, "run-a", "claim",
+		product.Provenance{Type: product.ProvenanceAgentDiscovery, Producer: "run-a"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.RecordKnowledgeEntry(sourceInA); err != nil {
+		t.Fatal(err)
+	}
+
+	promoted, record, err := product.Promote(sourceInA, product.ScopeProduct, "lead@example", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promoted.ProductID = productB.ID
+	if _, err := first.RecordPromotion(promoted, record); err == nil {
+		t.Fatal("retargeting a promoted entry at a different product after construction should be refused")
 	}
 }

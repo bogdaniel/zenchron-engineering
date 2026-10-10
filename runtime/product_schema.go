@@ -37,17 +37,26 @@ CREATE TABLE product_graph_associations (
 );
 CREATE INDEX product_graph_associations_by_product ON product_graph_associations(product_id);
 -- Knowledge entries are append-only and never updated. scope_rank mirrors the
--- #476 scope ladder (product.ScopeRank) so an "at or below this boundary"
--- read is one indexed range scan rather than a decode-every-row filter.
+-- #476 scope ladder (product.ScopeRank). provenance_type and owner_ref are
+-- indexed columns, not only fields inside document, because visibility is
+-- never "scope_rank <= requested" alone: OwnedKnowledge matches one exact
+-- owner_ref and excludes provenance_type = 'promotion'; PromotedKnowledgeAtOrBelow
+-- matches provenance_type = 'promotion' and never reads owner_ref. Splitting
+-- the index this way is what keeps a raw, unpromoted discovery out of a
+-- wider-scope read and one owner's discovery out of another owner's read,
+-- within the same product.
 CREATE TABLE product_knowledge_entries (
 	id                TEXT PRIMARY KEY,
 	product_id        TEXT NOT NULL,
 	scope             TEXT NOT NULL,
 	scope_rank        INTEGER NOT NULL,
+	provenance_type   TEXT NOT NULL,
+	owner_ref         TEXT NOT NULL DEFAULT '',
 	created_unix_nano INTEGER NOT NULL,
 	document          TEXT NOT NULL
 );
-CREATE INDEX product_knowledge_by_product_scope ON product_knowledge_entries(product_id, scope_rank, created_unix_nano);
+CREATE INDEX product_knowledge_owned ON product_knowledge_entries(product_id, owner_ref, provenance_type, scope_rank);
+CREATE INDEX product_knowledge_promoted ON product_knowledge_entries(product_id, provenance_type, scope_rank, created_unix_nano);
 -- The durable audit trail of every authorized promotion. promoted_entry_id is
 -- UNIQUE and a real foreign key: unlike product_id, entry id IS the sole
 -- primary key of product_knowledge_entries, so this one reference is valid.

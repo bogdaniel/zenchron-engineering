@@ -1,12 +1,21 @@
 package product
 
 // Knowledge promotion (#476): an agent's discovery is recorded at EXECUTION or
-// WORK_UNIT scope and stays there until an authorized, provenance-preserving
-// Promote call moves it up the ladder (scope.go). There is no path that lets a
-// directly authored entry land at feature/product/organization scope, and no
-// path that promotes without an explicit authorizer: those two refusals are
-// what makes "agent discovery never becomes organization truth automatically"
-// true by construction rather than by convention.
+// WORK_UNIT scope, tagged with the EXACT owner (run/work unit) that produced
+// it, and stays visible to only that owner until an authorized, provenance-
+// preserving Promote call moves it up the ladder (scope.go) into scope-wide
+// visibility with no owner of its own. Visibility is never "scope_rank <=
+// requested": a raw, unpromoted discovery is visible to its own owner alone,
+// at any scope a caller asks for; a wider-scope reader sees only entries that
+// went through Promote. That separation - not merely the scope label - is
+// what keeps "agent discovery never becomes organization truth automatically"
+// true, and it is enforced again at the store boundary (runtime/product_store.go),
+// which never trusts a caller-supplied id, scope or provenance without
+// recomputing or cross-checking it.
+//
+// There is no path that lets a directly authored entry land at feature,
+// product or organization scope, and no path that promotes without an
+// explicit authorizer.
 
 import (
 	"errors"
@@ -24,6 +33,7 @@ const (
 	maxKnowledgeEntryIDBytes   = 80
 	maxKnowledgeStatementBytes = 4 << 10
 	maxKnowledgeProducerBytes  = 200
+	maxKnowledgeOwnerRefBytes  = 200
 )
 
 // ProvenanceType is how a knowledge entry came to exist.
@@ -54,14 +64,23 @@ type Provenance struct {
 
 // KnowledgeEntry is one claim, scoped on the #476 ladder and attributed to its
 // provenance. It is immutable and content-identified: two calls that construct
-// the same entry at the same instant are the same entry.
+// the same entry at the same instant are the same entry, and Validate refuses
+// any entry whose ID does not match that recomputed content - an ID is never
+// trusted at face value, from a caller or from storage.
 type KnowledgeEntry struct {
-	SchemaVersion string     `json:"schema_version"`
-	ID            string     `json:"id"`
-	ProductID     string     `json:"product_id"`
-	Scope         Scope      `json:"scope"`
-	Statement     string     `json:"statement"`
-	Provenance    Provenance `json:"provenance"`
+	SchemaVersion string `json:"schema_version"`
+	ID            string `json:"id"`
+	ProductID     string `json:"product_id"`
+	Scope         Scope  `json:"scope"`
+	// OwnerRef is the exact execution or work unit this entry belongs to. It
+	// is required when Scope is execution or work_unit - that is the whole
+	// visibility rule for a raw discovery, enforced again by the store
+	// (OwnedKnowledge only ever matches one exact owner_ref) - and it is
+	// forbidden on a promoted entry: visibility above work_unit scope comes
+	// from having been promoted, never from who owns it.
+	OwnerRef   string     `json:"owner_ref,omitempty"`
+	Statement  string     `json:"statement"`
+	Provenance Provenance `json:"provenance"`
 	// PromotedFrom is the id of the entry this one was promoted from. It is
 	// set if and only if Provenance.Type is ProvenancePromotion.
 	PromotedFrom *string   `json:"promoted_from,omitempty"`
@@ -69,8 +88,9 @@ type KnowledgeEntry struct {
 }
 
 // NewKnowledgeEntry authors a claim directly, at execution or work_unit scope
-// only. A caller that wants it recorded wider must call Promote.
-func NewKnowledgeEntry(productID string, scope Scope, statement string, provenance Provenance, at time.Time) (KnowledgeEntry, error) {
+// only, owned by exactly the caller's ownerRef. A caller that wants it
+// recorded wider must call Promote.
+func NewKnowledgeEntry(productID string, scope Scope, ownerRef, statement string, provenance Provenance, at time.Time) (KnowledgeEntry, error) {
 	if provenance.Type == ProvenancePromotion {
 		return KnowledgeEntry{}, errors.New("a promoted knowledge entry is produced by Promote, not authored directly")
 	}
@@ -84,7 +104,7 @@ func NewKnowledgeEntry(productID string, scope Scope, statement string, provenan
 			ScopeExecution, ScopeWorkUnit, scope)
 	}
 	entry := KnowledgeEntry{
-		SchemaVersion: KnowledgeSchemaVersion, ProductID: productID, Scope: scope,
+		SchemaVersion: KnowledgeSchemaVersion, ProductID: productID, Scope: scope, OwnerRef: ownerRef,
 		Statement: statement, Provenance: provenance, CreatedAt: at,
 	}
 	id, err := entry.contentID()
@@ -180,10 +200,35 @@ func (e KnowledgeEntry) Validate() error {
 		if e.PromotedFrom == nil || strings.TrimSpace(*e.PromotedFrom) == "" {
 			return errors.New("a promoted knowledge entry needs the source entry id it was promoted from")
 		}
+		// A promoted entry never carries an owner reference, regardless of
+		// its resulting scope: visibility for it comes from having been
+		// promoted (PromotedKnowledgeAtOrBelow), never from ownership
+		// (OwnedKnowledge), even for the edge case of promoting an
+		// execution-scoped claim to work_unit scope.
+		if e.OwnerRef != "" {
+			return errors.New("a promoted knowledge entry may not carry an owner reference")
+		}
 	default:
 		if e.PromotedFrom != nil {
 			return fmt.Errorf("knowledge entry provenance %q may not carry a promoted-from source", e.Provenance.Type)
 		}
+		switch e.Scope {
+		case ScopeExecution, ScopeWorkUnit:
+			if err := boundedField("knowledge entry owner reference", e.OwnerRef, maxKnowledgeOwnerRefBytes); err != nil {
+				return err
+			}
+		default:
+			if e.OwnerRef != "" {
+				return fmt.Errorf("a %q-scoped knowledge entry may not carry an owner reference", e.Scope)
+			}
+		}
+	}
+	id, err := e.contentID()
+	if err != nil {
+		return err
+	}
+	if id != e.ID {
+		return fmt.Errorf("knowledge entry id %s does not match its own recomputed content id %s", e.ID, id)
 	}
 	return nil
 }
@@ -192,11 +237,12 @@ func (e KnowledgeEntry) contentID() (string, error) {
 	digest, err := domain.Digest(struct {
 		ProductID    string     `json:"product_id"`
 		Scope        Scope      `json:"scope"`
+		OwnerRef     string     `json:"owner_ref,omitempty"`
 		Statement    string     `json:"statement"`
 		Provenance   Provenance `json:"provenance"`
 		PromotedFrom *string    `json:"promoted_from,omitempty"`
 		CreatedAt    string     `json:"created_at"`
-	}{e.ProductID, e.Scope, e.Statement, e.Provenance, e.PromotedFrom, e.CreatedAt.UTC().Format(time.RFC3339Nano)})
+	}{e.ProductID, e.Scope, e.OwnerRef, e.Statement, e.Provenance, e.PromotedFrom, e.CreatedAt.UTC().Format(time.RFC3339Nano)})
 	if err != nil {
 		return "", err
 	}
@@ -254,6 +300,13 @@ func (r KnowledgePromotion) Validate() error {
 	}
 	if r.PromotedAt.IsZero() {
 		return errors.New("promotion time is required")
+	}
+	id, err := r.contentID()
+	if err != nil {
+		return err
+	}
+	if id != r.ID {
+		return fmt.Errorf("promotion id %s does not match its own recomputed content id %s", r.ID, id)
 	}
 	return nil
 }
