@@ -85,17 +85,40 @@ scope requires `Promote`, which:
 
 **Visibility is never "scope rank at or below the request".** That would let a
 product-scoped reader see every unpromoted agent discovery in the product -
-exactly the leak #476's acceptance refuses. Instead two separate reads exist
-(`Store.OwnedKnowledge`, `Store.PromotedKnowledgeAtOrBelow`): a raw discovery
-is visible to its own `OwnerRef` alone, at any scope; a wider-scope reader
-sees only entries that went through `Promote`, which carry no `OwnerRef` of
-their own. `RecordKnowledgeEntry` refuses a promotion-provenance entry
-outright, so the only way an entry gets an audit record is `RecordPromotion`,
-and `RecordPromotion` re-derives the claimed source from storage - its
-product, scope, provenance and statement - rather than trusting the caller's
-in-memory documents. `Validate` also recomputes and checks every entry's and
-every promotion record's own content id, so neither can be hand-crafted with
-an id that disagrees with its fields.
+exactly the leak #476's acceptance refuses - and, just as importantly, a scope
+rank alone is not an AUDIENCE: promoting an execution claim to `work_unit`
+scope has to name WHICH work unit it is for, or every work unit in the
+product could read it. Three separate reads exist:
+
+- `Store.OwnedKnowledge` - a raw discovery, visible to its own `OwnerRef`
+  alone, at any scope;
+- `Store.WidelyPromotedKnowledgeAtOrBelow` - a promotion to `product` or
+  `organization` scope, which carries no narrower audience and is visible to
+  anyone reading at or below that scope;
+- `Store.AudiencedPromotedKnowledge` - a promotion to `work_unit` or
+  `feature` scope, visible ONLY to the exact `AudienceRef` it named.
+
+`RecordKnowledgeEntry` refuses a promotion-provenance entry outright, so the
+only way an entry gets an audit record is `RecordPromotion`, which:
+
+- re-derives the claimed source from storage - its product, scope, provenance
+  and statement - rather than trusting the caller's in-memory documents;
+- cross-checks the promoted entry against its own audit record via
+  `product.ValidatePromotionConsistency` - not merely that each independently
+  validates, which two mutually contradictory documents can both do: the
+  promoted entry's scope, audience, producer and creation time must each
+  agree with what the record claims;
+- refuses a conflicting replay - the same promotion id with a stored audit
+  document that disagrees with the one being written - transactionally,
+  rather than silently ignoring it the way a blind `ON CONFLICT DO NOTHING`
+  would (which could otherwise commit a new, unaudited promoted entry while
+  dropping the audit row underneath it).
+
+`Validate` also recomputes and checks every entry's and every promotion
+record's own content id (which, for a `KnowledgePromotion`, now covers the
+promoted entry's id too), so neither can be hand-crafted with an id that
+disagrees with its fields, and two different promoted entries can never share
+one promotion id.
 
 There is no code path that lets a directly authored entry land above
 `work_unit` scope, and no code path that promotes without a non-empty
@@ -131,15 +154,21 @@ type Store interface {
     CurrentConfiguration(productID string) (ProductConfiguration, bool, error)
     ConfigurationRevision(productID string, revision int) (ProductConfiguration, bool, error)
     OwnedKnowledge(productID string, scope Scope, ownerRef string) ([]KnowledgeEntry, error)
-    PromotedKnowledgeAtOrBelow(productID string, scope Scope) ([]KnowledgeEntry, error)
+    WidelyPromotedKnowledgeAtOrBelow(productID string, scope Scope) ([]KnowledgeEntry, error)
+    AudiencedPromotedKnowledge(productID string, scope Scope, audienceRef string) ([]KnowledgeEntry, error)
 }
 
 type ContextRequest struct {
     ProductID string
     Scope     Scope
     // OwnerRef is required at ScopeExecution/ScopeWorkUnit, so a caller can
-    // only ever see knowledge it authored itself.
+    // only ever see knowledge it authored itself. Whenever non-empty, it also
+    // doubles as the audience key for a work_unit-scope promotion.
     OwnerRef string
+    // FeatureRef, when known, is the audience key for a feature-scope
+    // promotion. Always optional: omitting it means no feature-targeted
+    // promotions, the safe default, not an error.
+    FeatureRef string
     // ConfigurationRevision pins the exact revision a bound caller already
     // froze into its own contract. Nil means "current".
     ConfigurationRevision *int
@@ -210,3 +239,14 @@ a product with many entries cannot hand one caller an unbounded context.
   with every other `RequestedBy` field in this codebase, not yet backed by an
   authenticated session. Closing this needs a real caller establishing
   identity, not new machinery here.
+- **`OwnerRef`, `ProductID` and `ConfigurationRevision` are selectors, not
+  proofs of authority.** `CompileContext` trusts the caller to say which
+  product, owner and configuration revision it is; it does not verify that
+  the caller is actually entitled to read as that owner or that product, or
+  that an omitted `ConfigurationRevision` wasn't supposed to be pinned. The
+  eventual #480/#479 runtime adapter must derive these from the runtime's own
+  admitted facts - the graph association a WorkUnit's invocation already
+  belongs to, and the exact revision its own `domain.ContractProvenance`
+  recorded - rather than accept them as freely chosen caller input. Until
+  that adapter exists, this package's direct interface is for trusted,
+  first-party Go code only, not an untrusted-input boundary.

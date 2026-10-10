@@ -8,10 +8,19 @@ package product
 // Every Store method takes the product id CompileContext was given, and
 // CompileContext passes that SAME id to every one of them - there is no step
 // here that can read a sibling product's row. Knowledge visibility is split
-// into two separate reads on purpose (OwnedKnowledge, PromotedKnowledgeAtOrBelow):
-// a single "scope_rank <= requested" read would let a product-scoped request
-// see every unpromoted agent discovery in the product, which is exactly the
-// leak #476's acceptance refuses.
+// into three separate reads on purpose:
+//
+//   - OwnedKnowledge: a raw, unpromoted discovery, visible to its exact owner
+//     alone. A single "scope_rank <= requested" read would let a product-
+//     scoped request see every unpromoted agent discovery in the product.
+//   - WidelyPromotedKnowledgeAtOrBelow: a promotion to product or organization
+//     scope, which carries no narrower audience and is visible to anyone
+//     reading at or below that scope.
+//   - AudiencedPromotedKnowledge: a promotion to work_unit or feature scope,
+//     visible ONLY to the exact audience it named. A scope rank alone is not
+//     an audience: without this split, promoting an execution claim to
+//     work_unit scope would be readable by every work unit in the product,
+//     not only the one it was promoted for.
 
 import (
 	"errors"
@@ -46,10 +55,16 @@ type Store interface {
 	// returns a promoted entry (a promoted entry has no owner) and never
 	// another owner's entry, however wide scope is.
 	OwnedKnowledge(productID string, scope Scope, ownerRef string) ([]KnowledgeEntry, error)
-	// PromotedKnowledgeAtOrBelow returns ONLY entries that went through
-	// Promote, at or below scope, in this product. It never returns a
-	// directly authored, unpromoted entry.
-	PromotedKnowledgeAtOrBelow(productID string, scope Scope) ([]KnowledgeEntry, error)
+	// WidelyPromotedKnowledgeAtOrBelow returns promoted entries with NO
+	// audience restriction (product or organization scope), at or below
+	// scope, in this product. It never returns a directly authored entry or
+	// an audience-restricted promotion.
+	WidelyPromotedKnowledgeAtOrBelow(productID string, scope Scope) ([]KnowledgeEntry, error)
+	// AudiencedPromotedKnowledge returns promoted entries targeted at exactly
+	// scope (work_unit or feature) AND exactly audienceRef, in this product.
+	// It never returns an entry promoted for a different audience, and never
+	// a widely-visible (product/organization scope) promotion.
+	AudiencedPromotedKnowledge(productID string, scope Scope, audienceRef string) ([]KnowledgeEntry, error)
 }
 
 // ContextRequest is what a caller - ultimately a WorkUnit's execution context
@@ -60,9 +75,16 @@ type ContextRequest struct {
 	Scope     Scope
 	// OwnerRef identifies the exact execution or work unit this request is
 	// for. It is required when Scope is ScopeExecution or ScopeWorkUnit - the
-	// only scopes a raw discovery can exist at - and ignored above that,
-	// since nothing is ever directly authored at feature scope or wider.
+	// only scopes a raw discovery can exist at - and, whenever non-empty, it
+	// ALSO doubles as the audience key for a work_unit-scope promotion: a
+	// caller only ever receives a promotion targeted at the exact work unit
+	// it says it is.
 	OwnerRef string
+	// FeatureRef, when the caller knows which feature it belongs to, is the
+	// audience key for a feature-scope promotion. It is always optional: a
+	// caller that omits it simply receives no feature-targeted promotions,
+	// which is the safe default rather than an error.
+	FeatureRef string
 	// ConfigurationRevision pins the EXACT configuration revision a caller
 	// already froze into its own contract (domain.ContractProvenance). A
 	// caller with no frozen binding yet - nothing to pin - leaves it nil and
@@ -126,11 +148,30 @@ func CompileContext(store Store, request ContextRequest) (ProductContext, error)
 		}
 		knowledge = append(knowledge, owned...)
 	}
-	promoted, err := store.PromotedKnowledgeAtOrBelow(current.ID, request.Scope)
+	widelyPromoted, err := store.WidelyPromotedKnowledgeAtOrBelow(current.ID, request.Scope)
 	if err != nil {
 		return ProductContext{}, err
 	}
-	context.Knowledge = append(knowledge, promoted...)
+	knowledge = append(knowledge, widelyPromoted...)
+	// Audience lookups are keyed by WHO the caller is, not by WHAT scope it
+	// asked for: a caller that supplied no OwnerRef/FeatureRef is not that
+	// audience, and gets none of its targeted promotions, regardless of
+	// request.Scope.
+	if request.OwnerRef != "" {
+		forOwner, err := store.AudiencedPromotedKnowledge(current.ID, ScopeWorkUnit, request.OwnerRef)
+		if err != nil {
+			return ProductContext{}, err
+		}
+		knowledge = append(knowledge, forOwner...)
+	}
+	if request.FeatureRef != "" {
+		forFeature, err := store.AudiencedPromotedKnowledge(current.ID, ScopeFeature, request.FeatureRef)
+		if err != nil {
+			return ProductContext{}, err
+		}
+		knowledge = append(knowledge, forFeature...)
+	}
+	context.Knowledge = knowledge
 	return context, nil
 }
 

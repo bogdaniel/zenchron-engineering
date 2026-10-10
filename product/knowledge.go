@@ -34,6 +34,7 @@ const (
 	maxKnowledgeStatementBytes = 4 << 10
 	maxKnowledgeProducerBytes  = 200
 	maxKnowledgeOwnerRefBytes  = 200
+	maxKnowledgeAudienceBytes  = 200
 )
 
 // ProvenanceType is how a knowledge entry came to exist.
@@ -78,9 +79,17 @@ type KnowledgeEntry struct {
 	// (OwnedKnowledge only ever matches one exact owner_ref) - and it is
 	// forbidden on a promoted entry: visibility above work_unit scope comes
 	// from having been promoted, never from who owns it.
-	OwnerRef   string     `json:"owner_ref,omitempty"`
-	Statement  string     `json:"statement"`
-	Provenance Provenance `json:"provenance"`
+	OwnerRef string `json:"owner_ref,omitempty"`
+	// AudienceRef is the intended TARGET of a promotion below product scope.
+	// A scope rank alone is not an audience: promoting an execution claim to
+	// work_unit scope must still name WHICH work unit it is for, or every
+	// other work unit in the product could read it too. Required when a
+	// promoted entry's Scope is work_unit or feature; forbidden at product or
+	// organization scope, which carry no audience restriction, and forbidden
+	// on a directly authored entry, which is never promoted in the first place.
+	AudienceRef string     `json:"audience_ref,omitempty"`
+	Statement   string     `json:"statement"`
+	Provenance  Provenance `json:"provenance"`
 	// PromotedFrom is the id of the entry this one was promoted from. It is
 	// set if and only if Provenance.Type is ProvenancePromotion.
 	PromotedFrom *string   `json:"promoted_from,omitempty"`
@@ -122,7 +131,13 @@ func NewKnowledgeEntry(productID string, scope Scope, ownerRef, statement string
 // scope. AuthorizedBy is required and never inferred: a missing authorizer is
 // refused rather than defaulted to the entry's own producer, which is exactly
 // the unauthorized scope widening #476's acceptance refuses.
-func Promote(source KnowledgeEntry, targetScope Scope, authorizedBy string, at time.Time) (KnowledgeEntry, KnowledgePromotion, error) {
+//
+// audienceRef names the intended target when targetScope is work_unit or
+// feature - a scope rank is not an audience, so promoting "to work_unit
+// scope" with no further identity would otherwise be readable by every work
+// unit in the product. It is required there and forbidden at product or
+// organization scope, which have no narrower audience to restrict to.
+func Promote(source KnowledgeEntry, targetScope Scope, audienceRef, authorizedBy string, at time.Time) (KnowledgeEntry, KnowledgePromotion, error) {
 	if strings.TrimSpace(authorizedBy) == "" {
 		return KnowledgeEntry{}, KnowledgePromotion{}, errors.New(
 			"promotion requires an explicit authorizer; a claim never widens its own scope")
@@ -140,7 +155,7 @@ func Promote(source KnowledgeEntry, targetScope Scope, authorizedBy string, at t
 	}
 	promoted := KnowledgeEntry{
 		SchemaVersion: KnowledgeSchemaVersion, ProductID: source.ProductID, Scope: targetScope,
-		Statement:    source.Statement,
+		AudienceRef: audienceRef, Statement: source.Statement,
 		Provenance:   Provenance{Type: ProvenancePromotion, Producer: authorizedBy},
 		PromotedFrom: &source.ID, CreatedAt: at,
 	}
@@ -154,8 +169,8 @@ func Promote(source KnowledgeEntry, targetScope Scope, authorizedBy string, at t
 	}
 	record := KnowledgePromotion{
 		SchemaVersion: KnowledgeSchemaVersion, SourceEntryID: source.ID, SourceScope: source.Scope,
-		SourceProvenance: source.Provenance, TargetScope: targetScope, AuthorizedBy: authorizedBy,
-		PromotedEntryID: promoted.ID, PromotedAt: at,
+		SourceProvenance: source.Provenance, TargetScope: targetScope, AudienceRef: audienceRef,
+		AuthorizedBy: authorizedBy, PromotedEntryID: promoted.ID, PromotedAt: at,
 	}
 	recordID, err := record.contentID()
 	if err != nil {
@@ -163,6 +178,9 @@ func Promote(source KnowledgeEntry, targetScope Scope, authorizedBy string, at t
 	}
 	record.ID = recordID
 	if err := record.Validate(); err != nil {
+		return KnowledgeEntry{}, KnowledgePromotion{}, err
+	}
+	if err := ValidatePromotionConsistency(promoted, record); err != nil {
 		return KnowledgeEntry{}, KnowledgePromotion{}, err
 	}
 	return promoted, record, nil
@@ -202,15 +220,31 @@ func (e KnowledgeEntry) Validate() error {
 		}
 		// A promoted entry never carries an owner reference, regardless of
 		// its resulting scope: visibility for it comes from having been
-		// promoted (PromotedKnowledgeAtOrBelow), never from ownership
-		// (OwnedKnowledge), even for the edge case of promoting an
-		// execution-scoped claim to work_unit scope.
+		// promoted, never from ownership (OwnedKnowledge), even for the edge
+		// case of promoting an execution-scoped claim to work_unit scope.
 		if e.OwnerRef != "" {
 			return errors.New("a promoted knowledge entry may not carry an owner reference")
+		}
+		// A scope rank alone is not an audience: work_unit and feature scope
+		// promotions MUST name who they are for, or they would be readable
+		// by every unit/feature in the product; product and organization
+		// scope have no narrower audience to restrict to.
+		switch e.Scope {
+		case ScopeWorkUnit, ScopeFeature:
+			if err := boundedField("knowledge entry audience reference", e.AudienceRef, maxKnowledgeAudienceBytes); err != nil {
+				return err
+			}
+		case ScopeProduct, ScopeOrganization:
+			if e.AudienceRef != "" {
+				return fmt.Errorf("a promotion to %q scope may not carry an audience reference; it has no narrower audience to restrict to", e.Scope)
+			}
 		}
 	default:
 		if e.PromotedFrom != nil {
 			return fmt.Errorf("knowledge entry provenance %q may not carry a promoted-from source", e.Provenance.Type)
+		}
+		if e.AudienceRef != "" {
+			return errors.New("a directly authored knowledge entry may not carry an audience reference; only a promotion names one")
 		}
 		switch e.Scope {
 		case ScopeExecution, ScopeWorkUnit:
@@ -238,11 +272,12 @@ func (e KnowledgeEntry) contentID() (string, error) {
 		ProductID    string     `json:"product_id"`
 		Scope        Scope      `json:"scope"`
 		OwnerRef     string     `json:"owner_ref,omitempty"`
+		AudienceRef  string     `json:"audience_ref,omitempty"`
 		Statement    string     `json:"statement"`
 		Provenance   Provenance `json:"provenance"`
 		PromotedFrom *string    `json:"promoted_from,omitempty"`
 		CreatedAt    string     `json:"created_at"`
-	}{e.ProductID, e.Scope, e.OwnerRef, e.Statement, e.Provenance, e.PromotedFrom, e.CreatedAt.UTC().Format(time.RFC3339Nano)})
+	}{e.ProductID, e.Scope, e.OwnerRef, e.AudienceRef, e.Statement, e.Provenance, e.PromotedFrom, e.CreatedAt.UTC().Format(time.RFC3339Nano)})
 	if err != nil {
 		return "", err
 	}
@@ -259,9 +294,13 @@ type KnowledgePromotion struct {
 	SourceScope      Scope      `json:"source_scope"`
 	SourceProvenance Provenance `json:"source_provenance"`
 	TargetScope      Scope      `json:"target_scope"`
-	AuthorizedBy     string     `json:"authorized_by"`
-	PromotedEntryID  string     `json:"promoted_entry_id"`
-	PromotedAt       time.Time  `json:"promoted_at"`
+	// AudienceRef mirrors the promoted entry's own AudienceRef, so the audit
+	// record states the intended audience as part of what was authorized,
+	// not only as a field on the entry it produced.
+	AudienceRef     string    `json:"audience_ref,omitempty"`
+	AuthorizedBy    string    `json:"authorized_by"`
+	PromotedEntryID string    `json:"promoted_entry_id"`
+	PromotedAt      time.Time `json:"promoted_at"`
 }
 
 // Validate is the complete deterministic admission check for one promotion
@@ -298,6 +337,16 @@ func (r KnowledgePromotion) Validate() error {
 	if direction >= 0 {
 		return fmt.Errorf("promotion target scope %q is not above source scope %q", r.TargetScope, r.SourceScope)
 	}
+	switch r.TargetScope {
+	case ScopeWorkUnit, ScopeFeature:
+		if err := boundedField("promotion audience reference", r.AudienceRef, maxKnowledgeAudienceBytes); err != nil {
+			return err
+		}
+	case ScopeProduct, ScopeOrganization:
+		if r.AudienceRef != "" {
+			return fmt.Errorf("a promotion to %q scope may not carry an audience reference", r.TargetScope)
+		}
+	}
 	if r.PromotedAt.IsZero() {
 		return errors.New("promotion time is required")
 	}
@@ -313,13 +362,46 @@ func (r KnowledgePromotion) Validate() error {
 
 func (r KnowledgePromotion) contentID() (string, error) {
 	digest, err := domain.Digest(struct {
-		SourceEntryID string `json:"source_entry_id"`
-		TargetScope   Scope  `json:"target_scope"`
-		AuthorizedBy  string `json:"authorized_by"`
-		PromotedAt    string `json:"promoted_at"`
-	}{r.SourceEntryID, r.TargetScope, r.AuthorizedBy, r.PromotedAt.UTC().Format(time.RFC3339Nano)})
+		SourceEntryID   string `json:"source_entry_id"`
+		TargetScope     Scope  `json:"target_scope"`
+		AudienceRef     string `json:"audience_ref,omitempty"`
+		AuthorizedBy    string `json:"authorized_by"`
+		PromotedAt      string `json:"promoted_at"`
+		PromotedEntryID string `json:"promoted_entry_id"`
+	}{r.SourceEntryID, r.TargetScope, r.AudienceRef, r.AuthorizedBy, r.PromotedAt.UTC().Format(time.RFC3339Nano), r.PromotedEntryID})
 	if err != nil {
 		return "", err
 	}
 	return "promotion-" + digest[:32], nil
+}
+
+// ValidatePromotionConsistency checks that a promoted entry and its audit
+// record describe the SAME action - not merely that each is independently
+// self-consistent. Two documents can each pass Validate on their own and
+// still disagree about what happened: a record whose target scope,
+// authorizer or timestamp does not match the promoted entry it claims to
+// audit is exactly that, and is refused here rather than only checked by id.
+// Callers call this AFTER promoted.Validate() and record.Validate(), which
+// already establish that promoted.Provenance.Type is ProvenancePromotion
+// whenever PromotedFrom is set.
+func ValidatePromotionConsistency(promoted KnowledgeEntry, record KnowledgePromotion) error {
+	if record.PromotedEntryID != promoted.ID {
+		return fmt.Errorf("promotion record names entry %s but was given entry %s", record.PromotedEntryID, promoted.ID)
+	}
+	if promoted.PromotedFrom == nil || *promoted.PromotedFrom != record.SourceEntryID {
+		return errors.New("promoted entry does not link back to the promotion record's source entry")
+	}
+	if promoted.Scope != record.TargetScope {
+		return fmt.Errorf("promoted entry scope %q does not match the promotion record's target scope %q", promoted.Scope, record.TargetScope)
+	}
+	if promoted.AudienceRef != record.AudienceRef {
+		return errors.New("promoted entry audience reference does not match the promotion record")
+	}
+	if promoted.Provenance.Producer != record.AuthorizedBy {
+		return errors.New("promoted entry's producer does not match the promotion record's authorizer")
+	}
+	if !promoted.CreatedAt.Equal(record.PromotedAt) {
+		return errors.New("promoted entry's creation time does not match the promotion record's promoted-at time")
+	}
+	return nil
 }

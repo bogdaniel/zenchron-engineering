@@ -52,7 +52,7 @@ func seedProductFixture(t *testing.T, store *SQLiteOperationStore, name string, 
 	if _, err := store.RecordKnowledgeEntry(discovered); err != nil {
 		t.Fatal(err)
 	}
-	promoted, promotion, err := product.Promote(discovered, product.ScopeProduct, authorizer, at)
+	promoted, promotion, err := product.Promote(discovered, product.ScopeProduct, "", authorizer, at)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -60,11 +60,11 @@ func (f *fakeStore) OwnedKnowledge(productID string, scope Scope, ownerRef strin
 	return out, nil
 }
 
-func (f *fakeStore) PromotedKnowledgeAtOrBelow(productID string, scope Scope) ([]KnowledgeEntry, error) {
+func (f *fakeStore) WidelyPromotedKnowledgeAtOrBelow(productID string, scope Scope) ([]KnowledgeEntry, error) {
 	f.queried = append(f.queried, productID)
 	var out []KnowledgeEntry
 	for _, entry := range f.knowledge[productID] {
-		if entry.Provenance.Type != ProvenancePromotion {
+		if entry.Provenance.Type != ProvenancePromotion || entry.AudienceRef != "" {
 			continue
 		}
 		rank, err := compareScope(entry.Scope, scope)
@@ -72,6 +72,17 @@ func (f *fakeStore) PromotedKnowledgeAtOrBelow(productID string, scope Scope) ([
 			return nil, err
 		}
 		if rank <= 0 {
+			out = append(out, entry)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) AudiencedPromotedKnowledge(productID string, scope Scope, audienceRef string) ([]KnowledgeEntry, error) {
+	f.queried = append(f.queried, productID)
+	var out []KnowledgeEntry
+	for _, entry := range f.knowledge[productID] {
+		if entry.Provenance.Type == ProvenancePromotion && entry.Scope == scope && entry.AudienceRef == audienceRef {
 			out = append(out, entry)
 		}
 	}
@@ -89,7 +100,7 @@ func twoOverlappingProducts(t *testing.T) (*fakeStore, KnowledgeEntry, Knowledge
 	if err != nil {
 		t.Fatal(err)
 	}
-	promotedA, _, err := Promote(discoveryA, ScopeProduct, "storefront-lead@example", at)
+	promotedA, _, err := Promote(discoveryA, ScopeProduct, "", "storefront-lead@example", at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +110,7 @@ func twoOverlappingProducts(t *testing.T) (*fakeStore, KnowledgeEntry, Knowledge
 	if err != nil {
 		t.Fatal(err)
 	}
-	promotedB, _, err := Promote(discoveryB, ScopeProduct, "checkout-lead@example", at)
+	promotedB, _, err := Promote(discoveryB, ScopeProduct, "", "checkout-lead@example", at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,6 +220,85 @@ func TestCompileContextIsolatesOwnersWithinTheSameProduct(t *testing.T) {
 	}
 }
 
+// TestCompileContextRestrictsAWorkUnitPromotionToItsNamedAudience is R2's
+// core regression: promoting an execution claim to work_unit scope must be
+// visible to the exact work unit it was promoted for, and invisible to every
+// OTHER work unit in the same product - a scope rank alone is not an
+// audience.
+func TestCompileContextRestrictsAWorkUnitPromotionToItsNamedAudience(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC()
+	productA := composedProduct(t, "storefront", 1, []string{"acme/storefront-web"})
+	executionClaim, err := NewKnowledgeEntry(productA.ID, ScopeExecution, "unit-a", "a narrow execution detail",
+		Provenance{Type: ProvenanceAgentDiscovery, Producer: "unit-a"}, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promoted, _, err := Promote(executionClaim, ScopeWorkUnit, "unit-a", "lead@example", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeStore{
+		products:  map[string]Product{productA.ID: productA},
+		knowledge: map[string][]KnowledgeEntry{productA.ID: {executionClaim, promoted}},
+	}
+
+	forUnitA, err := CompileContext(store, ContextRequest{ProductID: productA.ID, Scope: ScopeWorkUnit, OwnerRef: "unit-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsKnowledgeID(forUnitA.Knowledge, promoted.ID) {
+		t.Fatal("unit A should see the promotion that named it as the audience")
+	}
+
+	forUnitB, err := CompileContext(store, ContextRequest{ProductID: productA.ID, Scope: ScopeWorkUnit, OwnerRef: "unit-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsKnowledgeID(forUnitB.Knowledge, promoted.ID) {
+		t.Fatal("unit B must not see a promotion named for unit A - a scope rank alone is not an audience")
+	}
+}
+
+// TestCompileContextRestrictsAFeaturePromotionToItsNamedAudience is the same
+// claim at feature scope, with two independent features.
+func TestCompileContextRestrictsAFeaturePromotionToItsNamedAudience(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC()
+	productA := composedProduct(t, "storefront", 1, []string{"acme/storefront-web"})
+	claim, err := NewKnowledgeEntry(productA.ID, ScopeWorkUnit, "unit-a", "a feature-relevant detail",
+		Provenance{Type: ProvenanceAgentDiscovery, Producer: "unit-a"}, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promoted, _, err := Promote(claim, ScopeFeature, "feature-checkout-redesign", "lead@example", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeStore{
+		products:  map[string]Product{productA.ID: productA},
+		knowledge: map[string][]KnowledgeEntry{productA.ID: {claim, promoted}},
+	}
+
+	forItsFeature, err := CompileContext(store, ContextRequest{
+		ProductID: productA.ID, Scope: ScopeFeature, FeatureRef: "feature-checkout-redesign",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsKnowledgeID(forItsFeature.Knowledge, promoted.ID) {
+		t.Fatal("the named feature should see its own promotion")
+	}
+
+	forAnotherFeature, err := CompileContext(store, ContextRequest{
+		ProductID: productA.ID, Scope: ScopeFeature, FeatureRef: "feature-payments-refresh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsKnowledgeID(forAnotherFeature.Knowledge, promoted.ID) {
+		t.Fatal("an unrelated feature must not see a promotion named for a different feature")
+	}
+}
+
 func TestCompileContextPinsAnExactConfigurationRevision(t *testing.T) {
 	store, _, _ := twoOverlappingProducts(t)
 	productAID, err := ProductID("storefront")
@@ -253,4 +343,13 @@ func TestCompileContextPinsAnExactConfigurationRevision(t *testing.T) {
 	}); err == nil {
 		t.Fatal("pinning a configuration revision that does not exist should fail closed")
 	}
+}
+
+func containsKnowledgeID(entries []KnowledgeEntry, id string) bool {
+	for _, entry := range entries {
+		if entry.ID == id {
+			return true
+		}
+	}
+	return false
 }
