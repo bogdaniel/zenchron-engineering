@@ -110,7 +110,9 @@ type WorkUnit struct {
 	// decision for the exact bound commit is APPROVE, never merely on
 	// ItemCompleted. False (the default, so every graph that predates this
 	// field keeps its exact prior behavior and digest) means ordinary #472
-	// satisfaction, unchanged.
+	// satisfaction, unchanged. Frozen once the unit is activated (sameUnit,
+	// ValidateMutation): an authorization property may not be revised away
+	// out from under a unit a dependent is already waiting on.
 	RequiresReview bool `json:"requires_review,omitempty"`
 }
 
@@ -387,7 +389,7 @@ func ValidateMutation(current, next WorkGraph, activated map[string]bool) error 
 			return fmt.Errorf("work unit %q has already been activated, so revision %d may not remove it", unit.ID, next.Revision)
 		}
 		if !sameUnit(unit, proposed) {
-			return fmt.Errorf("work unit %q has already been activated, so revision %d may not change its issue, role, execution kind, purpose or dependencies", unit.ID, next.Revision)
+			return fmt.Errorf("work unit %q has already been activated, so revision %d may not change its issue, role, execution kind, purpose, dependencies or RequiresReview", unit.ID, next.Revision)
 		}
 	}
 	return nil
@@ -412,7 +414,12 @@ func boundedField(name, value string, limit int) error {
 
 func sameUnit(a, b WorkUnit) bool {
 	if a.Issue != b.Issue || a.Role != b.Role || a.effectiveExecutionKind() != b.effectiveExecutionKind() ||
-		a.Purpose != b.Purpose || len(a.DependsOn) != len(b.DependsOn) {
+		a.Purpose != b.Purpose || len(a.DependsOn) != len(b.DependsOn) ||
+		// #474 R3: RequiresReview is an authorization property, exactly like
+		// every other frozen field here - an activated unit mutating it away
+		// would let an ordinary AdoptWorkGraph revision remove B4's gate
+		// after the fact, with no forged store row anywhere.
+		a.RequiresReview != b.RequiresReview {
 		return false
 	}
 	left, right := sortedCopy(a.DependsOn), sortedCopy(b.DependsOn)

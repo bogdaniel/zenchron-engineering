@@ -127,7 +127,7 @@ func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now 
 			}
 			fact.Output = output
 			if unit.RequiresReview && output != nil {
-				fact.ReviewApproved, err = reviewApprovedFor(store, graph.Repository, child.PullRequest, output.CandidateRevision)
+				fact.ReviewApproved, err = reviewApprovedFor(store, graph.Repository, child.PullRequest, output.CandidateRevision, activation.RunID, child.AgentID)
 				if err != nil {
 					fact.Item, fact.Unreadable, fact.UnreadableReason = "", true, boundedDetail(err.Error())
 				}
@@ -211,7 +211,20 @@ func admittedOutput(tx *sql.Tx, runID, handoffID string) (*orchestration.UnitOut
 // A REQUEST_CHANGES decision is never routed through this function at all:
 // it is #474's remediation admission's job, never this read-only gate's,
 // which only ever asks "is there a current APPROVE for this exact output".
-func reviewApprovedFor(store *SQLiteOperationStore, repository string, prNumber int, candidateRevision string) (bool, error) {
+//
+// runID and producerAgentID are the unit's OWN activation and its child's
+// ACTUAL agent - never the decision's own claim about either (#474 R4). A
+// direct, hand-written review_decisions row is exactly as reachable here as
+// a hand-written review_remediation_admissions row is for a BLOCK, and
+// CreateReviewDecision's own validation never checks producer/reviewer
+// independence or which run a decision is actually for - review.Validate
+// deliberately leaves that to the caller, same as #233's own
+// CheckReviewIndependence does by construction elsewhere. This is the same
+// defense reviewRemediationBindingInvariants already applies to a BLOCK
+// admission, reusing the run/PR authority WorkGraphStatus already read,
+// never a second review engine and never an agent registry this read-only
+// path has no business resolving.
+func reviewApprovedFor(store *SQLiteOperationStore, repository string, prNumber int, candidateRevision, runID, producerAgentID string) (bool, error) {
 	latest, found, err := store.LatestReviewDecision(repository, prNumber)
 	if err != nil {
 		return false, err
@@ -219,5 +232,17 @@ func reviewApprovedFor(store *SQLiteOperationStore, repository string, prNumber 
 	if !found {
 		return false, nil
 	}
-	return latest.Verdict == review.VerdictApprove && latest.Subject.HeadSHA == candidateRevision, nil
+	if latest.Verdict != review.VerdictApprove || latest.Subject.HeadSHA != candidateRevision {
+		return false, nil
+	}
+	if latest.RunID != runID {
+		return false, nil
+	}
+	if producerAgentID == "" || latest.ProducerAgentID != producerAgentID {
+		return false, nil
+	}
+	if latest.ReviewerAgentID == "" || latest.ReviewerAgentID == producerAgentID {
+		return false, nil
+	}
+	return true, nil
 }

@@ -452,6 +452,22 @@ both closed with no new mechanism:
   (delivery) - the same two read-time call sites
   `reviewRemediationBindingInvariants` already runs at. A store read failure
   fails closed (treated as superseded, never as current).
+- **R7 - a superseded retry binding could still invoke the provider with
+  zero findings.** `unresolvedReviewRemediationBinding` re-proposes an
+  existing non-succeeded review-remediation operation for retry by binding
+  PREFIX alone - the same #376-style rediscovery `feedbackUnresolved` uses,
+  correct when the admission it was bound to is still current. If D1's
+  first remediation attempt fails retryably and D2 (APPROVE, the SAME exact
+  head) arrives before the retry, `reviewRemediationFindings` correctly
+  filters D1 out and returns EMPTY findings - but `invokeExecution` used to
+  read empty findings as "no obligation this attempt", proceeding to invoke
+  the producer anyway with no authorized review findings at all.
+  `invokeExecution` now refuses outright whenever an operation's own
+  binding carries the `review-remediation|` prefix but this attempt's fresh
+  `reviewRemediationFindings` is empty - under the existing
+  `FailureDecisionBindingStale` class (the same bounded-retry shape #508's
+  stale decision-resumption binding already uses), before any workspace or
+  provider preparation.
 
 `TestUnresolvedReviewRemediationReturnFailsTheOperationAndStaysActionable`
 now also asserts the real journal contains exactly one
@@ -463,8 +479,16 @@ reviewer) for the identical subject with no intervening projection change,
 and asserts both that D1 no longer binds or delivers findings and that the
 producer is never invoked for it (R2); a second focused test
 (`TestReviewRemediationSupersessionFailsClosedOnAnUnreadableLatestDecision`)
-proves the fail-closed error path. All four new guards (R1's event gate,
-R2's two call sites, R2's error path) were deliberately disabled and
+proves the fail-closed error path.
+`TestSupersededRetryBindingNeverInvokesTheProviderWithNoFindings` (R7)
+writes D2 as a side effect of D1's own first remediation attempt
+returning - so it already exists before the SAME `Reconcile` call's next
+internal pass dispatches the retry - and asserts the provider is called
+exactly twice total (the initial commit and D1's first attempt only, never
+a third call for the stale retry), the operation is never fulfilled, and
+the run still reaches a durable, visible disposition. All five new guards
+(R1's event gate, R2's two call sites, R2's error path, R7's binding
+refusal) were deliberately disabled and
 confirmed to fail their exact test before being restored.
 
 ## WorkGraph review-readiness (section 8, now implemented)
@@ -516,21 +540,63 @@ section used to freeze, with no change to its shape:
   mechanism, a second activation path, or a second graph, and no new
   parameter threaded through `WorkGraphStatus`'s five call sites.
 
-`TestAReviewGatedUnitBlocksItsDependentUntilIndependentApproval`
+An independent exact-head re-review of B4 found two further gaps, both
+closed with no new mechanism:
+
+- **R3 - an activated unit could remove its own review gate by graph
+  mutation.** `RequiresReview` is an authorization property exactly like
+  every other field `sameUnit`/`ValidateMutation` already freezes once a
+  unit is activated (issue, role, execution kind, purpose, dependencies) -
+  but `sameUnit` omitted it. An ordinary `AdoptWorkGraph` revision proposing
+  the SAME activated unit with `RequiresReview: false` was accepted,
+  silently removing B4's gate from a unit a dependent was already waiting
+  on, with no forged store row anywhere. `sameUnit` now compares it too
+  (both directions: true->false and false->true after activation are both
+  refused; before activation, it is ordinary planning input and may still
+  be revised freely).
+- **R4 - the WorkGraph `APPROVE` was not bound to its actual producing run
+  or independent reviewer.** `reviewApprovedFor` checked only verdict and
+  exact-commit head; it never checked `latest.RunID` against the unit's
+  own activation, or `latest.ProducerAgentID`/`latest.ReviewerAgentID`
+  against the unit's own child's ACTUAL agent.
+  `review.Decision.Validate` (and `CreateReviewDecision`, which calls only
+  that) never checks producer/reviewer independence or which run a decision
+  is actually for - independence is #233's `CheckReviewIndependence`'s job,
+  enforced at the time a REAL review is performed, never re-derivable from
+  storage alone without an agent registry this read-only path has no
+  business holding. A directly-written, valid-shaped `APPROVE` at the exact
+  right commit with a forged `RunID`, a mismatched producer, or
+  `ReviewerAgentID == ProducerAgentID` (self-review) was exactly as
+  reachable as a forged `review_remediation_admissions` row already was for
+  a BLOCK before #474's own R1/R2 hardening. `reviewApprovedFor` now takes
+  the unit's own `runID` and its child's own ACTUAL `AgentID` (both already
+  read by `WorkGraphStatus`, no new query) and refuses unless
+  `latest.RunID == runID`, `latest.ProducerAgentID == producerAgentID`, and
+  `latest.ReviewerAgentID` is both non-empty and different from
+  `producerAgentID` - the same same-ID defense
+  `reviewRemediationBindingInvariants` already applies to a BLOCK, reused
+  here for an APPROVE, never a second review engine.
+
+`TestMutationValidationFreezesRequiresReview` (R3, `orchestration/workgraph_test.go`)
+proves both directions refused after activation and free revision before
+it. `TestAReviewGatedUnitBlocksItsDependentUntilIndependentApproval`
 (`runtime/workgraph_test.go`) is the required A->B acceptance test, driven
 through the real fleet fixture (`fleetFixture`, real supervisor, real
 scheduler, the same infrastructure #472's own acceptance tests use): a
 completes and publishes a real PR; b stays blocked with no review at all,
 stays blocked through a `REQUEST_CHANGES`, stays blocked through an
-`APPROVE` bound to the WRONG commit, becomes `ready` only once a fresh
-independent `APPROVE` of the EXACT commit exists - with no supervisor tick
-needed, since satisfaction is a pure read-time fact - and then drives to
+`APPROVE` bound to the WRONG commit, stays blocked through a self-review
+APPROVE, a forged-run APPROVE, and a mismatched-producer APPROVE - each at
+the EXACT right commit (R4) - becomes `ready` only once a fresh,
+genuinely-bound independent `APPROVE` exists, with no supervisor tick
+needed since satisfaction is a pure read-time fact, and then drives to
 completion through #472's own ordinary activation path, unchanged. Every
-new guard (the satisfaction predicate itself, the exact-commit binding, and
-the `integration_compose` validation refusal) was deliberately disabled,
-confirmed to fail its exact test, then restored. Restart is not a separate
-code path to test: `ProjectWorkGraph` and `WorkGraphStatus` hold no state
-between reads, so every call in the test already is the fresh,
+new guard (the satisfaction predicate, the exact-commit binding, the
+`integration_compose` validation refusal, the `RequiresReview` freeze, and
+each of R4's three identity checks independently) was deliberately
+disabled, confirmed to fail its exact test, then restored. Restart is not a
+separate code path to test: `ProjectWorkGraph` and `WorkGraphStatus` hold no
+state between reads, so every call in the test already is the fresh,
 independent computation a restart would also produce.
 
 ## Negative and recovery coverage

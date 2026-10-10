@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/execution"
 	"github.com/bogdaniel/zenchron-engineering/review"
@@ -407,5 +408,102 @@ func TestReviewRemediationSupersessionFailsClosedOnAnUnreadableLatestDecision(t 
 	}
 	if _, err := reviewRemediationSuperseded(f.store, decision); err == nil {
 		t.Fatal("expected a read failure against a closed store to be returned as an error, never silently treated as current")
+	}
+}
+
+// TestSupersededRetryBindingNeverInvokesTheProviderWithNoFindings is #474
+// R7's required regression. unresolvedReviewRemediationBinding re-proposes
+// an existing non-succeeded review-remediation operation for retry by
+// binding PREFIX alone (the same #376-style rediscovery feedbackUnresolved
+// uses), which is correct when the admission it was bound to is still
+// current. D2 (APPROVE, the SAME exact head, a different reviewer) is
+// written as a side effect of the producer's OWN first remediation
+// attempt returning - so it already exists in the store before THIS
+// Reconcile call's next internal pass dispatches the operation's own
+// bounded retry. reviewRemediationFindings correctly finds nothing left to
+// deliver for the now-superseded D1, and the retry must be refused before
+// ever reaching Provider.Execute - never silently proceed as an ordinary,
+// unauthorized invocation.
+func TestSupersededRetryBindingNeverInvokesTheProviderWithNoFindings(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	fixture.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
+
+	var attempts int
+	var repo GitHubRepo
+	var prNumber int
+	var h1, runID string
+	fixture.provider = newIsolatedProvider(func(dir string) error {
+		attempts++
+		if attempts == 1 {
+			return os.WriteFile(filepath.Join(dir, "candidate.go"), []byte("package candidate\n// v1\n"), 0600)
+		}
+		if attempts == 2 {
+			seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, h1, runID, "codex", "reviewer-2", review.VerdictApprove, fixture.clock.Now().Add(time.Minute))
+		}
+		return nil
+	})
+	fixture.deps.Provider = fixture.provider
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+
+	runID = fixture.start()
+	for i := 0; i < 20; i++ {
+		fixture.reconcile(runID)
+	}
+	state := fixture.state(runID)
+	if state.projection.CandidateRevision == "" || state.projection.PullRequest == nil {
+		t.Fatalf("producer did not reach a published candidate: projection=%+v", state.projection)
+	}
+	h1 = state.projection.CandidateRevision
+	prNumber = state.projection.PullRequest.Number
+	repo = GitHubRepo{Owner: "acme", Name: "repo"}
+
+	blockDocument := `{"schema_version":"0.1","verdict":"blocked","findings":[{"signature":"candidate is marked incomplete","severity":"blocking"}]}`
+	reviewerProvider := &sequencedReviewProvider{documents: []string{blockDocument}}
+	port := &SupervisorReviewPort{
+		Store: fixture.store, GitHub: fixture.forge, ResolveAgent: e2eResolveAgent,
+		ProviderFor: func(ResolvedAgent) (ExecutionProvider, error) { return reviewerProvider, nil },
+		StateDir:    filepath.Join(fixture.root, "review-state-r7"), Source: fixture.origin,
+		ControllerID: "controller-a", Clock: fixture.clock,
+	}
+	ctx := context.Background()
+	outcome1, admission1, err := fixture.runtime.ReconcileReviewRemediation(ctx, port, repo, prNumber, "claude")
+	if err != nil {
+		t.Fatalf("ReconcileReviewRemediation: %v", err)
+	}
+	if outcome1.Decision.Verdict != "request_changes" || admission1 == nil {
+		t.Fatalf("expected H1 to be admitted for remediation, got outcome=%+v admission=%v", outcome1, admission1)
+	}
+
+	outcome := fixture.reconcile(runID)
+
+	// Exactly 2 provider calls total: the initial commit, and D1's own
+	// first remediation attempt (which wrote D2 as it returned). A THIRD
+	// call would mean the stale binding's retry reached Provider.Execute.
+	if attempts != 2 {
+		t.Fatalf("expected exactly 2 provider calls (no retry invoked once D2 superseded D1), got %d", attempts)
+	}
+	state = fixture.state(runID)
+	var invoke RunOperation
+	found := 0
+	for _, op := range state.snapshot.Operations {
+		if op.Kind == OpExecutionInvoke && strings.HasPrefix(bindingOf(op), reviewRemediationBindingPrefix) {
+			invoke, found = op, found+1
+		}
+	}
+	if found != 1 {
+		t.Fatalf("expected exactly one review-remediation execution.invoke operation, found %d", found)
+	}
+	if invoke.State == Succeeded {
+		t.Fatalf("a superseded D1 binding must never be fulfilled: %+v", invoke)
+	}
+	var result mutationResult
+	if err := decodeJSON(invoke.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.FailureClass != FailureDecisionBindingStale {
+		t.Fatalf("the superseded retry did not record failure_class=decision_binding_stale: %+v", result)
+	}
+	if outcome.Disposition != Failed || !BudgetBoundary(outcome.Disposition, outcome.Reason) {
+		t.Fatalf("the superseded retry did not stop the run truthfully under its existing finite authority: %+v", outcome)
 	}
 }

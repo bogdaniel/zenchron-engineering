@@ -725,6 +725,22 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	if err != nil {
 		return failed(err)
 	}
+	// #474 R7: an operation whose own binding exists SPECIFICALLY to
+	// remediate an admitted BLOCK, but whose fresh re-validation this
+	// attempt finds nothing left to remediate for, has had its whole
+	// justification revoked - most commonly by a newer same-head APPROVE
+	// (reviewRemediationFindings/reviewRemediationSuperseded correctly
+	// filter it, but bindExecutionInvoke's own #376-style retry rediscovery
+	// can still re-propose THIS exact operation by binding prefix alone).
+	// Treating the resulting empty findings as "ordinary invocation,
+	// proceed" would invoke the producer with no authorized review
+	// obligation at all. Refused here, before any workspace or provider
+	// preparation, under the SAME bounded-retry class a stale decision
+	// binding already uses.
+	if len(reviewFindings) == 0 && strings.HasPrefix(bindingOf(operation), reviewRemediationBindingPrefix) {
+		return r.executionFailureEffect(OperationFailed, execStageCandidateAdmission, FailureDecisionBindingStale,
+			errors.New("this operation's own review-remediation binding names an admission that is no longer the governing decision"))
+	}
 	if len(reviewFindings) > 0 && purpose != InvocationContinuation {
 		purpose = InvocationRemediation
 		findings = append(findings, reviewFindings...)

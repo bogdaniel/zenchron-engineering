@@ -653,7 +653,7 @@ func graphReviewGated() []orchestration.WorkUnit {
 // WorkGraph satisfaction predicate asks only "is the LATEST decision for
 // this PR an APPROVE of this exact commit", never independence (that is
 // #233/#474's own admission gate's concern, not this read-only gate's).
-func seedWorkGraphReviewDecision(t *testing.T, store *SQLiteOperationStore, repo GitHubRepo, prNumber int, headSHA, runID, reviewerID string, verdict review.Verdict, at time.Time) review.Decision {
+func seedWorkGraphReviewDecision(t *testing.T, store *SQLiteOperationStore, repo GitHubRepo, prNumber int, headSHA, runID, producerAgentID, reviewerID string, verdict review.Verdict, at time.Time) review.Decision {
 	t.Helper()
 	subject := review.Subject{Repository: repo.String(), PRNumber: prNumber, HeadSHA: headSHA}
 	id, err := review.DecisionID(subject, reviewerID)
@@ -666,7 +666,7 @@ func seedWorkGraphReviewDecision(t *testing.T, store *SQLiteOperationStore, repo
 	}
 	decision := review.Decision{
 		SchemaVersion: review.SchemaVersion, ID: id, Subject: subject, RunID: runID,
-		ProducerAgentID: "claude", ReviewerAgentID: reviewerID, Verdict: verdict, Findings: findings, CreatedAt: at,
+		ProducerAgentID: producerAgentID, ReviewerAgentID: reviewerID, Verdict: verdict, Findings: findings, CreatedAt: at,
 	}
 	stored, _, err := store.CreateReviewDecision(decision)
 	if err != nil {
@@ -719,7 +719,7 @@ func TestAReviewGatedUnitBlocksItsDependentUntilIndependentApproval(t *testing.T
 
 	// A REQUEST_CHANGES decision does NOT invalidate anything downstream -
 	// nothing was ever satisfied on it. b simply stays blocked, visibly.
-	seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, h1, a.RunID, "reviewer-1", review.VerdictRequestChanges, fixture.clock.Now())
+	seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, h1, a.RunID, a.Child.AgentID, "reviewer-1", review.VerdictRequestChanges, fixture.clock.Now())
 	afterBlock := fixture.graph(view.GraphID)
 	b := afterBlock.unit(t, "b")
 	if b.State != orchestration.UnitBlocked {
@@ -728,16 +728,43 @@ func TestAReviewGatedUnitBlocksItsDependentUntilIndependentApproval(t *testing.T
 
 	// An APPROVE bound to the WRONG commit - a stale or otherwise-mismatched
 	// review - must never release b either.
-	seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, strings.Repeat("f", 40), a.RunID, "reviewer-2", review.VerdictApprove, fixture.clock.Now().Add(time.Minute))
+	seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, strings.Repeat("f", 40), a.RunID, a.Child.AgentID, "reviewer-2", review.VerdictApprove, fixture.clock.Now().Add(time.Minute))
 	afterWrongHead := fixture.graph(view.GraphID)
 	if got := afterWrongHead.unit(t, "b").State; got != orchestration.UnitBlocked {
 		t.Fatalf("b = %s after an APPROVE bound to the wrong commit, want still blocked", got)
 	}
 
+	// #474 R4: an APPROVE at the EXACT right commit still must not release b
+	// when it is not actually bound to a's own real producing run and agent -
+	// review.Decision.Validate (and CreateReviewDecision, which calls only
+	// that) never checks producer/reviewer independence or which run a
+	// decision is actually for, so these are all reachable through the same
+	// ordinary store writer the legitimate case below uses.
+	selfReviewAt := fixture.clock.Now().Add(3 * time.Minute)
+	seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, h1, a.RunID, a.Child.AgentID, a.Child.AgentID, review.VerdictApprove, selfReviewAt)
+	afterSelfReview := fixture.graph(view.GraphID)
+	if got := afterSelfReview.unit(t, "b").State; got != orchestration.UnitBlocked {
+		t.Fatalf("b = %s after a self-review APPROVE (reviewer == a's own producer) of the exact commit, want still blocked", got)
+	}
+
+	forgedRunAt := selfReviewAt.Add(time.Minute)
+	seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, h1, "run-does-not-exist", a.Child.AgentID, "reviewer-4", review.VerdictApprove, forgedRunAt)
+	afterForgedRun := fixture.graph(view.GraphID)
+	if got := afterForgedRun.unit(t, "b").State; got != orchestration.UnitBlocked {
+		t.Fatalf("b = %s after an APPROVE claiming a run other than a's own, want still blocked", got)
+	}
+
+	mismatchedProducerAt := forgedRunAt.Add(time.Minute)
+	seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, h1, a.RunID, "someone-else", "reviewer-5", review.VerdictApprove, mismatchedProducerAt)
+	afterMismatchedProducer := fixture.graph(view.GraphID)
+	if got := afterMismatchedProducer.unit(t, "b").State; got != orchestration.UnitBlocked {
+		t.Fatalf("b = %s after an APPROVE naming a producer other than a's own actual agent, want still blocked", got)
+	}
+
 	// A fresh independent APPROVE of the EXACT commit a produced satisfies
 	// it: b becomes ready, with no supervisor tick needed - satisfaction is
 	// a pure read-time fact, exactly like every other #472 satisfaction.
-	seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, h1, a.RunID, "reviewer-3", review.VerdictApprove, fixture.clock.Now().Add(2*time.Minute))
+	seedWorkGraphReviewDecision(t, fixture.store, repo, prNumber, h1, a.RunID, a.Child.AgentID, "reviewer-3", review.VerdictApprove, mismatchedProducerAt.Add(time.Minute))
 	approved := fixture.graph(view.GraphID)
 	if got := approved.unit(t, "b").State; got != orchestration.UnitReady {
 		t.Fatalf("b = %s after a fresh independent APPROVE of the exact commit, want ready: %+v", got, approved.unit(t, "b"))
