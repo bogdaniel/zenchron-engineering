@@ -249,6 +249,171 @@ func TestReviewPublicationRefusesARowThatDisagreesWithItsDocument(t *testing.T) 
 	}
 }
 
+// TestLatestReviewDecisionRefusesAnIndexedTimestampDisagreement is #474
+// R12's required regression: `created_unix_nano` is the ORDER BY column
+// LatestReviewDecision picks "latest" by. A row whose INDEXED timestamp is
+// corrupted to read NEWER than its own document's CreatedAt could sort
+// ahead of, and incorrectly supersede, a genuinely newer decision - the
+// concrete scenario named in review #5478506037: an OLDER APPROVE, forged
+// to look newest by its index alone, overriding a genuinely newer BLOCK.
+func TestLatestReviewDecisionRefusesAnIndexedTimestampDisagreement(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteOperationStore: %v", err)
+	}
+	defer store.Close()
+
+	subject := review.Subject{Repository: "zenchron/fixture", PRNumber: 7, HeadSHA: "head1"}
+	blockID, err := review.DecisionID(subject, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := review.Decision{
+		SchemaVersion: review.SchemaVersion, ID: blockID, Subject: subject, RunID: "run-1",
+		ProducerAgentID: "codex", ReviewerAgentID: "claude", Verdict: review.VerdictRequestChanges,
+		Findings:  []review.Finding{{Severity: review.SeverityBlocking, Signature: "f1"}},
+		CreatedAt: time.Unix(1700000200, 0).UTC(),
+	}
+	if _, _, err := store.CreateReviewDecision(block); err != nil {
+		t.Fatal(err)
+	}
+
+	// A genuinely OLDER APPROVE, by its own document's CreatedAt - but
+	// INDEXED with a created_unix_nano forged to be newer than the BLOCK
+	// above. No legitimate CreateReviewDecision call can produce this
+	// disagreement; it models the same storage-layer corruption R10 already
+	// guards the repository/pr_number columns against, here for the column
+	// that decides ordering itself.
+	approveSubject := review.Subject{Repository: "zenchron/fixture", PRNumber: 7, HeadSHA: "head1"}
+	approveID, err := review.DecisionID(approveSubject, "reviewer-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trueCreatedAt := time.Unix(1700000100, 0).UTC() // genuinely OLDER than block
+	approve := review.Decision{
+		SchemaVersion: review.SchemaVersion, ID: approveID, Subject: approveSubject, RunID: "run-1",
+		ProducerAgentID: "codex", ReviewerAgentID: "reviewer-2", Verdict: review.VerdictApprove,
+		CreatedAt: trueCreatedAt,
+	}
+	document, err := CanonicalJSON(approve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedIndexedTimestamp := time.Unix(1700000300, 0).UnixNano() // forged NEWER than the block
+	if _, err := store.db.Exec(`INSERT INTO review_decisions (id, repository, pr_number, head_sha, run_id, created_unix_nano, document)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		approve.ID, approveSubject.Repository, approveSubject.PRNumber, approveSubject.HeadSHA, approve.RunID,
+		forgedIndexedTimestamp, string(document)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, found, err := store.LatestReviewDecision(subject.Repository, subject.PRNumber); err == nil || found {
+		t.Fatalf("expected the indexed-timestamp disagreement to be refused rather than read as the latest decision, got found=%v err=%v", found, err)
+	}
+}
+
+// TestLatestReviewDecisionStillPicksTheGenuinelyLatestDecision is the
+// positive counterpart: with no corruption, an OLDER decision never
+// supersedes a genuinely NEWER one, and the newer one is returned normally.
+func TestLatestReviewDecisionStillPicksTheGenuinelyLatestDecision(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteOperationStore: %v", err)
+	}
+	defer store.Close()
+
+	subject := review.Subject{Repository: "zenchron/fixture", PRNumber: 7, HeadSHA: "head1"}
+	older := testReviewDecision(t, "head1")
+	older.CreatedAt = time.Unix(1700000100, 0).UTC()
+	if _, _, err := store.CreateReviewDecision(older); err != nil {
+		t.Fatal(err)
+	}
+
+	newerID, err := review.DecisionID(subject, "reviewer-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer := review.Decision{
+		SchemaVersion: review.SchemaVersion, ID: newerID, Subject: subject, RunID: "run-1",
+		ProducerAgentID: "codex", ReviewerAgentID: "reviewer-2", Verdict: review.VerdictRequestChanges,
+		Findings:  []review.Finding{{Severity: review.SeverityBlocking, Signature: "f1"}},
+		CreatedAt: time.Unix(1700000200, 0).UTC(),
+	}
+	if _, _, err := store.CreateReviewDecision(newer); err != nil {
+		t.Fatal(err)
+	}
+
+	latest, found, err := store.LatestReviewDecision(subject.Repository, subject.PRNumber)
+	if err != nil || !found {
+		t.Fatalf("LatestReviewDecision: found=%v err=%v", found, err)
+	}
+	if latest.ID != newer.ID {
+		t.Fatalf("latest.ID = %q, want the genuinely newer decision %q", latest.ID, newer.ID)
+	}
+}
+
+// TestLatestReviewDecisionRefusesEveryOtherIndexedFieldDisagreement is
+// #474 R12's remaining coverage: `id`, `head_sha` and `run_id` are indexed
+// identity columns with the same index-vs-document exposure as
+// `created_unix_nano`, each checked independently.
+func TestLatestReviewDecisionRefusesEveryOtherIndexedFieldDisagreement(t *testing.T) {
+	subject := review.Subject{Repository: "zenchron/fixture", PRNumber: 7, HeadSHA: "head1"}
+
+	cases := []struct {
+		name           string
+		indexedID      string
+		indexedHeadSHA string
+		indexedRunID   string
+	}{
+		{name: "id", indexedID: "review-forged-id", indexedHeadSHA: "head1", indexedRunID: "run-1"},
+		{name: "head_sha", indexedHeadSHA: "head-forged"},
+		{name: "run_id", indexedRunID: "run-forged"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store, err := OpenSQLiteOperationStore(t.TempDir())
+			if err != nil {
+				t.Fatalf("OpenSQLiteOperationStore: %v", err)
+			}
+			defer store.Close()
+
+			id, err := review.DecisionID(subject, "claude")
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision := review.Decision{
+				SchemaVersion: review.SchemaVersion, ID: id, Subject: subject, RunID: "run-1",
+				ProducerAgentID: "codex", ReviewerAgentID: "claude", Verdict: review.VerdictApprove,
+				CreatedAt: time.Unix(1700000100, 0).UTC(),
+			}
+			document, err := CanonicalJSON(decision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			indexedID, indexedHeadSHA, indexedRunID := decision.ID, decision.Subject.HeadSHA, decision.RunID
+			if c.indexedID != "" {
+				indexedID = c.indexedID
+			}
+			if c.indexedHeadSHA != "" {
+				indexedHeadSHA = c.indexedHeadSHA
+			}
+			if c.indexedRunID != "" {
+				indexedRunID = c.indexedRunID
+			}
+			if _, err := store.db.Exec(`INSERT INTO review_decisions (id, repository, pr_number, head_sha, run_id, created_unix_nano, document)
+				VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				indexedID, subject.Repository, subject.PRNumber, indexedHeadSHA, indexedRunID,
+				decision.CreatedAt.UnixNano(), string(document)); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, found, err := store.LatestReviewDecision(subject.Repository, subject.PRNumber); err == nil || found {
+				t.Fatalf("%s: expected the indexed disagreement to be refused, got found=%v err=%v", c.name, found, err)
+			}
+		})
+	}
+}
+
 // TestClaimReviewIsExclusiveAcrossIndependentStoreHandles proves the claim is
 // exclusive across two SEPARATE SQLiteOperationStore handles on the same
 // database file (openPair), not merely within one shared Go struct - the

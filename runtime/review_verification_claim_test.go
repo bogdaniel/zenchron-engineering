@@ -28,7 +28,7 @@ func TestAssuranceOperationBlocksAReviewVerificationClaim(t *testing.T) {
 		t.Fatal("expected the assurance operation to acquire the only verification slot")
 	}
 
-	claim, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-2")
+	claim, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-2", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestReviewVerificationClaimBlocksAnAssuranceOperation(t *testing.T) {
 	t.Cleanup(func() { store.Close() })
 
 	s := verificationScheduler(store, "controller-a", 10, 1)
-	claim, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-2")
+	claim, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-2", 0)
 	if err != nil || !claimed {
 		t.Fatalf("claiming the only verification slot: claimed=%v err=%v", claimed, err)
 	}
@@ -86,7 +86,7 @@ func TestAnOrdinaryWorkOperationBlocksAReviewVerificationClaim(t *testing.T) {
 		t.Fatal("expected the ordinary work operation to acquire the only work slot")
 	}
 
-	if _, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-2"); err != nil {
+	if _, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-2", 0); err != nil {
 		t.Fatal(err)
 	} else if claimed {
 		t.Fatal("expected the review claim to be refused while an ordinary work operation holds the only work slot")
@@ -105,7 +105,7 @@ func TestAReviewVerificationClaimBlocksAnOrdinaryWorkOperation(t *testing.T) {
 	t.Cleanup(func() { store.Close() })
 
 	s := verificationScheduler(store, "controller-a", 1, 10)
-	claim, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-1")
+	claim, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-1", 0)
 	if err != nil || !claimed {
 		t.Fatalf("claiming the only work slot for a review: claimed=%v err=%v", claimed, err)
 	}
@@ -137,12 +137,12 @@ func TestReviewVerificationClaimIsVisibleAcrossControllers(t *testing.T) {
 	t.Cleanup(func() { store.Close() })
 
 	first := verificationScheduler(store, "controller-a", 10, 1)
-	if _, claimed, err := first.claimReviewVerificationSlot("controller-a", "run-1"); err != nil || !claimed {
+	if _, claimed, err := first.claimReviewVerificationSlot("controller-a", "run-1", 0); err != nil || !claimed {
 		t.Fatalf("first controller claiming the only slot: claimed=%v err=%v", claimed, err)
 	}
 
 	second := verificationScheduler(store, "controller-b", 10, 1)
-	if _, claimedAgain, err := second.claimReviewVerificationSlot("controller-b", "run-2"); err != nil {
+	if _, claimedAgain, err := second.claimReviewVerificationSlot("controller-b", "run-2", 0); err != nil {
 		t.Fatal(err)
 	} else if claimedAgain {
 		t.Fatal("a second controller's claim succeeded although the first controller's claim already held the only slot")
@@ -166,7 +166,7 @@ func TestAnAbandonedReviewVerificationClaimIsReclaimed(t *testing.T) {
 		Store: store, Clock: clock, Owner: "controller-a", LeaseDuration: time.Minute,
 		Liveness: neverAlive(), MaxConcurrentRuns: 10, MaxConcurrentVerifications: 1,
 	}
-	first, claimed, err := dead.claimReviewVerificationSlot("controller-a", "run-1")
+	first, claimed, err := dead.claimReviewVerificationSlot("controller-a", "run-1", 0)
 	if err != nil || !claimed {
 		t.Fatalf("claiming the only slot: claimed=%v err=%v", claimed, err)
 	}
@@ -179,14 +179,14 @@ func TestAnAbandonedReviewVerificationClaimIsReclaimed(t *testing.T) {
 		Store: store, Clock: clock, Owner: "controller-b", LeaseDuration: time.Minute,
 		Liveness: neverAlive(), MaxConcurrentRuns: 10, MaxConcurrentVerifications: 1,
 	}
-	if _, claimedAgain, err := other.claimReviewVerificationSlot("controller-b", "run-2"); err != nil {
+	if _, claimedAgain, err := other.claimReviewVerificationSlot("controller-b", "run-2", 0); err != nil {
 		t.Fatal(err)
 	} else if claimedAgain {
 		t.Fatal("a second claim succeeded before the first one's TTL expired")
 	}
 
 	clock.now = clock.now.Add(reviewVerificationClaimTTL + time.Minute)
-	second, claimedAfterExpiry, err := other.claimReviewVerificationSlot("controller-b", "run-2")
+	second, claimedAfterExpiry, err := other.claimReviewVerificationSlot("controller-b", "run-2", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestALiveOwnersExpiredClaimIsNotReclaimed(t *testing.T) {
 		Store: store, Clock: clock, Owner: "controller-a", LeaseDuration: time.Minute,
 		Liveness: alwaysAlive(), MaxConcurrentRuns: 10, MaxConcurrentVerifications: 1,
 	}
-	if _, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-1"); err != nil || !claimed {
+	if _, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-1", 0); err != nil || !claimed {
 		t.Fatalf("claiming the only slot: claimed=%v err=%v", claimed, err)
 	}
 
@@ -222,7 +222,7 @@ func TestALiveOwnersExpiredClaimIsNotReclaimed(t *testing.T) {
 		Store: store, Clock: clock, Owner: "controller-b", LeaseDuration: time.Minute,
 		Liveness: alwaysAlive(), MaxConcurrentRuns: 10, MaxConcurrentVerifications: 1,
 	}
-	if _, claimed, err := other.claimReviewVerificationSlot("controller-b", "run-2"); err != nil {
+	if _, claimed, err := other.claimReviewVerificationSlot("controller-b", "run-2", 0); err != nil {
 		t.Fatal(err)
 	} else if claimed {
 		t.Fatal("expected a live owner's expired claim to remain held - expiry alone is never enough")
@@ -248,7 +248,7 @@ func TestAnOrdinaryVerificationAcquisitionReclaimsADeadReviewClaim(t *testing.T)
 		Store: store, Clock: clock, Owner: "controller-a", LeaseDuration: time.Minute,
 		Liveness: neverAlive(), MaxConcurrentRuns: 10, MaxConcurrentVerifications: 1,
 	}
-	if _, claimed, err := dead.claimReviewVerificationSlot("controller-a", "run-1"); err != nil || !claimed {
+	if _, claimed, err := dead.claimReviewVerificationSlot("controller-a", "run-1", 0); err != nil || !claimed {
 		t.Fatalf("claiming the only verification slot: claimed=%v err=%v", claimed, err)
 	}
 
@@ -284,13 +284,13 @@ func TestAFailedReleaseIsRecoveredOnceExpiredByTheNextClaimForTheSameOwnerAndRun
 		Store: store, Clock: clock, Owner: "controller-a", LeaseDuration: time.Minute,
 		Liveness: alwaysAlive(), MaxConcurrentRuns: 10, MaxConcurrentVerifications: 1,
 	}
-	leaked, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-1")
+	leaked, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-1", 0)
 	if err != nil || !claimed {
 		t.Fatalf("the first claim: claimed=%v err=%v", claimed, err)
 	}
 
 	clock.now = clock.now.Add(reviewVerificationClaimTTL + time.Minute)
-	healed, claimedAgain, err := s.claimReviewVerificationSlot("controller-a", "run-1")
+	healed, claimedAgain, err := s.claimReviewVerificationSlot("controller-a", "run-1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,12 +326,12 @@ func TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires(t *testing.T) {
 		Store: store, Clock: clock, Owner: "controller-a", LeaseDuration: time.Minute,
 		Liveness: alwaysAlive(), MaxConcurrentRuns: 10, MaxConcurrentVerifications: 1,
 	}
-	active, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-1")
+	active, claimed, err := s.claimReviewVerificationSlot("controller-a", "run-1", 0)
 	if err != nil || !claimed {
 		t.Fatalf("the first claim: claimed=%v err=%v", claimed, err)
 	}
 
-	if _, claimedAgain, err := s.claimReviewVerificationSlot("controller-a", "run-1"); err != nil {
+	if _, claimedAgain, err := s.claimReviewVerificationSlot("controller-a", "run-1", 0); err != nil {
 		t.Fatal(err)
 	} else if claimedAgain {
 		t.Fatal("a second attempt for the SAME (owner, runID) pair deleted and replaced a still-active, unexpired claim")
@@ -346,5 +346,78 @@ func TestASameOwnerAndRunClaimIsNeverSelfHealedBeforeItExpires(t *testing.T) {
 	}
 	if len(remaining) != 1 || remaining[0].ID != active.ID {
 		t.Fatalf("claims = %+v, want exactly the original claim %q untouched", remaining, active.ID)
+	}
+}
+
+// TestALiveReviewWithALongerBudgetIsNotReclaimedAtTheFixedMinimumTTL is
+// #474 R11's required "live but expired [by the fixed minimum]" regression:
+// a review bound to an operator-configured budget LONGER than
+// reviewVerificationClaimTTL must not have its claim treated as abandoned
+// merely because that shorter fixed minimum elapsed. Both reclaim paths -
+// the general reclaimReviewVerificationClaims (death+expiry) a plain
+// Scheduler.Next already exercises, and claimReviewVerificationSlot's own
+// same-pair self-heal - must respect the LONGER ttl the caller actually
+// claimed with, never the fixed constant alone.
+func TestALiveReviewWithALongerBudgetIsNotReclaimedAtTheFixedMinimumTTL(t *testing.T) {
+	store, err := OpenSQLiteOperationStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	longBudget := 45 * time.Minute
+	clock := &fakeClock{now: time.Unix(100, 0)}
+	live := Scheduler{
+		Store: store, Clock: clock, Owner: "controller-a", LeaseDuration: time.Minute,
+		Liveness: alwaysAlive(), MaxConcurrentRuns: 10, MaxConcurrentVerifications: 1,
+	}
+	original, claimed, err := live.claimReviewVerificationSlot("controller-a", "run-1", longBudget)
+	if err != nil || !claimed {
+		t.Fatalf("the first claim: claimed=%v err=%v", claimed, err)
+	}
+
+	// Past the fixed 15-minute minimum, but well within the 45-minute
+	// budget this specific review actually claimed with: a review legitimately
+	// still running this long is NOT abandoned.
+	clock.now = clock.now.Add(reviewVerificationClaimTTL + time.Minute)
+	if reviewVerificationClaimTTL+time.Minute >= longBudget {
+		t.Fatal("test setup error: the elapsed time must stay within the long budget")
+	}
+
+	// The general reclaim path (as a plain Scheduler.Next tick would
+	// trigger) must not free it even though the owner is reported dead -
+	// death alone is moot here because the longer ttl has not elapsed.
+	dead := Scheduler{
+		Store: store, Clock: clock, Owner: "controller-a", LeaseDuration: time.Minute,
+		Liveness: neverAlive(), MaxConcurrentRuns: 10, MaxConcurrentVerifications: 1,
+	}
+	if err := dead.reclaimReviewVerificationClaims(); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := store.ReviewVerificationClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != original.ID {
+		t.Fatalf("the general reclaim path freed a claim still within its own longer budget: claims = %+v", remaining)
+	}
+
+	// Self-heal for the exact same (owner, runID) pair must likewise refuse:
+	// the claim is not yet expired BY ITS OWN TTL, regardless of the fixed
+	// minimum having elapsed.
+	if _, claimedAgain, err := live.claimReviewVerificationSlot("controller-a", "run-1", longBudget); err != nil {
+		t.Fatal(err)
+	} else if claimedAgain {
+		t.Fatal("self-heal released a claim still within its own longer budget merely because the fixed minimum TTL had elapsed")
+	}
+
+	// Once the review's OWN actual budget has genuinely elapsed, it is
+	// correctly reclaimable again (both paths already proven elsewhere for
+	// the ordinary, fixed-minimum case).
+	clock.now = clock.now.Add(longBudget)
+	if _, claimedAfterRealExpiry, err := live.claimReviewVerificationSlot("controller-a", "run-1", longBudget); err != nil {
+		t.Fatal(err)
+	} else if !claimedAfterRealExpiry {
+		t.Fatal("expected the claim to be recoverable once its own actual, longer budget had elapsed")
 	}
 }

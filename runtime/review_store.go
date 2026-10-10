@@ -155,9 +155,11 @@ func (s *SQLiteOperationStore) ReviewDecisionsForPullRequest(repository string, 
 // current question is always "what did the LAST independent review of this PR
 // conclude", never an arbitrary earlier one.
 func (s *SQLiteOperationStore) LatestReviewDecision(repository string, prNumber int) (review.Decision, bool, error) {
-	var document string
-	err := s.db.QueryRow(`SELECT document FROM review_decisions WHERE repository = ? AND pr_number = ?
-		ORDER BY created_unix_nano DESC, id DESC LIMIT 1`, repository, prNumber).Scan(&document)
+	var id, headSHA, runID, document string
+	var createdUnixNano int64
+	err := s.db.QueryRow(`SELECT id, head_sha, run_id, created_unix_nano, document FROM review_decisions
+		WHERE repository = ? AND pr_number = ? ORDER BY created_unix_nano DESC, id DESC LIMIT 1`,
+		repository, prNumber).Scan(&id, &headSHA, &runID, &createdUnixNano, &document)
 	if errors.Is(err, sql.ErrNoRows) {
 		return review.Decision{}, false, nil
 	}
@@ -183,7 +185,48 @@ func (s *SQLiteOperationStore) LatestReviewDecision(repository string, prNumber 
 			DecisionRepository: decision.Subject.Repository, DecisionPRNumber: decision.Subject.PRNumber,
 		}
 	}
+	// #474 R12: repository/pr_number are not the only indexed columns this
+	// query trusts. `created_unix_nano` is the ORDER BY column that decides
+	// which row is "latest" in the first place - a row whose INDEXED
+	// timestamp is corrupted to read newer than it truly is could make an
+	// older APPROVE sort ahead of, and incorrectly supersede, a genuinely
+	// newer BLOCK, with its document's own CreatedAt never checked against
+	// what sorted it there. `id`, `head_sha` and `run_id` are indexed
+	// identity columns with the same exposure. Every one is checked against
+	// the document that was supposedly read FROM it, fail-closed on any
+	// disagreement.
+	switch {
+	case decision.ID != id:
+		return review.Decision{}, false, &ReviewDecisionOrderingMismatchError{Field: "id", Repository: repository, PRNumber: prNumber}
+	case decision.Subject.HeadSHA != headSHA:
+		return review.Decision{}, false, &ReviewDecisionOrderingMismatchError{Field: "head_sha", Repository: repository, PRNumber: prNumber}
+	case decision.RunID != runID:
+		return review.Decision{}, false, &ReviewDecisionOrderingMismatchError{Field: "run_id", Repository: repository, PRNumber: prNumber}
+	case decision.CreatedAt.UnixNano() != createdUnixNano:
+		return review.Decision{}, false, &ReviewDecisionOrderingMismatchError{Field: "created_unix_nano", Repository: repository, PRNumber: prNumber}
+	}
 	return decision, true, nil
+}
+
+// ReviewDecisionOrderingMismatchError is LatestReviewDecision's #474 R12
+// fail-closed integrity failure for the indexed columns
+// ReviewDecisionIndexMismatchError does not cover: id, head_sha, run_id and
+// created_unix_nano - the column `ORDER BY` uses to decide which row is
+// "latest" at all. Kept distinct from ReviewDecisionIndexMismatchError
+// because AdmitReviewRemediation has an existing, equivalently-typed check
+// for repository/pr_number ONLY; it has none for these, so there is nothing
+// for this error to be reclassified into - it propagates as an ordinary
+// failure, which still refuses the admission or the WorkGraph release just
+// as any other LatestReviewDecision error already does.
+type ReviewDecisionOrderingMismatchError struct {
+	Field      string
+	Repository string
+	PRNumber   int
+}
+
+func (e *ReviewDecisionOrderingMismatchError) Error() string {
+	return fmt.Sprintf("stored review decision for %s#%d disagrees with its own document on indexed column %q",
+		e.Repository, e.PRNumber, e.Field)
 }
 
 // ReviewDecisionIndexMismatchError is LatestReviewDecision's #474 R10

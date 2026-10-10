@@ -569,6 +569,61 @@ claim row is untouched, not merely "replaced with an equivalent one".
 new guard here was likewise deliberately disabled, confirmed to fail its
 exact test, then restored.
 
+A further exact-head re-review (#5478506037, with CI still running at that
+check) found R11 was not yet complete, plus one new gap:
+
+- **R11 follow-up - expiry alone could not distinguish a finished reviewer
+  from one still legitimately running past a TOO-SHORT fixed bound.**
+  `reviewVerificationClaimTTL` was a FIXED 15 minutes, independent of the
+  reviewer's own actual permitted wall-clock budget
+  (`ReviewBudget().WallLimit`), which an operator may configure LARGER (the
+  R6 test fixture itself demonstrates 45 minutes as a valid configuration).
+  A legitimately still-running, still-alive review bound to a longer budget
+  could have its claim's fixed TTL lapse well before the review's own
+  enforced deadline - "expired" then meant only "15 minutes passed," never
+  "the reviewer could not still legitimately be running," which is exactly
+  what both the general reclaim path and self-heal need it to mean to stay
+  safe. `claimReviewVerificationSlot` now takes the caller's own `ttl`
+  (`ReconcileReviewRemediationForRun` passes `ReviewBudget().WallLimit +
+  reviewVerificationClaimTTL`, the review's real budget plus the system's
+  own minimum grace margin for claim/release overhead) and uses whichever
+  is LARGER of that and the fixed constant - never undercutting an
+  operator-configured longer budget, never producing a shorter-than-minimum
+  claim either.
+- **R12 - `LatestReviewDecision` validated only two of its six indexed
+  columns.** R10 checked `repository`/`pr_number` against the document's
+  own `Subject`, but `id`, `head_sha`, `run_id` and - critically -
+  `created_unix_nano`, the column `ORDER BY` uses to decide which row is
+  "latest" at all, went unchecked. A row whose INDEXED timestamp is
+  corrupted to read newer than its own document's `CreatedAt` could sort
+  ahead of, and incorrectly supersede, a genuinely newer decision: the
+  concrete scenario named in review #5478506037 is an OLDER `APPROVE`,
+  forged to look newest by its index alone, overriding a genuinely newer
+  `BLOCK`. `LatestReviewDecision` now selects and cross-checks all four
+  remaining indexed columns against the decoded document, fail-closed on
+  any disagreement, via a new `ReviewDecisionOrderingMismatchError` (kept
+  distinct from R10's `ReviewDecisionIndexMismatchError` because
+  `AdmitReviewRemediation` has an equivalent EXISTING check only for
+  repository/PR - it has none for these four, so there is nothing to
+  reclassify into; the error simply propagates as an ordinary refusal,
+  exactly as any other `LatestReviewDecision` failure already does for
+  `reviewApprovedFor` and `reviewRemediationSuperseded`).
+
+`TestALiveReviewWithALongerBudgetIsNotReclaimedAtTheFixedMinimumTTL` (R11
+follow-up) proves a claim within its own longer, caller-supplied budget is
+reclaimed by neither the general death+expiry path nor self-heal merely
+because the fixed 15-minute minimum elapsed, and is correctly reclaimable
+once its own real budget does.
+`TestLatestReviewDecisionRefusesAnIndexedTimestampDisagreement` (R12)
+proves the named forged-timestamp scenario directly: a genuinely older
+`APPROVE`, indexed with a timestamp forged newer than an existing `BLOCK`,
+is refused rather than read as the pull request's latest decision.
+`TestLatestReviewDecisionStillPicksTheGenuinelyLatestDecision` proves the
+coherent case is unaffected, and
+`TestLatestReviewDecisionRefusesEveryOtherIndexedFieldDisagreement` covers
+`id`/`head_sha`/`run_id` the same way. Every new guard was again
+deliberately disabled, confirmed to fail its exact test, then restored.
+
 ## Independent-review re-review hardening (B1, B2)
 
 Two gaps an independent exact-head re-review found in the wiring above,
@@ -929,6 +984,17 @@ application-level check, is load-bearing).
   Failure` (R9 follow-up, `runtime/review_remediation_trigger_test.go`)
   proves a reviewer failure and a release failure both survive in the
   combined `errors.Join`ed error.
+- `TestALiveReviewWithALongerBudgetIsNotReclaimedAtTheFixedMinimumTTL` (R11
+  follow-up) proves a claim within its own longer, caller-supplied `ttl`
+  survives both the general reclaim path and self-heal past the fixed
+  15-minute minimum, and is reclaimable once its own real budget elapses.
+- `TestLatestReviewDecisionRefusesAnIndexedTimestampDisagreement`,
+  `TestLatestReviewDecisionStillPicksTheGenuinelyLatestDecision` and
+  `TestLatestReviewDecisionRefusesEveryOtherIndexedFieldDisagreement` (R12,
+  `runtime/review_store_test.go`) prove `LatestReviewDecision` cross-checks
+  all six indexed columns against the document, including the exact named
+  scenario: an older `APPROVE` with a forged, newer-looking indexed
+  timestamp never overrides a genuinely newer `BLOCK`.
 
 **Still deferred, and why:** the residual external-head TOCTOU between this
 gate's last freshness check and its SQLite commit (explicitly documented

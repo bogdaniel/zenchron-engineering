@@ -92,7 +92,16 @@ func (r *EngineeringRuntime) ReconcileReviewRemediationForRun(ctx context.Contex
 	// second, uncoordinated counter. No free slot this pass is a clean
 	// no-op, exactly as idempotent as every other call here: the next tick
 	// tries again.
-	claim, claimed, claimErr := r.scheduler.claimReviewVerificationSlot(r.scheduler.Owner, runID)
+	//
+	// #474 R11: the claim's TTL is bound to THIS review's own actual
+	// permitted wall-clock budget, plus the system's own minimum grace
+	// margin for claim/release overhead - never a fixed constant shorter
+	// than a budget the operator may configure larger. "Expired" must mean
+	// the review's own enforced deadline has passed, never merely "some
+	// fixed number of minutes elapsed" while a legitimate, still-alive
+	// review could still be running.
+	ttl := r.ReviewBudget().WallLimit + reviewVerificationClaimTTL
+	claim, claimed, claimErr := r.scheduler.claimReviewVerificationSlot(r.scheduler.Owner, runID, ttl)
 	if claimErr != nil {
 		return nil, nil, claimErr
 	}

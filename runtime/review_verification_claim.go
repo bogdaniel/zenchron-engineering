@@ -41,10 +41,20 @@ func (c ReviewVerificationClaim) validate() error {
 	return nil
 }
 
-// reviewVerificationClaimTTL bounds how long an abandoned claim - its
-// owning controller died mid-review - may hold a slot before
+// reviewVerificationClaimTTL is the MINIMUM bound on how long an abandoned
+// claim - its owning controller died mid-review - may hold a slot before
 // reclaimReviewVerificationClaims may release it. The same bounded-lease
 // shape VerificationPermit's own ExpiresAt already uses.
+//
+// #474 R11: a FIXED 15 minutes shorter than the reviewer's own actual
+// permitted wall-clock budget (ReviewBudget().WallLimit, operator-
+// configurable past this) could expire while a genuinely still-running,
+// still-alive review had not yet reached its own deadline - "expired"
+// would then mean only "15 minutes passed," never "the reviewer could not
+// still legitimately be running." claimReviewVerificationSlot now takes
+// the caller's actual review TTL and uses whichever is LARGER, so a claim
+// can only ever expire once the review's own enforced budget guarantees it
+// is no longer legitimately in flight.
 const reviewVerificationClaimTTL = 15 * time.Minute
 
 // ReviewVerificationClaimStore is the scheduler's durable I/O boundary for
@@ -139,14 +149,24 @@ func (s *SQLiteOperationStore) ReleaseReviewVerificationClaim(id string) error {
 // leaves its claim recoverable within at most one TTL (bounded, never
 // permanent); a release that is still correctly held stays held.
 //
+// ttl is the caller's own actual review wall-clock budget (#474 R11): the
+// claim's real expiry is whichever is LARGER of ttl and
+// reviewVerificationClaimTTL, so a short or zero-valued ttl can never
+// produce a claim that expires before the system's own minimum bound,
+// and a longer operator-configured review budget can never be undercut
+// by a shorter fixed constant.
+//
 // ok is false exactly when either ceiling is genuinely held by someone
 // else: never queued, never retried within this call, exactly as
 // idempotent as every other call into ReconcileReviewRemediation.
-func (s Scheduler) claimReviewVerificationSlot(owner, runID string) (ReviewVerificationClaim, bool, error) {
+func (s Scheduler) claimReviewVerificationSlot(owner, runID string, ttl time.Duration) (ReviewVerificationClaim, bool, error) {
 	s = s.defaults()
 	store, ok := s.Store.(ReviewVerificationClaimStore)
 	if !ok {
 		return ReviewVerificationClaim{}, false, errors.New("operation store cannot enforce review verification capacity")
+	}
+	if ttl < reviewVerificationClaimTTL {
+		ttl = reviewVerificationClaimTTL
 	}
 	if err := s.reclaimReviewVerificationClaims(); err != nil {
 		return ReviewVerificationClaim{}, false, err
@@ -166,7 +186,7 @@ func (s Scheduler) claimReviewVerificationSlot(owner, runID string) (ReviewVerif
 	}
 	claim := ReviewVerificationClaim{
 		ID: "review-verification-" + rand.Text(), ControllerOwner: owner, RunID: runID,
-		RequestedAt: now, ExpiresAt: now.Add(reviewVerificationClaimTTL),
+		RequestedAt: now, ExpiresAt: now.Add(ttl),
 	}
 	claimed, err := store.ClaimReviewVerificationSlot(claim, s.MaxConcurrentRuns, s.MaxConcurrentVerifications)
 	if err != nil || !claimed {
