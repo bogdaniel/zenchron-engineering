@@ -68,6 +68,11 @@ func TestPublicationDecisionGateRequiresAuthorityKernelHumanClaim(t *testing.T) 
 	if err := planning.Validate(plan, planning.ValidationInput{Contract: contract}); err != nil {
 		t.Fatalf("contract-backed human publication decision was refused: %v", err)
 	}
+	plan.Stages[0].Action = nil
+	if err := planning.Validate(plan, planning.ValidationInput{Contract: contract}); err == nil || !strings.Contains(err.Error(), "must name its contract-authorized action") {
+		t.Fatalf("publication decision without its exact action was accepted: %v", err)
+	}
+	plan.Stages[0].Action = &action
 	contract.AuthorityConditions[0].RequiredClaims = []string{"validation"}
 	if err := planning.Validate(plan, planning.ValidationInput{Contract: contract}); err == nil || !strings.Contains(err.Error(), "not required by the work contract") {
 		t.Fatalf("human gate absent from action authority condition was accepted: %v", err)
