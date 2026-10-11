@@ -216,7 +216,7 @@ func TestReviewerEnvelopeMembersMatchTheProtocolStructFields(t *testing.T) {
 }
 
 // A DOCUMENT BUILT FROM EXACTLY WHAT reviewerEnvelope TELLS A REVIEWER TO
-// WRITE ROUND-TRIPS THROUGH THE STRICT DECODER, CONTENT INTACT (#374). This is
+// RETURN ROUND-TRIPS THROUGH THE STRICT DECODER, CONTENT INTACT (#374). This is
 // the positive mirror of TestAMalformedResultIsRefused: not merely "the two
 // descriptions currently agree" but "a document shaped from the live member
 // list is accepted and nothing in it is lost."

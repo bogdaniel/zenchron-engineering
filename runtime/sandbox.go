@@ -1209,7 +1209,7 @@ func reviewerEnvelope(r ExecutionRequest) string {
 	members, findingMembers := reviewerResultStatedMembers(), ReviewerFindingMembers()
 	return fmt.Sprintf(
 		"\n\nREQUIRED RESULT. This is a review stage, and its work product is a verdict rather than a change. "+
-			"Prose alone does not complete it: write a JSON document to %s and nothing else decides this stage. "+
+			"Prose alone does not complete it: return a JSON document as your final answer, which the runtime captures into its typed result slot; nothing else decides this stage. "+
 			"The document is a JSON object with exactly these members: %s (%q), %s (%q or %q), "+
 			"%s (an array of objects with a %s and an optional %s), and an optional %s. "+
 			"Use %q only when every acceptance obligation above is satisfied by evidence you actually observed, and name no findings with it. "+
@@ -1220,7 +1220,6 @@ func reviewerEnvelope(r ExecutionRequest) string {
 			"Judge such an obligation from the evidence presented and from what your own grant actually lets you inspect - do not repeatedly attempt a command you have already been denied, and do not treat a denial itself as a finding; "+
 			"an obligation you still cannot verify after that is, as above, not satisfied, and is reported through the ordinary finding for that obligation. "+
 			"Do not restate the candidate revision or tree: the runtime binds this result to the exact candidate it gave you.",
-		r.ReviewerResultPath,
 		members[0], ReviewerResultSchemaVersion,
 		members[1], StageReviewAccepted, StageReviewBlocked,
 		members[2], findingMembers[0], findingMembers[1],

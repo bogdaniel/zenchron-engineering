@@ -189,7 +189,7 @@ func ReviewerResultPath(stateDir string, attempt ExecutionAttemptRef) (string, e
 }
 
 // PrepareReviewerResult clears any leftover result and returns the path this
-// invocation must write to.
+// invocation's structured response is captured into.
 //
 // Clearing is not housekeeping. A result file surviving from an earlier attempt
 // of the same operation would be admitted as THIS attempt's verdict, which
@@ -217,7 +217,7 @@ func clearResultSlot(path string) error {
 	return nil
 }
 
-// ReadReviewerResult reads and decodes the result a reviewer wrote.
+// ReadReviewerResult reads and decodes the structured result captured for a reviewer.
 //
 // An absent file is not an error and not a verdict: it is (nil, nil), and the
 // reviewer stage stays unsettled. That is the case a reviewer producing only

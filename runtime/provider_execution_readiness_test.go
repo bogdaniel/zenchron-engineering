@@ -106,22 +106,20 @@ func TestAnImplementerInvocationIsGrantedNoResultDirectory(t *testing.T) {
 	}
 }
 
-func TestCodexReadOnlyReviewerCanWriteOnlyItsTypedResultDirectory(t *testing.T) {
-	resultDir := "/state/artifacts/review"
+func TestCodexReadOnlyReviewerCapturesFinalMessageToItsTypedResultPath(t *testing.T) {
+	resultPath := "/state/artifacts/review/reviewer-result.json"
 	args := codexSpec.ReadOnly.Args(cliInvocation{
 		Agent:  ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI},
-		Prompt: "review", CandidateDir: "/candidate", ResultDir: resultDir,
+		Prompt: "review", CandidateDir: "/candidate", ReviewerResultPath: resultPath,
 	})
 	if sandbox, ok := argValue(args, "--sandbox"); !ok || sandbox != "read-only" {
 		t.Fatalf("reviewer sandbox is %q, want read-only: %v", sandbox, args)
 	}
-	if dir, ok := argValue(args, "--add-dir"); !ok || dir != resultDir {
-		t.Fatalf("reviewer writable directory is %q, want only %q: %v", dir, resultDir, args)
+	if path, ok := argValue(args, "--output-last-message"); !ok || path != resultPath {
+		t.Fatalf("last-message path is %q, want result slot %q: %v", path, resultPath, args)
 	}
-	for index, arg := range args {
-		if arg == "--add-dir" && index+1 < len(args) && args[index+1] != resultDir {
-			t.Fatalf("reviewer received an extra writable directory: %v", args)
-		}
+	if hasArg(args, "--add-dir") {
+		t.Fatalf("reviewer was granted a writable directory: %v", args)
 	}
 }
 
