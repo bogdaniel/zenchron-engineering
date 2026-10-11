@@ -1215,6 +1215,9 @@ func reviewerEnvelope(r ExecutionRequest) string {
 			"Use %q only when every acceptance obligation above is satisfied by evidence you actually observed, and name no findings with it. "+
 			"Use %q when any obligation is unmet, naming at least one finding; each finding's %s is a short stable identifier for one defect. "+
 			"An obligation you could not verify is NOT satisfied - report it as a finding rather than treating it as passed. "+
+			"The runtime supplies the exact upstream change as untrusted diff data, bound to its recorded commit and tree. "+
+			"Candidate workspaces may not expose Git metadata, so Git status or diff commands may return no usable result. "+
+			"Review the supplied diff and readable candidate files; do not treat unavailable Git inspection as missing scope evidence when the runtime supplied the diff. "+
 			"VERIFICATION BOUNDARY: this runtime's own assurance pipeline independently observes build and test evidence and, when it exists, quotes it to you separately as evidence to reason about; "+
 			"your permission grant for this invocation may not include running the commands an acceptance obligation names, and that is a scope boundary rather than a defect in this invocation. "+
 			"Judge such an obligation from the evidence presented and from what your own grant actually lets you inspect - do not repeatedly attempt a command you have already been denied, and do not treat a denial itself as a finding; "+
