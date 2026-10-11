@@ -1515,7 +1515,7 @@ func (v BaselineGoVerifier) ProducedEvidenceClasses() []domain.EvidenceClass {
 }
 
 func (v BaselineGoVerifier) Definition() string {
-	d, _ := Digest(struct{ Name, Version string }{"baseline-go-offline", "gofmt-vet-test-v1"})
+	d, _ := Digest(struct{ Name, Version string }{"baseline-go-offline", "gofmt-vet-test-v3"})
 	return d
 }
 func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest) (AssuranceResult, error) {
@@ -1556,8 +1556,8 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 	}
 	args := dockerBase(request.CheckoutDir, true)
 	args = append(args, goModuleCacheMount(v.DependencyCacheDir), "--workdir", "/candidate")
-	args = append(args, envArgs(append([]string{"GOMODCACHE=/cache", "GONOSUMDB=*"}, sandboxGoEnv...)...)...)
-	args = append(args, v.Sandbox.Image, "sh", "-ec", "test -z \"$(gofmt -l .)\"; go vet ./...; go test ./...")
+	args = append(args, envArgs(append([]string{"GOMODCACHE=/cache", "GONOSUMDB=*", "TMPDIR=" + sandboxBuildDir}, sandboxGoEnv...)...)...)
+	args = append(args, v.Sandbox.Image, "sh", "-ec", baselineGoAssuranceCommand)
 	sandbox := v.Sandbox
 	sandbox.OperationID = "assurance-" + request.RunID + "-" + request.Commit
 	if sandbox.StateDir == "" {

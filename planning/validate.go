@@ -162,7 +162,7 @@ func planStageViews(plan domain.EngineeringPlan) []stageView {
 	views := make([]stageView, 0, len(plan.Stages))
 	for _, stage := range plan.Stages {
 		views = append(views, stageView{
-			ID: stage.ID, Kind: stage.Kind, Role: stage.Role, DependsOn: stage.DependsOn,
+			ID: stage.ID, Kind: stage.Kind, Role: stage.Role, DependsOn: stage.DependsOn, ExecutionKind: stage.ExecutionKind,
 			RequiredClaims: stage.RequiredClaims, Action: stage.Action, Independence: stage.Independence,
 			SubstitutesRole:      stage.SubstitutesRole,
 			RequiresCapabilities: stage.RequiresCapabilities, Profile: stage.Profile,

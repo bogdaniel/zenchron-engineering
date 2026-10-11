@@ -192,7 +192,9 @@ func handoffEnvelope(r ExecutionRequest) string {
 	return fmt.Sprintf(
 		"\n\nREQUIRED HANDOFF. This work is part of an orchestration batch, and it is not complete until you write a handoff. "+
 			"Before you finish, write a JSON document to %s shaped exactly like %s. "+
-			"outcome is %q when the objective is addressed (then name nothing in unresolved), or %q with an unresolved array naming what is not done. "+
+			"outcome is %q when your assigned producer implementation is complete (then name nothing in unresolved), or %q with an unresolved array naming real unfinished implementation. "+
+			"Completion reports implementation, not acceptance: independent review, runtime-owned assurance and publication authority remain separate required gates. "+
+			"Run only focused checks relevant to your change; the runtime owns required assurance suites. Pending or sandbox-denied runtime assurance is not unfinished assigned engineering work; report check limitations in summary, never claim those checks passed. "+
 			"summary is a short account of the change for whoever continues this work; unresolved and recommended_next are optional arrays of short strings. "+
 			"Write no other member: do not restate the run, issue, branch, commit, tree, changed files or contract - the runtime records those itself. "+
 			"Your final message is not read for this; only that file is.",

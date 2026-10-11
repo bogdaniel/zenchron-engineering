@@ -230,6 +230,7 @@ func templateStages(template domain.EngineeringPlanTemplate, facts []domain.Engi
 			ID:                   stage.ID,
 			Kind:                 stage.Kind,
 			Role:                 stage.Role,
+			ExecutionKind:        stage.ExecutionKind,
 			Objective:            stage.Objective,
 			DependsOn:            stage.DependsOn,
 			RequiresCapabilities: stage.RequiresCapabilities,

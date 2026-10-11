@@ -1124,10 +1124,7 @@ func (s *Supervisor) decomposeWithAgent(ctx context.Context, repository string, 
 	// Both bounds are the controller's own configuration, not a frozen
 	// RunPolicy: a planning invocation has no run (see planningWallLimit),
 	// and both values are controller-effective until B3 (ADR-0003).
-	budgets := ProviderBudget{
-		WallLimit:       engine.planningWallLimit(request.WallSeconds),
-		InactivityLimit: engine.deps.Budgets.defaults().ProviderInactivityLimit,
-	}
+	budgets := engine.PlanningBudget(request.WallSeconds)
 	return InvokePlanner(ctx, PlannerInput{
 		PlanID: request.Plan.ID, Revision: request.Plan.Revision, Budgets: budgets,
 		Agent: engine.PlanningAgent(), Provider: engine.PlanningProvider(),

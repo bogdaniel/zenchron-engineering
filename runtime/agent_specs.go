@@ -309,16 +309,16 @@ var claudeSpec = cliAgentSpec{
 		// and still not an association: help text that quotes "plan" for any
 		// other reason satisfied it.
 		Probe: cliHelpProbe{
-			Args: []string{"--help"}, Required: []string{"--permission-mode"},
+			Args: []string{"--help"}, Required: []string{"--permission-mode", "--disallowedTools"},
 			RequiredChoices: []cliFlagChoice{{Flag: "--permission-mode", Value: "plan"}},
 		},
 		Mode: "plan",
 		Args: func(i cliInvocation) []string {
-			args := []string{"--print", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "--safe-mode"}
+			args := []string{"--print", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "--safe-mode", "--disallowedTools", "EnterPlanMode ExitPlanMode"}
 			if i.Model() != "" {
 				args = append(args, "--model", i.Model())
 			}
-			return claudePromptArg(args, i.Prompt)
+			return claudePromptArg(args, i.Prompt+"\nHeadless planning: return the requested fenced JSON object inline in your final answer. Do not write a private plan file or invoke EnterPlanMode or ExitPlanMode; the runtime owns plan storage and operator approval.")
 		},
 	},
 }

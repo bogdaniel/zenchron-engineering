@@ -28,7 +28,6 @@ runtime/plan_closed_loop_test.go	1526
 runtime/plan_reconciler.go	2436
 runtime/plan_reconciler_test.go	2015
 runtime/plan_service.go	1868
-runtime/planner.go	1014
 runtime/provider_progress_coalescing_test.go	1112
 runtime/publication_identity_test.go	1030
 runtime/reconciler.go	2342

@@ -2444,9 +2444,9 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 		Commit:      commit,
 		Tree:        tree,
 		CheckoutDir: checkout,
-		// The scheduler's attempt, so the verifier writes evidence under an
-		// identity a replay reaches from the journal alone.
-		Attempt:  op.Attempt,
+		// A resumed operation can reuse its budget attempt, so evidence uses the
+		// physical attempt identity reserved durably before dispatch.
+		Attempt:  op.AttemptIdentity,
 		Contract: Ref{ID: kernel.Contract.ID, Revision: kernel.Contract.Revision},
 		Policy:   Ref{ID: r.deps.Policy.ID, Revision: r.deps.Policy.Revision},
 		Producer: Ref{ID: r.deps.ControllerID, Revision: r.controller},
@@ -2617,7 +2617,7 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 	}
 	result, assureErr := r.deps.SemanticAssurance.Assure(ctx, AssuranceRequest{
 		RunID: state.run.ID, Commit: commit, Tree: tree, CheckoutDir: checkout,
-		Attempt:    op.Attempt,
+		Attempt:    op.AttemptIdentity,
 		Contract:   Ref{ID: kernel.Contract.ID, Revision: kernel.Contract.Revision},
 		Policy:     Ref{ID: r.deps.Policy.ID, Revision: r.deps.Policy.Revision},
 		Producer:   Ref{ID: r.deps.ControllerID, Revision: r.controller},
