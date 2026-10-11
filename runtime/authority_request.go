@@ -225,6 +225,9 @@ func (r *EngineeringRuntime) PendingAuthorityRequest(runID string) (*AuthorityRe
 // performs, and a run whose evaluation reports no outstanding human_approval
 // claim has no request at all.
 func (r *EngineeringRuntime) authorityRequest(state *runState) (*AuthorityRequest, error) {
+	if state.publicationDeferred {
+		return nil, nil
+	}
 	if err := authorizableState(state); err != nil {
 		return nil, err
 	}

@@ -91,6 +91,10 @@ func TestObjectiveProducerDefersPublicationUntilIntegrationInputIsAdmitted(t *te
 			t.Fatalf("producer %s publication deferral = %t, %v; want deferred", producer, deferred, err)
 		}
 		state := &runState{publicationDeferred: deferred}
+		request, err := fleet.runtime.authorityRequest(state)
+		if err != nil || request != nil {
+			t.Fatalf("producer %s exposed a human publication request before integration: %#v, %v", producer, request, err)
+		}
 		if _, wanted := bindAuthorityEvaluate(state); wanted || state.authorizedForPublication() {
 			t.Fatalf("producer %s can obtain publication authority before integration", producer)
 		}
