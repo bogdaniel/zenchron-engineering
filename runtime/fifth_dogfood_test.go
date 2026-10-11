@@ -502,7 +502,9 @@ func (v *switchableVerifier) Assure(context.Context, AssuranceRequest) (Assuranc
 // executable; everything else stays noexec, and the rest of the boundary is
 // untouched.
 func TestOnlyTheGoBuildAreaIsExecutable(t *testing.T) {
-	args := dockerBase(t.TempDir(), true)
+	// Assurance's TMPDIR may share the container build area's name. The
+	// host candidate path is mounted at /candidate, never at /gobuild.
+	args := dockerBase(filepath.Join(sandboxBuildDir, "candidate"), true)
 	var execable, noexec []string
 	for i, arg := range args {
 		if arg != "--tmpfs" {
@@ -537,8 +539,24 @@ func TestOnlyTheGoBuildAreaIsExecutable(t *testing.T) {
 		t.Fatalf("the sandbox mounts the Docker socket: %s", text)
 	}
 	// The build area is a container tmpfs, never a host path.
-	if strings.Contains(text, "src="+sandboxBuildDir) {
-		t.Fatalf("the Go build area is bound to a host path: %s", text)
+	for i, arg := range args {
+		if arg != "--mount" {
+			continue
+		}
+		fields := strings.Split(args[i+1], ",")
+		if !slices.Contains(fields, "type=bind") {
+			continue
+		}
+		for _, field := range fields {
+			key, destination, _ := strings.Cut(field, "=")
+			if key != "dst" && key != "destination" && key != "target" {
+				continue
+			}
+			destination = filepath.Clean(destination)
+			if destination == sandboxBuildDir || strings.HasPrefix(destination, sandboxBuildDir+"/") {
+				t.Fatalf("the Go build area is bound to a host path: %s", text)
+			}
+		}
 	}
 }
 

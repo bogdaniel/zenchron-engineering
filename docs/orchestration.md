@@ -1,4 +1,43 @@
-# Basic explicit orchestration
+# Objective and explicit issue orchestration
+
+## Objective intake
+
+Submit one existing GitHub issue as the engineering objective to the running
+supervisor:
+
+```bash
+zenchron-engineering autonomy plan issue 481 --agent claude --repo bogdaniel/zenchron-engineering --text
+```
+
+This uses the existing reasoning planner and returns a proposed plan plus its
+durable WorkGraph ID. The graph binds the exact plan revision and digest; it
+starts no work until the operator approves that revision and its frozen
+assignment set:
+
+```bash
+zenchron-engineering autonomy plan show PLAN_ID --text
+zenchron-engineering autonomy plan approve PLAN_ID --revision REVISION --digest PLAN_DIGEST --assignments ASSIGNMENTS_DIGEST --text
+zenchron-engineering autonomy workgraph status GRAPH_ID --text
+zenchron-engineering autonomy plan status PLAN_ID --text
+```
+
+The plan reconciler dispatches graph-backed candidate stages with their frozen
+assignments and budgets. Dependencies consume admitted candidate handoffs.
+Review stages and assurance or human-decision gates retain their existing plan
+semantics; they do not create fake candidate handoffs. Review independence,
+remediation, verification and publication authority remain governed by the
+existing mechanisms. A stopped supervisor refuses objective intake; the command
+does not fall back to flat issue orchestration or local execution.
+
+For divergent candidate producers, the planner must explicitly propose an
+integrator agent stage with `execution_kind: "integration_compose"` and at least
+two dependencies before review. An `integrator` role alone invokes an ordinary
+provider. Objective graphs and explicit execution kinds are additive JSON
+contracts: keep their state on a compatible controller; older builds cannot
+consume these new artifacts safely. Existing artifacts without these fields
+retain their previous behavior.
+
+## Basic explicit orchestration
 
 `autonomy orchestrate` hands a running `serve` supervisor a bounded set of
 existing GitHub issues and one execution agent **once**, and reads the whole

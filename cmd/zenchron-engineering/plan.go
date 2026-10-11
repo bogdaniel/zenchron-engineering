@@ -117,10 +117,10 @@ func delegatePlanRevision(flags autonomyFlags, overrides autonomyOverrides, plan
 		repository, defaultBranch = target.Identity, target.DefaultBranch
 	}
 	delegated, payload, err := delegatePayload(stateDir, runtime.ControlRequest{
-		Command: runtime.ControlPlanRevise, PlanID: planID, Issue: issue,
+		Command: runtime.ControlPlanRevise, PlanID: planID, Issue: issue, Agent: flags.Agent,
 		Repository: repository, DefaultBranch: defaultBranch, Template: flags.Template,
 		Deterministic: flags.Deterministic, SubstituteHuman: flags.SubstituteHuman,
-		Note: flags.Note, Operator: requester.ID,
+		Note: flags.Note, Operator: requester.ID, ObjectiveWorkflow: true,
 	})
 	if !delegated {
 		return false, 0, nil
@@ -195,7 +195,7 @@ func renderDelegatedPlan(flags autonomyFlags, payload []byte, decided bool, stdo
 		}
 		return runtime.ExitCompleted, nil
 	}
-	return planOutput(flags, view, stdout, "proposed")
+	return renderObjectivePlan(flags, view, stdout, "proposed")
 }
 
 // planComposition is the wiring one plan command needs: the shared composition,
@@ -416,7 +416,7 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 		}
 	}
 	var plan domain.EngineeringPlan
-	write := func() (err error) { plan, err = composed.service.Propose(ctx, input); return err }
+	write := func() (err error) { plan, err = proposePlanAndGraph(ctx, composed, input, flags); return err }
 	if under != nil {
 		err = under(write)
 	} else {
@@ -429,7 +429,7 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
-	return planOutput(flags, view, stdout, "proposed")
+	return renderObjectivePlan(flags, view, stdout, "proposed")
 }
 
 // recordPlanningRefusal preserves a refused reasoning invocation and returns the
@@ -497,7 +497,7 @@ func reasonAboutPlan(ctx context.Context, composed *planComposition, intent runt
 		ControllerID:          composed.engine.ControllerIdentityID(),
 		AvailableRoles:        domain.EngineeringRoles(),
 		AvailableCapabilities: domain.EngineeringCapabilities(),
-		Artifacts:             composed.engine.PlanningArtifacts(),
+		Artifacts:             composed.engine.PlanningArtifacts(), Budgets: composed.engine.PlanningBudget(0),
 		// The referenced same-repository issues, pinned by the runtime through
 		// the governed forge boundary before this invocation. The provider
 		// makes no network request of its own; it is SHOWN this text, as
