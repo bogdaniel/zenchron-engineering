@@ -31,6 +31,9 @@ func TestTheOutputContractDoesNotDemandEveryMemberItShows(t *testing.T) {
 	if !strings.Contains(contract, "action git.pull_request.create:main") {
 		t.Fatal("the selected template's exact gate action is not stated to the planner")
 	}
+	if !strings.Contains(contract, "may not name a human_approval claim") {
+		t.Fatal("the planner is not told to keep human claims off automated assurance gates")
+	}
 
 	if strings.Contains(contract, "EXACTLY the members shown") {
 		t.Fatal("the contract still tells the model that every member shown is required")

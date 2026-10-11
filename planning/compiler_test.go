@@ -73,6 +73,13 @@ func TestPublicationDecisionGateRequiresAuthorityKernelHumanClaim(t *testing.T) 
 		t.Fatalf("publication decision without its exact action was accepted: %v", err)
 	}
 	plan.Stages[0].Action = &action
+	plan.Stages = append(plan.Stages, domain.PlanStage{
+		ID: "automated-verification", Kind: domain.StageAssuranceGate, RequiredClaims: []string{"approval"},
+	})
+	if err := planning.Validate(plan, planning.ValidationInput{Contract: contract}); err == nil || !strings.Contains(err.Error(), "cannot claim human_approval evidence") {
+		t.Fatalf("automated assurance was allowed to satisfy a human claim: %v", err)
+	}
+	plan.Stages = plan.Stages[:1]
 	contract.AuthorityConditions[0].RequiredClaims = []string{"validation"}
 	if err := planning.Validate(plan, planning.ValidationInput{Contract: contract}); err == nil || !strings.Contains(err.Error(), "not required by the work contract") {
 		t.Fatalf("human gate absent from action authority condition was accepted: %v", err)

@@ -134,11 +134,16 @@ func Validate(plan domain.EngineeringPlan, input ValidationInput) error {
 			continue
 		}
 		for _, claim := range stage.RequiredClaims {
-			if _, ok := input.Contract.RequiredClaims[claim]; !ok {
+			definition, ok := input.Contract.RequiredClaims[claim]
+			if !ok {
 				// A CLAIMLESS contract used to skip this check entirely, so a
 				// gate could reference claims nothing defines - valid at
 				// approval, and unsatisfiable forever at runtime.
 				add("stage %q is a %s referencing claim %q, which the work contract does not define", stage.ID, stage.Kind, claim)
+				continue
+			}
+			if stage.Kind == domain.StageAssuranceGate && definition.EvidenceClass == "human_approval" {
+				add("assurance stage %q cannot claim human_approval evidence for %q", stage.ID, claim)
 			}
 		}
 		if stage.Kind == domain.StageHumanDecisionGate {

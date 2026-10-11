@@ -513,7 +513,11 @@ stage to make the work smaller.
 	// gate can reference one and the answer says so.
 	claims := "this work contract defines no claim, so omit \"required_claims\" entirely"
 	if defined := contractClaimIDs(input.Contract); len(defined) > 0 {
-		claims = "subset of: " + strings.Join(defined, ", ")
+		classes := make([]string, 0, len(defined))
+		for _, id := range defined {
+			classes = append(classes, fmt.Sprintf("%s [%s]", id, input.Contract.RequiredClaims[id].EvidenceClass))
+		}
+		claims = "claim ids and their evidence classes (class is metadata, not part of the id); choose a subset: " + strings.Join(classes, ", ")
 	}
 	contract := fmt.Sprintf(`%s%s
 For divergent material producers, propose an integrator agent stage with explicit
@@ -566,6 +570,8 @@ Rules for your answer, all of which the runtime enforces afterwards:
   work contract's own claims, so omitting them is safe; a "human_decision_gate"
   must name at least one claim, because nothing else states what the person is
   deciding;
+- an "assurance_gate" may not name a human_approval claim; that evidence can
+  only satisfy a "human_decision_gate";
 - dependencies must name stages in your own answer and must not form a cycle;
 - propose the SMALLEST decomposition that does the work: a stage nobody needs is
   a run somebody pays for;
