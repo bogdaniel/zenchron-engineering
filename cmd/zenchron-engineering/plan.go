@@ -350,6 +350,13 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 			return runtime.ExitInvalid, err
 		}
 	}
+	// A supervisor supplies under and uses its own digest. Only the local
+	// caller can disagree with the governing controller.
+	if under == nil {
+		if err := warnPlanConfiguration(composed.built.store, composed.built.config.Digest, os.Stderr); err != nil {
+			return runtime.ExitFailed, err
+		}
+	}
 	intent, err := composed.engine.CompilePlanIntent(ctx, issue)
 	if err != nil {
 		return runtime.ExitFailed, err
@@ -893,6 +900,11 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 	if err != nil {
 		return runtime.ExitInvalid, err
 	}
+	if verb == "approve" {
+		if err := warnPlanConfiguration(composed.built.store, composed.built.config.Digest, os.Stderr); err != nil {
+			return runtime.ExitFailed, err
+		}
+	}
 	decide := composed.service.Approve
 	if verb == "reject" {
 		decide = composed.service.Reject
@@ -909,6 +921,23 @@ func planDecide(flags autonomyFlags, overrides autonomyOverrides, planID, verb s
 		return runtime.ExitFailed, err
 	}
 	return runtime.ExitCompleted, nil
+}
+
+// warnPlanConfiguration reads authority without changing it or blocking a
+// mismatched proposal/approval. No authority means there is nothing to compare.
+func warnPlanConfiguration(store *runtime.SQLiteOperationStore, local runtime.ConfigDigest, stderr io.Writer) error {
+	authority, ok, err := store.CurrentControllerAuthority()
+	if err != nil {
+		return fmt.Errorf("read governing controller configuration: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	member, localShort, governingShort := runtime.ConfigDigestDifference(local, authority.Binding.Config)
+	if member != "" {
+		fmt.Fprintf(stderr, "warning: %s configuration differs (CLI %s, governing controller %s); the governing controller will hold this plan as configuration_changed: it was proposed under a different controller-effective configuration; it is not carried across that boundary. Run from the directory `serve` uses or restore the configuration.\n", member, localShort, governingShort)
+	}
+	return nil
 }
 
 // planList is the fleet view for plans.
