@@ -94,6 +94,30 @@ func TestIndependentReviewResolvesOntoADifferentVendorFamily(t *testing.T) {
 	}
 }
 
+func TestSecurityReviewerRequiresStructuredVerdicts(t *testing.T) {
+	plan := compilePlan(t, planInput(t, "security-sensitive.engineering-fact.json", nil))
+	claude, codex := claudeAgent(), codexAgent()
+	claude.StructuredVerdicts = false
+	codex.StructuredVerdicts = false
+	resolution, err := planning.Resolve(resolveInput(t, plan, claude, codex))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, block := range resolution.Blocked {
+		if block.StageID != "security-reviewer" {
+			continue
+		}
+		for _, candidate := range block.Explain.Considered {
+			for _, reason := range candidate.Reasons {
+				if strings.Contains(reason, "structured reviewer verdict") {
+					return
+				}
+			}
+		}
+	}
+	t.Fatalf("security-reviewer was not blocked without structured verdict support: %#v", resolution)
+}
+
 // With ONE eligible vendor and a vendor-family obligation, the stage BLOCKS.
 // The same vendor is never assigned silently and the block names what would
 // have to change.

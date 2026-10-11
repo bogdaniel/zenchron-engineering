@@ -3460,7 +3460,7 @@ type planStageContext struct {
 // checks rather than one because they fail differently: this one means the
 // channel was never opened, and that one means something tried to use it.
 func (p planStageContext) producesVerdict() bool {
-	return p.assignment != nil && p.assignment.Role == domain.RoleReviewer
+	return p.assignment != nil && p.assignment.Role.ProducesReviewVerdict()
 }
 
 // apply narrows the request to the stage the operator approved.

@@ -1673,7 +1673,7 @@ func (r PlanReconciler) stageAcceptance(plan domain.EngineeringPlan, stage domai
 	// answers "is this change acceptable". A reviewer that changed nothing has
 	// still done its job, and re-running the producer's own tests over the
 	// producer's own tree is not an independent answer to the review question.
-	if stage.Role == domain.RoleReviewer {
+	if stage.Role.ProducesReviewVerdict() {
 		return r.reviewAcceptance(plan, stage, projection)
 	}
 	events, err := r.Store.Events(run.ID)

@@ -99,6 +99,19 @@ func TestAnAdmittedVerdictIsBoundToTheRuntimesOwnCandidate(t *testing.T) {
 	}
 }
 
+func TestSecurityAndReleaseReviewerRolesCanAdmitTypedVerdicts(t *testing.T) {
+	for _, role := range []domain.EngineeringRole{domain.RoleSecurityReviewer, domain.RoleReleaseReviewer} {
+		t.Run(string(role), func(t *testing.T) {
+			fixture := newReviewerFixture()
+			fixture.stage.Role = role
+			fixture.assignment.Role = role
+			if _, err := fixture.admit(accepting()); err != nil {
+				t.Fatalf("typed verdict from %s was refused: %v", role, err)
+			}
+		})
+	}
+}
+
 // PROSE IS NOT A VERDICT. A reviewer that wrote nothing to the structured path
 // produced no result, and the stage stays unsettled rather than being guessed
 // at in either direction.

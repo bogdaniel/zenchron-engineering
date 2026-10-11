@@ -340,7 +340,7 @@ func AdmitReviewerResult(
 	// 2. The stage is a VERDICT-PRODUCING stage. An implementer that writes a
 	// perfectly formed result gets nothing: the role is what carries the
 	// authority, and printing matching JSON is not a way to acquire one.
-	if stage.Kind != domain.StageAgent || stage.Role != domain.RoleReviewer {
+	if stage.Kind != domain.StageAgent || !stage.Role.ProducesReviewVerdict() {
 		return refuse("stage role %q does not produce review verdicts", stage.Role)
 	}
 	// 3-4. The frozen assignment is THIS stage's, and the worker that produced

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -36,5 +37,21 @@ func TestReviewerReceivesOnlyExactHeadRuntimeAssurance(t *testing.T) {
 	}
 	if len(stale) != 0 {
 		t.Fatalf("assurance for a different head reached the reviewer: %#v", stale)
+	}
+}
+
+func TestRuntimeOwnedAssuranceReachesReviewerPrompt(t *testing.T) {
+	prompt := agentPrompt(ExecutionRequest{TrustedInstructions: "trusted", Upstream: []UpstreamContext{{
+		StageID: "implementation", RunID: "run-impl", Commit: "c0ffee", Tree: "7ree",
+		Assurance: []AssuranceContext{{ProviderID: "go", VerifierDefinition: "go-test", Passed: true,
+			Commit: "c0ffee", Tree: "7ree", BundleID: "bundle-go", BundleRevision: "1"}},
+	}}})
+	for _, evidence := range []string{
+		"Runtime-owned assurance for stage implementation: provider=go verifier=go-test passed=true",
+		"commit=c0ffee tree=7ree bundle=bundle-go/1",
+	} {
+		if !strings.Contains(prompt, evidence) {
+			t.Fatalf("runtime-owned assurance evidence %q did not reach the reviewer:\n%s", evidence, prompt)
+		}
 	}
 }
