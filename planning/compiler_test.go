@@ -86,6 +86,23 @@ func TestPublicationDecisionGateRequiresAuthorityKernelHumanClaim(t *testing.T) 
 	}
 }
 
+func TestDefaultAssuranceGateExcludesHumanApprovalClaims(t *testing.T) {
+	input := planInput(t, "trivial.engineering-fact.json", nil)
+	input.Contract.RequiredClaims["claim-publication-approval"] = domain.RequiredClaim{
+		EvidenceClass: "human_approval", IndependentFromChangeProducer: true,
+	}
+	plan := compilePlan(t, input)
+	gate, ok := stageOfKind(plan, domain.StageAssuranceGate)
+	if !ok || len(gate.RequiredClaims) != 2 {
+		t.Fatalf("default assurance claims = %#v, want the two automated claims", gate.RequiredClaims)
+	}
+	for _, claim := range gate.RequiredClaims {
+		if claim == "claim-publication-approval" {
+			t.Fatalf("default assurance gate included a human approval claim: %#v", gate.RequiredClaims)
+		}
+	}
+}
+
 // A security-sensitive change gains the obligations POLICY states, not
 // obligations the planner invented.
 func TestSecuritySensitiveChangeGainsPolicyObligations(t *testing.T) {

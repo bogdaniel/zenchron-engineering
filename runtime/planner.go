@@ -488,6 +488,9 @@ func plannerOutputContract(input PlannerInput) string {
 			if stage.Action != nil {
 				line += fmt.Sprintf(", action %s:%s", stage.Action.Type, stage.Action.Target)
 			}
+			if len(stage.RequiredClaims) > 0 {
+				line += ", claims " + strings.Join(stage.RequiredClaims, ", ")
+			}
 			lines = append(lines, line+")")
 		}
 		process = fmt.Sprintf(`
