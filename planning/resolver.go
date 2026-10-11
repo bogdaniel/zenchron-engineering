@@ -317,6 +317,7 @@ func (input ResolveInput) resolveStage(stage domain.PlanStage, profiles []domain
 		Stage:         stage,
 		Role:          stage.Role,
 		PlanObjective: input.Plan.Objective,
+		PlanStages:    input.Plan.Stages,
 		Contract:      input.Contract,
 		Model:         input.Model,
 		Facts:         input.Facts,

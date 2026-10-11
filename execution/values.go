@@ -30,6 +30,21 @@ type UpstreamContext struct {
 	// Truncated reports that the diff was cut to the runtime's bound, so a
 	// reviewer knows it is reading part of a change rather than all of it.
 	Truncated bool
+	// Assurance is the runtime's latest exact-head verifier observation, not
+	// producer-authored evidence or a substitute for independent review.
+	Assurance []AssuranceContext
+}
+
+// AssuranceContext is one runtime-owned verification observation for an
+// upstream candidate.
+type AssuranceContext struct {
+	ProviderID         string
+	VerifierDefinition string
+	Passed             bool
+	Commit             string
+	Tree               string
+	BundleID           string
+	BundleRevision     string
 }
 
 // UpstreamHandoff is the producer's own admitted report, as the consumer sees

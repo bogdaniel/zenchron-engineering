@@ -36,6 +36,7 @@ type ContextInput struct {
 	Stage         domain.PlanStage
 	Role          domain.EngineeringRole
 	PlanObjective string
+	PlanStages    []domain.PlanStage
 	Contract      domain.EngineeringWorkContract
 	// Model is ProjectModel v1, consumed exactly as it is.
 	Model domain.ProjectModel
@@ -150,6 +151,14 @@ func CompileContext(input ContextInput) (domain.ContextPack, error) {
 		input.Role == domain.RoleReleaseReviewer
 	if isReviewer && strings.TrimSpace(input.PlanObjective) != "" {
 		objective = "Plan objective:\n" + strings.TrimSpace(input.PlanObjective) + "\n\nReview objective:\n" + objective
+	}
+	if isReviewer && len(input.PlanStages) > 0 {
+		var stages []string
+		for _, stage := range input.PlanStages {
+			stages = append(stages, fmt.Sprintf("%s (%s, role=%s, execution=%s, depends_on=%s): %s",
+				stage.ID, stage.Kind, stage.Role, stage.ExecutionKind, strings.Join(stage.DependsOn, ","), stage.Objective))
+		}
+		objective += "\n\nApproved plan stages:\n" + strings.Join(stages, "\n")
 	}
 	if objective == "" {
 		return refuse("neither the stage nor the contract states an objective, so the worker would be asked for nothing in particular")

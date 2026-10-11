@@ -3553,9 +3553,37 @@ func (r *EngineeringRuntime) upstreamOutputs(assignment domain.AgentAssignment) 
 		if err != nil {
 			return nil, err
 		}
+		context.Assurance, err = r.upstreamAssurance(upstream)
+		if err != nil {
+			return nil, err
+		}
 		outputs = append(outputs, context)
 	}
 	return outputs, nil
+}
+
+func (r *EngineeringRuntime) upstreamAssurance(upstream domain.UpstreamOutput) ([]AssuranceContext, error) {
+	if upstream.RunID == "" || upstream.Candidate == "" || upstream.Tree == "" {
+		return nil, nil
+	}
+	events, err := r.deps.Store.Events(upstream.RunID)
+	if err != nil {
+		return nil, err
+	}
+	projection, err := Project(events)
+	if err != nil {
+		return nil, err
+	}
+	observation := projection.Assurance
+	if observation == nil || observation.Stale || observation.Commit != upstream.Candidate || observation.Tree != upstream.Tree {
+		return nil, nil
+	}
+	result := AssuranceContext{
+		ProviderID: observation.ProviderID, VerifierDefinition: observation.VerifierDefinition,
+		Passed: observation.Passed, Commit: observation.Commit, Tree: observation.Tree,
+		BundleID: observation.Bundle.ID, BundleRevision: observation.Bundle.Revision,
+	}
+	return []AssuranceContext{result}, nil
 }
 
 // withUpstreamDiff fills in the change an upstream output actually contains.
