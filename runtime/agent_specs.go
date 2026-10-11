@@ -114,7 +114,9 @@ const claudeUnreachableEnvelope = "can't reach the api server — check your int
 // the candidate working tree's AGENTS.md as instructions.
 var codexSpec = cliAgentSpec{
 	Probes: []cliHelpProbe{
-		{Args: []string{"exec", "--help"}, Required: []string{"--sandbox", "workspace-write", "--ignore-user-config", "--cd", "--config"}},
+		{Args: []string{"exec", "--help"}, Required: []string{
+			"--sandbox", "workspace-write", "--ignore-user-config", "--cd", "--config", "--output-last-message",
+		}},
 		{Args: []string{"--help"}, Required: []string{"--ask-for-approval"}},
 	},
 	VersionArgs:                     []string{"--version"},
@@ -181,6 +183,9 @@ var codexSpec = cliAgentSpec{
 				roots, _ := json.Marshal(writable)
 				args = append(args, "-c", "sandbox_workspace_write.writable_roots="+string(roots))
 			}
+		}
+		if i.ReviewerResultPath != "" {
+			args = append(args, "--output-last-message", i.ReviewerResultPath)
 		}
 		args = append(args, "-c", "project_doc_max_bytes=0")
 		if i.Model() != "" {
