@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
@@ -63,6 +64,22 @@ func TestObjectiveGraphRequiresApprovalAndRetainsFrozenStageBindings(t *testing.
 	}
 	if !objectives["Implement the backend half."] || !objectives["Implement the frontend half."] || len(objectives) != 2 {
 		t.Fatalf("workers did not receive distinct responsibilities: %+v", objectives)
+	}
+}
+
+func TestObjectiveGraphProjectsVerboseObjectivesToBoundedStageReferences(t *testing.T) {
+	plan := domain.EngineeringPlan{
+		ID: "plan-verbose", Revision: 1, Digest: strings.Repeat("a", 64),
+		Subject: domain.Subject{Repository: "acme/repo"},
+		Stages: []domain.PlanStage{{ID: "implement", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective: strings.Repeat("detailed objective ", 200), InvocationMode: domain.InvocationModeMutating}},
+	}
+	graph, err := compileObjectiveGraph(plan, 7, "codex", time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := graph.Units[0].Purpose, "Execute approved plan stage implement"; got != want {
+		t.Fatalf("graph purpose = %q, want bounded stage reference %q", got, want)
 	}
 }
 

@@ -74,6 +74,15 @@ func objectiveCandidateStage(stage domain.PlanStage) bool {
 	return stage.Kind == domain.StageAgent && stage.InvocationMode != domain.InvocationModeNonMutatingPlanning && planning.ProducesMaterialChange(stage.Role)
 }
 
+func hasObjectiveCandidate(plan domain.EngineeringPlan) bool {
+	for _, stage := range plan.Stages {
+		if objectiveCandidateStage(stage) {
+			return true
+		}
+	}
+	return false
+}
+
 func compileObjectiveGraph(plan domain.EngineeringPlan, issue int, agent string, at time.Time) (orchestration.WorkGraph, error) {
 	name := "objective-" + plan.ID
 	id, err := orchestration.WorkGraphID(plan.Subject.Repository, agent, name)
@@ -87,7 +96,8 @@ func compileObjectiveGraph(plan domain.EngineeringPlan, issue int, agent string,
 		if !objectiveCandidateStage(stage) {
 			continue
 		}
-		graph.Units = append(graph.Units, orchestration.WorkUnit{ID: stage.ID, Purpose: stage.Objective, Role: stage.Role, Issue: issue,
+		// The plan owns the full objective; the graph stores only its bounded stage reference.
+		graph.Units = append(graph.Units, orchestration.WorkUnit{ID: stage.ID, Purpose: "Execute approved plan stage " + stage.ID, Role: stage.Role, Issue: issue,
 			DependsOn: objectiveDependencies(plan, stage), ExecutionKind: orchestration.WorkUnitExecutionKind(stage.ExecutionKind)})
 	}
 	if err := graph.Validate(); err != nil {

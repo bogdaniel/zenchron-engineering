@@ -292,6 +292,9 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 			Reasoning: input.Reasoning, Previous: previous, RatchetBaseline: ratchetBaseline, Consumed: consumed,
 		})
 	}
+	if compileErr == nil && input.Issue > 0 && !hasObjectiveCandidate(plan) {
+		compileErr = errors.New("an issue objective plan requires at least one material-producing agent stage")
+	}
 	if compileErr != nil {
 		// The refusal is durable in BOTH shapes it can take.
 		//
