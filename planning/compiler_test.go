@@ -45,6 +45,35 @@ func TestTrivialChangeCompilesWithoutCeremony(t *testing.T) {
 	}
 }
 
+func TestPublicationDecisionGateRequiresAuthorityKernelHumanClaim(t *testing.T) {
+	action := domain.Action{Type: "git.pull_request.create", Target: "main"}
+	contract := domain.EngineeringWorkContract{
+		ID: "contract", Revision: "1", Subject: domain.Subject{Repository: "acme/repo", Revision: "abc"},
+		RequiredClaims: map[string]domain.RequiredClaim{
+			"validation": {EvidenceClass: "automated_test"},
+			"approval":   {EvidenceClass: "human_approval"},
+		},
+		AuthorityConditions: []domain.AuthorityCondition{{Action: action, RequiredClaims: []string{"validation", "approval"}}},
+	}
+	plan := domain.EngineeringPlan{
+		ID: "plan", Revision: 1, Objective: "publish candidate",
+		Subject:    contract.Subject,
+		Provenance: domain.PlanProvenance{Contract: domain.ObjectRevision{ID: "contract", Revision: "1"}},
+		Stages:     []domain.PlanStage{{ID: "publish-approval", Kind: domain.StageHumanDecisionGate, Action: &action, RequiredClaims: []string{"validation"}}},
+	}
+	if err := planning.Validate(plan, planning.ValidationInput{Contract: contract}); err == nil || !strings.Contains(err.Error(), "evidence class human_approval") {
+		t.Fatalf("automated validation incorrectly backed a publication decision: %v", err)
+	}
+	plan.Stages[0].RequiredClaims = []string{"approval"}
+	if err := planning.Validate(plan, planning.ValidationInput{Contract: contract}); err != nil {
+		t.Fatalf("contract-backed human publication decision was refused: %v", err)
+	}
+	contract.AuthorityConditions[0].RequiredClaims = []string{"validation"}
+	if err := planning.Validate(plan, planning.ValidationInput{Contract: contract}); err == nil || !strings.Contains(err.Error(), "not required by the work contract") {
+		t.Fatalf("human gate absent from action authority condition was accepted: %v", err)
+	}
+}
+
 // A security-sensitive change gains the obligations POLICY states, not
 // obligations the planner invented.
 func TestSecuritySensitiveChangeGainsPolicyObligations(t *testing.T) {

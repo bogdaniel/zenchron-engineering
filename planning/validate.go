@@ -141,6 +141,21 @@ func Validate(plan domain.EngineeringPlan, input ValidationInput) error {
 				add("stage %q is a %s referencing claim %q, which the work contract does not define", stage.ID, stage.Kind, claim)
 			}
 		}
+		if stage.Kind == domain.StageHumanDecisionGate && stage.Action != nil && publicationAction(*stage.Action) {
+			for _, claimID := range stage.RequiredClaims {
+				claim := input.Contract.RequiredClaims[claimID]
+				if claim.EvidenceClass != "human_approval" {
+					add("publication decision stage %q requires claim %q with evidence class human_approval", stage.ID, claimID)
+					continue
+				}
+				if !authorityConditionRequires(input.Contract, *stage.Action, claimID) {
+					add("publication decision stage %q claim %q is not required by the work contract for %s:%s", stage.ID, claimID, stage.Action.Type, stage.Action.Target)
+				}
+			}
+			if len(stage.RequiredClaims) == 0 {
+				add("publication decision stage %q must reference a contract human_approval claim", stage.ID)
+			}
+		}
 	}
 	if input.Contract.PlanRequirements != nil {
 		reasons = append(reasons, unmetObligations(plan, *input.Contract.PlanRequirements)...)
@@ -156,6 +171,24 @@ func Validate(plan domain.EngineeringPlan, input ValidationInput) error {
 		return &ValidationError{PlanID: plan.ID, Reasons: reasons}
 	}
 	return nil
+}
+
+func publicationAction(action domain.Action) bool {
+	return action.Type == "git.pull_request.create" || action.Type == "git.pull_request.update" || action.Type == "git.push"
+}
+
+func authorityConditionRequires(contract domain.EngineeringWorkContract, action domain.Action, claimID string) bool {
+	for _, condition := range contract.AuthorityConditions {
+		if condition.Action != action {
+			continue
+		}
+		for _, required := range condition.RequiredClaims {
+			if required == claimID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func planStageViews(plan domain.EngineeringPlan) []stageView {
