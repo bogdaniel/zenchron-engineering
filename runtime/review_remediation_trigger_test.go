@@ -155,6 +155,21 @@ func TestReviewOfGraphProducerWaitsForItsIntegrationCandidate(t *testing.T) {
 	if _, _, err := engine.ReconcileReviewRemediationForRun(context.Background(), f.runID, failingNeedsReviewPort{}, "reviewer-1"); err != nil {
 		t.Fatalf("producer PR was reviewed before integration: %v", err)
 	}
+
+	approved := f.seedDecision(f.headSHA, "reviewer-approve", review.VerdictApprove)
+	outcome, admission, err := engine.ReconcileReviewRemediationForRun(context.Background(), f.runID, noNewReviewPort{ReviewPort: f.port()}, "reviewer-2")
+	if err != nil || outcome == nil || outcome.Decision.ID != approved.ID || admission != nil {
+		t.Fatalf("deferred approval outcome/admission = %+v / %+v / %v, want stored approval without remediation", outcome, admission, err)
+	}
+	f.clock.at = f.clock.at.Add(time.Minute)
+	decision := f.seedDecision(f.headSHA, "reviewer-1", review.VerdictRequestChanges, blockingFinding("fix before integration"))
+	outcome, admission, err = engine.ReconcileReviewRemediationForRun(context.Background(), f.runID, noNewReviewPort{ReviewPort: f.port()}, "reviewer-2")
+	if err != nil {
+		t.Fatalf("admit the stored blocking decision while review is deferred: %v", err)
+	}
+	if outcome == nil || outcome.Decision.ID != decision.ID || admission == nil || admission.DecisionID != decision.ID {
+		t.Fatalf("deferred outcome/admission = %+v / %+v, want the stored blocking decision %s", outcome, admission, decision.ID)
+	}
 }
 
 // failingNeedsReviewPort is stubReviewPort with NeedsReview returning a
@@ -165,6 +180,16 @@ type failingNeedsReviewPort struct{ stubReviewPort }
 
 func (failingNeedsReviewPort) NeedsReview(context.Context, GitHubRepo, int) (bool, error) {
 	return false, errors.New("simulated reviewer failure")
+}
+
+type noNewReviewPort struct{ ReviewPort }
+
+func (noNewReviewPort) NeedsReview(context.Context, GitHubRepo, int) (bool, error) {
+	return false, errors.New("deferred review must not start a new review")
+}
+
+func (noNewReviewPort) RequestReview(context.Context, GitHubRepo, int, string) (ReviewOutcome, error) {
+	return ReviewOutcome{}, errors.New("deferred review must not request another review")
 }
 
 // TestReconcileReviewRemediationForRunSurfacesBothTheReviewerAndReleaseFailure

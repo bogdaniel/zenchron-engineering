@@ -87,13 +87,26 @@ func (r *EngineeringRuntime) ReconcileReviewRemediationForRun(ctx context.Contex
 		return nil, nil, err
 	}
 	if deferred {
-		_, found, err := r.deps.Store.LatestReviewDecision(state.run.Repository, state.projection.PullRequest.Number)
+		decision, found, err := r.deps.Store.LatestReviewDecision(state.run.Repository, state.projection.PullRequest.Number)
 		if err != nil {
 			return nil, nil, err
 		}
 		if !found {
 			return nil, nil, nil
 		}
+		outcome := ReviewOutcome{Decision: decision}
+		if decision.Verdict != review.VerdictRequestChanges {
+			return &outcome, nil, nil
+		}
+		repo, err := parseGitHubRepo(state.run.Repository)
+		if err != nil {
+			return nil, nil, err
+		}
+		admitted, _, err := r.AdmitReviewRemediation(ctx, port, repo, state.projection.PullRequest.Number)
+		if err != nil {
+			return &outcome, nil, err
+		}
+		return &outcome, &admitted, nil
 	}
 	repo, err := parseGitHubRepo(state.run.Repository)
 	if err != nil {
