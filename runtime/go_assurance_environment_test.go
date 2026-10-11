@@ -27,7 +27,7 @@ func TestGoAssuranceUsesIsolatedGitAndExecutableTestScratch(t *testing.T) {
 		commands = append(commands, strings.Join(args, " "))
 	}
 	text := strings.Join(commands, "\n")
-	for _, want := range []string{"TMPDIR=" + sandboxBuildDir, "git init --quiet; git add --force --all", "/candidate/.git:rw,nosuid,nodev,noexec", "src=" + dir + ",dst=/candidate,readonly", "--network none", "go vet ./...; go test -timeout 15m ./..."} {
+	for _, want := range []string{"TMPDIR=" + sandboxBuildDir, "git init --quiet; git add --force --all", "/candidate/.git:rw,nosuid,nodev,noexec", "src=" + dir + ",dst=/candidate,readonly", "--network none", "go vet ./...; go test -timeout 1h ./..."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("assurance environment lacks %q: %s", want, text)
 		}
