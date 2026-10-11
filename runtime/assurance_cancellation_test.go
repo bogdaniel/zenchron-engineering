@@ -30,8 +30,9 @@ type scriptedDocker struct {
 	// alternate, so verification is every even one). A positive code is the
 	// workload's own exit, which Docker records and `wait` reports; a negative
 	// one is a start that failed before any workload ran.
-	startExits map[int]int
-	exited     int
+	startExits   map[int]int
+	startOutputs map[int][]byte
+	exited       int
 }
 
 func (d *scriptedDocker) LookPath(string) error { return nil }
@@ -47,8 +48,11 @@ func (d *scriptedDocker) Output(ctx context.Context, _ string, args []string, _ 
 	verb := strings.Fields(joined)[0]
 	d.seen[verb]++
 	code := 0
+	var output []byte
+	hasOutput := false
 	if verb == "start" {
 		code = d.startExits[d.seen[verb]]
+		output, hasOutput = d.startOutputs[d.seen[verb]]
 	}
 	block := d.blockOn != "" && strings.HasPrefix(joined, d.blockOn) && d.seen[verb] == d.blockNth
 	if block {
@@ -71,6 +75,8 @@ func (d *scriptedDocker) Output(ctx context.Context, _ string, args []string, _ 
 		d.exited = code
 		d.mu.Unlock()
 		return CommandOutput{ExitCode: code, Stdout: []byte("--- FAIL: TestCandidate\nFAIL\n")}, fmt.Errorf("exit status %d", code)
+	case verb == "start" && hasOutput:
+		return CommandOutput{Stdout: output}, nil
 	case strings.HasPrefix(joined, "inspect") && d.exitedCode() != 0:
 		return CommandOutput{Stdout: []byte("false\n")}, nil
 	case verb == "wait" && d.exitedCode() != 0:
@@ -241,6 +247,9 @@ func TestAShutdownDuringAssuranceIsResumedNotStranded(t *testing.T) {
 			ctx, shutdown := context.WithCancel(context.Background())
 			defer shutdown()
 			docker := &scriptedDocker{blockOn: phase.on, blockNth: phase.nth, onBlock: shutdown}
+			if phaseName == "verification" {
+				docker.startOutputs = map[int][]byte{4: []byte("recovered assurance output\n")}
+			}
 			f := goModFixture(t, docker)
 			runID := f.start()
 			outcome := reconcileUntilBlocked(t, f, ctx, runID, docker)
@@ -259,6 +268,21 @@ func TestAShutdownDuringAssuranceIsResumedNotStranded(t *testing.T) {
 			}
 			if docker.count("start") <= starts || !f.state(runID).satisfied(OpAssuranceGo, key) {
 				t.Fatalf("assurance did not run again after the restart (starts %d -> %d)", starts, docker.count("start"))
+			}
+			if phaseName == "verification" {
+				state := f.state(runID)
+				for attempt, want := range map[int]string{1: "", 2: "recovered assurance output\n"} {
+					ref, err := attemptTranscriptPrefix(baselineGoProviderID, AssuranceRequest{
+						RunID: runID, Commit: state.projection.CandidateRevision, Attempt: attempt,
+					}.AttemptRef())
+					if err != nil {
+						t.Fatal(err)
+					}
+					body, err := os.ReadFile(filepath.Join(f.stateDir, "artifacts", ref+".raw.log"))
+					if err != nil || string(body) != want {
+						t.Fatalf("assurance attempt %d transcript = %q, %v; want %q", attempt, body, err, want)
+					}
+				}
 			}
 		})
 	}
