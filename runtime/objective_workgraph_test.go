@@ -114,6 +114,14 @@ func TestObjectiveStagesDeferPublicationUntilDownstreamReviewAndGatesFinish(t *t
 	if err != nil || request != nil {
 		t.Fatalf("integration exposed publication authority before independent review: %#v, %v", request, err)
 	}
+	state.projection.AuthorityDecisions = map[string]AuthorityEvaluation{
+		PublicationActionType + "\x00main": {AuthorityEvaluatedPayload: AuthorityEvaluatedPayload{
+			Action: domain.Action{Type: PublicationActionType, Target: "main"}, Status: domain.AuthorityAwaitingAuthority,
+		}},
+	}
+	if _, waiting := state.unansweredPublicationDecision(); waiting {
+		t.Fatal("an earlier publication decision kept an intermediate integration run awaiting authority")
+	}
 	if _, wanted := bindAuthorityEvaluate(state); wanted || state.authorizedForPublication() {
 		t.Fatal("integration can obtain publication authority before downstream plan gates finish")
 	}

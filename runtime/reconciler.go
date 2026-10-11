@@ -809,6 +809,9 @@ func (s *runState) publicationDecision() (AuthorityEvaluatedPayload, bool) {
 // still settles the run as waiting, and a rejection still settles it as
 // blocked. Both terminate.
 func (s *runState) unansweredPublicationDecision() (AuthorityEvaluatedPayload, bool) {
+	if s.publicationDeferred {
+		return AuthorityEvaluatedPayload{}, false
+	}
 	decision, ok := s.decidedPublication()
 	if !ok {
 		return AuthorityEvaluatedPayload{}, false
