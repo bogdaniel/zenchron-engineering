@@ -149,11 +149,37 @@ func TestObjectiveStagesDeferPublicationUntilDownstreamReviewAndGatesFinish(t *t
 		PlanGateSatisfiedPayload{StageID: "other-human-decision", Kind: string(domain.StageHumanDecisionGate), HumanEvidenceID: "human-decision"}); err != nil {
 		t.Fatal(err)
 	}
+	for _, stageID := range []string{"integrate", "review"} {
+		if err := appendPlanEvent(fleet.store, fleet.clock.Now(), plan.ID, EventPlanStageSettled,
+			PlanStageSettledPayload{StageID: stageID, Outcome: string(Completed)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := appendPlanEvent(fleet.store, fleet.clock.Now(), plan.ID, EventPlanGateSatisfied,
+		PlanGateSatisfiedPayload{StageID: "approve", Kind: string(domain.StageHumanDecisionGate), HumanEvidenceID: "publication-approval"}); err != nil {
+		t.Fatal(err)
+	}
 	deferred, err = fleet.runtime.objectivePublicationDeferred(&orchestration.BatchOrigin{
 		GraphID: graph.ID, UnitID: "integrate", ExecutionKind: orchestration.ExecutionKindIntegrationCompose,
 	})
 	if err != nil || deferred {
-		t.Fatalf("reviewed and assured integration candidate remained publication-deferred while only human approval was pending: %t, %v", deferred, err)
+		t.Fatalf("completed integration candidate remained publication-deferred: %t, %v", deferred, err)
+	}
+	for _, producer := range []string{"producer-a", "producer-b"} {
+		deferred, err := fleet.runtime.objectivePublicationDeferred(&orchestration.BatchOrigin{
+			GraphID: graph.ID, UnitID: producer, ExecutionKind: orchestration.ExecutionKindProvider,
+		})
+		if err != nil || !deferred {
+			t.Fatalf("completed descendants made producer %s publishable: deferred=%t err=%v", producer, deferred, err)
+		}
+		state := &runState{publicationDeferred: deferred}
+		request, err := fleet.runtime.authorityRequest(state)
+		if err != nil || request != nil {
+			t.Fatalf("completed producer %s exposed an authority request: %#v, %v", producer, request, err)
+		}
+		if _, wanted := bindAuthorityEvaluate(state); wanted || state.authorizedForPublication() {
+			t.Fatalf("completed producer %s can obtain publication authority", producer)
+		}
 	}
 }
 

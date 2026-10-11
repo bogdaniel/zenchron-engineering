@@ -1043,17 +1043,8 @@ func TestAHumanDecisionGateIsNotSatisfiedByMachineAuthority(t *testing.T) {
 
 	// Recorded HUMAN authority does prove it, and the satisfaction names the
 	// person's evidence.
-	if _, err := fixture.store.AppendEvent(EngineeringEvent{
-		SchemaVersion: SchemaVersion, ID: "human-1", RunID: runID,
-		Type: EventHumanAuthorityRecorded, OccurredAt: time.Unix(21, 0).UTC(),
-		Payload: mustPayload(t, humanAuthorityFixture(map[string]any{
-			// What the person was actually asked, which is what the gate's
-			// claims are checked against.
-			"requires": []any{"human-approval"},
-		})),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	recordCandidate(t, fixture, runID, strings.Repeat("a", 40))
+	appendCurrentHumanDecision(t, fixture, runID, "human-1", "approve", []string{"human-approval"})
 	payload, satisfied, err := fixture.reconciler.gateSatisfaction(stage, plan, snapshot)
 	if err != nil || !satisfied {
 		t.Fatalf("recorded human authority did not satisfy the gate: satisfied=%v err=%v", satisfied, err)
@@ -1076,15 +1067,8 @@ func TestAHumanDecisionGateIsNotSatisfiedByMachineAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherRun := otherSnapshot.Stages["implementation"].RunID
-	if _, err := elsewhere.store.AppendEvent(EngineeringEvent{
-		SchemaVersion: SchemaVersion, ID: "human-other", RunID: otherRun,
-		Type: EventHumanAuthorityRecorded, OccurredAt: time.Unix(23, 0).UTC(),
-		Payload: mustPayload(t, humanAuthorityFixture(map[string]any{
-			"evidence_id": "ev-3", "requires": []any{"publication-authorized"},
-		})),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	recordCandidate(t, elsewhere, otherRun, strings.Repeat("b", 40))
+	appendCurrentHumanDecision(t, elsewhere, otherRun, "human-other", "approve", []string{"publication-authorized"})
 	otherPlan, _, err := elsewhere.store.PlanRevision(elsewhere.plan.ID, elsewhere.plan.Revision)
 	if err != nil {
 		t.Fatal(err)
@@ -1100,15 +1084,7 @@ func TestAHumanDecisionGateIsNotSatisfiedByMachineAuthority(t *testing.T) {
 	// And the NEWEST decision governs. A person who approved and then rejected
 	// has rejected; walking past the rejection to find the older approval would
 	// satisfy the gate with a decision that was reversed.
-	if _, err := fixture.store.AppendEvent(EngineeringEvent{
-		SchemaVersion: SchemaVersion, ID: "human-2", RunID: runID,
-		Type: EventHumanAuthorityRecorded, OccurredAt: time.Unix(22, 0).UTC(),
-		Payload: mustPayload(t, humanAuthorityFixture(map[string]any{
-			"evidence_id": "ev-2", "decision": "reject", "requires": []any{"human-approval"},
-		})),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	appendCurrentHumanDecision(t, fixture, runID, "human-2", "reject", []string{"human-approval"})
 	if _, satisfied, err := fixture.reconciler.gateSatisfaction(stage, plan, snapshot); err != nil || satisfied {
 		t.Fatalf("a reversed approval still satisfied the gate: satisfied=%v err=%v", satisfied, err)
 	}
@@ -1952,16 +1928,7 @@ func TestAStaleHumanApprovalIsNotCarriedOntoANewCandidate(t *testing.T) {
 
 	// Candidate A, approved by a person, and the gate is satisfied.
 	recordCandidate(t, fixture, runID, "aaaaaaaaaaaa")
-	if _, err := fixture.store.AppendEvent(EngineeringEvent{
-		SchemaVersion: SchemaVersion, ID: "human-a", RunID: runID,
-		Type: EventHumanAuthorityRecorded, OccurredAt: time.Unix(30, 0).UTC(),
-		Payload: mustPayload(t, humanAuthorityFixture(map[string]any{
-			"evidence_id": "ev-a", "requires": []any{"human-approval"},
-			"candidate": map[string]any{"branch": "candidate", "revision": "aaaaaaaaaaaa", "tree": "aaaaaaaaaaaa"},
-		})),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	appendCurrentHumanDecision(t, fixture, runID, "human-a", "approve", []string{"human-approval"})
 	plan, _, err := fixture.store.PlanRevision(fixture.plan.ID, fixture.plan.Revision)
 	if err != nil {
 		t.Fatal(err)
