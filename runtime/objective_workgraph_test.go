@@ -125,6 +125,23 @@ func TestObjectiveStagesDeferPublicationUntilDownstreamReviewAndGatesFinish(t *t
 	if _, wanted := bindAuthorityEvaluate(state); wanted || state.authorizedForPublication() {
 		t.Fatal("integration can obtain publication authority before downstream plan gates finish")
 	}
+	for _, event := range []struct {
+		typ     string
+		payload any
+	}{
+		{EventPlanStageSettled, PlanStageSettledPayload{StageID: "review", Outcome: string(Completed)}},
+		{EventPlanGateSatisfied, PlanGateSatisfiedPayload{StageID: "verify", Kind: string(domain.StageAssuranceGate), Claims: []string{"claim-validation"}, Evidence: Ref{ID: "evidence", Revision: strings.Repeat("a", 64)}}},
+	} {
+		if err := appendPlanEvent(fleet.store, fleet.clock.Now(), plan.ID, event.typ, event.payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deferred, err = fleet.runtime.objectivePublicationDeferred(&orchestration.BatchOrigin{
+		GraphID: graph.ID, UnitID: "integrate", ExecutionKind: orchestration.ExecutionKindIntegrationCompose,
+	})
+	if err != nil || deferred {
+		t.Fatalf("reviewed and assured integration candidate remained publication-deferred while only human approval was pending: %t, %v", deferred, err)
+	}
 }
 
 func TestObjectiveGraphProjectsVerboseObjectivesToBoundedStageReferences(t *testing.T) {

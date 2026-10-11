@@ -3,6 +3,7 @@ package runtime
 import (
 	"fmt"
 
+	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
@@ -41,8 +42,48 @@ func (r *EngineeringRuntime) objectivePublicationDeferred(origin *orchestration.
 	if !stageFound {
 		return false, fmt.Errorf("approved plan %s has no objective unit %s", graph.ObjectivePlan.ID, origin.UnitID)
 	}
-	// Any path to a later stage has a first direct edge from this stage.
-	return hasDownstreamStage, nil
+	if !hasDownstreamStage {
+		return false, nil
+	}
+	snapshot, err := r.deps.Store.ReplayPlan(plan.ID)
+	if err != nil {
+		return false, err
+	}
+	children := make(map[string][]string, len(plan.Stages))
+	for _, stage := range plan.Stages {
+		for _, dependency := range stage.DependsOn {
+			children[dependency] = append(children[dependency], stage.ID)
+		}
+	}
+	descendants := make(map[string]bool, len(plan.Stages))
+	frontier := []string{origin.UnitID}
+	for len(frontier) > 0 {
+		parent := frontier[0]
+		frontier = frontier[1:]
+		for _, id := range children[parent] {
+			if descendants[id] {
+				continue
+			}
+			descendants[id] = true
+			frontier = append(frontier, id)
+		}
+	}
+	for _, stage := range plan.Stages {
+		if !descendants[stage.ID] {
+			continue
+		}
+		if stage.Kind == domain.StageAgent && stage.InvocationMode == domain.InvocationModeMutating && !stage.Role.ProducesReviewVerdict() {
+			return true, nil
+		}
+		if stage.Kind == domain.StageHumanDecisionGate {
+			continue
+		}
+		state := snapshot.Stages[stage.ID].State
+		if state != PlanStageCompleted && state != PlanStageSatisfied {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // A read transaction prevents mixed reads, but a process can crash between
