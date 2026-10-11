@@ -52,11 +52,16 @@ func (s *runState) producerStageFinished() bool {
 		switch event.Type {
 		case EventRunWaiting:
 			finished = payloadReason(event.Payload) == ReasonGoalStateReached
+		case EventFeedbackObserved:
+			var feedback FeedbackObservedPayload
+			if decodeJSON(event.Payload, &feedback) != nil || feedback.Admitted {
+				finished = false
+			}
 		case EventRunCompleted, EventRunFailed, EventRunCancelled,
 			EventCandidateChanged, EventCandidateCommitted, EventCandidateCheckpointed,
 			EventCandidateBaseIntegrated, EventExecutionCompleted, EventContractCompiled,
 			EventReassessmentCompleted, EventAssuranceObserved, EventSemanticAssuranceObserved,
-			EventAuthorityEvaluated, EventFeedbackObserved, EventStageReviewBlocked,
+			EventAuthorityEvaluated, EventStageReviewBlocked,
 			EventSourceIntentChanged, EventSourceOptInRemoved, EventSourceOptInRestored,
 			EventCandidateExternalChanged, EventControllerSuccessionAdmitted, EventHumanAuthorityRecorded:
 			finished = false
