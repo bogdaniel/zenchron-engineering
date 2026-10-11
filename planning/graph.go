@@ -14,14 +14,16 @@ import (
 	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // stageView is the part of a stage the graph laws care about. It deliberately
 // carries no budget, objective or rationale: those are not graph properties.
 type stageView struct {
-	ID   string
-	Kind domain.StageKind
-	Role domain.EngineeringRole
+	ID            string
+	Kind          domain.StageKind
+	Role          domain.EngineeringRole
+	ExecutionKind string
 	// SubstitutesRole is the role a human decision gate stands in for.
 	SubstitutesRole      domain.EngineeringRole
 	DependsOn            []string
@@ -62,6 +64,9 @@ func validateStageGraph(stages []stageView) error {
 }
 
 func validateStage(stage stageView, byID map[string]stageView) error {
+	if err := validateExecutionKind(stage); err != nil {
+		return err
+	}
 	switch stage.Kind {
 	case domain.StageAgent:
 		if !domain.KnownRole(stage.Role) {
@@ -253,4 +258,21 @@ func dimensionStrength(dimension domain.IndependenceDimension) int {
 		}
 	}
 	return -1
+}
+
+func validateExecutionKind(stage stageView) error {
+	kind := orchestration.WorkUnitExecutionKind(stage.ExecutionKind)
+	if !orchestration.KnownExecutionKind(kind) {
+		return fmt.Errorf("stage %q has unknown execution kind %q", stage.ID, kind)
+	}
+	if kind == "" {
+		return nil
+	}
+	if stage.Kind != domain.StageAgent || stage.Role == domain.RolePlanner {
+		return fmt.Errorf("stage %q cannot select an execution algorithm", stage.ID)
+	}
+	if kind == orchestration.ExecutionKindIntegrationCompose && (stage.Role != domain.RoleIntegrator || len(stage.DependsOn) < 2) {
+		return fmt.Errorf("stage %q deterministic integration requires an integrator and at least two dependencies", stage.ID)
+	}
+	return nil
 }

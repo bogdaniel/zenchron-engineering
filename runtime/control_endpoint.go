@@ -166,9 +166,10 @@ type ControlRequest struct {
 	Operator string `json:"operator,omitempty"`
 	// Template, Deterministic and SubstituteHuman are a plan REVISION request,
 	// mirroring the flags of the command that would otherwise drive it here.
-	Template        string `json:"template,omitempty"`
-	Deterministic   bool   `json:"deterministic,omitempty"`
-	SubstituteHuman string `json:"substitute_human,omitempty"`
+	Template          string `json:"template,omitempty"`
+	Deterministic     bool   `json:"deterministic,omitempty"`
+	ObjectiveWorkflow bool   `json:"objective_workflow,omitempty"`
+	SubstituteHuman   string `json:"substitute_human,omitempty"`
 	// GraphID and UnitID name one WorkGraph unit a decision hold (#508) is
 	// placed on. Neither is a permission: UnitID selects among the units the
 	// named graph's own adopted revision already names, and the supervisor

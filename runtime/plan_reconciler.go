@@ -1247,7 +1247,7 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 	if err != nil {
 		return nil, &PlanStageBlock{StageID: stage.ID, Kind: "agent", Reason: boundedDetail(err.Error())}, nil
 	}
-	upstreamBaseRevision, upstreamCandidate, err := r.upstreamBase(assignment)
+	upstreamBaseRevision, upstreamCandidate, err := r.objectiveStageBase(plan, stage, assignment)
 	if err != nil {
 		return nil, &PlanStageBlock{StageID: stage.ID, Kind: "upstream", Reason: boundedDetail(err.Error())}, nil
 	}
@@ -1272,7 +1272,7 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		// bindings and can outspend the remainder before anything settles.
 		StageBudget: remainingHeadroom(plan, snapshot).tighten(assignment.Budget),
 	}
-	outcome, err := engine.StartPlanStageRun(ctx, r.Issue, binding)
+	outcome, err := r.startObjectiveStage(ctx, engine, plan, stage, binding)
 	if err != nil {
 		return nil, &PlanStageBlock{StageID: stage.ID, Kind: "run", Reason: boundedDetail(err.Error())}, nil
 	}

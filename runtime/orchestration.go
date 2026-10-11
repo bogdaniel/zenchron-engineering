@@ -280,6 +280,9 @@ func (r *EngineeringRuntime) materializeOrchestratedRun(ctx context.Context, bat
 	if !found {
 		// A lost claim returns without error, so the row is verified below
 		// whichever process created it.
+		if err := r.refuseFlatObjectiveRecovery(batchID); err != nil {
+			return err
+		}
 		if _, err := r.createRun(ctx, item.RunID, goal, nil, &RunOrchestrationBinding{BatchID: batchID}, domain.StageBudget{}, r.deps.Store.ClaimRun); err != nil {
 			return err
 		}

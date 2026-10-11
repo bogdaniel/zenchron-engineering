@@ -136,10 +136,9 @@ type SemanticClaimRequest struct {
 
 type AssuranceRequest struct {
 	RunID, Commit, Tree, CheckoutDir string
-	// Attempt is the SCHEDULER's attempt number for the assurance operation.
-	// It exists so a verification writes evidence under an identity a replay
-	// arrives at from the journal alone, exactly as #55 requires of a provider
-	// invocation.
+	// Attempt is the SCHEDULER's physical attempt identity for this assurance
+	// operation. It exists so a resumed invocation writes evidence to a fresh,
+	// durable slot, exactly as #55 requires of a provider invocation.
 	Attempt int
 	// Confirmation marks the SECOND verification of one candidate that
 	// AssuranceRerun performs to tell a flake from a real failure. Both
