@@ -252,14 +252,15 @@ declare a `plan` stage kind. Both refusals are in the schemas.
 
 ### Objective-bound operational graphs
 
-`autonomy orchestrate objective <existing-issue>` requires the owning supervisor.
-It proposes through the existing planner and binds a durable WorkGraph to the
+`autonomy plan issue <existing-issue>` requires the owning supervisor when one
+is serving. It proposes through the existing planner and binds a durable WorkGraph to the
 exact stored plan revision and digest. Binding grants no execution authority:
 the normal approval of the exact revision, plan digest and assignment digest
 remains necessary. Candidate stages execute through graph-backed ordinary runs;
 review stages and typed gates retain plan-owned semantics. The command has no
 flat orchestration fallback. A started objective graph's immutable plan binding
-cannot be replaced by another proposal.
+cannot be replaced by another proposal. This is the canonical issue-to-plan
+entry point; `autonomy orchestrate` remains the explicit flat batch command.
 
 `PlanStage` and `TemplateStage` optionally carry `execution_kind`, with values
 `provider` and `integration_compose`. Omission preserves ordinary provider

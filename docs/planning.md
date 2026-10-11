@@ -456,7 +456,8 @@ zenchron-engineering autonomy plan status PLAN [--text]
 zenchron-engineering autonomy plan list [--text]
 ```
 
-`plan issue` compiles a proposal and stores it. It does not execute it.
+`plan issue` compiles a proposal, binds its objective WorkGraph, and stores it.
+It does not execute work before the exact plan and assignment digests are approved.
 
 By default the decomposition is REASONED by a registered execution agent in its
 own non-mutating mode: `--agent` selects which one, and an agent whose adapter

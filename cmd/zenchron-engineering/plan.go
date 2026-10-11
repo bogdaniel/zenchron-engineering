@@ -120,7 +120,7 @@ func delegatePlanRevision(flags autonomyFlags, overrides autonomyOverrides, plan
 		Command: runtime.ControlPlanRevise, PlanID: planID, Issue: issue, Agent: flags.Agent,
 		Repository: repository, DefaultBranch: defaultBranch, Template: flags.Template,
 		Deterministic: flags.Deterministic, SubstituteHuman: flags.SubstituteHuman,
-		Note: flags.Note, Operator: requester.ID, ObjectiveWorkflow: flags.ObjectiveWorkflow,
+		Note: flags.Note, Operator: requester.ID, ObjectiveWorkflow: true,
 	})
 	if !delegated {
 		return false, 0, nil

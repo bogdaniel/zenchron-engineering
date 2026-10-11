@@ -6,7 +6,7 @@ Submit one existing GitHub issue as the engineering objective to the running
 supervisor:
 
 ```bash
-zenchron-engineering autonomy orchestrate objective 481 --agent claude --repo bogdaniel/zenchron-engineering --text
+zenchron-engineering autonomy plan issue 481 --agent claude --repo bogdaniel/zenchron-engineering --text
 ```
 
 This uses the existing reasoning planner and returns a proposed plan plus its

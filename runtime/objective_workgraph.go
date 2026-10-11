@@ -9,12 +9,13 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
+	"github.com/bogdaniel/zenchron-engineering/planning"
 )
 
 // BindObjectivePlan compiles operational units without granting execution
 // authority. The existing plan approval, assignment and budget owners still
 // decide whether a stage may start.
-func (s PlanService) BindObjectivePlan(plan domain.EngineeringPlan, issue int) (string, error) {
+func (s PlanService) BindObjectivePlan(plan domain.EngineeringPlan, issue int, agent string) (string, error) {
 	stored, found, err := s.Store.PlanRevision(plan.ID, plan.Revision)
 	if err != nil {
 		return "", err
@@ -41,7 +42,7 @@ func (s PlanService) BindObjectivePlan(plan domain.EngineeringPlan, issue int) (
 	if !found || source != issue || repository != plan.Subject.Repository {
 		return "", errors.New("objective graph source differs from the plan source")
 	}
-	graph, err := compileObjectiveGraph(plan, issue, s.DefaultAgent, s.now())
+	graph, err := compileObjectiveGraph(plan, issue, agent, s.now())
 	if err != nil {
 		return "", err
 	}
@@ -70,7 +71,7 @@ func (s PlanService) BindObjectivePlan(plan domain.EngineeringPlan, issue int) (
 // Reviewers and typed gates consume candidate units; they retain their own
 // plan semantics rather than pretending to produce a candidate handoff.
 func objectiveCandidateStage(stage domain.PlanStage) bool {
-	return stage.Kind == domain.StageAgent && stage.InvocationMode != domain.InvocationModeNonMutatingPlanning && stage.Role != domain.RoleReviewer
+	return stage.Kind == domain.StageAgent && stage.InvocationMode != domain.InvocationModeNonMutatingPlanning && planning.ProducesMaterialChange(stage.Role)
 }
 
 func compileObjectiveGraph(plan domain.EngineeringPlan, issue int, agent string, at time.Time) (orchestration.WorkGraph, error) {

@@ -69,7 +69,7 @@ func translateStage(stage plannerStage) (domain.PlanStage, error) {
 	}
 	kind := domain.StageKind(stage.Kind)
 	algorithm := orchestration.WorkUnitExecutionKind(stage.ExecutionKind)
-	if !orchestration.KnownExecutionKind(algorithm) || (algorithm != "" && (kind != domain.StageAgent || stage.Role == string(domain.RolePlanner))) || (algorithm == orchestration.ExecutionKindIntegrationCompose && (stage.Role != string(domain.RoleIntegrator) || len(stage.DependsOn) < 2)) {
+	if !orchestration.KnownExecutionKind(algorithm) {
 		return domain.PlanStage{}, fmt.Errorf("proposed stage %q has an invalid execution_kind", stage.ID)
 	}
 	switch kind {

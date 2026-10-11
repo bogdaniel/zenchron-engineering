@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -43,9 +44,9 @@ func TestObjectiveDelegationKeepsExplicitAgent(t *testing.T) {
 			return controlOK(runtime.PlanView{})
 		})
 	}()
-	delegated, _, err := delegatePlanRevision(autonomyFlags{Config: configPath, Agent: "claude", ObjectiveWorkflow: true}, planOverrides(t, 41), "", 41, &bytes.Buffer{})
-	if err != nil || !delegated {
-		t.Fatalf("delegation: delegated=%v err=%v", delegated, err)
+	_, err = autonomyPlan(context.Background(), []string{"issue", "41", "--agent", "claude", "--repo", "bogdaniel/zenchron-engineering", "--text", "--config", configPath}, planOverrides(t, 41), &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("canonical plan issue intake: %v", err)
 	}
 	request := <-requests
 	if request.Agent != "claude" || !request.ObjectiveWorkflow || request.Issue != 41 {

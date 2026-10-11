@@ -51,7 +51,8 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 		built: c, engine: engine, service: plans, target: target, release: func() {},
 	}
 	flags := autonomyFlags{
-		Template: request.Template, Deterministic: request.Deterministic, ObjectiveWorkflow: request.ObjectiveWorkflow,
+		Template: request.Template, Deterministic: request.Deterministic,
+		Agent:           request.Agent,
 		SubstituteHuman: request.SubstituteHuman, Note: request.Note,
 	}
 	// A first proposal has no id yet. It is derived exactly as the local path
@@ -86,10 +87,19 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 
 func proposePlanAndGraph(ctx context.Context, composed *planComposition, input runtime.ProposeInput, flags autonomyFlags) (domain.EngineeringPlan, error) {
 	plan, err := composed.service.Propose(ctx, input)
-	if err != nil || !flags.ObjectiveWorkflow {
+	if err != nil {
 		return plan, err
 	}
-	_, err = composed.service.BindObjectivePlan(plan, input.Issue)
+	agentID := composed.built.agents.Default()
+	if flags.Agent != "" {
+		agent, resolveErr := composed.built.agents.Agent(flags.Agent)
+		err = resolveErr
+		if err != nil {
+			return domain.EngineeringPlan{}, err
+		}
+		agentID = agent.ID
+	}
+	_, err = composed.service.BindObjectivePlan(plan, input.Issue, agentID)
 	return plan, err
 }
 

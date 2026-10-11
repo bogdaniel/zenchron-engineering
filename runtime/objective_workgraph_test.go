@@ -18,7 +18,7 @@ func TestObjectiveGraphRequiresApprovalAndRetainsFrozenStageBindings(t *testing.
 	}
 	fleet.runtime = engine
 	fixture := newPlanRunFixtureOn(t, fleet.phase8Fixture, parallelStages(), fleet.deps.ConfigDigest)
-	graphID, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue)
+	graphID, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue, fixture.service.DefaultAgent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestObjectiveDependencyRequiresAdmittedHandoffDespitePlanCompletion(t *test
 	stages := parallelStages()[:2]
 	stages[1].DependsOn = []string{stages[0].ID}
 	fixture := newPlanRunFixtureOn(t, fleet.phase8Fixture, stages, fleet.deps.ConfigDigest)
-	graphID, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue)
+	graphID, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue, fixture.service.DefaultAgent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestObjectiveDependencyRequiresAdmittedHandoffDespitePlanCompletion(t *test
 func TestObjectiveInterruptedBatchCannotRecoverAsFlatIssueRun(t *testing.T) {
 	fixture := newPlanRunFixture(t, parallelStages())
 	fixture.runtime.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
-	graphID, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue)
+	graphID, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue, fixture.service.DefaultAgent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,9 +139,13 @@ func TestObjectiveInterruptedBatchCannotRecoverAsFlatIssueRun(t *testing.T) {
 
 func TestObjectiveGraphDoesNotRelaxOrdinaryDuplicateIssueValidation(t *testing.T) {
 	fixture := newPlanRunFixture(t, parallelStages())
-	graph, err := compileObjectiveGraph(fixture.plan, fixture.issue, "codex", fixture.clock.Now())
+	graph, err := compileObjectiveGraph(fixture.plan, fixture.issue, "claude", fixture.clock.Now())
 	if err != nil {
 		t.Fatal(err)
+	}
+	wantID, err := orchestration.WorkGraphID(fixture.plan.Subject.Repository, "claude", "objective-"+fixture.plan.ID)
+	if err != nil || graph.AgentID != "claude" || graph.ID != wantID {
+		t.Fatalf("selected agent did not determine objective graph identity: graph=%+v wantID=%q err=%v", graph, wantID, err)
 	}
 	if len(graph.Units) != 2 || graph.Units[0].Issue != graph.Units[1].Issue || graph.ObjectivePlan == nil {
 		t.Fatalf("objective decomposition did not bind shared issue units: %+v", graph)
@@ -156,12 +160,30 @@ func TestObjectiveGraphDoesNotRelaxOrdinaryDuplicateIssueValidation(t *testing.T
 	}
 }
 
+func TestObjectiveGraphIncludesOnlyMaterialProducerRoles(t *testing.T) {
+	fixture := newPlanRunFixture(t, parallelStages())
+	plan := fixture.plan
+	plan.Stages = append(plan.Stages,
+		domain.PlanStage{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer},
+		domain.PlanStage{ID: "security-review", Kind: domain.StageAgent, Role: domain.RoleSecurityReviewer},
+		domain.PlanStage{ID: "compose", Kind: domain.StageAgent, Role: domain.RoleIntegrator, Objective: "compose admitted outputs",
+			ExecutionKind: string(orchestration.ExecutionKindIntegrationCompose), DependsOn: []string{"backend", "frontend"}},
+	)
+	graph, err := compileObjectiveGraph(plan, fixture.issue, "codex", fixture.clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(graph.Units) != 3 || graph.Units[2].ID != "compose" {
+		t.Fatalf("objective graph treated a non-producing review role as a candidate unit: %+v", graph.Units)
+	}
+}
+
 func TestObjectiveReviewerMayRestartWithoutReplacingCandidateUnit(t *testing.T) {
 	stage := domain.PlanStage{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer,
 		Objective: "Independently review the candidate.", InvocationMode: domain.InvocationModeMutating,
 		RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityRepositoryAnalysis}}
 	fixture := newPlanRunFixture(t, append(parallelStages()[:2], stage))
-	if _, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue); err != nil {
+	if _, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue, fixture.service.DefaultAgent); err != nil {
 		t.Fatal(err)
 	}
 	fixture.approve(t)
@@ -194,7 +216,7 @@ func TestObjectiveCompositionRetainsAlgorithmAndOriginalBase(t *testing.T) {
 		Objective: "Compose both independent candidates.", InvocationMode: domain.InvocationModeMutating,
 		DependsOn: []string{"backend", "frontend"}, ExecutionKind: string(orchestration.ExecutionKindIntegrationCompose)})
 	fixture := newPlanRunFixture(t, stages)
-	graphID, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue)
+	graphID, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue, fixture.service.DefaultAgent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +254,7 @@ func TestObjectiveAdmittedHandoffMakesDependentUnitReady(t *testing.T) {
 	stages := parallelStages()[:2]
 	stages[1].DependsOn = []string{"backend"}
 	fixture := newPlanRunFixtureOn(t, fleet.phase8Fixture, stages, fleet.deps.ConfigDigest)
-	graphID, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue)
+	graphID, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue, fixture.service.DefaultAgent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +295,7 @@ func TestObjectiveAdmittedHandoffMakesDependentUnitReady(t *testing.T) {
 
 func TestObjectiveReproposalRetainsHistoryAndRefusesStartedGraph(t *testing.T) {
 	fixture := newPlanRunFixture(t, parallelStages())
-	graphID, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue)
+	graphID, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue, fixture.service.DefaultAgent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +311,7 @@ func TestObjectiveReproposalRetainsHistoryAndRefusesStartedGraph(t *testing.T) {
 	if _, err := fixture.store.PutPlanRevision(next); err != nil {
 		t.Fatal(err)
 	}
-	newID, err := fixture.service.BindObjectivePlan(next, fixture.issue)
+	newID, err := fixture.service.BindObjectivePlan(next, fixture.issue, fixture.service.DefaultAgent)
 	if err != nil || newID != graphID {
 		t.Fatalf("unstarted re-proposal did not retain graph identity: id=%q err=%v", newID, err)
 	}
@@ -335,7 +357,7 @@ func TestObjectiveReproposalRetainsHistoryAndRefusesStartedGraph(t *testing.T) {
 	if _, err := fixture.store.PutPlanRevision(third); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.BindObjectivePlan(third, fixture.issue); err == nil || !strings.Contains(err.Error(), "objective graph has started work") {
+	if _, err := fixture.service.BindObjectivePlan(third, fixture.issue, fixture.service.DefaultAgent); err == nil || !strings.Contains(err.Error(), "objective graph has started work") {
 		t.Fatalf("claimed batch did not preserve graph plan binding: %v", err)
 	}
 	current, found, err = fixture.store.WorkGraph(graphID)

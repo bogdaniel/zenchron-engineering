@@ -37,7 +37,7 @@ import (
 const autonomyUsage = "usage: zenchron-engineering autonomy {agents [--text]|" +
 	"plan {issue <number>|show|approve|reject|revise|status <plan>|list} [--template <id>] [--deterministic] [--note <text>]|" +
 	"run issue <number> [--agent <id>] [--new-generation]|run issues <n> <n>... [--assign N=agent]|" +
-	"orchestrate {objective <issue> [--agent <id>] [--template <id>]|issues <n> <n>... --agent <id>|status <batch>} [--text]|" +
+	"orchestrate {issues <n> <n>... --agent <id>|status <batch>} [--text]|" +
 	"workgraph {adopt <proposal.json> --agent <id>|status <graph>} [--text]|" +
 	"review {pr <number> --agent <id> [--publish]|status <number>} [--text]|" +
 	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|refresh <run>|" +
@@ -192,8 +192,7 @@ type autonomyFlags struct {
 	// independent-review trigger uses. Empty disables the trigger entirely -
 	// an operator who names no reviewer gets exactly `serve`'s pre-#474
 	// behavior, never a silently-chosen default reviewer.
-	ReviewerAgent     string
-	ObjectiveWorkflow bool
+	ReviewerAgent string
 	// Assign binds issues to agents for a batch, as issue -> agent id.
 	Assign map[int]string
 	// PermissionBypass explicitly requests the provider's unsafe permission
