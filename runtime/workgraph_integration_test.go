@@ -185,6 +185,60 @@ func TestWorkGraphIntegrationReleasesDownstreamOnlyAfterItsOwnHandoff(t *testing
 	}
 }
 
+func TestIntegrationInvalidationBindingTracksCurrentAdmittedInputs(t *testing.T) {
+	const issueA, issueB, issueC = fleetFirstIssue, fleetFirstIssue + 1, fleetFirstIssue + 2
+	fixture := newFleetFixture(t, 4)
+	fixture.setIntegrationIssue(issueA, "a")
+	fixture.setIntegrationIssue(issueB, "b")
+	fixture.deps.Provider = &integrationWorker{files: map[string]integrationFile{
+		"a": {path: "a.go", content: "package candidate\nconst A = 1\n"},
+		"b": {path: "b.go", content: "package candidate\nconst B = 1\n"},
+	}}
+	supervisor := fixture.supervisor()
+	view := fixture.adoptGraph(supervisor, "claude", 1, integrationGraphUnits(issueA, issueB, issueC))
+	settled := fixture.driveGraph(supervisor, view.GraphID, nil)
+	a, integrated := settled.unit(t, "a"), settled.unit(t, "c")
+	integrationState := fixture.state(integrated.RunID)
+	op := RunOperation{Kind: OpIntegrationCompose, IdempotencyKey: "integration.compose#same-inputs"}
+	currentBinding, err := fixture.runtime.failureBinding(integrationState, op, integrationInvalidatedCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	producer := fixture.state(a.RunID)
+	if err := fixture.runtime.append(producer, EventFeedbackObserved, "", FeedbackObservedPayload{
+		FeedbackDecision: FeedbackDecision{
+			Key: "pull_request_comment:99", Class: FeedbackPullRequestComment,
+			Actor: "maintainer", Permission: PermissionWrite, Admitted: true, Applicable: true,
+			Reason: feedbackAdmittedPermitted,
+		},
+		TextDigest: "digest",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	integrationState = fixture.state(integrated.RunID)
+	unavailableBinding, err := fixture.runtime.failureBinding(integrationState, op, integrationInvalidatedCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unavailableBinding == currentBinding {
+		t.Fatal("an admitted output becoming unavailable did not change integration retry binding")
+	}
+
+	producer = fixture.state(a.RunID)
+	if err := fixture.runtime.append(producer, EventRunWaiting, "", dispositionRecord{Reason: ReasonGoalStateReached}, nil); err != nil {
+		t.Fatal(err)
+	}
+	integrationState = fixture.state(integrated.RunID)
+	recoveredBinding, err := fixture.runtime.failureBinding(integrationState, op, integrationInvalidatedCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveredBinding != currentBinding {
+		t.Fatal("the same admitted output becoming current again did not restore the integration retry binding")
+	}
+}
+
 // TestWorkGraphIntegrationNeverInvokesAProviderForTheIntegratorUnit proves
 // the explicit, structural dispatch guard by breaking it conceptually: the
 // controlled worker given to the fixture would fail the test outright if it
