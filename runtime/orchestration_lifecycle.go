@@ -7,7 +7,7 @@ import (
 )
 
 func (r *EngineeringRuntime) objectivePublicationDeferred(origin *orchestration.BatchOrigin) (bool, error) {
-	if origin == nil || origin.ExecutionKind == orchestration.ExecutionKindIntegrationCompose {
+	if origin == nil {
 		return false, nil
 	}
 	graph, found, err := r.deps.Store.WorkGraph(origin.GraphID)
@@ -20,18 +20,29 @@ func (r *EngineeringRuntime) objectivePublicationDeferred(origin *orchestration.
 	if graph.ObjectivePlan == nil {
 		return false, nil
 	}
-	for _, unit := range graph.Units {
-		if unit.ID == origin.UnitID {
-			for _, integration := range graph.Units {
-				if integration.ExecutionKind == orchestration.ExecutionKindIntegrationCompose &&
-					graphUnitDependsOn(graph, integration.ID, unit.ID) {
-					return true, nil
-				}
+	plan, found, err := r.deps.Store.PlanRevision(graph.ObjectivePlan.ID, graph.ObjectivePlan.Revision)
+	if err != nil {
+		return false, err
+	}
+	if !found || plan.Digest != graph.ObjectivePlan.Digest {
+		return false, fmt.Errorf("approved plan %s revision %d for objective publication was not found exactly", graph.ObjectivePlan.ID, graph.ObjectivePlan.Revision)
+	}
+	stageFound, hasDownstreamStage := false, false
+	for _, stage := range plan.Stages {
+		if stage.ID == origin.UnitID {
+			stageFound = true
+		}
+		for _, dependency := range stage.DependsOn {
+			if dependency == origin.UnitID {
+				hasDownstreamStage = true
 			}
-			return false, nil
 		}
 	}
-	return false, fmt.Errorf("work graph %s has no objective unit %s", origin.GraphID, origin.UnitID)
+	if !stageFound {
+		return false, fmt.Errorf("approved plan %s has no objective unit %s", graph.ObjectivePlan.ID, origin.UnitID)
+	}
+	// Any path to a later stage has a first direct edge from this stage.
+	return hasDownstreamStage, nil
 }
 
 // A read transaction prevents mixed reads, but a process can crash between

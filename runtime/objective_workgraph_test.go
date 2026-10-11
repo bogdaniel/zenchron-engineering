@@ -67,15 +67,19 @@ func TestObjectiveGraphRequiresApprovalAndRetainsFrozenStageBindings(t *testing.
 	}
 }
 
-func TestObjectiveProducerDefersPublicationUntilIntegrationInputIsAdmitted(t *testing.T) {
+func TestObjectiveStagesDeferPublicationUntilDownstreamReviewAndGatesFinish(t *testing.T) {
 	fleet := newFleetFixture(t, 2)
-	plan := domain.EngineeringPlan{ID: "plan-publication-order", Revision: 1, Digest: strings.Repeat("a", 64),
-		Subject: domain.Subject{Repository: "acme/repo"}, Stages: []domain.PlanStage{
-			{ID: "producer-a", Kind: domain.StageAgent, Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating},
-			{ID: "producer-b", Kind: domain.StageAgent, Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating},
-			{ID: "integrate", Kind: domain.StageAgent, Role: domain.RoleIntegrator, InvocationMode: domain.InvocationModeMutating,
-				ExecutionKind: string(orchestration.ExecutionKindIntegrationCompose), DependsOn: []string{"producer-a", "producer-b"}},
-		}}
+	fixture := newPlanRunFixtureOn(t, fleet.phase8Fixture, []domain.PlanStage{
+		{ID: "producer-a", Kind: domain.StageAgent, Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating},
+		{ID: "producer-b", Kind: domain.StageAgent, Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating},
+		{ID: "integrate", Kind: domain.StageAgent, Role: domain.RoleIntegrator, InvocationMode: domain.InvocationModeMutating,
+			ExecutionKind: string(orchestration.ExecutionKindIntegrationCompose), DependsOn: []string{"producer-a", "producer-b"}},
+		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer, InvocationMode: domain.InvocationModeMutating, DependsOn: []string{"integrate"}},
+		{ID: "verify", Kind: domain.StageAssuranceGate, RequiredClaims: []string{"claim-validation"}, DependsOn: []string{"review"}},
+		{ID: "approve", Kind: domain.StageHumanDecisionGate, RequiredClaims: []string{"claim-publication-approval"},
+			Action: &domain.Action{Type: "git.pull_request.create", Target: "main"}, DependsOn: []string{"verify"}},
+	}, fleet.deps.ConfigDigest)
+	plan := fixture.plan
 	graph, err := compileObjectiveGraph(plan, 554, "claude", time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatal(err)
@@ -102,8 +106,16 @@ func TestObjectiveProducerDefersPublicationUntilIntegrationInputIsAdmitted(t *te
 	deferred, err := fleet.runtime.objectivePublicationDeferred(&orchestration.BatchOrigin{
 		GraphID: graph.ID, UnitID: "integrate", ExecutionKind: orchestration.ExecutionKindIntegrationCompose,
 	})
-	if err != nil || deferred {
-		t.Fatalf("integrator publication deferral = %t, %v; want publication eligibility", deferred, err)
+	if err != nil || !deferred {
+		t.Fatalf("integration publication deferral = %t, %v; want deferred through review and decision gates", deferred, err)
+	}
+	state := &runState{publicationDeferred: deferred}
+	request, err := fleet.runtime.authorityRequest(state)
+	if err != nil || request != nil {
+		t.Fatalf("integration exposed publication authority before independent review: %#v, %v", request, err)
+	}
+	if _, wanted := bindAuthorityEvaluate(state); wanted || state.authorizedForPublication() {
+		t.Fatal("integration can obtain publication authority before downstream plan gates finish")
 	}
 }
 
