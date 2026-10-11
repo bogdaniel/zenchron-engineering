@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 	"github.com/bogdaniel/zenchron-engineering/review"
 )
 
@@ -81,6 +82,19 @@ func (r *EngineeringRuntime) ReconcileReviewRemediationForRun(ctx context.Contex
 	if state.projection.PullRequest == nil {
 		return nil, nil, nil
 	}
+	deferred, err := r.reviewDeferredUntilIntegration(state)
+	if err != nil {
+		return nil, nil, err
+	}
+	if deferred {
+		_, found, err := r.deps.Store.LatestReviewDecision(state.run.Repository, state.projection.PullRequest.Number)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !found {
+			return nil, nil, nil
+		}
+	}
 	repo, err := parseGitHubRepo(state.run.Repository)
 	if err != nil {
 		return nil, nil, err
@@ -129,6 +143,53 @@ func (r *EngineeringRuntime) ReconcileReviewRemediationForRun(ctx context.Contex
 	}
 	outcome = &reconcileOutcome
 	return outcome, admission, nil
+}
+
+func (r *EngineeringRuntime) reviewDeferredUntilIntegration(state *runState) (bool, error) {
+	if state.origin == nil || state.origin.ExecutionKind == orchestration.ExecutionKindIntegrationCompose {
+		return false, nil
+	}
+	graph, found, err := r.deps.Store.WorkGraph(state.origin.GraphID)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, fmt.Errorf("work graph %s for run %s was not found", state.origin.GraphID, state.run.ID)
+	}
+	for _, unit := range graph.Units {
+		if unit.ID == state.origin.UnitID && unit.RequiresReview {
+			return false, nil
+		}
+	}
+	for _, unit := range graph.Units {
+		if unit.ExecutionKind != orchestration.ExecutionKindIntegrationCompose || !graphUnitDependsOn(graph, unit.ID, state.origin.UnitID) {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func graphUnitDependsOn(graph orchestration.WorkGraph, unitID, ancestorID string) bool {
+	units := make(map[string]orchestration.WorkUnit, len(graph.Units))
+	for _, unit := range graph.Units {
+		units[unit.ID] = unit
+	}
+	visited := make(map[string]bool, len(graph.Units))
+	var dependsOn func(string) bool
+	dependsOn = func(id string) bool {
+		if visited[id] {
+			return false
+		}
+		visited[id] = true
+		for _, dependency := range units[id].DependsOn {
+			if dependency == ancestorID || dependsOn(dependency) {
+				return true
+			}
+		}
+		return false
+	}
+	return dependsOn(unitID)
 }
 
 // ReviewBudget is the finite provider budget #474's automatic trigger binds

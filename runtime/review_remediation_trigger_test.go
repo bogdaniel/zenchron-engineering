@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 	"github.com/bogdaniel/zenchron-engineering/review"
 )
 
@@ -107,6 +109,51 @@ func TestReconcileReviewRemediationForRunSurfacesAReleaseFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "releasing the review verification claim") {
 		t.Fatalf("error %q does not attribute the failure to releasing the review verification claim", err.Error())
+	}
+}
+
+func TestReviewOfGraphProducerWaitsForItsIntegrationCandidate(t *testing.T) {
+	f := newAdmissionFixture(t)
+	graph, err := (orchestration.WorkGraphProposal{
+		Name: "review-after-integration", Revision: 1,
+		Units: []orchestration.WorkUnit{
+			{ID: "producer-a", Purpose: "produce A", Role: domain.RoleImplementer, Issue: 554},
+			{ID: "producer-b", Purpose: "produce B", Role: domain.RoleImplementer, Issue: 555},
+			{ID: "integrate", Purpose: "compose A and B", Role: domain.RoleIntegrator,
+				ExecutionKind: orchestration.ExecutionKindIntegrationCompose, Issue: 556, DependsOn: []string{"producer-a", "producer-b"}},
+		},
+	}).Compose(testRepo.String(), "codex", "test", f.clock.Now())
+	if err != nil {
+		t.Fatalf("compose graph: %v", err)
+	}
+	if _, _, err := f.store.AdoptWorkGraphRevision(graph); err != nil {
+		t.Fatalf("store graph: %v", err)
+	}
+	origin := &orchestration.BatchOrigin{GraphID: graph.ID, UnitID: "producer-b", ExecutionKind: orchestration.ExecutionKindProvider}
+	batchID, err := orchestration.WorkUnitBatchID(testRepo.String(), "codex", 555, *origin)
+	if err != nil {
+		t.Fatalf("work unit batch id: %v", err)
+	}
+	batch := orchestration.Batch{
+		SchemaVersion: orchestration.BatchSchemaVersion, ID: batchID, Repository: testRepo.String(),
+		AgentID: "codex", CreatedAt: f.clock.Now(), Origin: origin,
+		Items: []orchestration.BatchItem{{Issue: 555, RunID: f.runID}},
+	}
+	if _, _, err := f.store.CreateOrchestrationBatch(batch); err != nil {
+		t.Fatalf("store batch: %v", err)
+	}
+	run, found, err := f.store.Run(f.runID)
+	if err != nil || !found {
+		t.Fatalf("read run: found=%t err=%v", found, err)
+	}
+	run.Orchestration = &RunOrchestrationBinding{BatchID: batchID}
+	if err := f.store.PutRun(run); err != nil {
+		t.Fatalf("bind run to work unit: %v", err)
+	}
+
+	engine := f.runtime()
+	if _, _, err := engine.ReconcileReviewRemediationForRun(context.Background(), f.runID, failingNeedsReviewPort{}, "reviewer-1"); err != nil {
+		t.Fatalf("producer PR was reviewed before integration: %v", err)
 	}
 }
 
