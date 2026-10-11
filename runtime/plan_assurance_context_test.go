@@ -41,11 +41,12 @@ func TestReviewerReceivesOnlyExactHeadRuntimeAssurance(t *testing.T) {
 }
 
 func TestRuntimeOwnedAssuranceReachesReviewerPrompt(t *testing.T) {
-	prompt := agentPrompt(ExecutionRequest{TrustedInstructions: "trusted", Upstream: []UpstreamContext{{
-		StageID: "implementation", RunID: "run-impl", Commit: "c0ffee", Tree: "7ree",
-		Assurance: []AssuranceContext{{ProviderID: "go", VerifierDefinition: "go-test", Passed: true,
-			Commit: "c0ffee", Tree: "7ree", BundleID: "bundle-go", BundleRevision: "1"}},
-	}}})
+	prompt := agentPrompt(ExecutionRequest{RunID: "run-review", OperationID: "review", Attempt: 1,
+		TrustedInstructions: "trusted", Upstream: []UpstreamContext{{
+			StageID: "implementation", RunID: "run-impl", Commit: "c0ffee", Tree: "7ree",
+			Assurance: []AssuranceContext{{ProviderID: "go", VerifierDefinition: "go-test", Passed: true,
+				Commit: "c0ffee", Tree: "7ree", BundleID: "bundle-go", BundleRevision: "1"}},
+		}}})
 	for _, evidence := range []string{
 		"Runtime-owned assurance for stage implementation: provider=go verifier=go-test passed=true",
 		"commit=c0ffee tree=7ree bundle=bundle-go/1",

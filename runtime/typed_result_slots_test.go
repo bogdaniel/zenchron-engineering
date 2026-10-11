@@ -124,8 +124,19 @@ func TestTheHostSlotReadPreservesTheAdapterOutcomes(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			provider, request, _ := slotFixture(t)
-			writeRaw(t, request.ReviewerResultPath, tc.review)
+			provider, request, fake := slotFixture(t)
+			if tc.review == "" {
+				request.ReviewerResultPath = ""
+			} else {
+				line, err := json.Marshal(map[string]any{
+					"type": "result", "subtype": "success", "is_error": false, "result": tc.review,
+					"permission_denials": []any{},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				fake.outputs = []CommandOutput{{Stdout: append(line, '\n')}}
+			}
 			writeRaw(t, request.FeedbackResolutionPath, tc.resolution)
 
 			result, typed, err := executeWithHostSlots(context.Background(), provider, request)
