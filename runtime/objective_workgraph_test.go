@@ -69,6 +69,8 @@ func TestObjectiveGraphRequiresApprovalAndRetainsFrozenStageBindings(t *testing.
 
 func TestObjectiveStagesDeferPublicationUntilDownstreamReviewAndGatesFinish(t *testing.T) {
 	fleet := newFleetFixture(t, 2)
+	fleet.deps.Repository.DefaultBranch = "main"
+	fleet.runtime = fleet.newRuntime(fleet.deps)
 	fixture := newPlanRunFixtureOn(t, fleet.phase8Fixture, []domain.PlanStage{
 		{ID: "producer-a", Kind: domain.StageAgent, Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating},
 		{ID: "producer-b", Kind: domain.StageAgent, Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating},
@@ -76,6 +78,7 @@ func TestObjectiveStagesDeferPublicationUntilDownstreamReviewAndGatesFinish(t *t
 			ExecutionKind: string(orchestration.ExecutionKindIntegrationCompose), DependsOn: []string{"producer-a", "producer-b"}},
 		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer, InvocationMode: domain.InvocationModeMutating, DependsOn: []string{"integrate"}},
 		{ID: "verify", Kind: domain.StageAssuranceGate, RequiredClaims: []string{"claim-validation"}, DependsOn: []string{"review"}},
+		{ID: "other-human-decision", Kind: domain.StageHumanDecisionGate, DependsOn: []string{"verify"}},
 		{ID: "approve", Kind: domain.StageHumanDecisionGate, RequiredClaims: []string{"claim-publication-approval"},
 			Action: &domain.Action{Type: "git.pull_request.create", Target: "main"}, DependsOn: []string{"verify"}},
 	}, fleet.deps.ConfigDigest)
@@ -135,6 +138,16 @@ func TestObjectiveStagesDeferPublicationUntilDownstreamReviewAndGatesFinish(t *t
 		if err := appendPlanEvent(fleet.store, fleet.clock.Now(), plan.ID, event.typ, event.payload); err != nil {
 			t.Fatal(err)
 		}
+	}
+	deferred, err = fleet.runtime.objectivePublicationDeferred(&orchestration.BatchOrigin{
+		GraphID: graph.ID, UnitID: "integrate", ExecutionKind: orchestration.ExecutionKindIntegrationCompose,
+	})
+	if err != nil || !deferred {
+		t.Fatalf("integration bypassed an unrelated pending human decision gate: %t, %v", deferred, err)
+	}
+	if err := appendPlanEvent(fleet.store, fleet.clock.Now(), plan.ID, EventPlanGateSatisfied,
+		PlanGateSatisfiedPayload{StageID: "other-human-decision", Kind: string(domain.StageHumanDecisionGate), HumanEvidenceID: "human-decision"}); err != nil {
+		t.Fatal(err)
 	}
 	deferred, err = fleet.runtime.objectivePublicationDeferred(&orchestration.BatchOrigin{
 		GraphID: graph.ID, UnitID: "integrate", ExecutionKind: orchestration.ExecutionKindIntegrationCompose,

@@ -68,6 +68,7 @@ func (r *EngineeringRuntime) objectivePublicationDeferred(origin *orchestration.
 			frontier = append(frontier, id)
 		}
 	}
+	publicationAction, hasPublicationAction := r.publicationAction()
 	for _, stage := range plan.Stages {
 		if !descendants[stage.ID] {
 			continue
@@ -75,7 +76,7 @@ func (r *EngineeringRuntime) objectivePublicationDeferred(origin *orchestration.
 		if stage.Kind == domain.StageAgent && stage.InvocationMode == domain.InvocationModeMutating && !stage.Role.ProducesReviewVerdict() {
 			return true, nil
 		}
-		if stage.Kind == domain.StageHumanDecisionGate {
+		if stage.Kind == domain.StageHumanDecisionGate && stage.Action != nil && hasPublicationAction && *stage.Action == publicationAction {
 			continue
 		}
 		state := snapshot.Stages[stage.ID].State
