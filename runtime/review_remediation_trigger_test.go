@@ -172,6 +172,78 @@ func TestReviewOfGraphProducerWaitsForItsIntegrationCandidate(t *testing.T) {
 	}
 }
 
+func TestReviewDeferralHonorsUnitAndGraphBoundaries(t *testing.T) {
+	f := newAdmissionFixture(t)
+	graph, err := (orchestration.WorkGraphProposal{
+		Name: "review-boundaries", Revision: 1,
+		Units: []orchestration.WorkUnit{
+			{ID: "producer", Purpose: "produce candidate", Role: domain.RoleImplementer, Issue: 554, RequiresReview: true},
+			{ID: "producer-b", Purpose: "produce another candidate", Role: domain.RoleImplementer, Issue: 556},
+			{ID: "integrate", Purpose: "compose candidate", Role: domain.RoleIntegrator, Issue: 555,
+				ExecutionKind: orchestration.ExecutionKindIntegrationCompose, DependsOn: []string{"producer", "producer-b"}},
+		},
+	}).Compose(testRepo.String(), "codex", "test", f.clock.Now())
+	if err != nil {
+		t.Fatalf("compose graph: %v", err)
+	}
+	if _, _, err := f.store.AdoptWorkGraphRevision(graph); err != nil {
+		t.Fatalf("store graph: %v", err)
+	}
+
+	runtime := &EngineeringRuntime{
+		deps: Dependencies{Store: f.store, Clock: f.clock, GitHub: f.fake},
+		scheduler: Scheduler{
+			Store: f.store, Clock: f.clock, Owner: "controller-review-boundary",
+			LeaseDuration: time.Minute, Liveness: neverAlive(),
+			MaxConcurrentRuns: 10, MaxConcurrentVerifications: 10,
+		},
+	}
+	bindReviewTriggerOrigin(t, f, orchestration.BatchOrigin{
+		GraphID: graph.ID, UnitID: "producer", ExecutionKind: orchestration.ExecutionKindProvider,
+	}, 554)
+	if _, _, err := runtime.ReconcileReviewRemediationForRun(context.Background(), f.runID, failingNeedsReviewPort{}, "reviewer"); err == nil || !strings.Contains(err.Error(), "simulated reviewer failure") {
+		t.Fatalf("review-required producer result = %v; want immediate review", err)
+	}
+
+	bindReviewTriggerOrigin(t, f, orchestration.BatchOrigin{
+		GraphID: graph.ID, UnitID: "integrate", ExecutionKind: orchestration.ExecutionKindIntegrationCompose,
+	}, 555)
+	if _, _, err := runtime.ReconcileReviewRemediationForRun(context.Background(), f.runID, failingNeedsReviewPort{}, "reviewer"); err == nil || !strings.Contains(err.Error(), "simulated reviewer failure") {
+		t.Fatalf("integration run result = %v; want immediate review", err)
+	}
+
+	bindReviewTriggerOrigin(t, f, orchestration.BatchOrigin{
+		GraphID: "missing-graph", UnitID: "producer", ExecutionKind: orchestration.ExecutionKindProvider,
+	}, 554)
+	if _, _, err := runtime.ReconcileReviewRemediationForRun(context.Background(), f.runID, stubReviewPort{}, "reviewer"); err == nil || !strings.Contains(err.Error(), "work graph missing-graph") {
+		t.Fatalf("missing graph result = %v; want a work graph missing-graph error", err)
+	}
+}
+
+func bindReviewTriggerOrigin(t *testing.T, f *admissionFixture, origin orchestration.BatchOrigin, issue int) {
+	t.Helper()
+	batchID, err := orchestration.WorkUnitBatchID(testRepo.String(), "codex", issue, origin)
+	if err != nil {
+		t.Fatalf("work unit batch id: %v", err)
+	}
+	batch := orchestration.Batch{
+		SchemaVersion: orchestration.BatchSchemaVersion, ID: batchID, Repository: testRepo.String(),
+		AgentID: "codex", CreatedAt: f.clock.Now(), Origin: &origin,
+		Items: []orchestration.BatchItem{{Issue: issue, RunID: f.runID}},
+	}
+	if _, _, err := f.store.CreateOrchestrationBatch(batch); err != nil {
+		t.Fatalf("store batch: %v", err)
+	}
+	run, found, err := f.store.Run(f.runID)
+	if err != nil || !found {
+		t.Fatalf("read run: found=%t err=%v", found, err)
+	}
+	run.Orchestration = &RunOrchestrationBinding{BatchID: batchID}
+	if err := f.store.PutRun(run); err != nil {
+		t.Fatalf("bind run to work unit: %v", err)
+	}
+}
+
 // failingNeedsReviewPort is stubReviewPort with NeedsReview returning a
 // distinguishable error, so ReconcileReviewRemediation itself fails before
 // any decision is read - the review's own failure, independent of
