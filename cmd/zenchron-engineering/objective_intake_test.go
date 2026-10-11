@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"strings"
 	"testing"
@@ -12,7 +11,7 @@ import (
 
 func TestObjectiveIntakeRejectsMalformedIssue(t *testing.T) {
 	for _, issue := range []string{"", "0", "-1", "objective text", "--agent"} {
-		code, err := autonomyOrchestrate([]string{"objective", issue}, &bytes.Buffer{})
+		code, err := autonomyOrchestrate([]string{"objective", issue}, autonomyOverrides{}, &bytes.Buffer{})
 		if code != runtime.ExitInvalid || err == nil {
 			t.Fatalf("issue %q: code=%d err=%v", issue, code, err)
 		}
@@ -44,9 +43,9 @@ func TestObjectiveDelegationKeepsExplicitAgent(t *testing.T) {
 			return controlOK(runtime.PlanView{})
 		})
 	}()
-	_, err = autonomyPlan(context.Background(), []string{"issue", "41", "--agent", "claude", "--repo", "bogdaniel/zenchron-engineering", "--text", "--config", configPath}, planOverrides(t, 41), &bytes.Buffer{})
+	_, err = autonomyOrchestrate([]string{"objective", "41", "--agent", "claude", "--repo", "bogdaniel/zenchron-engineering", "--text", "--config", configPath}, planOverrides(t, 41), &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("canonical plan issue intake: %v", err)
+		t.Fatalf("objective orchestration intake: %v", err)
 	}
 	request := <-requests
 	if request.Agent != "claude" || !request.ObjectiveWorkflow || request.Issue != 41 {

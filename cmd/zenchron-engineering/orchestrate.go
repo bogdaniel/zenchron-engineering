@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,16 +15,19 @@ import (
 )
 
 const orchestrateUsage = "usage: zenchron-engineering autonomy orchestrate " +
-	"{issues <n> <n>... --agent <id> [--repo owner/name] [--text]|status <batch> [--text]} [--config <path>]"
+	"{objective <issue> [--template <id>] [--agent <id>] [--repo owner/name] [--text]|" +
+	"issues <n> <n>... --agent <id> [--repo owner/name] [--text]|status <batch> [--text]} [--config <path>]"
 
 // autonomyOrchestrate is basic explicit orchestration (#470): hand a running
 // supervisor a bounded set of existing issues and one agent ONCE, and read the
 // whole cohort back from one aggregate view.
-func autonomyOrchestrate(args []string, stdout io.Writer) (int, error) {
+func autonomyOrchestrate(args []string, overrides autonomyOverrides, stdout io.Writer) (int, error) {
 	if len(args) < 2 {
 		return runtime.ExitInvalid, errors.New(orchestrateUsage)
 	}
 	switch args[0] {
+	case "objective":
+		return autonomyPlan(context.Background(), append([]string{"issue"}, args[1:]...), overrides, stdout)
 	case "issues":
 		var issues []int
 		rest := args[1:]
