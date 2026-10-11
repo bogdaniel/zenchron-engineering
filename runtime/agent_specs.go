@@ -205,6 +205,9 @@ var codexSpec = cliAgentSpec{
 		Args: func(i cliInvocation) []string {
 			args := []string{"--ask-for-approval", "never", "exec", "--sandbox", "read-only", "--ignore-user-config",
 				"-c", "sandbox_workspace_write.network_access=false", "-c", "project_doc_max_bytes=0"}
+			if i.ResultDir != "" {
+				args = append(args, "--add-dir", i.ResultDir)
+			}
 			if i.Model() != "" {
 				args = append(args, "--model", i.Model())
 			}

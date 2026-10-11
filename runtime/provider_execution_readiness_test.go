@@ -106,6 +106,25 @@ func TestAnImplementerInvocationIsGrantedNoResultDirectory(t *testing.T) {
 	}
 }
 
+func TestCodexReadOnlyReviewerCanWriteOnlyItsTypedResultDirectory(t *testing.T) {
+	resultDir := "/state/artifacts/review"
+	args := codexSpec.ReadOnly.Args(cliInvocation{
+		Agent:  ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI},
+		Prompt: "review", CandidateDir: "/candidate", ResultDir: resultDir,
+	})
+	if sandbox, ok := argValue(args, "--sandbox"); !ok || sandbox != "read-only" {
+		t.Fatalf("reviewer sandbox is %q, want read-only: %v", sandbox, args)
+	}
+	if dir, ok := argValue(args, "--add-dir"); !ok || dir != resultDir {
+		t.Fatalf("reviewer writable directory is %q, want only %q: %v", dir, resultDir, args)
+	}
+	for index, arg := range args {
+		if arg == "--add-dir" && index+1 < len(args) && args[index+1] != resultDir {
+			t.Fatalf("reviewer received an extra writable directory: %v", args)
+		}
+	}
+}
+
 // D2: resolution is not permission. The invocation must grant exactly the
 // executables the contract obliges, per-executable rather than blanket Bash.
 //
