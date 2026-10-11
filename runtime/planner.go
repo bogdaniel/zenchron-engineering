@@ -485,11 +485,15 @@ func plannerOutputContract(input PlannerInput) string {
 			if stage.Independence != nil {
 				line += fmt.Sprintf(", independent of %s in %s", strings.Join(stage.Independence.DifferentFrom, " and "), stage.Independence.Dimension)
 			}
+			if stage.Action != nil {
+				line += fmt.Sprintf(", action %s:%s", stage.Action.Type, stage.Action.Target)
+			}
 			lines = append(lines, line+")")
 		}
 		process = fmt.Sprintf(`
 The operator selected this process for this work, and expects the plan to follow
-it. Keep its stages, roles, dependencies and independence requirements unless
+it. Keep its stages, roles, dependencies, independence requirements and exact
+gate actions unless
 the objective genuinely cannot be done that way, and say so in "notes" if you
 depart from it. You may add a stage the objective needs; you may not drop a
 stage to make the work smaller.
@@ -521,6 +525,7 @@ Answer with ONE JSON object, in a fenced json code block, drawn from this shape:
 {"stages": [{"id": "kebab-case-id", "kind": "agent|assurance_gate|human_decision_gate",
   "role": "one of: %s", "objective": "what this stage must achieve",
   "execution_kind": "provider|integration_compose",
+  "action": {"type": "exact protected-action type", "target": "exact protected-action target"},
   "depends_on": ["ids of stages that must finish first"],
   "requires_capabilities": ["subset of: {{capabilities}}"],
   "required_claims": ["%s"],
@@ -556,6 +561,7 @@ Rules for your answer, all of which the runtime enforces afterwards:
 - only "agent" stages are performed by a worker; the two gate kinds reference
   evidence and human decisions that already exist, take no role, no
   capabilities and no independence;
+- a human decision gate for a protected action names the exact contract action;
 - an "assurance_gate" that names no "required_claims" is completed from this
   work contract's own claims, so omitting them is safe; a "human_decision_gate"
   must name at least one claim, because nothing else states what the person is

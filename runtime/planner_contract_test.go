@@ -23,7 +23,14 @@ import (
 func TestTheOutputContractDoesNotDemandEveryMemberItShows(t *testing.T) {
 	input, _ := plannerFixture(t, goodAnswer)
 	input.Contract.RequiredClaims = map[string]domain.RequiredClaim{"claim-validation": {EvidenceClass: "automated_test"}}
+	action := domain.Action{Type: "git.pull_request.create", Target: "main"}
+	input.Template = &domain.EngineeringPlanTemplate{Stages: []domain.TemplateStage{{
+		ID: "publication-approval", Kind: domain.StageHumanDecisionGate, Action: &action,
+	}}}
 	contract := plannerOutputContract(input)
+	if !strings.Contains(contract, "action git.pull_request.create:main") {
+		t.Fatal("the selected template's exact gate action is not stated to the planner")
+	}
 
 	if strings.Contains(contract, "EXACTLY the members shown") {
 		t.Fatal("the contract still tells the model that every member shown is required")
@@ -52,7 +59,7 @@ func TestTheOutputContractDoesNotDemandEveryMemberItShows(t *testing.T) {
 	// direction: the model cannot use it, and cannot know it may.
 	for _, member := range []string{
 		`"id"`, `"kind"`, `"role"`, `"objective"`, `"depends_on"`,
-		`"requires_capabilities"`, `"required_claims"`, `"independence"`, `"rationale"`, `"notes"`,
+		`"requires_capabilities"`, `"required_claims"`, `"action"`, `"independence"`, `"rationale"`, `"notes"`,
 	} {
 		if !strings.Contains(contract, member) {
 			t.Fatalf("the decoder accepts %s and the contract never shows it", member)
