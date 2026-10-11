@@ -1,6 +1,38 @@
 package runtime
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
+)
+
+func (r *EngineeringRuntime) objectivePublicationDeferred(origin *orchestration.BatchOrigin) (bool, error) {
+	if origin == nil || origin.ExecutionKind == orchestration.ExecutionKindIntegrationCompose {
+		return false, nil
+	}
+	graph, found, err := r.deps.Store.WorkGraph(origin.GraphID)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, fmt.Errorf("work graph %s for objective publication was not found", origin.GraphID)
+	}
+	if graph.ObjectivePlan == nil {
+		return false, nil
+	}
+	for _, unit := range graph.Units {
+		if unit.ID == origin.UnitID {
+			for _, integration := range graph.Units {
+				if integration.ExecutionKind == orchestration.ExecutionKindIntegrationCompose &&
+					graphUnitDependsOn(graph, integration.ID, unit.ID) {
+					return true, nil
+				}
+			}
+			return false, nil
+		}
+	}
+	return false, fmt.Errorf("work graph %s has no objective unit %s", origin.GraphID, origin.UnitID)
+}
 
 // A read transaction prevents mixed reads, but a process can crash between
 // journal and row writes. Those durable transitions remain explicit on read.

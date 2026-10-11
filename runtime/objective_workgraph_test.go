@@ -67,6 +67,42 @@ func TestObjectiveGraphRequiresApprovalAndRetainsFrozenStageBindings(t *testing.
 	}
 }
 
+func TestObjectiveProducerDefersPublicationUntilIntegrationInputIsAdmitted(t *testing.T) {
+	fleet := newFleetFixture(t, 2)
+	plan := domain.EngineeringPlan{ID: "plan-publication-order", Revision: 1, Digest: strings.Repeat("a", 64),
+		Subject: domain.Subject{Repository: "acme/repo"}, Stages: []domain.PlanStage{
+			{ID: "producer-a", Kind: domain.StageAgent, Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating},
+			{ID: "producer-b", Kind: domain.StageAgent, Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating},
+			{ID: "integrate", Kind: domain.StageAgent, Role: domain.RoleIntegrator, InvocationMode: domain.InvocationModeMutating,
+				ExecutionKind: string(orchestration.ExecutionKindIntegrationCompose), DependsOn: []string{"producer-a", "producer-b"}},
+		}}
+	graph, err := compileObjectiveGraph(plan, 554, "claude", time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fleet.store.AdoptWorkGraphRevision(graph); err != nil {
+		t.Fatal(err)
+	}
+	for _, producer := range []string{"producer-a", "producer-b"} {
+		deferred, err := fleet.runtime.objectivePublicationDeferred(&orchestration.BatchOrigin{
+			GraphID: graph.ID, UnitID: producer, ExecutionKind: orchestration.ExecutionKindProvider,
+		})
+		if err != nil || !deferred {
+			t.Fatalf("producer %s publication deferral = %t, %v; want deferred", producer, deferred, err)
+		}
+		state := &runState{publicationDeferred: deferred}
+		if _, wanted := bindAuthorityEvaluate(state); wanted || state.authorizedForPublication() {
+			t.Fatalf("producer %s can obtain publication authority before integration", producer)
+		}
+	}
+	deferred, err := fleet.runtime.objectivePublicationDeferred(&orchestration.BatchOrigin{
+		GraphID: graph.ID, UnitID: "integrate", ExecutionKind: orchestration.ExecutionKindIntegrationCompose,
+	})
+	if err != nil || deferred {
+		t.Fatalf("integrator publication deferral = %t, %v; want publication eligibility", deferred, err)
+	}
+}
+
 func TestObjectiveGraphProjectsVerboseObjectivesToBoundedStageReferences(t *testing.T) {
 	plan := domain.EngineeringPlan{
 		ID: "plan-verbose", Revision: 1, Digest: strings.Repeat("a", 64),
