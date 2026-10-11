@@ -60,6 +60,7 @@ func resolveInput(t *testing.T, plan domain.EngineeringPlan, agents ...domain.Ex
 // classes that were compared.
 func TestIndependentReviewResolvesOntoADifferentVendorFamily(t *testing.T) {
 	plan := compilePlan(t, planInput(t, "security-sensitive.engineering-fact.json", nil))
+	plan.Objective = "The full approved objective, including exact acceptance requirements."
 	resolution, err := planning.Resolve(resolveInput(t, plan, claudeAgent(), codexAgent()))
 	if err != nil {
 		t.Fatal(err)
@@ -87,6 +88,9 @@ func TestIndependentReviewResolvesOntoADifferentVendorFamily(t *testing.T) {
 	}
 	if binding.SatisfiedBy != domain.IndependenceSatisfiedByWorker {
 		t.Fatalf("independence satisfied by %q", binding.SatisfiedBy)
+	}
+	if !strings.Contains(review.Context.Objective, plan.Objective) {
+		t.Fatalf("reviewer context omitted the full plan objective: %q", review.Context.Objective)
 	}
 }
 

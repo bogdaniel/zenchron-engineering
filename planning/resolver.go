@@ -314,14 +314,16 @@ func (input ResolveInput) resolveStage(stage domain.PlanStage, profiles []domain
 		return domain.AgentAssignment{}, nil, err
 	}
 	pack, err := CompileContext(ContextInput{
-		Stage:        stage,
-		Role:         stage.Role,
-		Contract:     input.Contract,
-		Model:        input.Model,
-		Facts:        input.Facts,
-		Policy:       contextPolicy,
-		Upstream:     input.Upstream[stage.ID],
-		Independence: independenceBindings(stage, assigned, selectedAgent, *selected),
+		Stage:         stage,
+		Role:          stage.Role,
+		PlanObjective: input.Plan.Objective,
+		PlanStages:    input.Plan.Stages,
+		Contract:      input.Contract,
+		Model:         input.Model,
+		Facts:         input.Facts,
+		Policy:        contextPolicy,
+		Upstream:      input.Upstream[stage.ID],
+		Independence:  independenceBindings(stage, assigned, selectedAgent, *selected),
 	})
 	if err != nil {
 		return domain.AgentAssignment{}, nil, err

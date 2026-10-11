@@ -33,9 +33,11 @@ import (
 // compiler cannot go and look something up" is a property of the signature
 // rather than a rule somebody has to remember.
 type ContextInput struct {
-	Stage    domain.PlanStage
-	Role     domain.EngineeringRole
-	Contract domain.EngineeringWorkContract
+	Stage         domain.PlanStage
+	Role          domain.EngineeringRole
+	PlanObjective string
+	PlanStages    []domain.PlanStage
+	Contract      domain.EngineeringWorkContract
 	// Model is ProjectModel v1, consumed exactly as it is.
 	Model domain.ProjectModel
 	Facts []domain.EngineeringFact
@@ -144,6 +146,19 @@ func CompileContext(input ContextInput) (domain.ContextPack, error) {
 	objective := strings.TrimSpace(input.Stage.Objective)
 	if objective == "" {
 		objective = strings.TrimSpace(input.Contract.Objective)
+	}
+	isReviewer := input.Role == domain.RoleReviewer || input.Role == domain.RoleSecurityReviewer ||
+		input.Role == domain.RoleReleaseReviewer
+	if isReviewer && strings.TrimSpace(input.PlanObjective) != "" {
+		objective = "Plan objective:\n" + strings.TrimSpace(input.PlanObjective) + "\n\nReview objective:\n" + objective
+	}
+	if isReviewer && len(input.PlanStages) > 0 {
+		var stages []string
+		for _, stage := range input.PlanStages {
+			stages = append(stages, fmt.Sprintf("%s (%s, role=%s, execution=%s, depends_on=%s): %s",
+				stage.ID, stage.Kind, stage.Role, stage.ExecutionKind, strings.Join(stage.DependsOn, ","), stage.Objective))
+		}
+		objective += "\n\nApproved plan stages:\n" + strings.Join(stages, "\n")
 	}
 	if objective == "" {
 		return refuse("neither the stage nor the contract states an objective, so the worker would be asked for nothing in particular")
