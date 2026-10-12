@@ -231,6 +231,8 @@ try {
     const graph = await cdp.evaluate(`({edges:document.querySelectorAll('.graph-edge').length,units:Array.from(document.querySelectorAll('.graph-node')).map(n=>({id:n.dataset.unitId,column:n.style.gridColumn}))})`);
     assert.equal(graph.edges, 1, 'the admitted dependency must have a visible arrow');
     assert(Number(graph.units.find(n => n.id === 'integration').column) > Number(graph.units.find(n => n.id === 'implementation').column), 'dependent work must render in a later column');
+    assert.equal(graph.units.find(n => n.id === 'parallel-verification').column,
+      graph.units.find(n => n.id === 'implementation').column, 'independent work must remain parallel');
     await cdp.evaluate(`document.querySelector('.graph-node[href="#unit-integration"]').click()`);
     assert.equal(await cdp.evaluate(`location.hash`), '#unit-integration', 'work unit links must navigate to their evidence detail');
     await cdp.evaluate(`window.__graphMapMutations=0;new MutationObserver(()=>window.__graphMapMutations++).observe(document.querySelector('.graph-map'),{childList:true,subtree:true,attributes:true});document.activeElement.blur()`);
@@ -282,6 +284,7 @@ try {
     const implementation = graph.units.find(unit => unit.unit_id === 'implementation');
     assert.equal(implementation.state, 'ready', 'resolving the hold must advance the WorkGraph frontier');
     assert(graph.frontier.includes('implementation'), 'newly authorized unit must appear in the runnable frontier');
+    assert(graph.frontier.includes('parallel-verification'), 'independent work must also be ready');
     assert.equal(implementation.hold, undefined, 'resolved hold must leave Action Required and the unit');
     const duplicate = await post('/v1/decisions/' + decision + '/resolve', {controller_binding:binding,outcome_kind:'allow_deny',outcome_value:'allow'});
     assert.equal(duplicate.body.outcome,'already_applied');

@@ -73,6 +73,7 @@ func TestBrowserWorkspace(t *testing.T) {
 	graph, err := (orchestration.WorkGraphProposal{Name: "browser-approval-flow", Revision: 1, Units: []orchestration.WorkUnit{
 		{ID: "implementation", Purpose: "Implement widget behavior", Role: domain.RoleImplementer, Issue: 41},
 		{ID: "integration", Purpose: "Integrate verified widget", Role: domain.RoleIntegrator, Issue: 42, DependsOn: []string{"implementation"}},
+		{ID: "parallel-verification", Purpose: "Verify adjacent behavior", Role: domain.RoleTester, Issue: 43},
 	}}).Compose("zenchron/seeded", built.agent.ID, "operator-1", time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
