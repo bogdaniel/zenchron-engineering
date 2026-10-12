@@ -82,6 +82,72 @@
     if (freshness) freshness.textContent = "updated " + new Date(lastGood).toISOString().slice(11, 19) + "Z" + (live ? "" : " (" + Math.round(age / 1000) + "s ago)");
   }
 
+  // shortcut: layout scans the validated 32-unit graph bound; revisit if that bound grows.
+  function renderWorkGraphMaps() {
+    document.querySelectorAll(".graph-map").forEach(function (map) {
+      var nodes = Array.from(map.querySelectorAll("[data-unit-id]"));
+      if (!nodes.length) return;
+      var byId = new Map(nodes.map(function (node) { return [node.dataset.unitId, node]; }));
+      var depthById = new Map();
+      var visiting = new Set();
+      function depth(id) {
+        if (depthById.has(id)) return depthById.get(id);
+        if (visiting.has(id)) return 0;
+        visiting.add(id);
+        var value = 0;
+        (byId.get(id).dataset.dependsOn || "").trim().split(/\s+/).filter(Boolean).forEach(function (dependency) {
+          if (byId.has(dependency)) value = Math.max(value, depth(dependency) + 1);
+        });
+        visiting.delete(id);
+        depthById.set(id, value);
+        return value;
+      }
+      var columns = [];
+      nodes.forEach(function (node) {
+        var level = depth(node.dataset.unitId);
+        if (!columns[level]) columns[level] = [];
+        columns[level].push(node);
+      });
+      map.style.setProperty("--graph-columns", String(columns.length));
+      columns.forEach(function (column, index) {
+        column.forEach(function (node, row) {
+          node.style.gridColumn = String(index + 1);
+          node.style.gridRow = String(row + 1);
+        });
+      });
+
+      var svg = map.querySelector(".graph-edges");
+      if (!svg) return;
+      var defs = document.createElementNS(svg.namespaceURI, "defs");
+      var marker = document.createElementNS(svg.namespaceURI, "marker");
+      marker.setAttribute("id", "graph-arrow");
+      marker.setAttribute("viewBox", "0 0 10 10");
+      marker.setAttribute("refX", "9"); marker.setAttribute("refY", "5");
+      marker.setAttribute("markerWidth", "6"); marker.setAttribute("markerHeight", "6"); marker.setAttribute("orient", "auto-start-reverse");
+      var arrow = document.createElementNS(svg.namespaceURI, "path");
+      arrow.setAttribute("d", "M 0 0 L 10 5 L 0 10 z"); arrow.setAttribute("fill", "var(--accent)");
+      marker.appendChild(arrow); defs.appendChild(marker); svg.replaceChildren(defs);
+      var bounds = map.getBoundingClientRect();
+      svg.setAttribute("viewBox", "0 0 " + bounds.width + " " + bounds.height);
+      nodes.forEach(function (node) {
+        (node.dataset.dependsOn || "").trim().split(/\s+/).filter(Boolean).forEach(function (dependency) {
+          var source = byId.get(dependency);
+          if (!source) return;
+          var from = source.getBoundingClientRect();
+          var to = node.getBoundingClientRect();
+          var x1 = from.right - bounds.left, y1 = from.top + from.height / 2 - bounds.top;
+          var x2 = to.left - bounds.left, y2 = to.top + to.height / 2 - bounds.top;
+          var bend = Math.max(28, (x2 - x1) / 2);
+          var path = document.createElementNS(svg.namespaceURI, "path");
+          path.classList.add("graph-edge");
+          path.setAttribute("d", "M" + x1 + " " + y1 + " C" + (x1 + bend) + " " + y1 + "," + (x2 - bend) + " " + y2 + "," + x2 + " " + y2);
+          path.setAttribute("marker-end", "url(#" + marker.id + ")");
+          svg.appendChild(path);
+        });
+      });
+    });
+  }
+
   function reconcile(current, next) {
     if (current.isEqualNode(next)) return;
     if (current.nodeType !== next.nodeType || current.nodeName !== next.nodeName) {
@@ -144,6 +210,7 @@
       })
       .then(function (html) {
         swapRegions(new DOMParser().parseFromString(html, "text/html"));
+        renderWorkGraphMaps();
         lastGood = Date.now();
         failure = "";
         confirmed = true;
@@ -395,6 +462,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
+    renderWorkGraphMaps();
     loadWorkspaceOptions();
     loadPlanPreview();
     loadPublicationRequest();
@@ -413,6 +481,7 @@
       document.documentElement.dataset.theme = choice;
       try { localStorage.setItem("zenchron-theme", choice); } catch (_) { /* Theme still applies for this page. */ }
     });
+    window.addEventListener("resize", renderWorkGraphMaps);
     if (!loginForm) {
       refresh();
       window.setInterval(render, 1000);

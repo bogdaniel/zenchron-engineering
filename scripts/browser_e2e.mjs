@@ -185,6 +185,15 @@ try {
     await cdp.navigate('/workgraphs/' + process.env.ZENCHRON_E2E_GRAPH);
     const text = await cdp.evaluate(`document.body.innerText`);
     assert(text.includes('implementation') && text.includes('integration') && /decision|hold/i.test(text));
+    const graph = await cdp.evaluate(`({edges:document.querySelectorAll('.graph-edge').length,units:Array.from(document.querySelectorAll('.graph-node')).map(n=>({id:n.dataset.unitId,column:n.style.gridColumn}))})`);
+    assert.equal(graph.edges, 1, 'the admitted dependency must have a visible arrow');
+    assert(Number(graph.units.find(n => n.id === 'integration').column) > Number(graph.units.find(n => n.id === 'implementation').column), 'dependent work must render in a later column');
+    await cdp.evaluate(`document.querySelector('.graph-node[href="#unit-integration"]').click()`);
+    assert.equal(await cdp.evaluate(`location.hash`), '#unit-integration', 'work unit links must navigate to their evidence detail');
+    await cdp.evaluate(`window.__graphMapMutations=0;new MutationObserver(()=>window.__graphMapMutations++).observe(document.querySelector('.graph-map'),{childList:true,subtree:true,attributes:true});document.activeElement.blur()`);
+    await until(() => cdp.evaluate(`window.__graphMapMutations > 0`), 'live WorkGraph map reconciliation');
+    assert.equal(await cdp.evaluate(`document.querySelectorAll('.graph-edge').length`), 1, 'live refresh must redraw dependency arrows');
+    await cdp.navigate('/workgraphs/' + process.env.ZENCHRON_E2E_GRAPH);
     await screenshot('desktop-workgraph');
     await cdp.call('Emulation.setDeviceMetricsOverride', {width:390,height:1000,deviceScaleFactor:1,mobile:true});
     assert(await cdp.evaluate(`document.documentElement.scrollWidth <= innerWidth + 1`));

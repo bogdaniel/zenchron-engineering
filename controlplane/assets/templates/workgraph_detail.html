@@ -18,9 +18,9 @@
   <p><strong>runnable frontier:</strong> {{range $g.Frontier}}<span class="pill mono">{{.}}</span> {{else}}<span class="muted">nothing runnable right now</span>{{end}}</p>
 </section>
 
-<section class="panel"><h2>Execution map</h2><p class="muted">Dependencies advance only through admitted handoffs. Select a work unit to inspect its evidence and next step.</p><div class="graph-map" role="list">
-{{range $g.Units}}<a class="graph-node" role="listitem" href="#unit-{{.UnitID}}"><span class="label">{{.Role}} · Issue #{{.Issue}}</span><strong>{{.Purpose}}</strong><span data-state="{{.State}}">{{.State}}</span><small>Depends on: {{range .DependsOn}}{{.}} {{else}}No dependencies{{end}}</small></a>{{end}}
-</div></section>
+<section class="panel"><h2>Execution map</h2><p class="muted">Arrows show dependency order. Units in the same column can progress in parallel. Dependencies advance only through admitted handoffs. Select a unit to inspect its evidence and next step.</p><div class="graph-scroll" tabindex="0" aria-label="Scrollable WorkGraph dependency map"><div class="graph-map" role="list"><svg class="graph-edges" aria-hidden="true"></svg>
+{{range $g.Units}}<a class="graph-node" role="listitem" data-unit-id="{{.UnitID}}" data-depends-on="{{range .DependsOn}}{{.}} {{end}}" href="#unit-{{.UnitID}}"><span class="label">{{.Role}} · Issue #{{.Issue}}</span><strong>{{.Purpose}}</strong><span data-state="{{.State}}">{{.State}}</span><small>Depends on: {{range .DependsOn}}{{.}} {{else}}No dependencies{{end}}</small></a>{{end}}
+</div></div></section>
 {{range $g.Units}}
 <section class="panel unit" aria-labelledby="unit-{{.UnitID}}">
   <h2 id="unit-{{.UnitID}}" class="mono">{{.UnitID}} <span class="muted">· {{.Role}}</span> · <span data-state="{{.State}}">{{.State}}</span></h2>
