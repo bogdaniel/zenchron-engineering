@@ -1,6 +1,6 @@
 {{define "title"}}Agents{{end}}
 {{define "content"}}
-<section class="panel"><p class="eyebrow">Execution providers</p><h1>Agents</h1><p class="muted">Installed workers are execution providers. Worker trust never grants acceptance authority.</p><p id="agents-status" role="status">Loading controller-owned agent configuration…</p><div id="agents-list" class="graph-map"></div></section>
+<section class="panel"><p class="eyebrow">Execution providers</p><h1>Agents</h1><p class="muted">Installed workers are execution providers. Worker trust never grants acceptance authority.</p>{{if .Controller.ActionsDisabled}}<p class="banner error" role="status">Provider eligibility is configuration only. Browser actions are unavailable: {{.Controller.ActionsDisabled}}.</p>{{end}}<p id="agents-status" role="status">Loading controller-owned agent configuration…</p><div id="agents-list" class="graph-map"></div></section>
 <section class="panel"><h2>Agent profiles</h2><p class="muted">Profiles bind workers to planning roles and requirements. They grant no acceptance or publication authority.</p><p id="profiles-status" role="status">Loading installed profiles…</p><div id="profiles-list" class="graph-map"></div></section>
 <section class="panel"><h2>Plan templates</h2><p class="muted">Templates are reusable planning inputs. Human approval is still required for each generated plan.</p><p id="templates-status" role="status">Loading installed templates…</p><div id="templates-list" class="graph-map"></div></section>
 {{end}}
