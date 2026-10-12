@@ -68,7 +68,8 @@ func (s *ReadStore) PlanView(id string, revision int) (PlanView, error) {
 func (s *ReadStore) PlanEvents(id string) ([]EngineeringEvent, error) {
 	return s.store.PlanEvents(id)
 }
-func (s *ReadStore) HasRun(id string) (bool, error) { _, ok, err := s.store.Run(id); return ok, err }
+func (s *ReadStore) HasRun(id string) (bool, error)    { _, ok, err := s.store.Run(id); return ok, err }
+func (s *ReadStore) RunPaused(id string) (bool, error) { return s.store.RunPaused(id) }
 
 // RunBinding reports only whether a run belongs to a plan or WorkGraph.
 func (s *ReadStore) RunBinding(id string) (plan, workGraph, found bool, err error) {

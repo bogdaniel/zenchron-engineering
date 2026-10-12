@@ -24,3 +24,19 @@ func TestRunLifecycleButtonsUseGovernedBindingsAndExplainLimits(t *testing.T) {
 		t.Fatal("run detail has inaccurate lifecycle-action guidance")
 	}
 }
+
+func TestRunDetailShowsOnlyTheValidPauseTransition(t *testing.T) {
+	controller := Controller{ControllerBinding: strings.Repeat("b", 64)}
+	for _, test := range []struct {
+		paused bool
+		want   string
+		omit   string
+	}{{false, "/pause\"", "/unpause\""}, {true, "/unpause\"", "/pause\""}} {
+		page := renderTemplate(t, runDetailTemplate, runDetailData{
+			Status: RunDetail{ID: "run-1", Disposition: rt.Active}, Controller: controller, Paused: test.paused,
+		})
+		if !strings.Contains(page, test.want) || strings.Contains(page, test.omit) {
+			t.Errorf("paused=%v rendered the wrong scheduling transition", test.paused)
+		}
+	}
+}

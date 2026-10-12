@@ -276,6 +276,7 @@ type runDetailData struct {
 	Controller      Controller
 	StopDisabled    string
 	RefreshDisabled string
+	Paused          bool
 }
 
 func (w *Web) handleRunDetail(rw http.ResponseWriter, r *http.Request) {
@@ -315,6 +316,11 @@ func (w *Web) handleRunDetail(rw http.ResponseWriter, r *http.Request) {
 	data.Controller = w.liveController(now)
 	data.StopDisabled = data.Controller.ActionsDisabled()
 	data.RefreshDisabled = data.StopDisabled
+	data.Paused, err = w.Store.RunPaused(id)
+	if err != nil {
+		w.renderError(rw, err)
+		return
+	}
 	planBound, graphBound, found, err := w.Store.RunBinding(id)
 	if err != nil {
 		w.renderError(rw, err)

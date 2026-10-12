@@ -200,6 +200,23 @@ try {
     await screenshot('mobile-workgraph');
     await cdp.call('Emulation.setDeviceMetricsOverride', {width:1440,height:1000,deviceScaleFactor:1,mobile:false});
   });
+  await check('run detail offers only the current pause transition', async () => {
+    await cdp.navigate('/runs/browser-live');
+    assert(await cdp.evaluate(`Boolean(document.querySelector('[data-action="/v1/runs/browser-live/pause"]'))`));
+    assert(await cdp.evaluate(`!document.querySelector('[data-action="/v1/runs/browser-live/unpause"]')`));
+    await cdp.evaluate(`document.querySelector('[data-action="/v1/runs/browser-live/pause"]').click();document.querySelector('#action-confirm').click()`);
+    await until(() => cdp.evaluate(`/applied/.test(document.querySelector('#action-result')?.textContent || '')`), 'pause request');
+    await cdp.evaluate(`document.querySelector('#action-close').click()`);
+    await until(() => cdp.evaluate(`Boolean(document.querySelector('[data-action="/v1/runs/browser-live/unpause"]'))`), 'paused view');
+    assert(await cdp.evaluate(`!document.querySelector('[data-action="/v1/runs/browser-live/pause"]')`));
+    await cdp.evaluate(`document.querySelector('[data-action="/v1/runs/browser-live/unpause"]').click();document.querySelector('#action-confirm').click()`);
+    await until(() => cdp.evaluate(`/applied/.test(document.querySelector('#action-result')?.textContent || '')`), 'unpause request');
+    await cdp.evaluate(`document.querySelector('#action-close').click()`);
+    await until(() => cdp.evaluate(`Boolean(document.querySelector('[data-action="/v1/runs/browser-live/pause"]'))`), 'resumed view');
+    const events = await cdp.evaluate(`fetch('/v1/runs/browser-live/events',{headers:{Authorization:'Bearer browser-test-token'}}).then(r=>r.json())`);
+    assert.equal(events.events.filter(event => event.type === 'run.paused').length, 1);
+    assert.equal(events.events.filter(event => event.type === 'run.unpaused').length, 1);
+  });
   await check('designated operator resolves exact WorkUnit hold through browser', async () => {
     await cdp.navigate('/decisions');
     const decision = process.env.ZENCHRON_E2E_DECISION;
