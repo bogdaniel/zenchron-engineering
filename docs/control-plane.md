@@ -206,8 +206,13 @@ A changed revision, worker binding or controller generation is refused.
 | `POST /v1/decisions/{id}/resolve` | `Supervisor.ResolveDecision`, configured operator provenance |
 | `GET /v1/runs/{id}/authority` | Current `PendingAuthorityRequest`, or no request |
 | `POST /v1/runs/{id}/authorize` | Existing `Authorize`, exact request id/digest and approve/reject evidence |
+| `POST /v1/runs/{id}/pause` and `/unpause` | Existing operator pause journal and scheduler admission |
+| `POST /v1/runs/{id}/resume` | Existing scheduler reconciliation request; policy and capacity remain authoritative |
+| `POST /v1/runs/{id}/refresh` | New source generation for an eligible issue run; plan/WorkGraph-bound work requires a governed revision |
 
-The original stop and reject routes remain available. Every mutation requires
+Stop, reject and lifecycle actions use fixed routes and existing controller
+commands. Run detail explains when an action is unavailable; it does not offer
+a manual retry that bypasses scheduler budgets. Every mutation requires
 Bearer authentication, exact Host, same Origin, strict bounded JSON and a
 same-request measured controller binding under the held controller role. No
 browser-supplied actor is accepted. Unsupported verbs remain unreachable.

@@ -90,6 +90,36 @@ func TestReadStoreAndBoundedEventsPage(t *testing.T) {
 	}
 }
 
+func TestReadStoreRunBindingExposesOnlyGovernedLineage(t *testing.T) {
+	dir, store := openJournal(t)
+	planRun := newJournalRun("plan-run")
+	planRun.Plan = &RunPlanBinding{PlanID: "plan", StageID: "stage"}
+	graphRun := newJournalRun("graph-run")
+	graphRun.Orchestration = &RunOrchestrationBinding{BatchID: "graph"}
+	for _, run := range []EngineeringRun{newJournalRun("plain-run"), planRun, graphRun} {
+		if err := store.PutRun(run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := OpenReadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	for _, test := range []struct {
+		id                   string
+		plan, graph, present bool
+	}{{"plain-run", false, false, true}, {"plan-run", true, false, true}, {"graph-run", false, true, true}, {"missing", false, false, false}} {
+		plan, graph, present, err := reader.RunBinding(test.id)
+		if err != nil || plan != test.plan || graph != test.graph || present != test.present {
+			t.Errorf("RunBinding(%q) = %v, %v, %v, %v", test.id, plan, graph, present, err)
+		}
+	}
+}
+
 func TestEventsPageDoesNotDecodeUnboundedTail(t *testing.T) {
 	_, store := openJournal(t)
 	for _, e := range journalFixture(t, "r") {

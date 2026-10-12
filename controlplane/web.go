@@ -273,8 +273,9 @@ type runDetailData struct {
 	NextAfter  int64
 	HasMore    bool
 	// Controller and StopDisabled drive the governed stop action (#398).
-	Controller   Controller
-	StopDisabled string
+	Controller      Controller
+	StopDisabled    string
+	RefreshDisabled string
 }
 
 func (w *Web) handleRunDetail(rw http.ResponseWriter, r *http.Request) {
@@ -313,8 +314,30 @@ func (w *Web) handleRunDetail(rw http.ResponseWriter, r *http.Request) {
 	}
 	data.Controller = w.liveController(now)
 	data.StopDisabled = data.Controller.ActionsDisabled()
-	if d := data.Status.Disposition; data.StopDisabled == "" && (d == rt.Completed || d == rt.Failed || d == rt.Cancelled) {
-		data.StopDisabled = "the run is already " + string(d)
+	data.RefreshDisabled = data.StopDisabled
+	planBound, graphBound, found, err := w.Store.RunBinding(id)
+	if err != nil {
+		w.renderError(rw, err)
+		return
+	}
+	if !found {
+		w.renderRunNotFound(rw, id)
+		return
+	}
+	terminal := data.Status.Disposition == rt.Completed || data.Status.Disposition == rt.Failed || data.Status.Disposition == rt.Cancelled
+	if terminal {
+		data.StopDisabled = "the run is already " + string(data.Status.Disposition)
+		data.RefreshDisabled = "the run is already " + string(data.Status.Disposition)
+	}
+	if data.RefreshDisabled == "" {
+		switch {
+		case data.Status.Source == nil || data.Status.Source.Issue < 1:
+			data.RefreshDisabled = "this run has no GitHub issue source"
+		case planBound:
+			data.RefreshDisabled = "plan-bound work must be revised through its approved plan"
+		case graphBound:
+			data.RefreshDisabled = "WorkGraph-bound work must be revised through its WorkGraph"
+		}
 	}
 	w.render(rw, runDetailTemplate, data)
 }

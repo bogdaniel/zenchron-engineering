@@ -69,6 +69,16 @@ func (s *ReadStore) PlanEvents(id string) ([]EngineeringEvent, error) {
 	return s.store.PlanEvents(id)
 }
 func (s *ReadStore) HasRun(id string) (bool, error) { _, ok, err := s.store.Run(id); return ok, err }
+
+// RunBinding reports only whether a run belongs to a plan or WorkGraph.
+func (s *ReadStore) RunBinding(id string) (plan, workGraph, found bool, err error) {
+	run, found, err := s.store.Run(id)
+	if err != nil || !found {
+		return false, false, found, err
+	}
+	return run.Plan != nil, run.Orchestration != nil, true, nil
+}
+
 func (s *ReadStore) EventsPage(id string, after int64, limit int) ([]EngineeringEvent, bool, error) {
 	return s.store.EventsPage(id, after, limit)
 }
