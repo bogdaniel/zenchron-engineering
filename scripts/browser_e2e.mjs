@@ -267,6 +267,11 @@ try {
     assert(await cdp.evaluate(`document.querySelector('#action-dialog').innerText.includes(${JSON.stringify(decision)})`));
     await cdp.evaluate(`document.querySelector('#action-confirm').click()`);
     await until(() => cdp.evaluate(`/applied/.test(document.querySelector('#action-result')?.textContent || '')`), 'decision resolution');
+    const graph = await cdp.evaluate(`fetch('/v1/workgraphs/' + ${JSON.stringify(process.env.ZENCHRON_E2E_GRAPH)}, {headers:{Authorization:'Bearer browser-test-token'}}).then(r=>r.json())`);
+    const implementation = graph.units.find(unit => unit.unit_id === 'implementation');
+    assert.equal(implementation.state, 'ready', 'resolving the hold must advance the WorkGraph frontier');
+    assert(graph.frontier.includes('implementation'), 'newly authorized unit must appear in the runnable frontier');
+    assert.equal(implementation.hold, undefined, 'resolved hold must leave Action Required and the unit');
     const duplicate = await post('/v1/decisions/' + decision + '/resolve', {controller_binding:binding,outcome_kind:'allow_deny',outcome_value:'allow'});
     assert.equal(duplicate.body.outcome,'already_applied');
     const changedReason = await post('/v1/decisions/' + decision + '/resolve', {controller_binding:binding,outcome_kind:'allow_deny',outcome_value:'allow',note:'changed rationale'});
