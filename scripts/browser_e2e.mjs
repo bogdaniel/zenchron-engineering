@@ -236,6 +236,15 @@ try {
     assert.equal(events.events.filter(event => event.type === 'run.paused').length, 1);
     assert.equal(events.events.filter(event => event.type === 'run.unpaused').length, 1);
   });
+  await check('runtime refusal never exposes publication authorization', async () => {
+    await cdp.navigate('/runs/browser-run');
+    await until(() => cdp.evaluate(`!(/loading publication authority/i.test(document.querySelector('#publication-actions')?.textContent || ''))`), 'publication authority observation');
+    const authority = await cdp.evaluate(`fetch('/v1/runs/browser-run/authority',{headers:{Authorization:'Bearer browser-test-token'}}).then(async r=>({status:r.status,body:await r.json()}))`);
+    assert.equal(authority.status, 409, JSON.stringify(authority));
+    assert.equal(authority.body.error, 'runtime_refused');
+    assert(await cdp.evaluate(`/publication unavailable \\(http 409\\)/i.test(document.querySelector('#publication-actions').textContent)`));
+    assert(await cdp.evaluate(`!Array.from(document.querySelectorAll('#publication-actions button')).some(button => /authorize publication/i.test(button.textContent))`));
+  });
   await check('designated operator resolves exact WorkUnit hold through browser', async () => {
     await cdp.navigate('/decisions');
     const decision = process.env.ZENCHRON_E2E_DECISION;
