@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -205,6 +206,8 @@ type autonomyFlags struct {
 	// Template names the operator's reusable EngineeringPlanTemplate for a plan
 	// proposal. Empty means the planner compiles from policy and intent alone.
 	Template string
+	// Profile is the operator's default profile preference for agent stages.
+	Profile string
 	// Revision and Digest name the EXACT plan revision a decision is about.
 	// They are what an operator read: without them the CLI would decide
 	// whatever the highest revision happened to be at decide time, which can
@@ -596,9 +599,11 @@ func writeJSON(stdout io.Writer, value any) error {
 // construction with a different repository target, rather than two wirings that
 // can drift apart.
 type composition struct {
-	config runtime.Config
-	store  *runtime.SQLiteOperationStore
-	owner  string
+	planInvocationsMu sync.Mutex
+	planInvocations   map[string]struct{}
+	config            runtime.Config
+	store             *runtime.SQLiteOperationStore
+	owner             string
 	// drivers is the one record of leases this process's drivers hold
 	// (#485), shared by every engine the composition builds.
 	drivers     *runtime.DriverLeases

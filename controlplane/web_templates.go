@@ -102,6 +102,11 @@ func parseWebTemplate(name string) *template.Template {
 
 var (
 	overviewTemplate        = parseWebTemplate("overview.html")
+	objectivesTemplate      = parseWebTemplate("objectives.html")
+	plansTemplate           = parseWebTemplate("plans.html")
+	decisionsTemplate       = parseWebTemplate("decisions.html")
+	agentsTemplate          = parseWebTemplate("agents.html")
+	settingsTemplate        = parseWebTemplate("settings.html")
 	runsTemplate            = parseWebTemplate("runs.html")
 	runDetailTemplate       = parseWebTemplate("run_detail.html")
 	planDetailTemplate      = parseWebTemplate("plan_detail.html")

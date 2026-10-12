@@ -477,6 +477,12 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 // after the controller binding was proven on this request.
 func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.Supervisor, shutdown func(), request runtime.ControlRequest, governed bool) runtime.ControlResponse {
 	switch request.Command {
+	case runtime.ControlPlanView, runtime.ControlWorkspaceOptions, runtime.ControlAuthorityView:
+		return c.workspaceRead(ctx, supervisor, request)
+	case runtime.ControlResume, runtime.ControlRefresh:
+		return c.controlRunLifecycle(ctx, supervisor, request)
+	case runtime.ControlAuthorize:
+		return c.recordBrowserAuthority(ctx, supervisor, request)
 	case runtime.ControlPing:
 		return controlOK(map[string]string{"state_dir": c.config.StateDir, "agent": c.agent.ID})
 	case runtime.ControlCommandControllerSnapshot:
@@ -503,6 +509,13 @@ func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.S
 		}
 		return controlOK(view)
 	case runtime.ControlWorkGraphHold, runtime.ControlResolveDecision:
+		if governed {
+			operator, err := c.config.ResolveOperator()
+			if err != nil {
+				return controlError(err)
+			}
+			request.Operator = operator.ID
+		}
 		return dispatchDecisionControl(supervisor, request) // #508, kept out of this switch's bulk
 	case runtime.ControlStatus:
 		policy, err := c.config.SupervisorPolicy()
@@ -533,14 +546,7 @@ func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.S
 		}
 		return controlOK(outcome)
 	case runtime.ControlPause, runtime.ControlUnpause:
-		// Applied under the controller role (#86): a generation that has been
-		// superseded - or a process holding no role at all (WithAuthority is
-		// nil-safe and refuses) - cannot accept a pause or an unpause.
-		var view runtime.PauseView
-		if err := c.role.WithAuthority(func() (err error) { view, err = applyPause(c.store, request); return err }); err != nil {
-			return controlError(err)
-		}
-		return controlOK(view)
+		return c.controlPause(request, governed)
 	case runtime.ControlPlanApprove, runtime.ControlPlanReject:
 		// Under the reconciler's own lock: a decision and a plan tick both read
 		// a snapshot and then append against it, and interleaving them lets one
@@ -591,7 +597,7 @@ func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.S
 // meanwhile refuses it. Only the governed verbs are accepted; nothing else is
 // reachable this way.
 func (c *composition) governedControl(ctx context.Context, supervisor *runtime.Supervisor, shutdown func(), request runtime.ControlRequest) runtime.ControlResponse {
-	if request.Command != runtime.ControlStop && request.Command != runtime.ControlPlanReject {
+	if !browserGovernedCommand(request.Command) {
 		return runtime.ControlResponse{Code: runtime.ControlCodeUnsupported, Error: fmt.Sprintf("%q is not a governed control command", request.Command)}
 	}
 	self, err := controllerSelf()

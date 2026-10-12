@@ -40,6 +40,7 @@ func TestOverviewTemplateRendersEveryOptionalField(t *testing.T) {
 		Controller: Controller{
 			DurableConsistency: rt.DurableConsistent, Serving: rt.Serving, Projection: rt.ProjectionCurrent,
 			GenerationMatch: "match", Role: rt.RoleHeld, WorkAdmission: rt.AdmissionOpen,
+			ControllerBinding: "binding",
 			DurableGeneration: &Build{Kind: "release", Version: "v1", SourceRevision: "abc"},
 			LiveReachable:     true,
 			LiveBuild:         &Build{Kind: "release", Version: "v1", SourceRevision: "abc"},
@@ -52,6 +53,9 @@ func TestOverviewTemplateRendersEveryOptionalField(t *testing.T) {
 		},
 	}
 	out := renderTemplate(t, overviewTemplate, data)
+	if strings.Contains(out, "Governed browser actions unavailable") {
+		t.Fatalf("an actionable controller must not show a blocker: %s", out)
+	}
 	for _, want := range []string{"overview", "release", "abc", "durably active generation", "could not be replayed"} {
 		if !bytes.Contains([]byte(out), []byte(want)) {
 			t.Fatalf("expected %q in rendered overview, got: %s", want, out)
@@ -63,8 +67,24 @@ func TestOverviewTemplateRendersEveryOptionalField(t *testing.T) {
 // reachable" / "unknown" branches, the complement of the fully-populated
 // case above.
 func TestOverviewTemplateRendersControllerUnreachable(t *testing.T) {
-	data := overviewData{ObservedAt: time.Now(), Controller: Controller{GenerationMatch: "unknown"}, Fleet: Fleet{}}
-	renderTemplate(t, overviewTemplate, data)
+	data := overviewData{ObservedAt: time.Now(), Controller: Controller{
+		Serving: rt.Serving, LiveReachable: true, Role: rt.RoleHeld, GenerationMatch: "unknown",
+		LiveBuild: &Build{Kind: rt.ControllerUnattested},
+	}, Fleet: Fleet{}}
+	out := renderTemplate(t, overviewTemplate, data)
+	if !strings.Contains(out, "Governed browser actions unavailable: the serving controller is unattested") {
+		t.Fatalf("the overview must expose its blocking controller state: %s", out)
+	}
+}
+
+func TestAgentsTemplateExplainsProviderEligibilityRequiresActionableController(t *testing.T) {
+	out := renderTemplate(t, agentsTemplate, struct{ Controller Controller }{Controller: Controller{
+		Serving: rt.Serving, LiveReachable: true, Role: rt.RoleHeld, LiveBuild: &Build{Kind: rt.ControllerUnattested},
+	}})
+	if !strings.Contains(out, "Provider eligibility is configuration only") ||
+		!strings.Contains(out, "Browser actions are unavailable: the serving controller is unattested") {
+		t.Fatalf("the agents page must distinguish provider eligibility from controller authority: %s", out)
+	}
 }
 
 // TestRunsTemplateRendersEveryColumn exercises every runs.html column,

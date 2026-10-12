@@ -362,7 +362,7 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 	input := runtime.ProposeInput{
 		PlanID: planID, Objective: intent.Objective, Subject: intent.Subject,
 		Repository: composed.target.Identity, Contract: intent.Contract,
-		Model: intent.Model, Facts: intent.Facts, Template: flags.Template, Issue: issue,
+		Model: intent.Model, Facts: intent.Facts, Template: flags.Template, Profile: flags.Profile, Issue: issue,
 		// The OBSERVED trusted base, from the same intent compilation that read
 		// it through the governed remote. This is the only path in the product
 		// that can authorize a plan moving onto a newer base, and it can do so

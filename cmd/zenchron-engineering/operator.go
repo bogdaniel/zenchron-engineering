@@ -228,7 +228,7 @@ func persistedDisposition(run runtime.EngineeringRun, events []runtime.Engineeri
 // source refresh draws. It is deliberately not stopReason: a refresh is not a
 // person abandoning the work, and the two must stay distinguishable in the
 // journal forever.
-const refreshReason = "operator_source_refresh"
+const refreshReason = runtime.ReasonOperatorSourceRefresh
 
 // refreshView is what `refresh` reports: which run was refreshed, which
 // snapshot it had pinned, which run now answers the same source, and which

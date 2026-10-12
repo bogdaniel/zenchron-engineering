@@ -51,6 +51,9 @@ func TestWorkGraphDetailProjectionCarriesHoldsRunsAndOpenDecisions(t *testing.T)
 		"batch-a": {{
 			ID: "decision-1", Kind: orchestration.KindDecisionRequest, Purpose: "which backend?",
 			Source: orchestration.MessageSource{Unit: "a"}, AdmittedAt: requestedAt,
+			ExpectedOutcomeKind: orchestration.DecisionSelectedOption, PermittedOptions: []string{"sqlite", "postgres"},
+			Subject: &orchestration.MessageSubject{Handoff: "handoff-1", Owner: "a",
+				Revision: orchestration.HandoffSubject{BaseRevision: "base-1", CandidateRevision: "deadbeef", CandidateTree: "tree-1"}},
 		}},
 	}
 	runOf := func(runID string) (*RunDetail, error) {
@@ -92,6 +95,15 @@ func TestWorkGraphDetailProjectionCarriesHoldsRunsAndOpenDecisions(t *testing.T)
 	if len(a.OpenDecisions) != 1 || a.OpenDecisions[0].ID != "decision-1" || a.OpenDecisions[0].RequestedBy != "a" {
 		t.Fatalf("a's open decisions must come from its own batch alone: %+v", a.OpenDecisions)
 	}
+	request := a.OpenDecisions[0]
+	if request.ExpectedOutcomeKind != orchestration.DecisionSelectedOption || len(request.PermittedOptions) != 2 ||
+		request.Subject == nil || request.Subject.Handoff != "handoff-1" || request.Subject.CandidateRevision != "deadbeef" || request.Subject.CandidateTree != "tree-1" {
+		t.Fatalf("decision must show its frozen grammar and exact subject: %+v", request)
+	}
+	decisions["batch-a"][0].PermittedOptions[0] = "mutated"
+	if request.PermittedOptions[0] != "sqlite" {
+		t.Fatal("projected decision options alias mutable source data")
+	}
 	if b.Run != nil {
 		t.Fatalf("b has no run yet, got %+v", b.Run)
 	}
@@ -108,7 +120,7 @@ func TestWorkGraphDetailProjectionCarriesHoldsRunsAndOpenDecisions(t *testing.T)
 	out := renderTemplate(t, workGraphDetailTemplate, workGraphDetailData{Graph: detail})
 	for _, want := range []string{
 		"checkout", `href="/runs/run-a"`, "which backend?", "approve the backend choice",
-		"autonomy workgraph resolve", "unknown - not reported for this run",
+		`href="/decisions"`, "unknown - not reported for this run",
 		"landed the schema", "follow-up migration", "approve", "style-nit",
 	} {
 		if !strings.Contains(out, want) {

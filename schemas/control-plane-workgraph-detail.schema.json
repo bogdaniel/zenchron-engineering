@@ -231,6 +231,43 @@
                 "requested_at": {
                   "type": "string",
                   "format": "date-time"
+                },
+                "expected_outcome_kind": {
+                  "type": "string"
+                },
+                "permitted_options": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "subject": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "handoff",
+                    "owner",
+                    "base_revision",
+                    "candidate_revision",
+                    "candidate_tree"
+                  ],
+                  "properties": {
+                    "handoff": {
+                      "type": "string"
+                    },
+                    "owner": {
+                      "type": "string"
+                    },
+                    "base_revision": {
+                      "type": "string"
+                    },
+                    "candidate_revision": {
+                      "type": "string"
+                    },
+                    "candidate_tree": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
