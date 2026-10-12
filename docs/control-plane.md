@@ -5,6 +5,22 @@
 `/objectives` lists durable plans alongside issue-backed intake. Selecting an
 objective opens `/objectives/{plan-id}`, a bookmarkable read-side composition
 with Summary, Plan, Execution, Decisions, Evidence, and Changes and PR sections.
+Objective, plan and inbox plan pages are database-bounded before lifecycle replay.
+The inbox pages through all plans, showing only pending approvals and unobservable
+records on each page; an empty page is not proof that no later approval exists.
+Planning identities with revision zero remain visible after reload, explicitly
+without a stored proposal or approval controls. A positive revision whose document
+is missing fails closed. Repository and issue identities label the objective list;
+private objective prose is not copied into the durable list projection.
+Summary uses the runtime's existing governing-plan lifecycle and WorkGraph counts,
+preserving concurrent dimensions. It does not derive an objective authority state.
+WorkGraph detail JSON adds optional `objective_plan_id`, `objective_plan_revision`
+and `objective_plan_digest` together, from the same graph revision that produced
+its unit projection. Native WorkGraph status also includes the existing
+`objective_plan` reference. Strict schema consumers need the updated schema;
+persisted formats and controller commands are unchanged. A conflicting displayed
+revision or an unverifiable graph binding offers no objective decision/publication
+action; navigation opens the graph's exact plan context instead.
 It reconstructs context after reload from the existing plan and the WorkGraph's
 explicit `objective_plan` binding; it creates no lifecycle record or execution
 authority. Product-associated graph summaries expose optional `objective_plan_id`

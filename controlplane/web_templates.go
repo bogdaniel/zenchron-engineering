@@ -11,6 +11,7 @@ import (
 	"embed"
 	"html/template"
 	"io/fs"
+	"strings"
 	"time"
 )
 
@@ -43,6 +44,7 @@ var webFuncs = template.FuncMap{
 	"fmtTimePtr":  fmtWebTimePtr,
 	"fmtDuration": fmtWebDuration,
 	"runsLink":    webRunsLink,
+	"stateLabel":  func(state string) string { return strings.ReplaceAll(state, "_", " ") },
 }
 
 const webTimeLayout = "2006-01-02 15:04:05 MST"

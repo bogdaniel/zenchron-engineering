@@ -5,6 +5,7 @@
 <section class="panel">
   <p class="breadcrumb"><a href="/overview">overview</a> / plans / <span class="mono">{{$p.ID}}</span></p>
   <h1>Engineering plan · revision {{$p.Revision}}</h1><details><summary>Plan identifier</summary><span class="mono">{{$p.ID}}</span></details>
+  <p><a href="/objectives/{{$p.ID}}">Return to objective workspace</a></p>
   <p class="meta">observed {{fmtTime .ObservedAt}} · {{$p.Repository}} @ <span class="mono">{{$p.BaseRevision}}</span></p>
   <div class="grid stats">
     <div class="stat"><span class="label">showing revision</span><span class="value">{{$p.Revision}}</span></div>

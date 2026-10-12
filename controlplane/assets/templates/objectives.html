@@ -1,7 +1,7 @@
 {{define "title"}}Objectives{{end}}
 {{define "content"}}
 <section class="panel" id="objectives-live" data-live><h1>Engineering objectives</h1><p class="muted">Return to durable work, or define a new objective below.</p>
-{{range .Plans}}<article><h2><a href="/objectives/{{.ID}}">Open objective workspace</a></h2><p>Plan revision {{.Revision}} · {{.State}}</p><details><summary>Plan identity</summary>{{.ID}}</details></article>{{else}}<p>No plans on this page. Start an issue-backed objective below.</p>{{end}}
+{{range .Objectives}}<article><h2><a href="/objectives/{{.ID}}">{{.Repository}}{{if .Issue}} · issue #{{.Issue}}{{else}} · engineering objective{{end}}</a></h2><p>Plan revision {{.Revision}} · {{if eq .Revision 0}}no plan revision recorded{{else if .Unavailable}}unobservable{{else}}{{stateLabel .State}}{{end}}</p><details><summary>Plan identity</summary>{{.ID}}</details></article>{{else}}<p>No plans on this page. Start an issue-backed objective below.</p>{{end}}
 {{if .PrevLink}}<a href="{{.PrevLink}}">Previous objectives</a>{{end}} {{if .NextLink}}<a href="{{.NextLink}}">Next objectives</a>{{end}}</section>
 <section class="panel"><p class="eyebrow">Intent → plan → evidence → authority</p><h1>Start an engineering objective</h1><p class="muted">Choose an existing GitHub issue. The controller proposes bounded work; execution waits for your approval.</p>
 <form id="objective-form" data-binding="{{.Controller.ControllerBinding}}">
