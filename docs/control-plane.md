@@ -19,7 +19,13 @@ revision through the same governed routes as the plan diagnostic page. A preview
 whose revision or digest differs from the rendered page is refused locally
 before actions are offered; the controller still validates every submitted
 binding. Intake links return to the continuing objective workspace. Decision and
-run diagnostics remain available. This navigation and guided plan slice does not
+run diagnostics remain available. Typed WorkUnit decisions appear in the
+objective Decisions section using the same cards and guarded resolution routes
+as Action Required. Inbox cards link back to their explicitly bound objective.
+Resolved holds disappear from durable reads after reconnect; resolution never
+starts a bypass run. Recorded review findings and current review eligibility
+are shown separately, alongside assurance and classified runtime failures.
+This navigation, guided plan and decision slice does not
 establish completion of the browser objective-to-PR experience or #448 acceptance.
 
 Start the separate process against an existing runtime state directory:

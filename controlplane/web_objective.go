@@ -9,6 +9,7 @@ type objectiveData struct {
 	Graph           *WorkGraphDetail
 	Controller      Controller
 	BindingMismatch bool
+	Decisions       []workspaceDecision
 }
 
 func (w *Web) handleObjective(rw http.ResponseWriter, r *http.Request) {
@@ -35,6 +36,14 @@ func (w *Web) handleObjective(rw http.ResponseWriter, r *http.Request) {
 		}
 		data.Graph = &detail
 		data.BindingMismatch = graph.ObjectivePlan.Revision != plan.Revision || graph.ObjectivePlan.Digest != plan.Digest
+		data.Decisions, _, err = workspaceGraphActions(w.Store, detail, plan.ID)
+		if err != nil {
+			w.renderError(rw, err)
+			return
+		}
+		for i := range data.Decisions {
+			data.Decisions[i].Binding = data.Controller.ControllerBinding
+		}
 	}
 	w.render(rw, objectiveTemplate, data)
 }

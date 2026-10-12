@@ -97,6 +97,7 @@ func webRunsLink(status, source string) string {
 func parseWebTemplate(name string) *template.Template {
 	return template.Must(template.New("layout.html").Funcs(webFuncs).ParseFS(webTemplateFiles,
 		"assets/templates/layout.html",
+		"assets/templates/decision_card.html",
 		"assets/templates/"+name))
 }
 
