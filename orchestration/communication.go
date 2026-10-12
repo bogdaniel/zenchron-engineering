@@ -444,3 +444,91 @@ func MessageID(runID, operationID string, attempt, index int) (string, error) {
 	}
 	return "message-" + digest[:32], nil
 }
+
+// DeliverFinding copies an already-admitted unit-routed Finding into the
+// scope its own Route already names as the recipient (#475 B1). A WorkGraph
+// integration unit's conflict Finding is admitted into ITS OWN single-item
+// batch scope, where routeOf has already named the upstream producer as
+// Route.Unit without granting it anything: that producer's inbox is
+// projected from ITS OWN scope, which this Finding was never a member of.
+// Delivery is this one explicit, narrow step - copying the SAME admitted
+// observation into that other existing, durable scope - never a new scope,
+// never every unit's messages, never a second message bus.
+//
+// destinationUnit is the producer's OWN name within its own scope
+// (BatchItemUnit(its issue), e.g. "issue-101") - NOT the graph unit id
+// ("a") that named it as Route.Unit inside the INTEGRATOR's scope. The two
+// are different naming spaces for the exact same unit: a batch's own
+// roster is always named by its issue (queryBatchMessageScope), and a graph
+// unit id is only ever a foreign alias another unit's scope uses for it.
+// Subject.Owner and Route.Unit are rewritten to destinationUnit so the
+// delivered copy routes correctly inside the scope it actually lives in.
+//
+// destinationRevision is the SAME handoff's full, authoritative
+// HandoffSubject, read by the caller from the destination's own durable
+// handoff record. The consuming unit's own scope can only reconstruct a
+// foreign input's subject from WorkUnitInputs, which carries no
+// BaseRevision - so message.Subject.Revision, copied from there, is never
+// the complete record an exact-subject staleness comparison in the
+// DESTINATION scope (InboxFor/AppliesTo, against that scope's own live
+// current handoff) can safely use. destinationRevision replaces it with the
+// real thing; the handoff identity itself (Subject.Handoff) is unchanged,
+// so this is completing the one record already named, never substituting
+// a different one.
+//
+// Everything else about the message is preserved exactly: Kind, Source,
+// Category and Body are copied verbatim, so the producer reads the
+// identical observation its conflict actually was, never a restatement a
+// second author could get wrong. Only ID and Scope otherwise change,
+// because a message's id is a global identity (#475 review): reusing the
+// original id under a second scope would not create a second row, it would
+// silently do nothing, which is exactly the failure this function exists to
+// avoid.
+//
+// The result is still fully self-validating: Validate() recomputes Route
+// from Kind/Target/Subject exactly as it does for any other message, so a
+// delivered copy that disagreed with its own content would be refused here,
+// before anything durable is written from it.
+func DeliverFinding(message EngineeringMessage, destinationScope, destinationUnit string, destinationRevision HandoffSubject) (EngineeringMessage, error) {
+	if message.Kind != KindFinding {
+		return EngineeringMessage{}, fmt.Errorf("only a %s can be delivered this way, not a %s", KindFinding, message.Kind)
+	}
+	if message.Route.Audience != AudienceUnit || message.Route.Unit == "" {
+		return EngineeringMessage{}, errors.New("a finding delivery requires a unit-routed finding")
+	}
+	if message.Subject == nil {
+		return EngineeringMessage{}, errors.New("a finding delivery requires a subject-bound finding")
+	}
+	if strings.TrimSpace(destinationScope) == "" || strings.TrimSpace(destinationUnit) == "" {
+		return EngineeringMessage{}, errors.New("a finding delivery names its destination scope and the producer's own name within it")
+	}
+	if destinationScope == message.Scope {
+		return EngineeringMessage{}, errors.New("a finding delivery's destination scope must differ from the scope it was admitted in")
+	}
+	id, err := deliveredFindingID(message.ID, destinationScope)
+	if err != nil {
+		return EngineeringMessage{}, err
+	}
+	delivered := message
+	delivered.ID, delivered.Scope, delivered.Route.Unit = id, destinationScope, destinationUnit
+	subject := *delivered.Subject
+	subject.Owner, subject.Revision = destinationUnit, destinationRevision
+	delivered.Subject = &subject
+	return delivered, delivered.Validate()
+}
+
+// deliveredFindingID is the deterministic identity of one Finding delivered
+// into one destination scope: the same original message delivered into the
+// same destination always names the same record, so replaying delivery after
+// a restart or a repeated reconcile pass finds the row it already wrote
+// instead of inserting a second one.
+func deliveredFindingID(originalID, destinationScope string) (string, error) {
+	digest, err := domain.Digest(struct {
+		Original    string `json:"original"`
+		Destination string `json:"destination"`
+	}{originalID, destinationScope})
+	if err != nil {
+		return "", err
+	}
+	return "message-delivered-" + digest[:32], nil
+}

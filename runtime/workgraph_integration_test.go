@@ -495,25 +495,114 @@ func TestWorkGraphIntegrationTextualConflictBlocksAndFindsNoHandoff(t *testing.T
 	if finding.Source.AgentID != "" {
 		t.Fatalf("a system-authored Finding names agent id %q; it never invoked an agent", finding.Source.AgentID)
 	}
-	// #475 review B1: honestly, this is admission into the integrator's OWN
-	// batch, not delivery into producer a's inbox - #473's per-batch
-	// isolation means producer a's own batch scope must NOT see it. This is
-	// the regression guard against ever closing that gap by accident with
-	// graph-wide visibility (reverted #543) instead of a deliberate,
-	// narrow, exact-subject delivery mechanism.
-	producerRun, ok := storedRun(t, fixture.phase8Fixture, a.RunID)
-	if !ok || producerRun.Orchestration == nil {
-		t.Fatal("producer a's run not found or not orchestrated")
+	// #475 B1: admission into the integrator's OWN batch is not delivery -
+	// the blamed producer's inbox is projected from ITS OWN scope, which this
+	// record is never a member of. The blamed unit's batch must hold a
+	// DELIVERED COPY of the exact same observation; the OTHER, unblamed unit's
+	// batch must hold none at all - never every unit's messages, never a
+	// graph-wide mailbox (reverted #543).
+	blamed, other := "a", "b"
+	if finding.Route.Unit == "b" {
+		blamed, other = "b", "a"
 	}
-	producerMessages, err := fixture.store.ScopeMessages(producerRun.Orchestration.BatchID)
+	blamedUnit := fixture.graph(view.GraphID).unit(t, blamed)
+	blamedRun, ok := storedRun(t, fixture.phase8Fixture, blamedUnit.RunID)
+	if !ok || blamedRun.Orchestration == nil {
+		t.Fatalf("producer %s's run not found or not orchestrated", blamed)
+	}
+	delivered := findDeliveredFinding(t, fixture, blamedRun.Orchestration.BatchID, finding.ID)
+	// The exact handoff and candidate/tree binding is byte-identical. Only
+	// two things legitimately change versus the original admitted record:
+	// Owner's NAME, translated from the integrator scope's graph-unit-id
+	// alias ("a") into the producer's own batch's self-name (BatchItemUnit),
+	// and Revision.BaseRevision, completed from the producer's own durable
+	// handoff record - the integrator's scope can only reconstruct a foreign
+	// input's subject from WorkUnitInputs, which never carries it, so the
+	// original record's own copy is incomplete by construction, not a fact
+	// delivery is permitted to restate differently.
+	if delivered.Subject == nil || finding.Subject == nil ||
+		delivered.Subject.Handoff != finding.Subject.Handoff ||
+		delivered.Subject.Revision.CandidateRevision != finding.Subject.Revision.CandidateRevision ||
+		delivered.Subject.Revision.CandidateTree != finding.Subject.Revision.CandidateTree {
+		t.Fatalf("delivered finding does not preserve the exact handoff/candidate binding: got %+v, want %+v", delivered.Subject, finding.Subject)
+	}
+	if delivered.Subject.Revision.BaseRevision == "" {
+		t.Fatal("delivered finding's subject revision was not completed with the producer's own real base revision")
+	}
+	if delivered.Subject.Owner != delivered.Route.Unit {
+		t.Fatalf("delivered finding's route disagrees with its own translated subject owner: %+v", delivered)
+	}
+	if delivered.Body != finding.Body || delivered.Category != finding.Category {
+		t.Fatalf("delivered finding does not preserve the original observation: %+v", delivered)
+	}
+	if !delivered.Source.System || delivered.Source.AgentID != "" {
+		t.Fatalf("delivered finding does not preserve honest system authorship: %+v", delivered.Source)
+	}
+	otherUnit := fixture.graph(view.GraphID).unit(t, other)
+	otherRun, ok := storedRun(t, fixture.phase8Fixture, otherUnit.RunID)
+	if !ok || otherRun.Orchestration == nil {
+		t.Fatalf("producer %s's run not found or not orchestrated", other)
+	}
+	otherMessages, err := fixture.store.ScopeMessages(otherRun.Orchestration.BatchID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, message := range producerMessages {
-		if message.ID == finding.ID {
-			t.Fatal("the integrator's Finding leaked into producer a's own batch scope - #473 per-batch isolation is broken")
+	for _, message := range otherMessages {
+		if message.Subject != nil && finding.Subject != nil && message.Subject.Handoff == finding.Subject.Handoff {
+			t.Fatalf("the finding naming producer %s was ALSO delivered to unrelated producer %s - delivery is not bounded to the exact-subject owner", blamed, other)
 		}
 	}
+	// The blamed unit's own REAL rendered inbox - the exact document
+	// communicationContext would give that unit's next invocation, not a
+	// hand-rolled projection - actually shows it as a live, actionable
+	// finding: it applies to the producer's CURRENT admitted subject, which
+	// has not changed.
+	inboxView := blamedUnitInbox(t, fixture, blamedRun)
+	if !containsMessageID(inboxView.Inbox.Findings, delivered.ID) {
+		t.Fatalf("producer %s's own inbox does not show the delivered finding as live: %+v", blamed, inboxView.Inbox)
+	}
+}
+
+// blamedUnitInbox renders one unit's exact communication view, the same
+// document communicationContext gives a real invocation of that unit.
+func blamedUnitInbox(t *testing.T, fixture *fleetFixture, run EngineeringRun) communicationView {
+	t.Helper()
+	rendered, _, err := communicationContext(fixture.store, run, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view communicationView
+	if err := json.Unmarshal([]byte(rendered), &view); err != nil {
+		t.Fatal(err)
+	}
+	return view
+}
+
+// findDeliveredFinding locates the delivered copy of originalID in scope -
+// same subject and content, a different (deterministic) id, never the
+// original's own id under a second scope.
+func findDeliveredFinding(t *testing.T, fixture *fleetFixture, scope, originalID string) orchestration.EngineeringMessage {
+	t.Helper()
+	messages, err := fixture.store.ScopeMessages(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range messages {
+		if message.Kind == orchestration.KindFinding && message.ID != originalID {
+			return message
+		}
+	}
+	t.Fatalf("scope %s holds no delivered finding distinct from %s", scope, originalID)
+	return orchestration.EngineeringMessage{}
+}
+
+func containsMessageID(messages []orchestration.EngineeringMessage, id string) bool {
+	for _, message := range messages {
+		if message.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // TestWorkGraphIntegrationRestartReproducesTheSameOutcome is Scenario E/H: a

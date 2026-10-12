@@ -167,6 +167,12 @@ func (s *Supervisor) reconcileOrchestration(ctx context.Context) []string {
 			problems = append(problems, boundedDetail(batch.ID+" messages: "+err.Error()))
 		}
 	}
+	// Delivery after every batch's own messages are admitted (#475 B1): an
+	// integration unit's conflict Finding is admitted into its own batch
+	// above; this delivers it into the producer's batch too, over the SAME
+	// freshly reloaded batch list, so a producer activated earlier in this
+	// very pass is already visible to it.
+	problems = append(problems, deliverIntegrationConflicts(s.deps.Store, batches)...)
 	return problems
 }
 
