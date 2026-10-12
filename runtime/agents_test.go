@@ -123,6 +123,7 @@ const capableHelp = `Options:
       --safe-mode
       --disallowedTools <tools...>
       --output-format <format>  (choices: "text", "json", "stream-json")
+      --output-last-message <FILE>
       --verbose
       --extensions <NAME>
   -m, --model <MODEL>

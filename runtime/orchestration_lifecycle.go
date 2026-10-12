@@ -1,6 +1,91 @@
 package runtime
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
+)
+
+func (r *EngineeringRuntime) objectivePublicationDeferred(origin *orchestration.BatchOrigin) (bool, error) {
+	if origin == nil {
+		return false, nil
+	}
+	graph, found, err := r.deps.Store.WorkGraph(origin.GraphID)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, fmt.Errorf("work graph %s for objective publication was not found", origin.GraphID)
+	}
+	if graph.ObjectivePlan == nil {
+		return false, nil
+	}
+	plan, found, err := r.deps.Store.PlanRevision(graph.ObjectivePlan.ID, graph.ObjectivePlan.Revision)
+	if err != nil {
+		return false, err
+	}
+	if !found || plan.Digest != graph.ObjectivePlan.Digest {
+		return false, fmt.Errorf("approved plan %s revision %d for objective publication was not found exactly", graph.ObjectivePlan.ID, graph.ObjectivePlan.Revision)
+	}
+	stageFound, hasDownstreamStage := false, false
+	for _, stage := range plan.Stages {
+		if stage.ID == origin.UnitID {
+			stageFound = true
+		}
+		for _, dependency := range stage.DependsOn {
+			if dependency == origin.UnitID {
+				hasDownstreamStage = true
+			}
+		}
+	}
+	if !stageFound {
+		return false, fmt.Errorf("approved plan %s has no objective unit %s", graph.ObjectivePlan.ID, origin.UnitID)
+	}
+	if !hasDownstreamStage {
+		return false, nil
+	}
+	snapshot, err := r.deps.Store.ReplayPlan(plan.ID)
+	if err != nil {
+		return false, err
+	}
+	children := make(map[string][]string, len(plan.Stages))
+	for _, stage := range plan.Stages {
+		for _, dependency := range stage.DependsOn {
+			children[dependency] = append(children[dependency], stage.ID)
+		}
+	}
+	descendants := make(map[string]bool, len(plan.Stages))
+	frontier := []string{origin.UnitID}
+	for len(frontier) > 0 {
+		parent := frontier[0]
+		frontier = frontier[1:]
+		for _, id := range children[parent] {
+			if descendants[id] {
+				continue
+			}
+			descendants[id] = true
+			frontier = append(frontier, id)
+		}
+	}
+	publicationAction, hasPublicationAction := r.publicationAction()
+	for _, stage := range plan.Stages {
+		if !descendants[stage.ID] {
+			continue
+		}
+		if stage.Kind == domain.StageAgent && stage.InvocationMode == domain.InvocationModeMutating && !stage.Role.ProducesReviewVerdict() {
+			return true, nil
+		}
+		if stage.Kind == domain.StageHumanDecisionGate && stage.Action != nil && hasPublicationAction && *stage.Action == publicationAction {
+			continue
+		}
+		state := snapshot.Stages[stage.ID].State
+		if state != PlanStageCompleted && state != PlanStageSatisfied {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 // A read transaction prevents mixed reads, but a process can crash between
 // journal and row writes. Those durable transitions remain explicit on read.
@@ -52,11 +137,16 @@ func (s *runState) producerStageFinished() bool {
 		switch event.Type {
 		case EventRunWaiting:
 			finished = payloadReason(event.Payload) == ReasonGoalStateReached
+		case EventFeedbackObserved:
+			var feedback FeedbackObservedPayload
+			if decodeJSON(event.Payload, &feedback) != nil || feedback.Admitted {
+				finished = false
+			}
 		case EventRunCompleted, EventRunFailed, EventRunCancelled,
 			EventCandidateChanged, EventCandidateCommitted, EventCandidateCheckpointed,
 			EventCandidateBaseIntegrated, EventExecutionCompleted, EventContractCompiled,
 			EventReassessmentCompleted, EventAssuranceObserved, EventSemanticAssuranceObserved,
-			EventAuthorityEvaluated, EventFeedbackObserved, EventStageReviewBlocked,
+			EventAuthorityEvaluated, EventStageReviewBlocked,
 			EventSourceIntentChanged, EventSourceOptInRemoved, EventSourceOptInRestored,
 			EventCandidateExternalChanged, EventControllerSuccessionAdmitted, EventHumanAuthorityRecorded:
 			finished = false

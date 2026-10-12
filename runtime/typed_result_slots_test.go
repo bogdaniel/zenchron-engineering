@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
@@ -70,6 +71,32 @@ func slotFixture(t *testing.T) (CLIAgentProvider, ExecutionRequest, *fakeAgentEx
 	return provider, request, fake
 }
 
+func TestReadOnlyClaudeReviewerFinalAnswerIsCapturedIntoRuntimeSlot(t *testing.T) {
+	provider, request, fake := slotFixture(t)
+	request.Purpose = InvocationIndependentReview
+	request.Mode = domain.InvocationModeNonMutatingPlanning
+	const document = `{"schema_version":"0.1","verdict":"accepted","findings":[]}`
+	line, err := json.Marshal(map[string]any{
+		"type": "result", "subtype": "success", "is_error": false, "result": document,
+		"permission_denials": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.outputs = []CommandOutput{{Stdout: append(line, '\n')}}
+
+	result, typed, err := executeWithHostSlots(context.Background(), provider, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != execution.Succeeded || typed.Review == nil || typed.Review.Verdict != StageReviewAccepted {
+		t.Fatalf("read-only reviewer final answer did not reach the typed validator: result=%+v typed=%+v", result, typed)
+	}
+	if hasArg(fake.execution(t).args, "--add-dir") {
+		t.Fatalf("read-only reviewer received a writable directory: %v", fake.execution(t).args)
+	}
+}
+
 // The slot read keeps the adapter's old outcomes exactly: a valid document is
 // carried, an absent one is nil with no failure, and an unreadable one fails
 // the invocation with the same class and the transcript as its diagnostic.
@@ -97,8 +124,19 @@ func TestTheHostSlotReadPreservesTheAdapterOutcomes(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			provider, request, _ := slotFixture(t)
-			writeRaw(t, request.ReviewerResultPath, tc.review)
+			provider, request, fake := slotFixture(t)
+			if tc.review == "" {
+				request.ReviewerResultPath = ""
+			} else {
+				line, err := json.Marshal(map[string]any{
+					"type": "result", "subtype": "success", "is_error": false, "result": tc.review,
+					"permission_denials": []any{},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				fake.outputs = []CommandOutput{{Stdout: append(line, '\n')}}
+			}
 			writeRaw(t, request.FeedbackResolutionPath, tc.resolution)
 
 			result, typed, err := executeWithHostSlots(context.Background(), provider, request)

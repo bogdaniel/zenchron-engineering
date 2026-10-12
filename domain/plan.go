@@ -72,6 +72,12 @@ func KnownRole(role EngineeringRole) bool {
 	return false
 }
 
+// ProducesReviewVerdict reports whether this role's stage output is a typed
+// independent-review verdict rather than a candidate change.
+func (role EngineeringRole) ProducesReviewVerdict() bool {
+	return role == RoleSecurityReviewer || role == RoleReviewer || role == RoleReleaseReviewer
+}
+
 // EngineeringCapability is a typed ability a stage requires and a profile or
 // agent advertises.
 //

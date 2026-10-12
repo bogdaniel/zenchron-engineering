@@ -106,6 +106,44 @@ func TestAnImplementerInvocationIsGrantedNoResultDirectory(t *testing.T) {
 	}
 }
 
+func TestCodexReadOnlyReviewerCapturesFinalMessageToItsTypedResultPath(t *testing.T) {
+	resultPath := "/state/artifacts/review/reviewer-result.json"
+	args := codexSpec.ReadOnly.Args(cliInvocation{
+		Agent:  ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI},
+		Prompt: "review", CandidateDir: "/candidate", ReviewerResultPath: resultPath,
+	})
+	if sandbox, ok := argValue(args, "--sandbox"); !ok || sandbox != "read-only" {
+		t.Fatalf("reviewer sandbox is %q, want read-only: %v", sandbox, args)
+	}
+	if path, ok := argValue(args, "--output-last-message"); !ok || path != resultPath {
+		t.Fatalf("last-message path is %q, want result slot %q: %v", path, resultPath, args)
+	}
+	if hasArg(args, "--add-dir") {
+		t.Fatalf("reviewer was granted a writable directory: %v", args)
+	}
+}
+
+func TestCodexMutatingReviewerCapturesFinalMessageToItsTypedResultPath(t *testing.T) {
+	resultPath := "/state/artifacts/review/reviewer-result.json"
+	args := codexSpec.Args(cliInvocation{
+		Prompt: "review", CandidateDir: "/candidate", ReviewerResultPath: resultPath,
+	})
+	if path, ok := argValue(args, "--output-last-message"); !ok || path != resultPath {
+		t.Fatalf("last-message path is %q, want result slot %q: %v", path, resultPath, args)
+	}
+	if sandbox, ok := argValue(args, "--sandbox"); !ok || sandbox != "workspace-write" {
+		t.Fatalf("mutating reviewer sandbox is %q, want workspace-write: %v", sandbox, args)
+	}
+}
+
+func TestCodexWithoutFinalMessageCaptureIsUnavailable(t *testing.T) {
+	provider, _, fake := agentFixture(t, AgentKindCodexCLI)
+	fake.help = strings.Replace(fake.help, "      --output-last-message <FILE>\n", "", 1)
+	if readiness := provider.Probe(context.Background()); readiness.Available {
+		t.Fatalf("Codex without typed reviewer-result capture was reported ready: %+v", readiness)
+	}
+}
+
 // D2: resolution is not permission. The invocation must grant exactly the
 // executables the contract obliges, per-executable rather than blanket Bash.
 //

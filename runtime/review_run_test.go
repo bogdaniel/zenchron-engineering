@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/review"
 )
 
 // reviewRunFixture builds a real local Git checkout (base commit, then a
@@ -208,6 +210,46 @@ func TestRunIndependentReviewIsIdempotentForTheSameHead(t *testing.T) {
 	if err != nil || len(decisions) != 1 {
 		t.Fatalf("expected exactly one durable decision, got %+v %v", decisions, err)
 	}
+}
+
+func TestRunIndependentReviewAdvancesPastAnExistingTranscript(t *testing.T) {
+	in, fake, _ := reviewRunFixture(t)
+	pr := fake.PullRequests[7]
+	reviewID, err := review.DecisionID(review.Subject{
+		Repository: in.Repo.String(), PRNumber: 7, HeadSHA: pr.HeadSHA,
+	}, in.Reviewer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts := ArtifactStore{Root: filepath.Join(in.StateDir, "artifacts")}
+	if _, err := artifacts.StoreExecutionAttemptTranscript(in.Reviewer.ID, ExecutionAttemptRef{
+		RunID: reviewID, OperationID: reviewOperationID, Attempt: 1,
+	}, []byte("previous attempt"), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	document, err := json.Marshal(ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := 0
+	in.Provider = attemptRecordingReviewProvider{attempt: &attempt, document: string(document)}
+	if _, err := RunIndependentReview(context.Background(), in); err != nil {
+		t.Fatalf("RunIndependentReview: %v", err)
+	}
+	if attempt != 2 {
+		t.Fatalf("reviewer selected attempt %d after attempt 1 already had a transcript; want 2", attempt)
+	}
+}
+
+type attemptRecordingReviewProvider struct {
+	attempt  *int
+	document string
+}
+
+func (p attemptRecordingReviewProvider) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	*p.attempt = request.Attempt
+	return reviewStubProvider{document: p.document}.Execute(ctx, request)
 }
 
 // Mutation check: the same underlying vendor family under a different agent

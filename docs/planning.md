@@ -165,6 +165,10 @@ They carry the governance envelope, and a worker that cannot see its obligations
 is a worker nothing can hold to them. A policy that excludes one is refused when
 it is loaded, not quietly ignored when work starts.
 
+Reviewer assignments receive the full plan objective alongside their
+stage-specific review objective, so they can check the candidate against the
+operator's exact request without inheriting producer reasoning.
+
 `producer_reasoning` — the implementation worker's own reasoning transcript — is
 a named class precisely so it can be refused. A policy that asks for it is
 rejected: an independent reviewer never inherits the producer's hidden

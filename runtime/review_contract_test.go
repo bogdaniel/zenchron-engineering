@@ -32,7 +32,7 @@ func TestIndependentReviewEnvelopeStatesTheRequiredResultContract(t *testing.T) 
 	}
 	envelope := independentReviewEnvelope(request)
 	for _, want := range []string{
-		"/state/result.json", "NON-MUTATING",
+		"final answer", "typed result slot", "NON-MUTATING",
 		ReviewSeverityBlocking, ReviewSeverityNonBlocking,
 		StageReviewAccepted, StageReviewBlocked,
 		"did NOT author this change",

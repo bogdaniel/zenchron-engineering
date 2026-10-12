@@ -17,6 +17,7 @@ type (
 	FailureClass             = execution.FailureClass
 	Finding                  = execution.Finding
 	UpstreamContext          = execution.UpstreamContext
+	AssuranceContext         = execution.AssuranceContext
 	UpstreamHandoff          = execution.UpstreamHandoff
 	Ref                      = execution.Ref
 	Candidate                = execution.Candidate

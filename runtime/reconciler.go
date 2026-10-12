@@ -230,6 +230,10 @@ type runState struct {
 	// can read it without a store call of its own. nil for an ordinary batch
 	// or plan-stage run, exactly as Orchestration itself is.
 	origin *orchestration.BatchOrigin
+	// publicationDeferred is true for an objective producer whose output is
+	// consumed by a later integration_compose unit. Its admitted handoff, not a
+	// producer PR, is the integration input.
+	publicationDeferred bool
 }
 
 func (r *EngineeringRuntime) load(runID string) (*runState, error) {
@@ -264,9 +268,14 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 	if err != nil {
 		return nil, err
 	}
+	publicationDeferred, err := r.objectivePublicationDeferred(origin)
+	if err != nil {
+		return nil, err
+	}
 	state := &runState{
 		rt: r, run: run, snapshot: snapshot, events: events, projection: projection,
 		resolvedOwnDecisions: resolvedOwnDecisions, deliveredOwnDecisionIDs: deliveredOwnDecisionIDs, origin: origin,
+		publicationDeferred: publicationDeferred,
 		// A DIFFERENT CONTROLLER IS STILL THE DEFAULT REFUSAL. What changed
 		// with #234 is that one specific transition can be converted from
 		// drift into an admitted succession by evidence in this run's own
@@ -800,6 +809,9 @@ func (s *runState) publicationDecision() (AuthorityEvaluatedPayload, bool) {
 // still settles the run as waiting, and a rejection still settles it as
 // blocked. Both terminate.
 func (s *runState) unansweredPublicationDecision() (AuthorityEvaluatedPayload, bool) {
+	if s.publicationDeferred {
+		return AuthorityEvaluatedPayload{}, false
+	}
 	decision, ok := s.decidedPublication()
 	if !ok {
 		return AuthorityEvaluatedPayload{}, false
@@ -1487,6 +1499,9 @@ func bindBaseIntegrate(s *runState) (string, bool) {
 // revision, so without it a satisfied authority.evaluate would never be
 // re-planned and an approved run would wait forever.
 func bindAuthorityEvaluate(s *runState) (string, bool) {
+	if s.publicationDeferred {
+		return "", false
+	}
 	key, wanted := bindBaseIntegrate(s)
 	if !wanted || !s.satisfied(OpBaseIntegrate, key) {
 		return "", false

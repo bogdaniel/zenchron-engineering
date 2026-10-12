@@ -37,7 +37,7 @@ import (
 const autonomyUsage = "usage: zenchron-engineering autonomy {agents [--text]|" +
 	"plan {issue <number>|show|approve|reject|revise|status <plan>|list} [--template <id>] [--deterministic] [--note <text>]|" +
 	"run issue <number> [--agent <id>] [--new-generation]|run issues <n> <n>... [--assign N=agent]|" +
-	"orchestrate {issues <n> <n>... --agent <id>|status <batch>} [--text]|" +
+	"orchestrate {objective <issue> [--template <id>] [--agent <id>]|issues <n> <n>... --agent <id>|status <batch>} [--text]|" +
 	"workgraph {adopt <proposal.json> --agent <id>|status <graph>} [--text]|" +
 	"review {pr <number> --agent <id> [--publish]|status <number>} [--text]|" +
 	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|refresh <run>|" +
@@ -287,7 +287,7 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		// decomposition that several of them would execute.
 		return autonomyPlan(context.Background(), rest, overrides, stdout)
 	case "orchestrate":
-		return autonomyOrchestrate(rest, stdout)
+		return autonomyOrchestrate(rest, overrides, stdout)
 	case "workgraph":
 		// One altitude above `orchestrate`: the same explicit issues, with the
 		// dependencies between them stated, so a unit waits for its upstream

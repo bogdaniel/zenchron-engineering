@@ -98,6 +98,7 @@
         "runtime/watch*_test.go",
         "runtime/forge_review_test_doubles_test.go",
         "runtime/connectivity_test.go",
+        "runtime/connectivity_dns_test.go",
         "runtime/fleet*_test.go",
         "runtime/gc_test.go",
         "runtime/status_live_operation_test.go"
@@ -408,6 +409,7 @@
         "runtime/review_remediation_e2e_test.go",
         "runtime/review_remediation_supervisor_test.go",
         "runtime/review_remediation_trigger_test.go",
+        "runtime/security_reviewer_stage_test.go",
         "runtime/review_verification_claim_test.go"
       ]
     },

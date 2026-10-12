@@ -67,6 +67,122 @@ func TestObjectiveGraphRequiresApprovalAndRetainsFrozenStageBindings(t *testing.
 	}
 }
 
+func TestObjectiveStagesDeferPublicationUntilDownstreamReviewAndGatesFinish(t *testing.T) {
+	fleet := newFleetFixture(t, 2)
+	fleet.deps.Repository.DefaultBranch = "main"
+	fleet.runtime = fleet.newRuntime(fleet.deps)
+	fixture := newPlanRunFixtureOn(t, fleet.phase8Fixture, []domain.PlanStage{
+		{ID: "producer-a", Kind: domain.StageAgent, Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating},
+		{ID: "producer-b", Kind: domain.StageAgent, Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating},
+		{ID: "integrate", Kind: domain.StageAgent, Role: domain.RoleIntegrator, InvocationMode: domain.InvocationModeMutating,
+			ExecutionKind: string(orchestration.ExecutionKindIntegrationCompose), DependsOn: []string{"producer-a", "producer-b"}},
+		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer, InvocationMode: domain.InvocationModeMutating, DependsOn: []string{"integrate"}},
+		{ID: "verify", Kind: domain.StageAssuranceGate, RequiredClaims: []string{"claim-validation"}, DependsOn: []string{"review"}},
+		{ID: "other-human-decision", Kind: domain.StageHumanDecisionGate, DependsOn: []string{"verify"}},
+		{ID: "approve", Kind: domain.StageHumanDecisionGate, RequiredClaims: []string{"claim-publication-approval"},
+			Action: &domain.Action{Type: "git.pull_request.create", Target: "main"}, DependsOn: []string{"verify"}},
+	}, fleet.deps.ConfigDigest)
+	plan := fixture.plan
+	graph, err := compileObjectiveGraph(plan, 554, "claude", time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fleet.store.AdoptWorkGraphRevision(graph); err != nil {
+		t.Fatal(err)
+	}
+	for _, producer := range []string{"producer-a", "producer-b"} {
+		deferred, err := fleet.runtime.objectivePublicationDeferred(&orchestration.BatchOrigin{
+			GraphID: graph.ID, UnitID: producer, ExecutionKind: orchestration.ExecutionKindProvider,
+		})
+		if err != nil || !deferred {
+			t.Fatalf("producer %s publication deferral = %t, %v; want deferred", producer, deferred, err)
+		}
+		state := &runState{publicationDeferred: deferred}
+		request, err := fleet.runtime.authorityRequest(state)
+		if err != nil || request != nil {
+			t.Fatalf("producer %s exposed a human publication request before integration: %#v, %v", producer, request, err)
+		}
+		if _, wanted := bindAuthorityEvaluate(state); wanted || state.authorizedForPublication() {
+			t.Fatalf("producer %s can obtain publication authority before integration", producer)
+		}
+	}
+	deferred, err := fleet.runtime.objectivePublicationDeferred(&orchestration.BatchOrigin{
+		GraphID: graph.ID, UnitID: "integrate", ExecutionKind: orchestration.ExecutionKindIntegrationCompose,
+	})
+	if err != nil || !deferred {
+		t.Fatalf("integration publication deferral = %t, %v; want deferred through review and decision gates", deferred, err)
+	}
+	state := &runState{publicationDeferred: deferred}
+	request, err := fleet.runtime.authorityRequest(state)
+	if err != nil || request != nil {
+		t.Fatalf("integration exposed publication authority before independent review: %#v, %v", request, err)
+	}
+	state.projection.AuthorityDecisions = map[string]AuthorityEvaluation{
+		PublicationActionType + "\x00main": {AuthorityEvaluatedPayload: AuthorityEvaluatedPayload{
+			Action: domain.Action{Type: PublicationActionType, Target: "main"}, Status: domain.AuthorityAwaitingAuthority,
+		}},
+	}
+	if _, waiting := state.unansweredPublicationDecision(); waiting {
+		t.Fatal("an earlier publication decision kept an intermediate integration run awaiting authority")
+	}
+	if _, wanted := bindAuthorityEvaluate(state); wanted || state.authorizedForPublication() {
+		t.Fatal("integration can obtain publication authority before downstream plan gates finish")
+	}
+	for _, event := range []struct {
+		typ     string
+		payload any
+	}{
+		{EventPlanStageSettled, PlanStageSettledPayload{StageID: "review", Outcome: string(Completed)}},
+		{EventPlanGateSatisfied, PlanGateSatisfiedPayload{StageID: "verify", Kind: string(domain.StageAssuranceGate), Claims: []string{"claim-validation"}, Evidence: Ref{ID: "evidence", Revision: strings.Repeat("a", 64)}}},
+	} {
+		if err := appendPlanEvent(fleet.store, fleet.clock.Now(), plan.ID, event.typ, event.payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deferred, err = fleet.runtime.objectivePublicationDeferred(&orchestration.BatchOrigin{
+		GraphID: graph.ID, UnitID: "integrate", ExecutionKind: orchestration.ExecutionKindIntegrationCompose,
+	})
+	if err != nil || !deferred {
+		t.Fatalf("integration bypassed an unrelated pending human decision gate: %t, %v", deferred, err)
+	}
+	if err := appendPlanEvent(fleet.store, fleet.clock.Now(), plan.ID, EventPlanGateSatisfied,
+		PlanGateSatisfiedPayload{StageID: "other-human-decision", Kind: string(domain.StageHumanDecisionGate), HumanEvidenceID: "human-decision"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, stageID := range []string{"integrate", "review"} {
+		if err := appendPlanEvent(fleet.store, fleet.clock.Now(), plan.ID, EventPlanStageSettled,
+			PlanStageSettledPayload{StageID: stageID, Outcome: string(Completed)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := appendPlanEvent(fleet.store, fleet.clock.Now(), plan.ID, EventPlanGateSatisfied,
+		PlanGateSatisfiedPayload{StageID: "approve", Kind: string(domain.StageHumanDecisionGate), HumanEvidenceID: "publication-approval"}); err != nil {
+		t.Fatal(err)
+	}
+	deferred, err = fleet.runtime.objectivePublicationDeferred(&orchestration.BatchOrigin{
+		GraphID: graph.ID, UnitID: "integrate", ExecutionKind: orchestration.ExecutionKindIntegrationCompose,
+	})
+	if err != nil || deferred {
+		t.Fatalf("completed integration candidate remained publication-deferred: %t, %v", deferred, err)
+	}
+	for _, producer := range []string{"producer-a", "producer-b"} {
+		deferred, err := fleet.runtime.objectivePublicationDeferred(&orchestration.BatchOrigin{
+			GraphID: graph.ID, UnitID: producer, ExecutionKind: orchestration.ExecutionKindProvider,
+		})
+		if err != nil || !deferred {
+			t.Fatalf("completed descendants made producer %s publishable: deferred=%t err=%v", producer, deferred, err)
+		}
+		state := &runState{publicationDeferred: deferred}
+		request, err := fleet.runtime.authorityRequest(state)
+		if err != nil || request != nil {
+			t.Fatalf("completed producer %s exposed an authority request: %#v, %v", producer, request, err)
+		}
+		if _, wanted := bindAuthorityEvaluate(state); wanted || state.authorizedForPublication() {
+			t.Fatalf("completed producer %s can obtain publication authority", producer)
+		}
+	}
+}
+
 func TestObjectiveGraphProjectsVerboseObjectivesToBoundedStageReferences(t *testing.T) {
 	plan := domain.EngineeringPlan{
 		ID: "plan-verbose", Revision: 1, Digest: strings.Repeat("a", 64),

@@ -485,11 +485,18 @@ func plannerOutputContract(input PlannerInput) string {
 			if stage.Independence != nil {
 				line += fmt.Sprintf(", independent of %s in %s", strings.Join(stage.Independence.DifferentFrom, " and "), stage.Independence.Dimension)
 			}
+			if stage.Action != nil {
+				line += fmt.Sprintf(", action %s:%s", stage.Action.Type, stage.Action.Target)
+			}
+			if len(stage.RequiredClaims) > 0 {
+				line += ", claims " + strings.Join(stage.RequiredClaims, ", ")
+			}
 			lines = append(lines, line+")")
 		}
 		process = fmt.Sprintf(`
 The operator selected this process for this work, and expects the plan to follow
-it. Keep its stages, roles, dependencies and independence requirements unless
+it. Keep its stages, roles, dependencies, independence requirements and exact
+gate actions unless
 the objective genuinely cannot be done that way, and say so in "notes" if you
 depart from it. You may add a stage the objective needs; you may not drop a
 stage to make the work smaller.
@@ -509,7 +516,11 @@ stage to make the work smaller.
 	// gate can reference one and the answer says so.
 	claims := "this work contract defines no claim, so omit \"required_claims\" entirely"
 	if defined := contractClaimIDs(input.Contract); len(defined) > 0 {
-		claims = "subset of: " + strings.Join(defined, ", ")
+		classes := make([]string, 0, len(defined))
+		for _, id := range defined {
+			classes = append(classes, fmt.Sprintf("%s [%s]", id, input.Contract.RequiredClaims[id].EvidenceClass))
+		}
+		claims = "claim ids and their evidence classes (class is metadata, not part of the id); choose a subset: " + strings.Join(classes, ", ")
 	}
 	contract := fmt.Sprintf(`%s%s
 For divergent material producers, propose an integrator agent stage with explicit
@@ -521,6 +532,7 @@ Answer with ONE JSON object, in a fenced json code block, drawn from this shape:
 {"stages": [{"id": "kebab-case-id", "kind": "agent|assurance_gate|human_decision_gate",
   "role": "one of: %s", "objective": "what this stage must achieve",
   "execution_kind": "provider|integration_compose",
+  "action": {"type": "exact protected-action type", "target": "exact protected-action target"},
   "depends_on": ["ids of stages that must finish first"],
   "requires_capabilities": ["subset of: {{capabilities}}"],
   "required_claims": ["%s"],
@@ -556,10 +568,13 @@ Rules for your answer, all of which the runtime enforces afterwards:
 - only "agent" stages are performed by a worker; the two gate kinds reference
   evidence and human decisions that already exist, take no role, no
   capabilities and no independence;
+- a human decision gate for a protected action names the exact contract action;
 - an "assurance_gate" that names no "required_claims" is completed from this
   work contract's own claims, so omitting them is safe; a "human_decision_gate"
   must name at least one claim, because nothing else states what the person is
   deciding;
+- an "assurance_gate" may not name a human_approval claim; that evidence can
+  only satisfy a "human_decision_gate";
 - dependencies must name stages in your own answer and must not form a cycle;
 - propose the SMALLEST decomposition that does the work: a stage nobody needs is
   a run somebody pays for;

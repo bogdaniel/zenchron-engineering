@@ -138,7 +138,7 @@ func TestBrokeredContainerBoundaryIsUnchanged(t *testing.T) {
 
 // TestExecutionRequestCarriesTheAuthorizingOperation proves the field is the
 // runtime's own operation identity rather than something the provider invents.
-func TestExecutionRequestCarriesTheAuthorizingOperation(t *testing.T) {
+func TestExecutionRequestCarriesItsOperationAndVerificationGuidance(t *testing.T) {
 	fixture := newPhase8Fixture(t)
 	recorder := &recordingExecutionProvider{inner: fixture.deps.Provider}
 	fixture.deps.Provider = recorder
@@ -156,6 +156,16 @@ func TestExecutionRequestCarriesTheAuthorizingOperation(t *testing.T) {
 		}
 		if !strings.HasPrefix(request.OperationID, runID+":execution.invoke:") {
 			t.Fatalf("operation id %q is not this run's execution operation", request.OperationID)
+		}
+		prompt := strings.Join(strings.Fields(agentPrompt(request)), " ")
+		for _, required := range []string{
+			"Do not background long checks",
+			"Leave the full Go suite to runtime-owned exact-candidate assurance",
+			"run only bounded foreground checks during execution",
+		} {
+			if !strings.Contains(prompt, required) {
+				t.Fatalf("execution prompt is missing %q", required)
+			}
 		}
 	}
 }

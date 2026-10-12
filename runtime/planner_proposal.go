@@ -17,13 +17,14 @@ type plannerProposal struct {
 }
 
 type plannerStage struct {
-	ID                   string   `json:"id"`
-	Kind                 string   `json:"kind"`
-	Role                 string   `json:"role,omitempty"`
-	ExecutionKind        string   `json:"execution_kind,omitempty"`
-	Objective            string   `json:"objective,omitempty"`
-	DependsOn            []string `json:"depends_on,omitempty"`
-	RequiresCapabilities []string `json:"requires_capabilities,omitempty"`
+	ID                   string         `json:"id"`
+	Kind                 string         `json:"kind"`
+	Role                 string         `json:"role,omitempty"`
+	ExecutionKind        string         `json:"execution_kind,omitempty"`
+	Action               *domain.Action `json:"action,omitempty"`
+	Objective            string         `json:"objective,omitempty"`
+	DependsOn            []string       `json:"depends_on,omitempty"`
+	RequiresCapabilities []string       `json:"requires_capabilities,omitempty"`
 	Independence         *struct {
 		Dimension     string   `json:"dimension"`
 		DifferentFrom []string `json:"different_from"`
@@ -79,7 +80,7 @@ func translateStage(stage plannerStage) (domain.PlanStage, error) {
 	}
 	translated := domain.PlanStage{
 		ID: stage.ID, Kind: kind, Objective: strings.TrimSpace(stage.Objective), ExecutionKind: stage.ExecutionKind,
-		DependsOn: stage.DependsOn, RequiredClaims: stage.RequiredClaims,
+		DependsOn: stage.DependsOn, RequiredClaims: stage.RequiredClaims, Action: stage.Action,
 		Rationale: boundedDetail(stage.Rationale),
 	}
 	if kind != domain.StageAgent {

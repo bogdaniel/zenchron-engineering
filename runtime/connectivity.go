@@ -16,13 +16,14 @@ import (
 type TransportCause string
 
 const (
-	// Fail closed: none of these clears by itself, or it is the caller's own.
+	// These permanent failures and caller cancellation never clear by retry alone.
 	TransportCallerCancelled TransportCause = "caller_cancelled"
 	TransportTLS             TransportCause = "tls"
 	TransportProxy           TransportCause = "proxy_configuration"
-	TransportDNSNotFound     TransportCause = "dns_not_found"
 	TransportUnrecognized    TransportCause = "unrecognized"
-	// Transport loss: the exchange never happened and may on a later probe.
+	// Resolver NXDOMAIN can be transient; it retains only the existing finite retry budget.
+	TransportDNSNotFound TransportCause = "dns_not_found"
+	// Transport loss: the exchange never happened and may recover on a later probe.
 	TransportDNSTemporary TransportCause = "dns_temporary"
 	TransportTimeout      TransportCause = "timeout"
 	TransportUnreachable  TransportCause = "unreachable"
@@ -33,7 +34,7 @@ const (
 // Lost reports transport loss: the causes that earn transport_backoff.
 func (c TransportCause) Lost() bool {
 	switch c {
-	case TransportDNSTemporary, TransportTimeout, TransportUnreachable, TransportReset, TransportRefused:
+	case TransportDNSNotFound, TransportDNSTemporary, TransportTimeout, TransportUnreachable, TransportReset, TransportRefused:
 		return true
 	}
 	return false

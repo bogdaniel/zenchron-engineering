@@ -45,6 +45,14 @@ cohort back from one aggregate view. It is the bootstrap primitive of #470: it
 removes the operator from starting, tracking and relaying between many coding
 agent sessions by hand.
 
+For one objective that needs a planned team, `autonomy orchestrate objective`
+delegates to the existing Engineering Planner and plan approval lifecycle; it
+does not create a second scheduler or execute before the plan is approved.
+
+```bash
+zenchron-engineering autonomy orchestrate objective 554 --agent claude --repo bogdaniel/zenchron-engineering --text
+```
+
 ```bash
 zenchron-engineering serve                     # in one terminal, owns the work
 zenchron-engineering autonomy orchestrate issues 481 482 483 484 485 486 487 488 489 490 --agent claude

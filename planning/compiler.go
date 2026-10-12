@@ -207,7 +207,7 @@ func (input CompileInput) baseStages() ([]domain.PlanStage, error) {
 		Objective: input.Objective,
 		Rationale: "the objective requires a change, and nothing in policy or a template asked for more",
 	}}
-	if claims := contractClaims(input.Contract); len(claims) > 0 {
+	if claims := assuranceClaims(input.Contract); len(claims) > 0 {
 		stages = append(stages, domain.PlanStage{
 			ID:             stageAssurance,
 			Kind:           domain.StageAssuranceGate,
@@ -247,10 +247,12 @@ func templateStages(template domain.EngineeringPlanTemplate, facts []domain.Engi
 
 // contractClaims are the claim ids the work contract requires, in canonical
 // order. A gate references them; it does not invent a second evidence model.
-func contractClaims(contract domain.EngineeringWorkContract) []string {
+func assuranceClaims(contract domain.EngineeringWorkContract) []string {
 	claims := make([]string, 0, len(contract.RequiredClaims))
-	for id := range contract.RequiredClaims {
-		claims = append(claims, id)
+	for id, claim := range contract.RequiredClaims {
+		if claim.EvidenceClass != "human_approval" {
+			claims = append(claims, id)
+		}
 	}
 	sort.Strings(claims)
 	return claims
@@ -496,7 +498,7 @@ func applyCapabilityObligations(stages []domain.PlanStage, capabilities []domain
 func applyGateObligation(stages []domain.PlanStage, gate domain.GateRequirement, contract domain.EngineeringWorkContract) []domain.PlanStage {
 	claims := gate.RequiredClaims
 	if len(claims) == 0 && gate.Kind == domain.StageAssuranceGate {
-		claims = contractClaims(contract)
+		claims = assuranceClaims(contract)
 	}
 	for i, stage := range stages {
 		if stage.Kind != gate.Kind || !sameAction(stage.Action, gate.Action) {
@@ -528,7 +530,7 @@ func applyGateObligation(stages []domain.PlanStage, gate domain.GateRequirement,
 // the contract requires outside the plan an operator approved - which is not a
 // smaller plan, it is a plan that says less than the truth.
 func ensureAssuranceGate(stages []domain.PlanStage, contract domain.EngineeringWorkContract) []domain.PlanStage {
-	claims := contractClaims(contract)
+	claims := assuranceClaims(contract)
 	if len(claims) == 0 {
 		return stages
 	}
@@ -574,7 +576,7 @@ func fillStageDefaults(stages []domain.PlanStage, input CompileInput) ([]domain.
 			// requires nothing, the refusal stands - there would be nothing to
 			// prove.
 			if stage.Kind == domain.StageAssuranceGate && len(stage.RequiredClaims) == 0 {
-				stage.RequiredClaims = contractClaims(input.Contract)
+				stage.RequiredClaims = assuranceClaims(input.Contract)
 			}
 			stages[i] = stage
 			continue

@@ -1673,7 +1673,7 @@ func (r PlanReconciler) stageAcceptance(plan domain.EngineeringPlan, stage domai
 	// answers "is this change acceptable". A reviewer that changed nothing has
 	// still done its job, and re-running the producer's own tests over the
 	// producer's own tree is not an independent answer to the review question.
-	if stage.Role == domain.RoleReviewer {
+	if stage.Role.ProducesReviewVerdict() {
 		return r.reviewAcceptance(plan, stage, projection)
 	}
 	events, err := r.Store.Events(run.ID)
@@ -1927,6 +1927,12 @@ func (r PlanReconciler) providerInvocations(runID string) (int, error) {
 func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanGateSatisfiedPayload, bool, error) {
 	payload := PlanGateSatisfiedPayload{StageID: stage.ID, Kind: string(stage.Kind), Claims: stage.RequiredClaims}
 	runs := upstreamRuns(stage, plan, snapshot)
+	if stage.Kind == domain.StageHumanDecisionGate && stage.Action != nil && stage.Action.Type == PublicationActionType {
+		runs = publicationCandidateRuns(stage, plan, snapshot)
+		if len(runs) != 1 {
+			return payload, false, nil
+		}
+	}
 	if len(runs) == 0 {
 		// A gate with no upstream run has nothing to be satisfied BY. It waits
 		// rather than being treated as vacuously true: a gate that passes
@@ -1968,7 +1974,25 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 			payload.ProvingRuns = append(payload.ProvingRuns, runID)
 			payload.ProvenHeads = append(payload.ProvenHeads, runID+"@"+projected.Head())
 		case domain.StageHumanDecisionGate:
-			decision, satisfied := humanDecision(events, stage.Action, projected.Head())
+			run, found, err := r.Store.Run(runID)
+			if err != nil {
+				return payload, false, err
+			}
+			if !found {
+				continue
+			}
+			runSnapshot, err := Reduce(run, events)
+			if err != nil {
+				return payload, false, err
+			}
+			runSnapshot.Candidate = Candidate{
+				Branch: candidateBranch(runID), Revision: projected.CandidateRevision, Tree: projected.CandidateTree,
+			}
+			runSnapshot.Contract = projected.Contract
+			if runSnapshot.Contract == (Ref{}) {
+				runSnapshot.Contract = run.Contract
+			}
+			decision, satisfied := humanDecision(events, stage.Action, runSnapshot)
 			if !satisfied {
 				continue
 			}
@@ -2031,98 +2055,12 @@ func answersClaims(decision humanDecisionReference, required []string) bool {
 	return true
 }
 
-// humanDecision reports whether A PERSON decided this gate for this run.
-//
-// It reads the run's recorded human authority evidence and nothing else. An
-// authorized #7 decision is NOT accepted in its place: authority is authorized
-// whenever nothing is missing, which ordinary machine evidence can reach on its
-// own, so a producing run's auto-authorized publication could discharge the
-// very gate that stood in for a blocked independence obligation. A gate that
-// says a person decided has to be able to name the person's evidence.
-//
-// The evidence is the kernel's existing HumanAuthorityRecorded record - pinned
-// to a request, a candidate, a contract and a state digest - so the plan
-// invents no second approval system.
-func humanDecision(events []EngineeringEvent, action *domain.Action, head string) (humanDecisionReference, bool) {
-	for i := len(events) - 1; i >= 0; i-- {
-		event := events[i]
-		if event.Type != EventHumanAuthorityRecorded {
-			continue
-		}
-		var payload HumanAuthorityRecordedPayload
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			// An unreadable decision is not an absent one. Walking past it
-			// reaches an OLDER approval of the same head and satisfies the
-			// gate - an error answering the question "did a person approve
-			// this", which is the class this file swept elsewhere.
-			return humanDecisionReference{}, false
-		}
-		if action != nil && payload.Action != *action {
-			continue
-		}
-		// The decision has to be about THIS candidate. A person approves a
-		// change, not a run: carrying an approval of head A onto head B is the
-		// rule the run-level authority binding exists to prevent, and reading
-		// raw events here bypassed it - the gate re-opened when the head moved
-		// and then re-satisfied itself from the same stale approval, stamping
-		// it onto work nobody had seen.
-		if head != "" && payload.Candidate.Revision != head {
-			continue
-		}
-		// The NEWEST matching decision governs. Skipping a rejection to keep
-		// looking would let a gate be satisfied by an approval the person has
-		// since reversed, which is the opposite of what a human decision gate
-		// is for.
-		if payload.Decision != "approve" {
-			return humanDecisionReference{}, false
-		}
-		return humanDecisionReference{
-			decision:        Ref{ID: payload.Request.ID, Revision: payload.Request.Revision},
-			humanEvidenceID: payload.EvidenceID,
-			claims:          payload.Requires,
-		}, true
-	}
-	return humanDecisionReference{}, false
-}
-
 func (r PlanReconciler) runProjection(runID string) (RunProjection, error) {
 	events, err := r.Store.Events(runID)
 	if err != nil {
 		return RunProjection{}, err
 	}
 	return Project(events)
-}
-
-// upstreamRuns are the child runs a gate judges: the runs of the agent stages
-// it transitively depends on. Transitive, because a gate placed after another
-// gate still judges the work, and the work is upstream of both.
-func upstreamRuns(stage domain.PlanStage, plan domain.EngineeringPlan, snapshot PlanSnapshot) []string {
-	seen := map[string]bool{}
-	var walk func(id string)
-	walk = func(id string) {
-		if seen[id] {
-			return
-		}
-		seen[id] = true
-		current, ok := plan.Stage(id)
-		if !ok {
-			return
-		}
-		for _, dependency := range current.DependsOn {
-			walk(dependency)
-		}
-	}
-	for _, dependency := range stage.DependsOn {
-		walk(dependency)
-	}
-	ids := make([]string, 0, len(seen))
-	for id := range seen {
-		if projection, ok := snapshot.Stages[id]; ok && projection.RunID != "" {
-			ids = append(ids, projection.RunID)
-		}
-	}
-	sort.Strings(ids)
-	return ids
 }
 
 // dependenciesSatisfied is the whole of dependency gating: a stage is ready
