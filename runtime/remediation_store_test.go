@@ -164,6 +164,27 @@ func TestRemediationAuthorizationCheckConstraintRefusesAPolicyRowWithACeilingRai
 	}
 }
 
+// TestRemediationAuthorizationCheckConstraintRefusesAPolicyRowWithNoClauseRef
+// proves the other half of the same CHECK: a policy-authorized row needs its
+// own clause reference - "non-null iff authorized_by = policy" (ADR-0008
+// §5) is bidirectional, not merely a refusal of the decision-only fields.
+func TestRemediationAuthorizationCheckConstraintRefusesAPolicyRowWithNoClauseRef(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, err = store.db.Exec(`INSERT INTO remediation_authorizations
+		(id, graph_id, unit_id, proposed_epoch, finding_id, authorized_by, authorized_unix_nano)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"auth-bad", "graph-1", "a", 2, "finding-1", string(RemediationAuthorizedByPolicy), time.Now().UnixNano(),
+	)
+	if err == nil {
+		t.Fatal("a policy-authorized row with no policy_clause_ref was accepted; the CHECK constraint did not refuse it")
+	}
+}
+
 func TestRemediationEpochRoundTripsAndSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	store, err := OpenSQLiteOperationStore(dir)

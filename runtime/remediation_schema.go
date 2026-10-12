@@ -35,7 +35,7 @@ CREATE TABLE remediation_authorizations (
 	raises_ceiling_to      INTEGER,
 	authorized_unix_nano   INTEGER NOT NULL,
 	CHECK (
-		(authorized_by = 'policy' AND raises_ceiling_to IS NULL AND decision_resolution_id IS NULL)
+		(authorized_by = 'policy' AND policy_clause_ref IS NOT NULL AND raises_ceiling_to IS NULL AND decision_resolution_id IS NULL)
 		OR
 		(authorized_by = 'decision' AND policy_clause_ref IS NULL AND decision_resolution_id IS NOT NULL)
 	)
