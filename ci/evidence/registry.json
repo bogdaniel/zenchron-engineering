@@ -231,7 +231,8 @@
       ],
       "tests": [
         "runtime/remediation_store_test.go",
-        "runtime/remediation_end_to_end_test.go"
+        "runtime/remediation_end_to_end_test.go",
+        "runtime/remediation_decision_resumption_isolation_test.go"
       ]
     },
     {
