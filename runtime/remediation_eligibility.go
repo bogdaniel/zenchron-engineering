@@ -227,29 +227,27 @@ const systemReintegrationFindingID = "system:upstream-remediation-advanced"
 const systemReintegrationPolicyClause = "system:integration-reintegration-on-upstream-remediation"
 
 // isExactRemediationOutput reports whether dependencyUnitID's CURRENT
-// admitted output is exactly, untouched-since, what its OWN latest
-// remediation epoch produced - the precise fact that lets a caller
-// (activateGraphFrontier, workgraph.go) tell "this content changed because
-// of a governed #581 remediation" apart from "a dependency that happens to
-// have remediated at some point in its history was ALSO, separately,
-// later replaced by something else entirely" (independent review finding,
-// PR #585: the latter must never auto-authorize reintegration, and
-// "latestAttemptEpoch > 1" alone cannot tell the two apart).
+// admitted output - current, named by consumedInput, the exact entry the
+// invalidated downstream unit is about to consume for THIS dependency - is
+// exactly, untouched-since, what the dependency's OWN latest remediation
+// epoch produced. The precise fact that lets a caller
+// (activateGraphFrontier, workgraph.go) tell "THIS dependency's content
+// changed because of a governed #581 remediation" apart from two distinct
+// false positives independent review found on PR #585:
 //
-// Two facts, both required: the dependency has remediated at least once
-// (latestAttemptEpoch > 1), AND the run that epoch names has been admitted
-// EXACTLY ONCE (len(RunHandoffs) == 1). The second is what actually binds
-// this to the exact remediation handoff: a settled run (goalSettled,
-// remediation_activation.go) never produces a second admission on its
-// own - the only way one appears is an external tool forcing it
-// (#472's own replaceAdmittedOutput test helper models exactly this: the
-// SAME run, a SECOND reported handoff, Attempt = original + 1). A
-// dependency whose remediation epoch run was touched again this way no
-// longer satisfies this check, even though it "has remediated" in its
-// history - exactly the distinction #472's existing external-replacement
-// invariant (TestWorkGraphIntegrationUnitInvalidatedWhenUpstreamOutputReplaced)
-// requires to stay terminal.
-func isExactRemediationOutput(store *SQLiteOperationStore, graphID, dependencyUnitID string) (bool, error) {
+//  1. a dependency that remediated once and was LATER, separately,
+//     externally replaced again (#472's own replaceAdmittedOutput test
+//     helper: the SAME run, a SECOND reported handoff) - still satisfied by
+//     "latestAttemptEpoch > 1" alone, which is why the run's remediation
+//     epoch must still be admitted EXACTLY ONCE (len(RunHandoffs) == 1);
+//  2. a DIFFERENT dependency of the SAME downstream unit remediating, or
+//     being replaced, while THIS dependency's consumed output never moved
+//     at all - a per-unit check with no consumedInput could satisfy for
+//     dependency A while the invalidation causing this pass was actually B's.
+//     consumedInput.RunID must therefore name the exact remediation epoch's
+//     own run, never merely "any remediation this unit ever had" - a
+//     dependency unrelated to the current invalidation never passes.
+func isExactRemediationOutput(store *SQLiteOperationStore, graphID, dependencyUnitID string, consumedInput orchestration.WorkUnitInput) (bool, error) {
 	epochs, err := store.WorkUnitRemediationEpochs(graphID, dependencyUnitID)
 	if err != nil {
 		return false, err
@@ -264,11 +262,14 @@ func isExactRemediationOutput(store *SQLiteOperationStore, graphID, dependencyUn
 			runID = epoch.RunID
 		}
 	}
+	if runID != consumedInput.RunID {
+		return false, nil // the CURRENTLY consumed output is not from this dependency's remediation epoch at all
+	}
 	handoffs, err := store.RunHandoffs(runID)
 	if err != nil {
 		return false, err
 	}
-	return len(handoffs) == 1, nil
+	return len(handoffs) == 1 && handoffs[0].ID == consumedInput.HandoffID, nil
 }
 
 // admitAutomaticReintegrationAuthorization grants an invalidated

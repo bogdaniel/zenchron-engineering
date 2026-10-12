@@ -354,3 +354,71 @@ func TestExternalReplacementAfterRemediationNeverAutoReintegrates(t *testing.T) 
 		t.Fatalf("integrator's run changed after an unrelated external replacement: %s -> %s", cBefore.RunID, after.unit(t, "c").RunID)
 	}
 }
+
+// TestUnrelatedDependencyReplacementAfterRemediationNeverAutoReintegrates is
+// the direct regression for the independent review's follow-up P1 finding
+// on PR #585 (head 04909f4): isExactRemediationOutput alone - "does SOME
+// dependency have an exact, unreplaced remediation output" - is not
+// causation. The blamed producer A remediated and the integrator I already
+// reintegrated against that; this test then externally replaces the OTHER,
+// never-remediated producer B's admitted output. A's own remediation never
+// stopped being true, so the old per-dependency-only check would still see
+// A pass and wrongly grant I a second automatic reintegration for an
+// invalidation B's unrelated external replacement actually caused. The fix
+// (consumedInputsFor/currentInputFor in workgraph.go) only ever considers a
+// dependency whose CURRENT output actually differs from what I's own
+// current epoch was activated against - A never qualifies here because A's
+// own output never changed again.
+func TestUnrelatedDependencyReplacementAfterRemediationNeverAutoReintegrates(t *testing.T) {
+	g := driveToGovernedRecovery(t)
+	fixture, view, blamedID := g.fixture, g.view, g.blamedID
+	unblamedID := "a"
+	if blamedID == "a" {
+		unblamedID = "b"
+	}
+
+	before := fixture.graph(view.GraphID)
+	unblamedUnit := before.unit(t, unblamedID)
+	cBefore := before.unit(t, "c")
+	integratorAuthorizationsBefore, err := fixture.store.RemediationAuthorizationsFor(view.GraphID, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// External replacement of the OTHER producer - the one that never
+	// remediated at all, never through #581's governed epoch mechanism,
+	// exactly #472's own existing mechanism (replaceAdmittedOutput).
+	replaceAdmittedOutput(t, fixture, view.GraphID, unblamedUnit)
+
+	for range 20 {
+		if _, err := g.supervisor.Tick(g.ctx); err != nil {
+			t.Fatal(err)
+		}
+		fixture.clock.advance(61 * time.Second)
+	}
+
+	after := fixture.graph(view.GraphID)
+	if state := after.unit(t, "c").State; state != orchestration.UnitInvalidated {
+		t.Fatalf("integrator is %s after an external replacement of its never-remediated dependency %s, want invalidated: %s",
+			state, unblamedID, after.unit(t, "c").Reason)
+	}
+	// The decisive assertion: the ALREADY-remediated dependency A's own,
+	// unrelated, still-exact remediation output must never be mistaken for
+	// the cause of THIS invalidation - no new authorization, no new epoch,
+	// for the integrator.
+	integratorAuthorizationsAfter, err := fixture.store.RemediationAuthorizationsFor(view.GraphID, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(integratorAuthorizationsAfter) != len(integratorAuthorizationsBefore) {
+		t.Fatalf("a new automatic reintegration authorization was granted after an unrelated dependency's external replacement: before=%+v after=%+v",
+			integratorAuthorizationsBefore, integratorAuthorizationsAfter)
+	}
+	cEpochs, err := fixture.store.WorkUnitRemediationEpochs(view.GraphID, "c")
+	if err != nil || len(cEpochs) != 1 {
+		t.Fatalf("integrator epochs = %+v (%v), want exactly the one legitimate reintegration epoch from before the external replacement", cEpochs, err)
+	}
+	if after.unit(t, "c").RunID != cBefore.RunID {
+		t.Fatalf("integrator's run changed after an unrelated dependency's external replacement: %s -> %s", cBefore.RunID, after.unit(t, "c").RunID)
+	}
+}

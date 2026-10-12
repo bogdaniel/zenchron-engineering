@@ -203,14 +203,27 @@ func (s *Supervisor) activateGraphFrontier(graphID string) []string {
 	// remediation did, and auto-reintegrate against content #581 never
 	// authorized at all.
 	//
-	// isExactRemediationOutput (remediation_eligibility.go) is the fix: it
-	// requires not merely that a remediation epoch exists, but that the
-	// run WHICH epoch registers has admitted EXACTLY ONCE - the one
-	// invariant that is true for a governed remediation's own, untouched
-	// result and false the instant anything external adds a second
-	// admission to that same run, by the same "a settled run never
+	// isExactRemediationOutput (remediation_eligibility.go) requires that (a)
+	// the run WHICH a dependency's own latest remediation epoch registers has
+	// admitted EXACTLY ONCE - true for a governed remediation's own,
+	// untouched result and false the instant anything external adds a
+	// second admission to that same run, by the same "a settled run never
 	// produces another handoff on its own" fact goalSettled
 	// (remediation_activation.go) already relies on.
+	//
+	// Independent review follow-up (PR #585): that alone still is not
+	// causation. A SECOND, unrelated dependency can satisfy it forever once
+	// it has ever remediated, even on a pass where THAT dependency did not
+	// change at all and a DIFFERENT, unremediated dependency's unrelated
+	// external replacement is the real cause of THIS invalidation. The fix
+	// is consumed-vs-current: unit.BatchID's own stored BatchOrigin.Inputs
+	// (consumedInputsFor) is the exact set this unit's CURRENT epoch was
+	// actually activated against - recorded once, unconditionally, by both
+	// activateWorkUnit and activateRemediationEpoch, never re-derived - and
+	// only a dependency whose CURRENT output (unit.Inputs, freshly
+	// re-projected every pass) differs from THAT is even a candidate cause.
+	// A dependency that still looks exactly as it did when this epoch was
+	// activated cannot be why this epoch no longer satisfies.
 	//
 	// unit.InputsDigest non-empty remains required too: true precisely in
 	// the ActivationInputsDigest-mismatch case
@@ -228,9 +241,22 @@ func (s *Supervisor) activateGraphFrontier(graphID string) []string {
 		if unit.State != orchestration.UnitInvalidated || unit.ExecutionKind != orchestration.ExecutionKindIntegrationCompose || unit.InputsDigest == "" {
 			continue
 		}
+		consumed, err := consumedInputsFor(s.deps.Store, unit.BatchID)
+		if err != nil {
+			problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s: %v", view.GraphID, unit.UnitID, err)))
+			continue
+		}
 		remediatedDependency := false
 		for _, dependency := range unit.DependsOn {
-			exact, err := isExactRemediationOutput(s.deps.Store, view.GraphID, dependency)
+			currentInput, found := currentInputFor(unit.Inputs, dependency)
+			if !found {
+				continue // no admitted output from this dependency to compare against
+			}
+			if previous, wasConsumed := currentInputFor(consumed, dependency); wasConsumed &&
+				previous.RunID == currentInput.RunID && previous.HandoffID == currentInput.HandoffID {
+				continue // unchanged since this unit's own current epoch - not what caused THIS invalidation
+			}
+			exact, err := isExactRemediationOutput(s.deps.Store, view.GraphID, dependency, currentInput)
 			if err != nil {
 				problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s: %v", view.GraphID, unit.UnitID, err)))
 				continue
@@ -268,6 +294,38 @@ func (s *Supervisor) activateGraphFrontier(graphID string) []string {
 		}
 	}
 	return problems
+}
+
+// currentInputFor finds dependencyUnitID's own entry in a unit's current
+// input set - the exact output this unit is about to consume for that ONE
+// dependency, never any other. ok is false while the dependency has no
+// admitted output to compare against at all.
+func currentInputFor(inputs orchestration.WorkUnitInputs, dependencyUnitID string) (orchestration.WorkUnitInput, bool) {
+	for _, input := range inputs {
+		if input.UnitID == dependencyUnitID {
+			return input, true
+		}
+	}
+	return orchestration.WorkUnitInput{}, false
+}
+
+// consumedInputsFor reads the exact input set a unit's CURRENT epoch -
+// named by batchID - was actually activated against: BatchOrigin.Inputs,
+// recorded unconditionally by both activateWorkUnit and
+// activateRemediationEpoch at the moment of activation, never re-derived
+// afterward. Paired with a unit's freshly re-projected current Inputs
+// (currentInputFor above), this is what tells "a dependency's output moved
+// since this epoch last ran" apart from "a dependency has always looked
+// exactly the way it looks now".
+func consumedInputsFor(store *SQLiteOperationStore, batchID string) (orchestration.WorkUnitInputs, error) {
+	batch, found, err := store.OrchestrationBatch(batchID)
+	if err != nil {
+		return nil, err
+	}
+	if !found || batch.Origin == nil {
+		return nil, fmt.Errorf("batch %s names no origin to read its consumed inputs from", batchID)
+	}
+	return batch.Origin.Inputs, nil
 }
 
 // workUnitHolds asks the readiness owner outside the graph what it is holding.
