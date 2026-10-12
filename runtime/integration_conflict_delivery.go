@@ -138,20 +138,36 @@ func deliverIntegrationConflicts(store *SQLiteOperationStore, batches []orchestr
 }
 
 // deliveredRecordMatches reports whether a row already found under a
-// delivery's own deterministic id is genuinely THIS delivery - the four
-// runtime-owned facts that identify it, every one already in hand from the
-// SAME single row MessageByID just read plus the original message this
-// function is about to deliver, so this costs nothing beyond that one read.
-// It deliberately does not compare Subject.Revision: that field alone needs
-// the producer's full handoff record to recompute, which is exactly the
-// cost this fast path exists to avoid paying on every pass; Handoff
-// equality, together with the immutability of an admitted handoff's own
-// subject, is what makes re-deriving it unnecessary for this check.
+// delivery's own deterministic id is genuinely THIS delivery, not merely
+// a record that happens to share its routing. Every fact compared is
+// already in hand from the SAME single row MessageByID just read plus the
+// original message this function is about to deliver - the candidate/tree
+// identity and handoff id come from original.Subject.Revision, which
+// WorkUnitInputs already carries in full (queryBatchMessageScope); only
+// BaseRevision is ever incomplete there, which is exactly why it is the
+// one Revision field left uncompared - recomputing it needs the producer's
+// full handoff record, the cost this fast path exists to avoid paying on
+// every pass. Everything else about the observation - its body, category
+// and the exact document digest it was admitted from - is compared too
+// (#475 review P2 second follow-up): a record agreeing only on scope,
+// route, source and handoff id could still be a DIFFERENT finding about
+// the same subject, and this fast path's whole job is refusing exactly
+// that, not merely a scope mismatch.
 func deliveredRecordMatches(stored, original orchestration.EngineeringMessage, destinationScope, destinationUnit string) bool {
-	return stored.Scope == destinationScope &&
-		stored.Route == orchestration.MessageRoute{Audience: orchestration.AudienceUnit, Unit: destinationUnit} &&
-		stored.Source == original.Source &&
-		stored.Subject != nil && original.Subject != nil && stored.Subject.Handoff == original.Subject.Handoff
+	if stored.Scope != destinationScope ||
+		stored.Route != (orchestration.MessageRoute{Audience: orchestration.AudienceUnit, Unit: destinationUnit}) ||
+		stored.Source != original.Source ||
+		stored.Body != original.Body ||
+		stored.Category != original.Category ||
+		stored.DocumentSHA256 != original.DocumentSHA256 {
+		return false
+	}
+	if stored.Subject == nil || original.Subject == nil {
+		return false
+	}
+	return stored.Subject.Handoff == original.Subject.Handoff &&
+		stored.Subject.Revision.CandidateRevision == original.Subject.Revision.CandidateRevision &&
+		stored.Subject.Revision.CandidateTree == original.Subject.Revision.CandidateTree
 }
 
 // integrationConflictDeliverySkipped is a test seam: it runs whenever the
