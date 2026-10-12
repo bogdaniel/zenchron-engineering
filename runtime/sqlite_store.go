@@ -16,9 +16,10 @@ import (
 // by one, so the applied count is the schema version. Never edit an applied
 // migration: append a new one.
 //
-// productSchemaMigrations (product_schema.go) is appended rather than inlined
-// here, to keep this file under the repository's file-size cap - it is still
-// one ordered migration list, never a second schema version counter.
+// productSchemaMigrations (product_schema.go) and remediationSchemaMigrations
+// (remediation_schema.go) are appended rather than inlined here, to keep this
+// file under the repository's file-size cap - it is still one ordered
+// migration list, never a second schema version counter.
 var sqliteMigrations = append([]string{`
 CREATE TABLE run_operations (
 	id                TEXT PRIMARY KEY,
@@ -637,7 +638,7 @@ CREATE TABLE review_verification_claims (
 	revision INTEGER NOT NULL,
 	document TEXT NOT NULL
 );
-`}, productSchemaMigrations...)
+`}, append(productSchemaMigrations, remediationSchemaMigrations...)...)
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
 var sqliteSchemaVersion = len(sqliteMigrations)
