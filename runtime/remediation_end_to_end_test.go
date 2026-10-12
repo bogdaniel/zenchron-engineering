@@ -83,14 +83,27 @@ type governedRecoveryFixture struct {
 	blamedOriginalRunID string
 }
 
-// driveToGovernedRecovery drives the real supervisor through every stage up
-// through a successful, fully governed recovery: real conflict -> delivered
-// Finding -> decision_request -> an unauthorized attempt refused -> a real
-// operator's approval -> the blamed producer's new epoch -> the
-// integrator's own automatic reintegration -> a final admitted candidate.
-// Shared so the positive test and the negative (external-replacement)
-// regression both start from the IDENTICAL, already-proven-governed state.
-func driveToGovernedRecovery(t *testing.T) *governedRecoveryFixture {
+// epochAuthorizationRequestedFixture is driveToEpochAuthorizationRequest's
+// result: the real conflict has produced a delivered Finding and a live,
+// UNRESOLVED epoch_authorization decision_request in the blamed producer's
+// own inbox - the one shared starting point every governed-resolution
+// regression (approve, reject, dismiss) drives forward from independently.
+type epochAuthorizationRequestedFixture struct {
+	fixture             *fleetFixture
+	supervisor          *Supervisor
+	view                WorkGraphView
+	ctx                 context.Context
+	blamedID            string
+	blamedOriginalRunID string
+	requestID           string
+}
+
+// driveToEpochAuthorizationRequest drives the real supervisor through the
+// real-conflict -> delivered-Finding -> live epoch_authorization
+// decision_request stages (A-D), common to every governed-resolution outcome
+// a human operator may choose. It resolves nothing: the request is left
+// live for the caller to approve, reject, or dismiss.
+func driveToEpochAuthorizationRequest(t *testing.T) *epochAuthorizationRequestedFixture {
 	t.Helper()
 	const issueA, issueB, issueC = fleetFirstIssue, fleetFirstIssue + 1, fleetFirstIssue + 2
 	fixture := newFleetFixture(t, 4)
@@ -194,6 +207,23 @@ func driveToGovernedRecovery(t *testing.T) *governedRecoveryFixture {
 	if requestID == "" {
 		t.Fatal("no epoch_authorization decision_request ever appeared in the blamed producer's own inbox")
 	}
+	return &epochAuthorizationRequestedFixture{
+		fixture: fixture, supervisor: supervisor, view: view, ctx: ctx,
+		blamedID: blamedID, blamedOriginalRunID: blamedUnit.RunID, requestID: requestID,
+	}
+}
+
+// driveToGovernedRecovery drives the real supervisor through every stage up
+// through a successful, fully governed recovery: real conflict -> delivered
+// Finding -> decision_request -> an unauthorized attempt refused -> a real
+// operator's approval -> the blamed producer's new epoch -> the
+// integrator's own automatic reintegration -> a final admitted candidate.
+// Shared so the positive test and the negative (external-replacement)
+// regression both start from the IDENTICAL, already-proven-governed state.
+func driveToGovernedRecovery(t *testing.T) *governedRecoveryFixture {
+	t.Helper()
+	g := driveToEpochAuthorizationRequest(t)
+	fixture, supervisor, view, ctx, requestID := g.fixture, g.supervisor, g.view, g.ctx, g.requestID
 
 	// A genuinely unauthorized attempt is refused: no operator identity, no
 	// resolution (ADR-0008's own never-cut, proven against the real
@@ -231,7 +261,7 @@ func driveToGovernedRecovery(t *testing.T) *governedRecoveryFixture {
 	}
 	return &governedRecoveryFixture{
 		fixture: fixture, supervisor: supervisor, view: view, ctx: ctx,
-		blamedID: blamedID, blamedOriginalRunID: blamedUnit.RunID,
+		blamedID: g.blamedID, blamedOriginalRunID: g.blamedOriginalRunID,
 	}
 }
 
@@ -420,5 +450,100 @@ func TestUnrelatedDependencyReplacementAfterRemediationNeverAutoReintegrates(t *
 	}
 	if after.unit(t, "c").RunID != cBefore.RunID {
 		t.Fatalf("integrator's run changed after an unrelated dependency's external replacement: %s -> %s", cBefore.RunID, after.unit(t, "c").RunID)
+	}
+}
+
+// TestRejectedEpochAuthorizationGrantsNoEpochOrAuthorization is the #581
+// Batch 3 acceptance regression for the Phase 2 negative matrix's "Rejected
+// decision -> No producer execution": a genuine operator REJECTS the exact
+// same epoch_authorization request the positive test approves. No
+// RemediationAuthorization and no RemediationEpoch row may ever exist for
+// the blamed unit, its run identity must stay its original epoch-1 RunID,
+// and the blocked integrator must never reintegrate.
+func TestRejectedEpochAuthorizationGrantsNoEpochOrAuthorization(t *testing.T) {
+	g := driveToEpochAuthorizationRequest(t)
+	fixture, view, blamedID := g.fixture, g.view, g.blamedID
+
+	if _, err := g.supervisor.ResolveDecision(ControlRequest{
+		DecisionID: g.requestID, Operator: "operator@example.com",
+		DecisionOutcomeKind: orchestration.DecisionSelectedOption, DecisionOutcomeValue: orchestration.EpochAuthorizationReject,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		if _, err := g.supervisor.Tick(g.ctx); err != nil {
+			t.Fatal(err)
+		}
+		fixture.clock.advance(61 * time.Second)
+	}
+
+	authorizations, err := fixture.store.RemediationAuthorizationsFor(view.GraphID, blamedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(authorizations) != 0 {
+		t.Fatalf("a rejected epoch_authorization request produced %d RemediationAuthorization rows, want 0: %+v", len(authorizations), authorizations)
+	}
+	epochs, err := fixture.store.WorkUnitRemediationEpochs(view.GraphID, blamedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(epochs) != 0 {
+		t.Fatalf("a rejected epoch_authorization request produced %d RemediationEpoch rows, want 0: %+v", len(epochs), epochs)
+	}
+	after := fixture.graph(view.GraphID)
+	if after.unit(t, blamedID).RunID != g.blamedOriginalRunID {
+		t.Fatalf("blamed producer's run changed after a REJECTED authorization: %s -> %s", g.blamedOriginalRunID, after.unit(t, blamedID).RunID)
+	}
+	if c := after.unit(t, "c"); c.Output != nil {
+		t.Fatalf("the integrator admitted an output after a REJECTED authorization, want it to stay blocked: %+v", c.Output)
+	}
+}
+
+// TestDismissedFindingGrantsNoEpochOrAuthorization is the #581 Batch 3
+// acceptance regression for the Phase 2 negative matrix's "Dismissed
+// Finding -> Explicit governed resolution, no synthetic fix": a genuine
+// operator DISMISSES the request, declaring the blamed producer's existing
+// (still-conflicting) handoff accepted as final. Exactly like reject, this
+// must never grant a RemediationAuthorization or create a RemediationEpoch,
+// and the blamed unit's own output never silently changes - dismissal is a
+// governed acceptance of what already exists, never a substitute fix.
+func TestDismissedFindingGrantsNoEpochOrAuthorization(t *testing.T) {
+	g := driveToEpochAuthorizationRequest(t)
+	fixture, view, blamedID := g.fixture, g.view, g.blamedID
+
+	if _, err := g.supervisor.ResolveDecision(ControlRequest{
+		DecisionID: g.requestID, Operator: "operator@example.com",
+		DecisionOutcomeKind: orchestration.DecisionSelectedOption, DecisionOutcomeValue: orchestration.EpochAuthorizationDismiss,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		if _, err := g.supervisor.Tick(g.ctx); err != nil {
+			t.Fatal(err)
+		}
+		fixture.clock.advance(61 * time.Second)
+	}
+
+	authorizations, err := fixture.store.RemediationAuthorizationsFor(view.GraphID, blamedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(authorizations) != 0 {
+		t.Fatalf("a dismissed Finding produced %d RemediationAuthorization rows, want 0: %+v", len(authorizations), authorizations)
+	}
+	epochs, err := fixture.store.WorkUnitRemediationEpochs(view.GraphID, blamedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(epochs) != 0 {
+		t.Fatalf("a dismissed Finding produced %d RemediationEpoch rows, want 0: %+v", len(epochs), epochs)
+	}
+	after := fixture.graph(view.GraphID)
+	if after.unit(t, blamedID).RunID != g.blamedOriginalRunID {
+		t.Fatalf("blamed producer's run changed after a DISMISSED Finding: %s -> %s", g.blamedOriginalRunID, after.unit(t, blamedID).RunID)
+	}
+	if c := after.unit(t, "c"); c.Output != nil {
+		t.Fatalf("the integrator admitted an output after a DISMISSED Finding with no new epoch ever produced, want it to stay blocked: %+v", c.Output)
 	}
 }
