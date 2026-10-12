@@ -103,6 +103,14 @@ try {
       assert(view.heading && !view.broken && view.navigation && !view.login, route + ': ' + JSON.stringify(view));
     }
   });
+  await check('agent configuration exposes profiles and template empty states', async () => {
+    await cdp.navigate('/agents');
+    await until(() => cdp.evaluate(`/installed profile/i.test(document.querySelector('#profiles-status')?.textContent || '')`), 'controller-owned profiles');
+    await until(() => cdp.evaluate(`document.querySelector('#profiles-list').children.length > 0`), 'rendered profile list');
+    const profileText = await cdp.evaluate(`document.querySelector('#profiles-list').textContent`);
+    assert(profileText.includes('browser-implementer'), 'configured profile must be visible');
+    assert(await cdp.evaluate(`/no templates configured/i.test(document.querySelector('#templates-status')?.textContent || '')`), 'empty template configuration must be explicit');
+  });
   await check('desktop and mobile layout have no document overflow', async () => {
     for (const width of [1440, 390]) {
       await cdp.call('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: width < 500 });
@@ -175,11 +183,22 @@ try {
   await check('browser objective intake reuses existing plan without duplicate planning', async () => {
     await cdp.navigate('/objectives');
     await until(() => cdp.evaluate(`!document.querySelector('#objective-submit').disabled`), 'eligible intake options');
+    assert(await cdp.evaluate(`Array.from(document.querySelector('#objective-profile').options).some(option => option.value === 'browser-implementer-alt')`), 'installed profiles must be selectable');
     await cdp.evaluate(`document.querySelector('#objective-issue').value='41';document.querySelector('#objective-form').requestSubmit();document.querySelector('#objective-form').requestSubmit()`);
     await until(() => cdp.evaluate(`Boolean(document.querySelector('#objective-status a[href^=\"/plans/\"]'))`), 'idempotent objective plan result');
     assert(await cdp.evaluate(`document.querySelector('#objective-submit').disabled`), 'ambiguous intake must not silently retry');
     assert.equal(await cdp.evaluate(`document.querySelector('#objective-status a').getAttribute('href')`), '/plans/' + process.env.ZENCHRON_E2E_PLAN);
     await screenshot('desktop-objective-intake');
+  });
+  await check('selected profile preference reaches a deterministic objective plan', async () => {
+    await cdp.navigate('/objectives');
+    await until(() => cdp.evaluate(`!document.querySelector('#objective-submit').disabled`), 'eligible intake options');
+    await cdp.evaluate(`document.querySelector('#objective-issue').value='42';document.querySelector('#objective-profile').value='browser-implementer-alt';document.querySelector('#objective-deterministic').checked=true;document.querySelector('#objective-form').requestSubmit()`);
+    await until(() => cdp.evaluate(`Boolean(document.querySelector('#objective-status a[href^="/plans/"]'))`), 'profile-bound plan proposal');
+    const href = await cdp.evaluate(`document.querySelector('#objective-status a').getAttribute('href')`);
+    await cdp.navigate(href);
+    await until(() => cdp.evaluate(`/browser-implementer-alt@1/.test(document.body.innerText)`), 'selected profile assignment');
+    assert(await cdp.evaluate(`/unapproved/i.test(document.body.innerText)`), 'new plan must remain subject to human approval');
   });
   await check('WorkGraph displays dependencies and preactivation authority hold', async () => {
     await cdp.navigate('/workgraphs/' + process.env.ZENCHRON_E2E_GRAPH);
@@ -252,6 +271,14 @@ try {
     assert(await cdp.evaluate(`!document.querySelector('[data-action="/v1/runs/browser-live/stop"]')`));
     const result = await post('/v1/runs/browser-live/stop', { controller_binding: binding });
     assert.equal(result.status, 409);
+    await cdp.navigate('/objectives');
+    await until(() => cdp.evaluate(`Boolean(document.querySelector('#workspace-options-retry'))`), 'controller configuration recovery action');
+    assert(await cdp.evaluate(`/serve is running/i.test(document.querySelector('#objective-status').textContent)`));
+    console.log('CONTROL:reconnect');
+    await until(async () => cdp.evaluate(`fetch('/v1/controller',{headers:{Authorization:'Bearer browser-test-token'}}).then(r=>r.json()).then(r=>r.live_reachable)`), 'controller reconnect');
+    await cdp.evaluate(`document.querySelector('#workspace-options-retry').click()`);
+    await until(() => cdp.evaluate(`/development controller is unattested/i.test(document.querySelector('#objective-status').textContent) && !document.querySelector('#workspace-options-retry')`), 'controller configuration recovery');
+    assert(await cdp.evaluate(`document.querySelector('#objective-submit').disabled`), 'an unattested controller must keep objective submission disabled');
   });
   await check('HTTP disconnect marks retained data stale', async () => {
     await cdp.navigate('/runs');

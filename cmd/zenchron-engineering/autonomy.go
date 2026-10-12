@@ -206,6 +206,8 @@ type autonomyFlags struct {
 	// Template names the operator's reusable EngineeringPlanTemplate for a plan
 	// proposal. Empty means the planner compiles from policy and intent alone.
 	Template string
+	// Profile is the operator's default profile preference for agent stages.
+	Profile string
 	// Revision and Digest name the EXACT plan revision a decision is about.
 	// They are what an operator read: without them the CLI would decide
 	// whatever the highest revision happened to be at decide time, which can

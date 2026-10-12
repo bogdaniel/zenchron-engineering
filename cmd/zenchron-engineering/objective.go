@@ -51,7 +51,7 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 		built: c, engine: engine, service: plans, target: target, release: func() {},
 	}
 	flags := autonomyFlags{
-		Template: request.Template, Deterministic: request.Deterministic,
+		Template: request.Template, Profile: request.Profile, Deterministic: request.Deterministic,
 		Agent:           request.Agent,
 		SubstituteHuman: request.SubstituteHuman, Note: request.Note,
 	}

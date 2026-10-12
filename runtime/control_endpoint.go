@@ -125,6 +125,7 @@ type ControlRequest struct {
 	// registry. A request naming an agent the operator did not configure is
 	// refused; it cannot introduce one.
 	Agent              string `json:"agent,omitempty"`
+	Profile            string `json:"profile,omitempty"`
 	RunID              string `json:"run_id,omitempty"`
 	AuthorityRequestID string `json:"authority_request_id,omitempty"`
 	AuthorityDigest    string `json:"authority_digest,omitempty"`

@@ -83,6 +83,23 @@ func TestWorkspaceOptionsRemainReadableFromUnattestedDevelopmentController(t *te
 	}
 }
 
+func TestObjectiveForwardsProfilePreferenceAndDeterministicChoice(t *testing.T) {
+	f := newActionFixture(t)
+	var received rt.ControlRequest
+	f.reply = func(request rt.ControlRequest) (rt.ControlResponse, error) {
+		received = request
+		return rt.ControlResponse{Code: "plan_refused"}, nil
+	}
+	body := `{"controller_binding":"binding","repository":"example/repo","issue":41,"profile":"implementer","template":"bounded","deterministic":true}`
+	post(t, f.api, validRequest("/v1/objectives", body), 409)
+	if received.Command != rt.ControlPlanRevise || received.Profile != "implementer" || received.Template != "bounded" || !received.Deterministic {
+		t.Fatalf("objective preferences did not reach the controller: %+v", received)
+	}
+	if f.sends.Load() != 1 {
+		t.Fatalf("planning request sent %d times, want exactly once", f.sends.Load())
+	}
+}
+
 func TestNewBrowserBodiesRemainClosed(t *testing.T) {
 	f := newActionFixture(t)
 	for _, path := range []string{"/v1/objectives", "/v1/plans/p/approve", "/v1/plans/p/revise", "/v1/decisions/d/resolve", "/v1/runs/s/authorize", "/v1/runs/s/pause", "/v1/runs/s/unpause"} {
@@ -116,6 +133,7 @@ func TestWorkspaceContractSchemas(t *testing.T) {
 	for _, body := range []string{
 		`{"controller_binding":"b","revision":1,"digest":"d","assignments_digest":"a"}`,
 		`{"controller_binding":"b","repository":"example/repo","issue":1}`,
+		`{"controller_binding":"b","repository":"example/repo","issue":1,"profile":"implementer","deterministic":true}`,
 		`{"controller_binding":"b","request_id":"r","digest":"d","decision":"approve"}`,
 		`{"controller_binding":"b","outcome_kind":"allow_deny","outcome_value":"allow"}`,
 	} {

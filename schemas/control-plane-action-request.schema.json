@@ -141,8 +141,14 @@
         "agent": {
           "type": "string"
         },
+        "profile": {
+          "type": "string"
+        },
         "template": {
           "type": "string"
+        },
+        "deterministic": {
+          "type": "boolean"
         },
         "revision": {
           "type": "integer"

@@ -40,6 +40,7 @@ func TestBrowserWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	writePlanningFile(t, loaded.PlanningDir, "profiles/browser-implementer.json", `{"execution_agent":"openai-responses","capabilities":["code_change","repository_analysis","verification"],"trust_requirement":"protected"}`)
+	writePlanningFile(t, loaded.PlanningDir, "profiles/browser-implementer-alt.json", `{"execution_agent":"openai-responses","capabilities":["code_change","repository_analysis","verification"],"trust_requirement":"protected"}`)
 	activeRun(t, config, dir, "browser-run")
 	activeRun(t, config, dir, "browser-live")
 	plan := proposePlan(t, config, 41)
@@ -51,6 +52,8 @@ func TestBrowserWorkspace(t *testing.T) {
 	if err := os.WriteFile(built.agent.CredentialPath, []byte("unused-browser-boundary-fixture"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	forge := built.forge.(*runtime.FakeGitHubAdapter)
+	forge.Issues[42] = runtime.GitHubIssue{Number: 42, URL: "https://github.com/zenchron/seeded/issues/42", Title: "Make widget retry idempotent", Body: "Repeated retries should produce the same result.", State: runtime.GitHubOpen, UpdatedAt: time.Unix(1_700_000_001, 0).UTC(), Author: runtime.GitHubActor{Login: "operator", ID: 7}}
 	role, err := runtime.AcquireControllerRole(state)
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +140,22 @@ func runBrowserFixture(t *testing.T, root string, built *composition, driver *ru
 		line := scan.Text()
 		if line == "CONTROL:disconnect" {
 			_ = socket.Close()
+			<-controllerDone
+			continue
+		}
+		if line == "CONTROL:reconnect" {
+			socket, err = runtime.ListenControl(state)
+			if err != nil {
+				t.Error(err)
+				continue
+			}
+			controllerDone = make(chan struct{})
+			go func() {
+				defer close(controllerDone)
+				_ = socket.Serve(func(r runtime.ControlRequest) runtime.ControlResponse {
+					return built.handleControl(context.Background(), driver, func() {}, r)
+				})
+			}()
 			continue
 		}
 		if line == "CONTROL:server-disconnect" {

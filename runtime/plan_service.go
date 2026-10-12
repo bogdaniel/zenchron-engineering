@@ -110,6 +110,9 @@ type ProposeInput struct {
 	Issue int
 	// Template is the operator's chosen reusable process, or empty.
 	Template string
+	// Profile is the operator's default profile preference for agent stages.
+	// A template or reasoning proposal may state a more specific preference.
+	Profile string
 	// Reasoned is a reasoning agent's proposed stages, and Reasoning its
 	// provenance. Both are absent for a purely deterministic compilation, which
 	// is a first-class mode rather than a fallback: the deterministic skeleton
@@ -229,6 +232,11 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 		}
 		template = &resolved
 	}
+	if input.Profile != "" {
+		if _, err := s.Registry.Profile(input.Profile); err != nil {
+			return domain.EngineeringPlan{}, err
+		}
+	}
 	origin := input.Origin
 	if origin == "" {
 		origin = domain.ProposalOriginInitial
@@ -288,7 +296,7 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 		plan, compileErr = planning.Compile(planning.CompileInput{
 			PlanID: input.PlanID, Revision: revision, Objective: input.Objective,
 			Subject: input.Subject, Contract: input.Contract, Model: input.Model, Facts: input.Facts,
-			Template: template, Envelope: s.Envelope, Proposed: input.Reasoned,
+			Template: template, PreferredProfile: input.Profile, Envelope: s.Envelope, Proposed: input.Reasoned,
 			Reasoning: input.Reasoning, Previous: previous, RatchetBaseline: ratchetBaseline, Consumed: consumed,
 		})
 	}

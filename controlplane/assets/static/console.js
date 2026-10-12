@@ -399,13 +399,20 @@
   function loadWorkspaceOptions() {
     var form = byId("objective-form");
     var agents = byId("agents-list");
-    if (!form && !agents) return;
+    var profiles = byId("profiles-list");
+    var templates = byId("templates-list");
+    if (!form && !agents && !profiles && !templates) return;
     fetch("/v1/workspace/options", { headers: authHeaders(), signal: AbortSignal.timeout(10000) })
       .then(function (response) {
-        if (!response.ok) throw new Error("Controller configuration unavailable (HTTP " + response.status + ")");
+        if (!response.ok) {
+          var error = new Error("Controller configuration unavailable (HTTP " + response.status + ")");
+          error.status = response.status;
+          throw error;
+        }
         return response.json();
       }).then(function (options) {
         if (agents) {
+          agents.replaceChildren();
           byId("agents-status").textContent = options.agents.length ? "Configured execution agents" : "No agents configured";
           options.agents.forEach(function (agent) {
             var card = document.createElement("article");
@@ -414,6 +421,28 @@
             var detail = document.createElement("span"); detail.textContent = agent.kind + " · " + agent.trust_mode; card.appendChild(detail);
             var eligibility = document.createElement("span"); eligibility.textContent = agent.eligible ? "Eligible for execution" : "Unavailable for execution"; card.appendChild(eligibility);
             agents.appendChild(card);
+          });
+        }
+        if (profiles) {
+          profiles.replaceChildren();
+          byId("profiles-status").textContent = options.profiles.length
+            ? options.profiles.length + " installed profile" + (options.profiles.length === 1 ? "" : "s")
+            : "No profiles configured. Plans may remain unassigned until the operator installs an eligible profile.";
+          options.profiles.forEach(function (profile) {
+            var card = document.createElement("article"); card.className = "stat";
+            var heading = document.createElement("strong"); heading.textContent = profile; card.appendChild(heading);
+            profiles.appendChild(card);
+          });
+        }
+        if (templates) {
+          templates.replaceChildren();
+          byId("templates-status").textContent = options.templates.length
+            ? options.templates.length + " installed plan template" + (options.templates.length === 1 ? "" : "s")
+            : "No templates configured. The controller default remains available for planning.";
+          options.templates.forEach(function (template) {
+            var card = document.createElement("article"); card.className = "stat";
+            var heading = document.createElement("strong"); heading.textContent = template; card.appendChild(heading);
+            templates.appendChild(card);
           });
         }
         if (!form) return;
@@ -428,6 +457,7 @@
         }
         populate("objective-repository", options.repositories);
         populate("objective-agent", options.agents.filter(function (agent) { return agent.eligible; }), function (agent) { return agent.id + " · " + agent.kind; });
+        populate("objective-profile", [""].concat(options.profiles), function (profile) { return profile || "Resolve from plan and policy"; });
         populate("objective-template", [""].concat(options.templates), function (template) { return template || "Controller default"; });
         var budget = options.budget;
         byId("objective-budget").textContent = "Maximum " + budget.max_child_runs + " worker runs · " + budget.max_concurrency + " concurrent · " + budget.max_provider_invocations + " provider invocations" +
@@ -437,28 +467,50 @@
         if (!form.dataset.binding) byId("objective-status").textContent = "This development controller is unattested. Objective generation and approvals require an adopted controller.";
       }).catch(function (error) {
         var status = byId("objective-status") || byId("agents-status");
-        if (status) status.textContent = error.message;
+        if (!status) return;
+        status.replaceChildren(document.createTextNode(error.status === 503
+          ? error.message + ". Check that zenchron serve is running, then retry."
+          : error.message));
+        ["profiles-status", "templates-status"].forEach(function (id) {
+          var detailStatus = byId(id);
+          if (detailStatus) detailStatus.textContent = error.message;
+        });
+        if (error.status !== 503) return;
+        var retry = document.createElement("button");
+        retry.type = "button";
+        retry.id = "workspace-options-retry";
+        retry.textContent = "Retry controller connection";
+        retry.addEventListener("click", function () {
+          retry.remove();
+          status.textContent = "Retrying controller configuration…";
+          loadWorkspaceOptions();
+        });
+        status.appendChild(document.createTextNode(" "));
+        status.appendChild(retry);
       });
-    if (form) form.addEventListener("submit", function (event) {
-      event.preventDefault();
-      var submit = byId("objective-submit");
-      if (submit.disabled || !form.reportValidity()) return;
-      submit.disabled = true;
-      var data = new FormData(form);
-      var body = { controller_binding: form.dataset.binding, repository: data.get("repository"), issue: Number(data.get("issue")), agent: data.get("agent"), template: data.get("template") };
-      var headers = authHeaders(); headers["Content-Type"] = "application/json";
-      byId("objective-status").textContent = "Generating once. No execution is authorized by this request.";
-      fetch("/v1/objectives", { method: "POST", headers: headers, body: JSON.stringify(body), signal: AbortSignal.timeout(1270000) })
-        .then(function (response) { return response.json(); })
-        .then(function (result) {
-          var status = byId("objective-status");
-          status.textContent = result.error || [result.outcome, result.code, result.detail].filter(Boolean).join(" · ");
-          if (result.state && result.state.plan_id) {
-            var link = document.createElement("a"); link.href = "/plans/" + encodeURIComponent(result.state.plan_id); link.textContent = "Inspect generated plan →";
-            status.appendChild(document.createElement("br")); status.appendChild(link);
-          }
-        }).catch(function () { byId("objective-status").textContent = "Outcome unconfirmed. Inspect Plans before submitting again; this request is never retried automatically."; });
-    });
+    if (form && !form.dataset.intakeBound) {
+      form.dataset.intakeBound = "true";
+      form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        var submit = byId("objective-submit");
+        if (submit.disabled || !form.reportValidity()) return;
+        submit.disabled = true;
+        var data = new FormData(form);
+        var body = { controller_binding: form.dataset.binding, repository: data.get("repository"), issue: Number(data.get("issue")), agent: data.get("agent"), profile: data.get("profile"), template: data.get("template"), deterministic: data.get("deterministic") === "on" };
+        var headers = authHeaders(); headers["Content-Type"] = "application/json";
+        byId("objective-status").textContent = "Generating once. No execution is authorized by this request.";
+        fetch("/v1/objectives", { method: "POST", headers: headers, body: JSON.stringify(body), signal: AbortSignal.timeout(1270000) })
+          .then(function (response) { return response.json(); })
+          .then(function (result) {
+            var status = byId("objective-status");
+            status.textContent = result.error || [result.outcome, result.code, result.detail].filter(Boolean).join(" · ");
+            if (result.state && result.state.plan_id) {
+              var link = document.createElement("a"); link.href = "/plans/" + encodeURIComponent(result.state.plan_id); link.textContent = "Inspect generated plan →";
+              status.appendChild(document.createElement("br")); status.appendChild(link);
+            }
+          }).catch(function () { byId("objective-status").textContent = "Outcome unconfirmed. Inspect Plans before submitting again; this request is never retried automatically."; });
+      });
+    }
   }
 
   document.addEventListener("DOMContentLoaded", function () {

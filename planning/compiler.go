@@ -56,7 +56,8 @@ type CompileInput struct {
 	Model    domain.ProjectModel
 	Facts    []domain.EngineeringFact
 	// Template is the operator's reusable process, or nil.
-	Template *domain.EngineeringPlanTemplate
+	Template         *domain.EngineeringPlanTemplate
+	PreferredProfile string
 	// Envelope is the OPERATOR ceiling. A template may tighten it; nothing may
 	// widen it here.
 	Envelope domain.PlanBudgetEnvelope
@@ -102,6 +103,7 @@ func Compile(input CompileInput) (domain.EngineeringPlan, error) {
 	if err != nil {
 		return domain.EngineeringPlan{}, err
 	}
+	stages = preferProfile(stages, input.PreferredProfile)
 	stages = ensureAssuranceGate(stages, input.Contract)
 	stages, err = fillStageDefaults(stages, input)
 	if err != nil {

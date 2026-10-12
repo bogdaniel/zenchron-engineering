@@ -189,10 +189,13 @@ templates and plain JavaScript. No frontend package manager or backend service
 has been added.
 
 An objective starts from an existing issue in a controller-enrolled repository.
-The browser selects a configured worker and template; the controller owns the
-budget envelope and profile resolution. Generation spends a bounded planning
-invocation but grants no execution authority. Review the proposed revision,
-stage dependencies, assignments, blockers and budgets before approving it.
+The browser selects a configured worker, optional default profile preference,
+and template; explicit template or reasoning-stage profile preferences take
+precedence, and the controller still resolves eligibility and assignments.
+The operator may choose deterministic compilation when no planning model is
+wanted. The controller owns the budget envelope. Generation grants no execution
+authority. Review the proposed revision, stage dependencies, assignments,
+blockers and budgets before approving it.
 Approval names both the plan digest and the live resolved assignment digest.
 A changed revision, worker binding or controller generation is refused.
 
