@@ -3,14 +3,21 @@ package runtime
 // Remediation epoch activation (#581 Batch 2): claiming one unit's Nth
 // attempt, once a durable RemediationAuthorization exists for it.
 //
-// This mirrors workgraph.go's activateWorkUnit almost exactly, deliberately:
-// #472's own first activation is already two decoupled, idempotent steps -
-// write the (possibly epoch-bound) batch through the existing
-// planOrchestrationBatch/CreateOrchestrationBatch path, then record the
-// claim - never one giant transaction. ADR-0008's first draft assumed a new
-// atomic epoch+run+operations transaction was needed; it was not; this
-// reuses the identical discipline #472 already proved, with BatchOrigin.Epoch
-// (orchestration/batch.go) as the one new fact that makes a remediation
+// Mirrors workgraph.go's activateWorkUnit for everything EXCEPT the one
+// place independent review (PR #585) found it could not: #472's own first
+// activation gets away with two decoupled, idempotent steps - write the
+// batch, then record the claim - because nothing downstream ever
+// materializes a run from a batch #472 itself did not just write in this
+// same call. reconcileOrchestration is not that narrow: it materializes a
+// run for EVERY batch its own unconditional OrchestrationBatches() read
+// returns, on every pass, regardless of who wrote it or when. Decoupling
+// this batch's write from its epoch claim would leave exactly the window
+// that guard exists to prevent - a batch visible, and therefore
+// materializable and schedulable, with no governing claim on it at all, if
+// a crash lands between the two writes. AdmitRemediationEpochBatch
+// (remediation_store.go) is the fix: one transaction, both rows, so a batch
+// is never visible without its claim already alongside it. BatchOrigin.Epoch
+// (orchestration/batch.go) remains the one fact that makes a remediation
 // epoch's batch/run identity genuinely distinct from epoch 1's.
 
 import (
@@ -106,22 +113,47 @@ func (s *Supervisor) activateRemediationEpoch(graph WorkGraphView, unit WorkGrap
 		if err != nil {
 			return err
 		}
-		if stored, _, err = s.deps.Store.CreateOrchestrationBatch(planned); err != nil {
+		// Independent review finding (PR #585): writing this batch and
+		// claiming its epoch row as two separate calls leaves a window - a
+		// crash between them - where the batch is already visible to
+		// reconcileOrchestration's own unconditional materialization of
+		// every stored batch, with no governing epoch claim to say it was
+		// ever authorized. AdmitRemediationEpochBatch closes that window by
+		// construction: both rows commit in ONE transaction, so this batch
+		// is NEVER visible to anything reading orchestration_batches
+		// without its epoch claim already alongside it, and a crash before
+		// that commit leaves nothing - not a stray batch, not a stray run -
+		// for a retry to find except the identical durable state it started
+		// from.
+		epoch := RemediationEpoch{
+			GraphID: graph.GraphID, UnitID: unit.UnitID, Epoch: authorization.ProposedEpoch,
+			BatchID: batchID, RunID: planned.Items[0].RunID, InputsDigest: unit.InputsDigest,
+			AuthorizationID: authorization.ID, ActivatedAt: s.deps.Clock.Now(),
+		}
+		if stored, _, err = s.deps.Store.AdmitRemediationEpochBatch(planned, epoch); err != nil {
 			return err
 		}
+		return validateRemediationEpochBatch(stored, graph, unit, authorization)
 	}
+	// Replay: the batch already exists, which - by AdmitRemediationEpochBatch's
+	// own atomicity - means its epoch claim already does too. Nothing left
+	// to do but confirm the shape, exactly as a first attempt's own result
+	// would.
+	return validateRemediationEpochBatch(stored, graph, unit, authorization)
+}
+
+// validateRemediationEpochBatch confirms a stored batch - freshly admitted
+// or found on replay - actually describes the exact unit execution this
+// call asked for. Shared so both paths through activateRemediationEpoch
+// check the identical thing.
+func validateRemediationEpochBatch(stored orchestration.Batch, graph WorkGraphView, unit WorkGraphUnitView, authorization RemediationAuthorization) error {
 	if len(stored.Items) != 1 || stored.Items[0].Issue != unit.Issue {
-		return fmt.Errorf("batch %s does not describe issue %d alone", batchID, unit.Issue)
+		return fmt.Errorf("batch %s does not describe issue %d alone", stored.ID, unit.Issue)
 	}
 	if stored.Origin == nil || stored.Origin.GraphID != graph.GraphID || stored.Origin.UnitID != unit.UnitID || stored.Origin.Epoch != authorization.ProposedEpoch {
-		return fmt.Errorf("batch %s does not describe unit %s of graph %s at epoch %d", batchID, unit.UnitID, graph.GraphID, authorization.ProposedEpoch)
+		return fmt.Errorf("batch %s does not describe unit %s of graph %s at epoch %d", stored.ID, unit.UnitID, graph.GraphID, authorization.ProposedEpoch)
 	}
-	_, err = s.deps.Store.ActivateRemediationEpoch(RemediationEpoch{
-		GraphID: graph.GraphID, UnitID: unit.UnitID, Epoch: authorization.ProposedEpoch,
-		BatchID: batchID, RunID: stored.Items[0].RunID, InputsDigest: unit.InputsDigest,
-		AuthorizationID: authorization.ID, ActivatedAt: s.deps.Clock.Now(),
-	})
-	return err
+	return nil
 }
 
 // goalSettled is runGoalSettled's whole-run form: true for any disposition

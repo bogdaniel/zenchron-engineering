@@ -193,20 +193,34 @@ func (s *Supervisor) activateGraphFrontier(graphID string) []string {
 	// judgment call needed, exactly like an ordinary first
 	// integration_compose attempt already needs none.
 	//
-	// Two conditions, both required:
-	//   - a dependency has ever remediated (latestAttemptEpoch > 1) - the
-	//     one fact that distinguishes "upstream's content changed because
-	//     of a governed #581 remediation" from "changed for some other,
-	//     arbitrary reason";
-	//   - unit.InputsDigest is non-empty - true precisely in the
-	//     ActivationInputsDigest-mismatch case (orchestration/workgraph_projection.go),
-	//     once the dependency is satisfied AGAIN with that new content, and
-	//     empty while a dependency is merely, temporarily unsatisfied (its
-	//     own remediation still in flight) - TestReplacedUpstreamSubjectInvalidatesDownstream
-	//     (orchestration package) proves an upstream that is merely
-	//     unsatisfied invalidates its dependent immediately, and this
-	//     second check is what stops that transient moment from being
-	//     mistaken for "ready to recompose".
+	// Independent review finding (PR #585): "a dependency has EVER
+	// remediated" is not the same fact as "the CURRENT input change was
+	// CAUSED by that exact remediation" - a dependency that remediated
+	// once and is LATER externally replaced again (#472's existing
+	// replaceAdmittedOutput path: a second admitted handoff on the SAME
+	// run, after the run's own single legitimate admission) would satisfy
+	// the old, looser check just as well as the first, genuine
+	// remediation did, and auto-reintegrate against content #581 never
+	// authorized at all.
+	//
+	// isExactRemediationOutput (remediation_eligibility.go) is the fix: it
+	// requires not merely that a remediation epoch exists, but that the
+	// run WHICH epoch registers has admitted EXACTLY ONCE - the one
+	// invariant that is true for a governed remediation's own, untouched
+	// result and false the instant anything external adds a second
+	// admission to that same run, by the same "a settled run never
+	// produces another handoff on its own" fact goalSettled
+	// (remediation_activation.go) already relies on.
+	//
+	// unit.InputsDigest non-empty remains required too: true precisely in
+	// the ActivationInputsDigest-mismatch case
+	// (orchestration/workgraph_projection.go), and empty while a
+	// dependency is merely, temporarily unsatisfied (its own remediation
+	// still in flight) - TestReplacedUpstreamSubjectInvalidatesDownstream
+	// (orchestration package) proves an upstream that is merely
+	// unsatisfied invalidates its dependent immediately, and this check is
+	// what stops that transient moment from being mistaken for "ready to
+	// recompose".
 	//
 	// Every other invalidated unit, and every other execution kind, is
 	// UNCHANGED: still terminal, exactly as #472 has always made it.
@@ -216,12 +230,12 @@ func (s *Supervisor) activateGraphFrontier(graphID string) []string {
 		}
 		remediatedDependency := false
 		for _, dependency := range unit.DependsOn {
-			epochs, err := s.deps.Store.WorkUnitRemediationEpochs(view.GraphID, dependency)
+			exact, err := isExactRemediationOutput(s.deps.Store, view.GraphID, dependency)
 			if err != nil {
 				problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s: %v", view.GraphID, unit.UnitID, err)))
 				continue
 			}
-			if latestAttemptEpoch(epochs) > 1 {
+			if exact {
 				remediatedDependency = true
 				break
 			}

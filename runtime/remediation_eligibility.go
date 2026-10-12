@@ -226,20 +226,61 @@ const systemReintegrationFindingID = "system:upstream-remediation-advanced"
 // never a human decision and never a second authority mechanism.
 const systemReintegrationPolicyClause = "system:integration-reintegration-on-upstream-remediation"
 
+// isExactRemediationOutput reports whether dependencyUnitID's CURRENT
+// admitted output is exactly, untouched-since, what its OWN latest
+// remediation epoch produced - the precise fact that lets a caller
+// (activateGraphFrontier, workgraph.go) tell "this content changed because
+// of a governed #581 remediation" apart from "a dependency that happens to
+// have remediated at some point in its history was ALSO, separately,
+// later replaced by something else entirely" (independent review finding,
+// PR #585: the latter must never auto-authorize reintegration, and
+// "latestAttemptEpoch > 1" alone cannot tell the two apart).
+//
+// Two facts, both required: the dependency has remediated at least once
+// (latestAttemptEpoch > 1), AND the run that epoch names has been admitted
+// EXACTLY ONCE (len(RunHandoffs) == 1). The second is what actually binds
+// this to the exact remediation handoff: a settled run (goalSettled,
+// remediation_activation.go) never produces a second admission on its
+// own - the only way one appears is an external tool forcing it
+// (#472's own replaceAdmittedOutput test helper models exactly this: the
+// SAME run, a SECOND reported handoff, Attempt = original + 1). A
+// dependency whose remediation epoch run was touched again this way no
+// longer satisfies this check, even though it "has remediated" in its
+// history - exactly the distinction #472's existing external-replacement
+// invariant (TestWorkGraphIntegrationUnitInvalidatedWhenUpstreamOutputReplaced)
+// requires to stay terminal.
+func isExactRemediationOutput(store *SQLiteOperationStore, graphID, dependencyUnitID string) (bool, error) {
+	epochs, err := store.WorkUnitRemediationEpochs(graphID, dependencyUnitID)
+	if err != nil {
+		return false, err
+	}
+	latest := latestAttemptEpoch(epochs)
+	if latest <= 1 {
+		return false, nil
+	}
+	var runID string
+	for _, epoch := range epochs {
+		if epoch.Epoch == latest {
+			runID = epoch.RunID
+		}
+	}
+	handoffs, err := store.RunHandoffs(runID)
+	if err != nil {
+		return false, err
+	}
+	return len(handoffs) == 1, nil
+}
+
 // admitAutomaticReintegrationAuthorization grants an invalidated
-// integration_compose unit's own next epoch automatically, IF AND ONLY IF
-// its invalidation was caused by an upstream dependency's legitimate
-// remediation (ADR-0008 §4.3's remediation_epoch_advance cause) rather than
-// an arbitrary external replacement - detected the only way available
-// without a stored Cause column (deliberately not added, ADR-0008 §4.1's
-// "no stored status" discipline extended here): a dependency that has
-// EVER remediated (latestAttemptEpoch > 1) is, by this mechanism's own
-// construction, the only way a producer's output legitimately changes
-// after its first admission. Recomposing deterministically needs no human
-// judgment call - #475 already runs integration_compose with no provider
-// and no human gate for an ordinary first attempt - so this is the
-// plan-preauthorized ("policy") path, never the decision path, and never
-// usable for any OTHER execution kind.
+// integration_compose unit's own next epoch automatically. The caller
+// (workgraph.go) gates this on isExactRemediationOutput above; this
+// function performs the grant only, trusting that gate exactly once,
+// never re-deriving it, so the two stay the single source of truth for
+// "was this genuinely caused by a governed remediation". Recomposing
+// deterministically needs no human judgment call - #475 already runs
+// integration_compose with no provider and no human gate for an ordinary
+// first attempt - so this is the plan-preauthorized ("policy") path,
+// never the decision path, and never usable for any OTHER execution kind.
 func admitAutomaticReintegrationAuthorization(store *SQLiteOperationStore, graphID, unitID string, now time.Time) error {
 	epochs, err := store.WorkUnitRemediationEpochs(graphID, unitID)
 	if err != nil {

@@ -8,6 +8,7 @@ package runtime
 // as the eventual Batch 2 writer will shape them.
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -353,5 +354,167 @@ func TestActivateRemediationEpochIsIdempotentAndValidates(t *testing.T) {
 	if _, err := store.ActivateRemediationEpoch(RemediationEpoch{GraphID: "graph-1", UnitID: "a", Epoch: 1,
 		BatchID: batchID, RunID: "run-x", InputsDigest: "d", AuthorizationID: "auth-1", ActivatedAt: now}); err == nil {
 		t.Fatal("an epoch below 2 was accepted")
+	}
+}
+
+// remediationEpochBatch builds a matching, Origin-bound (batch, epoch) pair
+// - the exact shape activateRemediationEpoch (remediation_activation.go)
+// constructs - for AdmitRemediationEpochBatch's own tests.
+func remediationEpochBatch(t *testing.T, graphID, unitID string, proposedEpoch int, issue int, runID, authorizationID string, now time.Time) (orchestration.Batch, RemediationEpoch) {
+	t.Helper()
+	origin := orchestration.BatchOrigin{GraphID: graphID, UnitID: unitID, Epoch: proposedEpoch}
+	batchID, err := orchestration.WorkUnitBatchID("acme/repo", "claude", issue, origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := orchestration.Batch{
+		SchemaVersion: orchestration.BatchSchemaVersion, ID: batchID,
+		Repository: "acme/repo", AgentID: "claude", CreatedAt: now, Origin: &origin,
+		Items: []orchestration.BatchItem{{Issue: issue, RunID: runID}},
+	}
+	epoch := RemediationEpoch{GraphID: graphID, UnitID: unitID, Epoch: proposedEpoch,
+		BatchID: batchID, RunID: runID, InputsDigest: "digest", AuthorizationID: authorizationID, ActivatedAt: now}
+	return batch, epoch
+}
+
+func TestAdmitRemediationEpochBatchIsAtomicAndIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1700000000, 0).UTC()
+	if _, err := store.AdmitRemediationAuthorization(RemediationAuthorization{
+		ID: "auth-1", GraphID: "graph-1", UnitID: "a", ProposedEpoch: 2, FindingID: "finding-1",
+		AuthorizedBy: RemediationAuthorizedByPolicy, PolicyClauseRef: "clause-1", AuthorizedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	batch, epoch := remediationEpochBatch(t, "graph-1", "a", 2, 505, "run-a-epoch2", "auth-1", now)
+
+	stored, created, err := store.AdmitRemediationEpochBatch(batch, epoch)
+	if err != nil || !created || stored.ID != batch.ID {
+		t.Fatalf("created=%t stored=%+v err=%v", created, stored, err)
+	}
+	// The epoch claim landed in the SAME transaction - never a second,
+	// separate write a caller could observe as missing.
+	epochs, err := store.WorkUnitRemediationEpochs("graph-1", "a")
+	if err != nil || len(epochs) != 1 || epochs[0].RunID != "run-a-epoch2" {
+		t.Fatalf("epochs = %+v (%v)", epochs, err)
+	}
+
+	// Idempotent replay: the exact same (batch, epoch) pair again finds
+	// what the first call already committed, writes nothing a second time.
+	stored2, created2, err := store.AdmitRemediationEpochBatch(batch, epoch)
+	if err != nil || created2 || stored2.ID != batch.ID {
+		t.Fatalf("replay: created=%t stored=%+v err=%v", created2, stored2, err)
+	}
+	epochs, err = store.WorkUnitRemediationEpochs("graph-1", "a")
+	if err != nil || len(epochs) != 1 {
+		t.Fatalf("replay produced %d epoch rows, want exactly 1 (%v)", len(epochs), err)
+	}
+}
+
+// TestAdmitRemediationEpochBatchRollsBackTheBatchWhenTheEpochClaimFails is
+// the direct regression for the independent review's P1 finding on PR
+// #585: a batch must NEVER become visible (and therefore materializable
+// and schedulable by reconcileOrchestration, which processes every stored
+// batch unconditionally) without its governing epoch claim landing in the
+// SAME transaction. Forced here by pairing a valid batch with a
+// deliberately invalid epoch (epoch 1 is refused, ADR-0008's own epoch
+// numbering starts remediation at 2) - the exact shape a crash-injected
+// failure between two separate writes would have left the batch in, had
+// this been two calls instead of one transaction.
+func TestAdmitRemediationEpochBatchRollsBackTheBatchWhenTheEpochClaimFails(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1700000000, 0).UTC()
+	batch, epoch := remediationEpochBatch(t, "graph-1", "a", 2, 506, "run-a-epoch2", "auth-1", now)
+	epoch.Epoch = 1 // invalid: validateRemediationEpoch refuses epoch < 2
+
+	if _, _, err := store.AdmitRemediationEpochBatch(batch, epoch); err == nil {
+		t.Fatal("an invalid epoch claim was accepted")
+	}
+	// The batch must not exist EITHER - not visible to OrchestrationBatches,
+	// not visible to OrchestrationBatch by id, and so never reachable by
+	// reconcileOrchestration's own unconditional per-batch materialization:
+	// no unclaimed child run is executable, because no such batch exists
+	// at all.
+	if _, found, err := store.OrchestrationBatch(batch.ID); err != nil || found {
+		t.Fatalf("batch exists after its epoch claim failed: found=%t err=%v", found, err)
+	}
+	batches, err := store.OrchestrationBatches()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range batches {
+		if b.ID == batch.ID {
+			t.Fatalf("batch %s is visible to OrchestrationBatches despite its failed epoch claim", batch.ID)
+		}
+	}
+	if _, found, err := store.Run(epoch.RunID); err != nil || found {
+		t.Fatalf("a run exists for the never-committed batch: found=%t err=%v", found, err)
+	}
+	epochs, err := store.WorkUnitRemediationEpochs("graph-1", "a")
+	if err != nil || len(epochs) != 0 {
+		t.Fatalf("epochs = %+v (%v), want none", epochs, err)
+	}
+}
+
+// TestAdmitRemediationEpochBatchIsRaceSafeAcrossTwoHandles proves the
+// concurrency half of the same P1 finding: two independent store handles
+// (never a shared in-process mutex) racing to admit the IDENTICAL
+// (batch, epoch) pair - exactly two concurrent reconcile passes would - can
+// never both succeed, and the loser observes the winner's committed row
+// rather than a partial or conflicting one.
+func TestAdmitRemediationEpochBatchIsRaceSafeAcrossTwoHandles(t *testing.T) {
+	dir := t.TempDir()
+	first, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	now := time.Unix(1700000000, 0).UTC()
+	if _, err := first.AdmitRemediationAuthorization(RemediationAuthorization{
+		ID: "auth-1", GraphID: "graph-1", UnitID: "a", ProposedEpoch: 2, FindingID: "finding-1",
+		AuthorizedBy: RemediationAuthorizedByPolicy, PolicyClauseRef: "clause-1", AuthorizedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	batch, epoch := remediationEpochBatch(t, "graph-1", "a", 2, 507, "run-a-epoch2", "auth-1", now)
+
+	var wg sync.WaitGroup
+	results := make([]bool, 2)
+	errs := make([]error, 2)
+	for i, store := range []*SQLiteOperationStore{first, second} {
+		wg.Add(1)
+		go func(i int, store *SQLiteOperationStore) {
+			defer wg.Done()
+			_, created, err := store.AdmitRemediationEpochBatch(batch, epoch)
+			results[i], errs[i] = created, err
+		}(i, store)
+	}
+	wg.Wait()
+	for i := range errs {
+		if errs[i] != nil {
+			t.Fatalf("handle %d: %v", i, errs[i])
+		}
+	}
+	if results[0] == results[1] {
+		t.Fatalf("both handles reported created=%t; exactly one must have won the race", results[0])
+	}
+	epochs, err := first.WorkUnitRemediationEpochs("graph-1", "a")
+	if err != nil || len(epochs) != 1 {
+		t.Fatalf("epochs = %+v (%v), want exactly 1 regardless of which handle won", epochs, err)
 	}
 }

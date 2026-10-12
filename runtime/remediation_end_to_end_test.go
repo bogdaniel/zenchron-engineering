@@ -70,16 +70,28 @@ func (w *remediationWorker) Execute(_ context.Context, request ExecutionRequest)
 		os.WriteFile(request.HandoffPath, []byte(fleetValidReport), 0o600)
 }
 
-// TestRemediationEpochRecoversFromARealConflictThroughGovernedReintegration
-// is #581 Batch 2's decisive positive path: real Git conflict -> delivered
-// Finding -> governed decision_request -> genuine operator approval ->
-// durable RemediationAuthorization -> a brand-new EngineeringRun under a
-// NEW epoch, reconstructed from the original contract and base candidate ->
-// a corrected handoff admitted through NORMAL validation -> the integrator
-// unit, invalidated by the exact upstream change, automatically and
-// deterministically reintegrated -> a final integrated candidate that
-// never existed before this recovery.
-func TestRemediationEpochRecoversFromARealConflictThroughGovernedReintegration(t *testing.T) {
+// governedRecoveryFixture is the real-conflict fixture both the positive
+// end-to-end test and the external-replacement negative regression drive
+// to the same point: a real textual conflict, a governed decision, and a
+// fully reintegrated final candidate.
+type governedRecoveryFixture struct {
+	fixture             *fleetFixture
+	supervisor          *Supervisor
+	view                WorkGraphView
+	ctx                 context.Context
+	blamedID            string
+	blamedOriginalRunID string
+}
+
+// driveToGovernedRecovery drives the real supervisor through every stage up
+// through a successful, fully governed recovery: real conflict -> delivered
+// Finding -> decision_request -> an unauthorized attempt refused -> a real
+// operator's approval -> the blamed producer's new epoch -> the
+// integrator's own automatic reintegration -> a final admitted candidate.
+// Shared so the positive test and the negative (external-replacement)
+// regression both start from the IDENTICAL, already-proven-governed state.
+func driveToGovernedRecovery(t *testing.T) *governedRecoveryFixture {
+	t.Helper()
 	const issueA, issueB, issueC = fleetFirstIssue, fleetFirstIssue + 1, fleetFirstIssue + 2
 	fixture := newFleetFixture(t, 4)
 	fixture.setIntegrationIssue(issueA, "a")
@@ -214,17 +226,35 @@ func TestRemediationEpochRecoversFromARealConflictThroughGovernedReintegration(t
 			break
 		}
 	}
+	if c := fixture.graph(view.GraphID).unit(t, "c"); c.Output == nil {
+		t.Fatal("the integrator never admitted a corrected handoff after remediation")
+	}
+	return &governedRecoveryFixture{
+		fixture: fixture, supervisor: supervisor, view: view, ctx: ctx,
+		blamedID: blamedID, blamedOriginalRunID: blamedUnit.RunID,
+	}
+}
+
+// TestRemediationEpochRecoversFromARealConflictThroughGovernedReintegration
+// is #581 Batch 2's decisive positive path: real Git conflict -> delivered
+// Finding -> governed decision_request -> genuine operator approval ->
+// durable RemediationAuthorization -> a brand-new EngineeringRun under a
+// NEW epoch, reconstructed from the original contract and base candidate ->
+// a corrected handoff admitted through NORMAL validation -> the integrator
+// unit, invalidated by the exact upstream change, automatically and
+// deterministically reintegrated -> a final integrated candidate that
+// never existed before this recovery.
+func TestRemediationEpochRecoversFromARealConflictThroughGovernedReintegration(t *testing.T) {
+	g := driveToGovernedRecovery(t)
+	fixture, view, blamedID := g.fixture, g.view, g.blamedID
 
 	final := fixture.graph(view.GraphID)
 	a, b, c := final.unit(t, "a"), final.unit(t, "b"), final.unit(t, "c")
-	if c.Output == nil {
-		t.Fatal("the integrator never admitted a corrected handoff after remediation")
-	}
 	// The blamed producer's own view now reflects its SECOND epoch's run -
 	// a genuinely NEW RunID, never the original, exactly as a new
 	// EngineeringRun under a new epoch requires.
 	blamedFinal := final.unit(t, blamedID)
-	if blamedFinal.RunID == blamedUnit.RunID {
+	if blamedFinal.RunID == g.blamedOriginalRunID {
 		t.Fatalf("blamed producer %s's run is unchanged after remediation: %s", blamedID, blamedFinal.RunID)
 	}
 	if a.State != orchestration.UnitState(orchestration.ItemCompleted) || b.State != orchestration.UnitState(orchestration.ItemCompleted) {
@@ -262,5 +292,65 @@ func TestRemediationEpochRecoversFromARealConflictThroughGovernedReintegration(t
 	integratorAuthorizations, err := fixture.store.RemediationAuthorizationsFor(view.GraphID, "c")
 	if err != nil || len(integratorAuthorizations) != 1 || integratorAuthorizations[0].AuthorizedBy != RemediationAuthorizedByPolicy {
 		t.Fatalf("integrator's own remediation authorization = %+v (%v), want exactly one policy-authorized grant", integratorAuthorizations, err)
+	}
+}
+
+// TestExternalReplacementAfterRemediationNeverAutoReintegrates is the
+// direct regression for the independent review's second P1 finding on PR
+// #585: a dependency that has ALREADY remediated once, and is LATER
+// externally replaced again (#472's own replaceAdmittedOutput path - a
+// second admitted handoff on the SAME run, never through #581's governed
+// epoch mechanism at all), must NOT auto-reintegrate the integrator a
+// second time. "Has remediated at some point in its history" is not the
+// same fact as "the CURRENT change is caused by that exact remediation",
+// and only the latter may ever auto-authorize anything.
+func TestExternalReplacementAfterRemediationNeverAutoReintegrates(t *testing.T) {
+	g := driveToGovernedRecovery(t)
+	fixture, view, blamedID := g.fixture, g.view, g.blamedID
+
+	before := fixture.graph(view.GraphID)
+	blamedUnit := before.unit(t, blamedID)
+	cBefore := before.unit(t, "c")
+	integratorAuthorizationsBefore, err := fixture.store.RemediationAuthorizationsFor(view.GraphID, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// External replacement of the ALREADY-REMEDIATED producer's current
+	// (epoch 2) run - never through ActivateRemediationEpoch, never
+	// through any #581 path, exactly #472's own existing mechanism
+	// (replaceAdmittedOutput, runtime/workgraph_test.go) already proves
+	// must stay terminal for an ordinary external replacement.
+	replaceAdmittedOutput(t, fixture, view.GraphID, blamedUnit)
+
+	for range 20 {
+		if _, err := g.supervisor.Tick(g.ctx); err != nil {
+			t.Fatal(err)
+		}
+		fixture.clock.advance(61 * time.Second)
+	}
+
+	after := fixture.graph(view.GraphID)
+	if state := after.unit(t, "c").State; state != orchestration.UnitInvalidated {
+		t.Fatalf("integrator is %s after an external replacement of its already-remediated dependency, want invalidated: %s",
+			state, after.unit(t, "c").Reason)
+	}
+	// The decisive assertion: NO new automatic reintegration authorization,
+	// and NO new epoch, for the integrator - the external replacement must
+	// never be mistaken for a governed remediation.
+	integratorAuthorizationsAfter, err := fixture.store.RemediationAuthorizationsFor(view.GraphID, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(integratorAuthorizationsAfter) != len(integratorAuthorizationsBefore) {
+		t.Fatalf("a new automatic reintegration authorization was granted after an unrelated external replacement: before=%+v after=%+v",
+			integratorAuthorizationsBefore, integratorAuthorizationsAfter)
+	}
+	cEpochs, err := fixture.store.WorkUnitRemediationEpochs(view.GraphID, "c")
+	if err != nil || len(cEpochs) != 1 {
+		t.Fatalf("integrator epochs = %+v (%v), want exactly the one legitimate reintegration epoch from before the external replacement", cEpochs, err)
+	}
+	if after.unit(t, "c").RunID != cBefore.RunID {
+		t.Fatalf("integrator's run changed after an unrelated external replacement: %s -> %s", cBefore.RunID, after.unit(t, "c").RunID)
 	}
 }

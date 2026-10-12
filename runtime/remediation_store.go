@@ -6,21 +6,36 @@ package runtime
 // nothing here is a second run database.
 //
 // Batch 1 shipped the read paths and the schema alone, with nothing calling
-// them. Batch 2 adds the two insert-only write paths: AdmitRemediationAuthorization
-// (the governed grant - never a Finding by itself) and ActivateRemediationEpoch
-// (the epoch row itself, written only AFTER the batch/run it names already
-// exists - see remediation_activation.go, which mirrors runtime/workgraph.go's
-// activateWorkUnit exactly rather than a new "atomic transaction" ADR-0008's
-// first draft assumed was needed: #472's OWN activation is already two
-// decoupled, idempotent steps - write the batch, then record the claim - and
-// that existing discipline, not a bigger transaction, is what this reuses.
+// them. Batch 2 adds the insert-only write paths: AdmitRemediationAuthorization
+// (the governed grant - never a Finding by itself) and AdmitRemediationEpochBatch,
+// which claims the epoch row and writes the batch it names TOGETHER, in one
+// transaction (independent review finding, PR #585: #470's reconcileOrchestration
+// materializes a RUN for ANY batch its own OrchestrationBatches() read
+// returns, unconditionally - so a batch visible with no governing epoch
+// claim yet is not merely "not yet claimed", it is an executable run
+// nothing governs. Two decoupled, idempotent inserts - this batch's first
+// drafted approach, mirroring activateWorkUnit - leave exactly that window
+// open between them. Atomicity closes it: either both rows commit together,
+// so a batch is NEVER visible to materialization without its epoch claim
+// already alongside it, or neither does, and a crash in between leaves
+// nothing for a retry to find but durable state identical to never having
+// tried.
+//
+// ActivateRemediationEpoch (below) is kept as a standalone, narrower
+// primitive for direct tests of the epoch row's own validation and
+// uniqueness; runtime/remediation_activation.go no longer calls it as a
+// second step after creating the batch - it calls AdmitRemediationEpochBatch
+// instead.
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // RemediationEpoch is one durable row of work_graph_remediation_epochs: a
@@ -244,21 +259,38 @@ func (s *SQLiteOperationStore) AdmitRemediationAuthorization(authorization Remed
 // SAME batch/run again rather than creating a second one, then simply
 // retries recording the epoch row.
 func (s *SQLiteOperationStore) ActivateRemediationEpoch(epoch RemediationEpoch) (bool, error) {
+	if err := validateRemediationEpoch(epoch); err != nil {
+		return false, err
+	}
+	inserted, err := execRemediationEpochInsert(s.db, epoch)
+	return inserted, err
+}
+
+// validateRemediationEpoch is the one validation both ActivateRemediationEpoch
+// and AdmitRemediationEpochBatch enforce - never duplicated, so the atomic
+// path cannot be looser than the standalone one.
+func validateRemediationEpoch(epoch RemediationEpoch) error {
 	for name, value := range map[string]string{
 		"graph_id": epoch.GraphID, "unit_id": epoch.UnitID, "batch_id": epoch.BatchID,
 		"run_id": epoch.RunID, "inputs_digest": epoch.InputsDigest, "authorization_id": epoch.AuthorizationID,
 	} {
 		if strings.TrimSpace(value) == "" {
-			return false, fmt.Errorf("a remediation epoch activation needs its %s", name)
+			return fmt.Errorf("a remediation epoch activation needs its %s", name)
 		}
 	}
 	if epoch.Epoch < 2 {
-		return false, fmt.Errorf("a remediation epoch must be 2 or later, got %d", epoch.Epoch)
+		return fmt.Errorf("a remediation epoch must be 2 or later, got %d", epoch.Epoch)
 	}
 	if epoch.ActivatedAt.IsZero() {
-		return false, errors.New("a remediation epoch activation needs its activation time")
+		return errors.New("a remediation epoch activation needs its activation time")
 	}
-	result, err := s.db.Exec(`INSERT INTO work_graph_remediation_epochs
+	return nil
+}
+
+// execRemediationEpochInsert is the sqlExecutor-polymorphic insert both the
+// standalone method and the atomic batch+epoch admission below share.
+func execRemediationEpochInsert(q sqlExecutor, epoch RemediationEpoch) (bool, error) {
+	result, err := q.Exec(`INSERT INTO work_graph_remediation_epochs
 		(graph_id, unit_id, epoch, batch_id, run_id, inputs_digest, authorization_id, activated_unix_nano)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(graph_id, unit_id, epoch) DO NOTHING`,
 		epoch.GraphID, epoch.UnitID, epoch.Epoch, epoch.BatchID, epoch.RunID, epoch.InputsDigest,
@@ -268,6 +300,67 @@ func (s *SQLiteOperationStore) ActivateRemediationEpoch(epoch RemediationEpoch) 
 	}
 	inserted, err := result.RowsAffected()
 	return inserted == 1, err
+}
+
+// AdmitRemediationEpochBatch claims one unit's remediation epoch AND writes
+// the batch it names, together, in one transaction (independent review
+// finding on PR #585 - see the file-level comment above for why decoupling
+// them is unsafe). Idempotent exactly like CreateOrchestrationBatch: a
+// batch already stored is returned unchanged with created=false, never
+// re-inserted and never re-validated against a possibly-different epoch
+// argument - the FIRST writer's epoch claim is the one that stands, by the
+// same "first activation wins" discipline #472's own activation already
+// uses. A caller that is replaying after an earlier crash passes the exact
+// same batch and epoch it would have on a first attempt (both are built
+// from deterministic facts - graph, unit, proposed epoch, inputs - never
+// freshly randomized per call), so the replayed call finds exactly what it
+// would have created.
+func (s *SQLiteOperationStore) AdmitRemediationEpochBatch(batch orchestration.Batch, epoch RemediationEpoch) (orchestration.Batch, bool, error) {
+	if err := batch.Validate(); err != nil {
+		return orchestration.Batch{}, false, err
+	}
+	if err := validateRemediationEpoch(epoch); err != nil {
+		return orchestration.Batch{}, false, err
+	}
+	if batch.ID != epoch.BatchID {
+		return orchestration.Batch{}, false, fmt.Errorf("batch %s does not match the epoch claim's own batch %s", batch.ID, epoch.BatchID)
+	}
+	document, err := CanonicalJSON(batch)
+	if err != nil {
+		return orchestration.Batch{}, false, err
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return orchestration.Batch{}, false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`INSERT INTO orchestration_batches (id, repository, created_unix_nano, document)
+		VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+		batch.ID, batch.Repository, batch.CreatedAt.UnixNano(), string(document))
+	if err != nil {
+		return orchestration.Batch{}, false, err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return orchestration.Batch{}, false, err
+	}
+	if inserted == 0 {
+		// Already claimed by an earlier, committed attempt - including its
+		// epoch row, which can only ever have committed in the SAME
+		// transaction as this batch row. Read and return it; write nothing.
+		stored, found, err := queryOrchestrationBatch(tx, batch.ID)
+		if err != nil {
+			return orchestration.Batch{}, false, err
+		}
+		if !found {
+			return orchestration.Batch{}, false, fmt.Errorf("orchestration batch %s was neither inserted nor found", batch.ID)
+		}
+		return stored, false, tx.Commit()
+	}
+	if _, err := execRemediationEpochInsert(tx, epoch); err != nil {
+		return orchestration.Batch{}, false, err
+	}
+	return batch, true, tx.Commit()
 }
 
 // RemediationAuthorizationByID reads one authorization by its own
