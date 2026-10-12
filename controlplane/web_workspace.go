@@ -18,14 +18,16 @@ type workspaceDecision struct {
 }
 
 type workspaceData struct {
-	ObservedAt   time.Time
-	Controller   Controller
-	Plans        []Plan
-	Decisions    []workspaceDecision
-	Publications []RunDetail
-	Offset       int64
-	PrevLink     string
-	NextLink     string
+	ObservedAt    time.Time
+	Controller    Controller
+	Plans         []Plan
+	PlansPrevLink string
+	PlansNextLink string
+	Decisions     []workspaceDecision
+	Publications  []RunDetail
+	Offset        int64
+	PrevLink      string
+	NextLink      string
 }
 
 func (w *Web) handleWorkspace(rw http.ResponseWriter, r *http.Request) {
@@ -56,19 +58,25 @@ func (w *Web) handleWorkspace(rw http.ResponseWriter, r *http.Request) {
 		data.PrevLink, data.NextLink = pageLinks(r.URL.Path, "offset", offset, end < int64(len(fleet.Plans)))
 		w.render(rw, plansTemplate, data)
 	case "/decisions":
+		plansOffset, ok := pageOffset(r, "plans_offset")
+		if !ok {
+			w.renderNotFound(rw)
+			return
+		}
 		fleet, err := w.Store.Fleet(now)
 		if err != nil {
 			w.renderError(rw, err)
 			return
 		}
+		var pendingPlans []Plan
 		for _, plan := range fleet.Plans {
-			if len(data.Plans) >= webPageSize {
-				break
-			}
 			if plan.State == "awaiting_approval" || plan.Revision > plan.ApprovedRevision {
-				data.Plans = append(data.Plans, planProjection(plan))
+				pendingPlans = append(pendingPlans, planProjection(plan))
 			}
 		}
+		plansEnd := min(int64(len(pendingPlans)), plansOffset+webPageSize)
+		data.Plans = pendingPlans[plansOffset:plansEnd]
+		data.PlansPrevLink, data.PlansNextLink = pageLinks(r.URL.Path, "plans_offset", plansOffset, plansEnd < int64(len(pendingPlans)))
 		graphs, more, err := w.Store.WorkGraphs(int(offset), webPageSize)
 		if err != nil {
 			w.renderError(rw, err)
