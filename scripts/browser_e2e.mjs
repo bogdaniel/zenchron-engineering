@@ -295,7 +295,7 @@ try {
     assert.equal(result.status, 409);
     await cdp.navigate('/objectives');
     await until(() => cdp.evaluate(`Boolean(document.querySelector('#workspace-options-retry'))`), 'controller configuration recovery action');
-    assert(await cdp.evaluate(`/serve is running/i.test(document.querySelector('#objective-status').textContent)`));
+    assert(await cdp.evaluate(`/serve is running for this workspace with the same state directory/i.test(document.querySelector('#objective-status').textContent)`));
     console.log('CONTROL:reconnect');
     await until(async () => cdp.evaluate(`fetch('/v1/controller',{headers:{Authorization:'Bearer browser-test-token'}}).then(r=>r.json()).then(r=>r.live_reachable)`), 'controller reconnect');
     await until(() => cdp.evaluate(`/development controller is unattested/i.test(document.querySelector('#objective-status').textContent) && !document.querySelector('#workspace-options-retry')`), 'automatic controller configuration recovery');

@@ -406,7 +406,7 @@
     fetch("/v1/workspace/options", { headers: authHeaders(), signal: AbortSignal.timeout(10000) })
       .then(function (response) {
         if (!response.ok) {
-          var error = new Error("Controller configuration unavailable (HTTP " + response.status + ")");
+          var error = new Error("Execution controller unavailable (HTTP " + response.status + ")");
           error.status = response.status;
           throw error;
         }
@@ -470,7 +470,7 @@
         var status = byId("objective-status") || byId("agents-status");
         if (!status) return;
         status.replaceChildren(document.createTextNode(error.status === 503
-          ? error.message + ". Check that zenchron serve is running, then retry."
+          ? error.message + ". Check that zenchron serve is running for this workspace with the same state directory, then retry."
           : error.message));
         ["profiles-status", "templates-status"].forEach(function (id) {
           var detailStatus = byId(id);
