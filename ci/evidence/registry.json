@@ -4,6 +4,12 @@
   "inert": [
     "**/*.md",
     "docs/**",
+    "controlplane/assets/static/console.css",
+    "controlplane/assets/static/console.js",
+    "controlplane/assets/templates/**",
+    "schemas/control-plane-product-detail.schema.json",
+    "schemas/control-plane-workgraph.schema.json",
+    "schemas/control-plane-workgraph-detail.schema.json",
     ".github/**",
     ".claude/**",
     "agentkernel/**",
