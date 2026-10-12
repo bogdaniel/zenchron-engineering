@@ -8,7 +8,7 @@ import (
 func TestRefreshReusesExactSuccessorAndCannotRefreshBoundWork(t *testing.T) {
 	fixture := newFleetFixture(t, 2)
 	supervisor := fixture.supervisor()
-	started, err := supervisor.Submit(context.Background(), ControlRequest{Repository: "acme/repo", Issue: fleetFirstIssue, Agent: "one"})
+	started, err := supervisor.Submit(context.Background(), ControlRequest{Repository: "acme/repo", Issue: fleetFirstIssue, Agent: "codex"})
 	if err != nil {
 		t.Fatal(err)
 	}
