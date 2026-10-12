@@ -198,8 +198,9 @@ try {
         assert(await cdp.evaluate(`Boolean(document.getElementById('${section}'))`), section);
       }
       if (visit === 0) {
+        const previousTimeOrigin = await cdp.evaluate('performance.timeOrigin');
         await cdp.call('Page.reload');
-        await until(() => cdp.evaluate(`Boolean(document.querySelector('#objective-live'))`), 'durable objective after reload');
+        await until(() => cdp.evaluate(`performance.timeOrigin !== ${JSON.stringify(previousTimeOrigin)} && document.readyState === 'complete'`), 'durable objective after reload');
       }
     }
     await screenshot('desktop-objective');

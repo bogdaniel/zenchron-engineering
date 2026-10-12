@@ -172,6 +172,31 @@ func TestRunDetailTemplateRendersWithoutOptionalFields(t *testing.T) {
 	renderTemplate(t, runDetailTemplate, data)
 }
 
+func TestObjectiveEvidenceRendersPlanStageReviewWithoutWorkGraph(t *testing.T) {
+	data := objectiveData{Plan: PlanDetail{Stages: []PlanStageDetail{{Review: &PlanStageReviewDTO{
+		Verdict: "approve", Candidate: "candidate-1", Tree: "tree-1",
+	}}}}}
+	out := renderTemplate(t, objectiveTemplate, data)
+	for _, want := range []string{"Plan-stage review: approve", "candidate-1", "tree-1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("objective evidence missing %q: %s", want, out)
+		}
+	}
+}
+
+func TestObjectivesListDistinguishesPlanWorkspaceLinks(t *testing.T) {
+	data := workspaceData{Plans: []Plan{
+		{ID: "plan-one", Revision: 1, State: "awaiting_approval"},
+		{ID: "plan-two", Revision: 1, State: "awaiting_approval"},
+	}}
+	out := renderTemplate(t, objectivesTemplate, data)
+	for _, want := range []string{"Open objective · plan-one", "Open objective · plan-two"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("objectives list missing %q: %s", want, out)
+		}
+	}
+}
+
 // TestPagesDeclareLiveRegionsAndNeverRenderLive pins the contract console.js
 // refreshes against (#420): every data page carries the [data-live] region
 // ids the script swaps, and the server render itself only ever claims a
