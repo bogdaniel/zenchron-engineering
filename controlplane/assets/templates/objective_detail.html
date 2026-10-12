@@ -1,0 +1,29 @@
+{{define "title"}}Engineering objective{{end}}
+{{define "content"}}
+<div id="objective-live" data-live>
+<section class="panel">
+<p class="breadcrumb"><a href="/products">Products</a> / <a href="/objectives">Objectives</a></p>
+<p class="eyebrow">Continuous engineering workflow</p><h1>Engineering objective</h1>
+<p>{{.Plan.Repository}} · Plan revision {{.Plan.Revision}} · <span data-state="{{.Plan.Shown}}">{{.Plan.Shown}}</span></p>
+{{with .Graph}}{{with .Product}}<p>Product: <a href="/products/{{.ID}}">{{.Name}}</a></p>{{end}}{{end}}
+<nav aria-label="Objective sections"><a href="#summary">Summary</a> · <a href="#plan">Plan</a> · <a href="#execution">Execution</a> · <a href="#decisions">Decisions</a> · <a href="#evidence">Evidence</a> · <a href="#changes">Changes and PR</a></nav>
+<details><summary>Traceability</summary><p>Plan {{.Plan.ID}} · digest {{.Plan.Digest}}</p>{{with .Graph}}<p>WorkGraph {{.ID}} · revision {{.Revision}}</p>{{end}}</details>
+</section>
+<section class="panel" id="summary"><h2>Summary</h2>
+{{if .Controller.ActionsDisabled}}<p class="banner">Actions unavailable: {{.Controller.ActionsDisabled}}. Durable records remain visible.</p>{{end}}
+{{if .BindingMismatch}}<p class="banner">The displayed plan revision differs from the execution graph binding. Inspect the governing revision before taking action.</p>{{end}}
+<p>Plan approval, execution, acceptance and publication are separate facts. A published PR does not establish objective completion.</p>
+</section>
+<section class="panel" id="plan"><h2>Plan</h2><p><a href="/plans/{{.Plan.ID}}?revision={{.Plan.Revision}}">Inspect exact plan and governed approval</a></p>
+<p>Child runs: {{.Plan.Budget.ChildRuns}} / {{.Plan.Budget.MaxChildRuns}} · Provider invocations: {{.Plan.Budget.ProviderInvocations}} / {{.Plan.Budget.MaxProviderInvocations}}</p>
+{{range .Plan.Stages}}<p>{{.ID}} · {{.Kind}} · {{if .State}}{{.State}}{{else}}State not recorded{{end}}{{if .RunID}} · <a href="/runs/{{.RunID}}">Inspect assigned run</a>{{end}}</p>{{end}}
+</section>
+<section class="panel" id="execution"><h2>Execution</h2>{{with .Graph}}
+<p><a href="/workgraphs/{{.ID}}">Inspect dependency graph and runnable frontier</a></p>
+{{range .Units}}<article><h3>{{.Purpose}} · {{.Role}}</h3><p>{{.State}}{{if .Reason}} · {{.Reason}}{{end}}</p><p>Dependencies: {{range .DependsOn}}{{.}} {{else}}None{{end}}</p>{{with .Run}}<p><a href="/runs/{{.ID}}">Inspect worker, lifecycle and events</a></p>{{end}}</article>{{end}}
+{{else}}<p>No objective WorkGraph binding is recorded. Execution is not inferred.</p>{{end}}</section>
+<section class="panel" id="decisions"><h2>Decisions</h2>{{with .Graph}}{{range .Units}}{{if .Hold}}<p>{{.Purpose}}: awaiting operator hold resolution.</p>{{end}}{{range .OpenDecisions}}<p>{{.Purpose}} · requested by {{.RequestedBy}}</p>{{end}}{{end}}{{end}}<p><a href="/decisions">Inspect governed Action Required inbox</a></p></section>
+<section class="panel" id="evidence"><h2>Evidence</h2>{{with .Graph}}{{range .Units}}{{with .Output}}<p>Admitted handoff {{.HandoffID}} · candidate {{.CandidateRevision}} · tree {{.CandidateTree}}</p>{{end}}{{with .Review}}<p>Independent review: {{.Verdict}} · candidate {{.Candidate}}</p>{{end}}{{end}}{{end}}{{range .Plan.Stages}}{{with .Gate}}{{with .Evidence}}<p>Gate evidence {{.ID}} · revision {{.Revision}}</p>{{end}}{{end}}{{end}}</section>
+<section class="panel" id="changes"><h2>Changes and PR</h2>{{with .Graph}}{{range .Units}}{{with .Run}}{{with .Candidate}}<p>Candidate {{.Revision}} · tree {{.Tree}}</p>{{end}}{{with .PullRequest}}<p>PR #{{.Number}} · {{.State}}{{if .Stale}} · observation stale{{end}}</p>{{end}}{{end}}{{end}}{{end}}<p>Publication authorization and outcome are confirmed by the controller against exact candidate identity.</p></section>
+</div>
+{{end}}

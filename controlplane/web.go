@@ -91,6 +91,7 @@ func (w *Web) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", w.handleRoot)
 	mux.HandleFunc("GET /overview", w.handleOverview)
 	mux.HandleFunc("GET /objectives", w.handleWorkspace)
+	mux.HandleFunc("GET /objectives/{id}", w.handleObjective)
 	mux.HandleFunc("GET /plans", w.handleWorkspace)
 	mux.HandleFunc("GET /decisions", w.handleWorkspace)
 	mux.HandleFunc("GET /agents", w.handleWorkspace)
