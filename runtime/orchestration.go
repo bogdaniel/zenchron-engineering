@@ -173,6 +173,11 @@ func (s *Supervisor) reconcileOrchestration(ctx context.Context) []string {
 	// freshly reloaded batch list, so a producer activated earlier in this
 	// very pass is already visible to it.
 	problems = append(problems, deliverIntegrationConflicts(s.deps.Store, batches)...)
+	// #581: the governed Finding -> request -> authorization bridge, over
+	// the SAME freshly reloaded batch list, after delivery - a request is
+	// only ever raised against a Finding already visible in its producer's
+	// own batch scope.
+	problems = append(problems, reconcileRemediationEligibility(s.deps.Store, s.deps.StateDir, batches, now)...)
 	return problems
 }
 

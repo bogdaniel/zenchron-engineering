@@ -104,6 +104,7 @@ func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now 
 	}
 	facts := make(map[string]orchestration.UnitFacts, len(graph.Units))
 	children := make(map[string]OrchestrationItemView, len(graph.Units))
+	currentEpochs := make(map[string]currentEpochSource, len(graph.Units))
 	for _, unit := range graph.Units {
 		activation, activated := activations[unit.ID]
 		if !activated {
@@ -112,11 +113,21 @@ func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now 
 			}
 			continue
 		}
-		child := projectOrchestrationItem(tx, stateDir, orchestration.BatchItem{Issue: unit.Issue, RunID: activation.RunID}, now)
+		// #581: a unit's CURRENT epoch may be a later remediation attempt,
+		// never necessarily its original activation - source is epoch 1's
+		// own activation unchanged for every unit that has never
+		// remediated, which is every unit before #581 and every unit #581
+		// never touches, unaffected.
+		source, err := remediationUnitFacts(tx, stateDir, graph.ID, unit, activation, now)
+		if err != nil {
+			return WorkGraphView{}, err
+		}
+		currentEpochs[unit.ID] = source
+		child := projectOrchestrationItem(tx, stateDir, orchestration.BatchItem{Issue: unit.Issue, RunID: source.RunID}, now)
 		children[unit.ID] = child
 		fact := orchestration.UnitFacts{
-			Activated: true, ActivationInputsDigest: activation.InputsDigest, Item: child.State,
-			Terminal: terminalDisposition(child.Disposition),
+			Activated: true, ActivationInputsDigest: source.InputsDigest, Item: child.State,
+			Terminal: terminalDisposition(child.Disposition), RemediationState: source.RemediationState,
 		}
 		if child.State == "" {
 			fact.Unreadable, fact.UnreadableReason = true, child.Reason
@@ -125,13 +136,13 @@ func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now 
 			// A completed child names an admitted handoff by definition. If
 			// this read cannot find it, THIS unit is unreadable - its siblings
 			// and their branches are not.
-			output, err := admittedOutput(tx, activation.RunID, child.HandoffID)
+			output, err := admittedOutput(tx, source.RunID, child.HandoffID)
 			if err != nil {
 				fact.Item, fact.Unreadable, fact.UnreadableReason = "", true, boundedDetail(err.Error())
 			}
 			fact.Output = output
 			if unit.RequiresReview && output != nil {
-				fact.ReviewApproved, err = reviewApprovedFor(store, graph.Repository, child.PullRequest, output.CandidateRevision, activation.RunID, child.AgentID)
+				fact.ReviewApproved, err = reviewApprovedFor(store, graph.Repository, child.PullRequest, output.CandidateRevision, source.RunID, child.AgentID)
 				if err != nil {
 					fact.Item, fact.Unreadable, fact.UnreadableReason = "", true, boundedDetail(err.Error())
 				}
@@ -160,9 +171,14 @@ func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now 
 			AwaitingDecision: decided.AwaitingDecision, RequiresReview: unit.RequiresReview,
 			ReviewApproved: unit.RequiresReview && facts[unit.ID].ReviewApproved,
 		}
-		if activation, activated := activations[unit.ID]; activated {
+		if _, activated := activations[unit.ID]; activated {
 			child := children[unit.ID]
-			out.RunID, out.BatchID, out.Child, out.Output = activation.RunID, activation.BatchID, &child, facts[unit.ID].Output
+			source := currentEpochs[unit.ID]
+			// #581: the view's own RunID/BatchID name the CURRENT epoch - the
+			// same run Child actually describes - never epoch 1's
+			// unconditionally, so a reader never sees a Child that disagrees
+			// with the RunID/BatchID right next to it.
+			out.RunID, out.BatchID, out.Child, out.Output = source.RunID, source.BatchID, &child, facts[unit.ID].Output
 		}
 		view.Counts.Add(out.State)
 		view.Units = append(view.Units, out)
