@@ -97,7 +97,7 @@ func deliverIntegrationConflicts(store *SQLiteOperationStore, batches []orchestr
 				problems = append(problems, boundedDetail(fmt.Sprintf("%s conflict delivery: %v", batch.ID, err)))
 				continue
 			} else if found {
-				if !deliveredRecordMatches(stored, message, destination.ID, destinationUnit) {
+				if !deliveredRecordMatches(stored, message, deliveredID, destination.ID, destinationUnit) {
 					problems = append(problems, boundedDetail(fmt.Sprintf(
 						"%s conflict delivery: id %s already names a different record in scope %s; refusing to treat it as this conflict's delivery",
 						batch.ID, deliveredID, stored.Scope)))
@@ -137,26 +137,42 @@ func deliverIntegrationConflicts(store *SQLiteOperationStore, batches []orchestr
 	return problems
 }
 
-// deliveredRecordMatches reports whether a row already found under a
-// delivery's own deterministic id is genuinely THIS delivery, not merely
-// a record that happens to share its routing. Every fact compared is
-// already in hand from the SAME single row MessageByID just read plus the
-// original message this function is about to deliver - the candidate/tree
-// identity and handoff id come from original.Subject.Revision, which
-// WorkUnitInputs already carries in full (queryBatchMessageScope); only
-// BaseRevision is ever incomplete there, which is exactly why it is the
-// one Revision field left uncompared - recomputing it needs the producer's
-// full handoff record, the cost this fast path exists to avoid paying on
-// every pass. Everything else about the observation - its body, category
-// and the exact document digest it was admitted from - is compared too
-// (#475 review P2 second follow-up): a record agreeing only on scope,
-// route, source and handoff id could still be a DIFFERENT finding about
-// the same subject, and this fast path's whole job is refusing exactly
-// that, not merely a scope mismatch.
-func deliveredRecordMatches(stored, original orchestration.EngineeringMessage, destinationScope, destinationUnit string) bool {
-	if stored.Scope != destinationScope ||
+// deliveredRecordMatches reports whether a row already found by looking up
+// deliveredID is genuinely THIS delivery, not merely a record that happens
+// to share its routing or its index entry. Every fact compared is already
+// in hand from the SAME single row MessageByID just read plus the original
+// message this function is about to deliver - the candidate/tree identity
+// and handoff id come from original.Subject.Revision, which WorkUnitInputs
+// already carries in full (queryBatchMessageScope); only BaseRevision is
+// ever incomplete there, which is exactly why it is the one Revision field
+// left uncompared - recomputing it needs the producer's full handoff
+// record, the cost this fast path exists to avoid paying on every pass.
+//
+// stored.ID is checked against deliveredID, the exact key MessageByID was
+// asked for (#475 review follow-up): MessageByID validates the decoded
+// document on its own terms, but never that its EMBEDDED id agrees with
+// the indexed row it was found under - a document whose own id disagrees
+// with the index it lives at is already an inconsistent record, corrupt or
+// tampered, whatever else about it looks right.
+//
+// stored.Supersedes is checked too: orchestration.Live() reads this field
+// to decide which OTHER admitted message a record retires. A record that
+// otherwise matches but silently supersedes something the real delivery
+// never would (or vice versa) would corrupt the destination scope's live
+// message set, not merely misreport this one delivery.
+//
+// Everything else about the observation - its body, category and the
+// exact document digest it was admitted from - is compared too (#475
+// review P2 second follow-up): a record agreeing only on scope, route,
+// source and handoff id could still be a DIFFERENT finding about the same
+// subject, and this fast path's whole job is refusing exactly that, not
+// merely a scope mismatch.
+func deliveredRecordMatches(stored, original orchestration.EngineeringMessage, deliveredID, destinationScope, destinationUnit string) bool {
+	if stored.ID != deliveredID ||
+		stored.Scope != destinationScope ||
 		stored.Route != (orchestration.MessageRoute{Audience: orchestration.AudienceUnit, Unit: destinationUnit}) ||
 		stored.Source != original.Source ||
+		stored.Supersedes != original.Supersedes ||
 		stored.Body != original.Body ||
 		stored.Category != original.Category ||
 		stored.DocumentSHA256 != original.DocumentSHA256 {

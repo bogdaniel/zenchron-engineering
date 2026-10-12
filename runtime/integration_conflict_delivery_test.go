@@ -339,6 +339,115 @@ func corruptDeliveredRowContent(t *testing.T, store *SQLiteOperationStore, id st
 	}
 }
 
+// TestIntegrationConflictDeliveryRefusesAnEmbeddedIDMismatchUnderTheSameID
+// is #475 review's third follow-up: MessageByID validates the decoded
+// document on its own terms, but never that its OWN embedded id agrees
+// with the indexed row it was found under. A document corrupted to embed
+// a different id than the index it lives at must never pass as a match.
+func TestIntegrationConflictDeliveryRefusesAnEmbeddedIDMismatchUnderTheSameID(t *testing.T) {
+	fixture, supervisor, view, cRunID := conflictedIntegrationFixture(t)
+	blamed := blamedProducer(t, fixture, view, cRunID)
+	blamedRun, ok := storedRun(t, fixture.phase8Fixture, blamed.RunID)
+	if !ok || blamedRun.Orchestration == nil {
+		t.Fatal("blamed producer's run not found or not orchestrated")
+	}
+	originalFinding := integratorConflictFinding(t, fixture, cRunID)
+	delivered := deliveredFindingsOf(t, fixture, blamedRun.Orchestration.BatchID, originalFinding.Subject.Handoff)
+	if len(delivered) != 1 {
+		t.Fatalf("delivery did not land before corrupting it: %d findings", len(delivered))
+	}
+	corruptDeliveredRowEmbeddedID(t, fixture.store, delivered[0].ID)
+
+	report, err := supervisor.Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.clock.advance(61 * time.Second)
+	var sawConflict bool
+	for _, problem := range report.Orchestration {
+		if strings.Contains(problem, "already names a different record") {
+			sawConflict = true
+		}
+	}
+	if !sawConflict {
+		t.Fatalf("a record indexed at the delivery's id but embedding a DIFFERENT id was silently treated as already delivered: %+v", report.Orchestration)
+	}
+}
+
+// corruptDeliveredRowEmbeddedID leaves the row's indexed id column exactly
+// as delivery wrote it, but rewrites its document to embed a different id -
+// the one inconsistency MessageByID's own decode+Validate cannot catch,
+// because it never compares the two.
+func corruptDeliveredRowEmbeddedID(t *testing.T, store *SQLiteOperationStore, id string) {
+	t.Helper()
+	stored, found, err := store.MessageByID(id)
+	if err != nil || !found {
+		t.Fatalf("delivered row %s not found to corrupt: found=%t err=%v", id, found, err)
+	}
+	stored.ID = "message-delivered-" + strings.Repeat("f", 32)
+	document, err := CanonicalJSON(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE orchestration_messages SET document = ? WHERE id = ?`, string(document), id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestIntegrationConflictDeliveryRefusesASupersedesMismatchUnderTheSameID is
+// #475 review's third follow-up: orchestration.Live() reads Supersedes to
+// decide which OTHER admitted message a record retires. A record that
+// otherwise matches but fabricates a Supersedes value would corrupt the
+// destination scope's live message set, not merely misreport this delivery.
+func TestIntegrationConflictDeliveryRefusesASupersedesMismatchUnderTheSameID(t *testing.T) {
+	fixture, supervisor, view, cRunID := conflictedIntegrationFixture(t)
+	blamed := blamedProducer(t, fixture, view, cRunID)
+	blamedRun, ok := storedRun(t, fixture.phase8Fixture, blamed.RunID)
+	if !ok || blamedRun.Orchestration == nil {
+		t.Fatal("blamed producer's run not found or not orchestrated")
+	}
+	originalFinding := integratorConflictFinding(t, fixture, cRunID)
+	delivered := deliveredFindingsOf(t, fixture, blamedRun.Orchestration.BatchID, originalFinding.Subject.Handoff)
+	if len(delivered) != 1 {
+		t.Fatalf("delivery did not land before corrupting it: %d findings", len(delivered))
+	}
+	corruptDeliveredRowSupersedes(t, fixture.store, delivered[0].ID)
+
+	report, err := supervisor.Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.clock.advance(61 * time.Second)
+	var sawConflict bool
+	for _, problem := range report.Orchestration {
+		if strings.Contains(problem, "already names a different record") {
+			sawConflict = true
+		}
+	}
+	if !sawConflict {
+		t.Fatalf("a record carrying a fabricated Supersedes value was silently treated as already delivered: %+v", report.Orchestration)
+	}
+}
+
+// corruptDeliveredRowSupersedes gives an already-delivered row a Supersedes
+// value the real delivery never would, while leaving everything
+// deliveredRecordMatches already compared untouched.
+func corruptDeliveredRowSupersedes(t *testing.T, store *SQLiteOperationStore, id string) {
+	t.Helper()
+	stored, found, err := store.MessageByID(id)
+	if err != nil || !found {
+		t.Fatalf("delivered row %s not found to corrupt: found=%t err=%v", id, found, err)
+	}
+	stored.Supersedes = "message-" + strings.Repeat("a", 32)
+	document, err := CanonicalJSON(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE orchestration_messages SET document = ? WHERE id = ?`, string(document), id); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // storedBatchID is the integrator run's own batch id, read through the
 // durable store exactly as every other helper in this file does.
 func storedBatchID(t *testing.T, fixture *fleetFixture, runID string) string {
