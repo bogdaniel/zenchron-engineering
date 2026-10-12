@@ -217,6 +217,22 @@
       ]
     },
     {
+      "name": "remediation_epochs",
+      "why": "#581: governed remediation epochs for an already-admitted WorkUnit - Finding-to-RemediationRequest eligibility, durable RemediationAuthorization/RemediationEpoch, atomic epoch admission and causation-bound automatic reintegration.",
+      "race": true,
+      "sources": [
+        "runtime/remediation_activation.go",
+        "runtime/remediation_eligibility.go",
+        "runtime/remediation_facts.go",
+        "runtime/remediation_schema.go",
+        "runtime/remediation_store.go"
+      ],
+      "tests": [
+        "runtime/remediation_store_test.go",
+        "runtime/remediation_end_to_end_test.go"
+      ]
+    },
+    {
       "name": "product",
       "why": "The ProductEngineeringEnvironment (#476): product identity, mutable configuration, graph association and the knowledge promotion ladder - durable SQLite state with its own revision-transition and promotion-consistency invariants, proved under concurrent writers.",
       "race": true,
