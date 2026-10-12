@@ -287,8 +287,7 @@ try {
     assert(await cdp.evaluate(`/serve is running/i.test(document.querySelector('#objective-status').textContent)`));
     console.log('CONTROL:reconnect');
     await until(async () => cdp.evaluate(`fetch('/v1/controller',{headers:{Authorization:'Bearer browser-test-token'}}).then(r=>r.json()).then(r=>r.live_reachable)`), 'controller reconnect');
-    await cdp.evaluate(`document.querySelector('#workspace-options-retry').click()`);
-    await until(() => cdp.evaluate(`/development controller is unattested/i.test(document.querySelector('#objective-status').textContent) && !document.querySelector('#workspace-options-retry')`), 'controller configuration recovery');
+    await until(() => cdp.evaluate(`/development controller is unattested/i.test(document.querySelector('#objective-status').textContent) && !document.querySelector('#workspace-options-retry')`), 'automatic controller configuration recovery');
     assert(await cdp.evaluate(`document.querySelector('#objective-submit').disabled`), 'an unattested controller must keep objective submission disabled');
   });
   await check('HTTP disconnect marks retained data stale', async () => {

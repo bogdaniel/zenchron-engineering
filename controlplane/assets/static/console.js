@@ -395,7 +395,8 @@
       }).catch(function (error) { status.textContent = error.message; });
   }
 
-  function loadWorkspaceOptions() {
+  function loadWorkspaceOptions(attempt) {
+    attempt = attempt || 0;
     var form = byId("objective-form");
     var agents = byId("agents-list");
     var profiles = byId("profiles-list");
@@ -479,13 +480,23 @@
         retry.type = "button";
         retry.id = "workspace-options-retry";
         retry.textContent = "Retry controller connection";
-        retry.addEventListener("click", function () {
+        var retrying = false;
+        function retryConfiguration() {
+          if (retrying || !retry.isConnected) return;
+          retrying = true;
           retry.remove();
           status.textContent = "Retrying controller configuration…";
-          loadWorkspaceOptions();
+          loadWorkspaceOptions(attempt + 1);
+        }
+        retry.addEventListener("click", function () {
+          retryConfiguration();
         });
         status.appendChild(document.createTextNode(" "));
         status.appendChild(retry);
+        if (attempt < 3) {
+          status.appendChild(document.createTextNode(" Retrying automatically."));
+          window.setTimeout(retryConfiguration, 1000 * Math.pow(2, attempt));
+        }
       });
     if (form && !form.dataset.intakeBound) {
       form.dataset.intakeBound = "true";
