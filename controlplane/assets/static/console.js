@@ -159,7 +159,11 @@
       return;
     }
     if (current.nodeType !== Node.ELEMENT_NODE) return;
-    if (current.matches("input, textarea, select, form, #plan-approval, #plan-preview-status, #publication-actions")) return;
+    if (current.matches("#publication-actions, [data-publication-run]")) {
+      ["run", "binding", "candidate"].forEach(function (key) { current.dataset[key] = next.dataset[key] || ""; });
+      return;
+    }
+    if (current.matches("input, textarea, select, form, #plan-approval, #plan-preview-status")) return;
     Array.from(current.attributes).forEach(function (attribute) {
       if (!next.hasAttribute(attribute.name) && !(current.tagName === "DETAILS" && attribute.name === "open")) {
         current.removeAttribute(attribute.name);
@@ -212,6 +216,7 @@
       .then(function (html) {
         swapRegions(new DOMParser().parseFromString(html, "text/html"));
         renderWorkGraphMaps();
+        loadPublicationRequest(true);
         lastGood = Date.now();
         failure = "";
         confirmed = true;
@@ -376,35 +381,43 @@
       }).catch(function (error) { byId("plan-preview-status").textContent = error.message; });
   }
 
-  function loadPublicationRequest() {
-    var container = byId("publication-actions");
-    if (!container) return;
-    container.replaceChildren();
-    var status = document.createElement("p"); status.setAttribute("role", "status");
-    status.textContent = "Loading publication authority request…"; container.appendChild(status);
-    fetch("/v1/runs/" + encodeURIComponent(container.dataset.run) + "/authority", { headers: authHeaders(), signal: AbortSignal.timeout(10000) })
-      .then(function (response) {
-        if (!response.ok) throw new Error("Publication unavailable (HTTP " + response.status + ")");
-        return response.json();
-      }).then(function (request) {
-        if (!request || !request.id || !request.requires || !request.requires.length || !container.dataset.binding) {
-          status.textContent = "No human publication authorization is currently available for this candidate.";
-          return;
-        }
-        status.textContent = "Publication requires your decision for the exact candidate below.";
-        var details = document.createElement("details");
-        var summary = document.createElement("summary"); summary.textContent = "Candidate, contract, action, and evidence binding"; details.appendChild(summary);
-        var exact = document.createElement("pre"); exact.textContent = JSON.stringify(request, null, 2); details.appendChild(exact); container.appendChild(details);
-        ["approve", "reject"].forEach(function (decision) {
-          var button = document.createElement("button"); button.type = "button"; button.className = "action";
-          button.textContent = decision === "approve" ? "Authorize publication…" : "Reject publication…";
-          Object.assign(button.dataset, { action: "/v1/runs/" + encodeURIComponent(container.dataset.run) + "/authorize", binding: container.dataset.binding,
-            requestId: request.id, digest: request.digest, decision: decision,
-            target: JSON.stringify({ request: request.id, candidate: request.candidate, contract: request.contract, action: request.action }),
-            generation: container.dataset.binding, consequence: decision === "approve" ? "Records human approval evidence for this exact publication request. The kernel still verifies policy, final candidate eligibility, and independent assurance before publishing." : "Records failed human approval evidence and blocks this publication request." });
-          container.appendChild(button);
+  function loadPublicationRequest(onlyChanged) {
+    document.querySelectorAll("#publication-actions, [data-publication-run]").forEach(function (container) {
+      var key = container.dataset.run + ":" + container.dataset.binding + ":" + container.dataset.candidate;
+      if (onlyChanged && container.dataset.loaded === key) return;
+      container.dataset.loaded = key;
+      container.replaceChildren();
+      var status = document.createElement("p"); status.setAttribute("role", "status");
+      status.textContent = "Loading publication authority request…"; container.appendChild(status);
+      fetch("/v1/runs/" + encodeURIComponent(container.dataset.run) + "/authority", { headers: authHeaders(), signal: AbortSignal.timeout(10000) })
+        .then(function (response) {
+          if (!response.ok) throw new Error("Publication unavailable (HTTP " + response.status + ")");
+          return response.json();
+        }).then(function (request) {
+          if (!container.isConnected || container.dataset.loaded !== key) return;
+          if (!request || !request.id || !request.requires || !request.requires.length || !container.dataset.binding) {
+            status.textContent = "No human publication authorization is currently available for this candidate.";
+            return;
+          }
+          status.textContent = "Publication requires your decision for the exact candidate below.";
+          var target = document.createElement("p"); target.textContent = "Target: " + request.action.target + " · Candidate: " + request.candidate.revision + " · Tree: " + request.candidate.tree;
+          target.className = "mono"; container.appendChild(target);
+          var details = document.createElement("details");
+          var summary = document.createElement("summary"); summary.textContent = "Candidate, contract, action, and evidence binding"; details.appendChild(summary);
+          var exact = document.createElement("pre"); exact.textContent = JSON.stringify(request, null, 2); details.appendChild(exact); container.appendChild(details);
+          ["approve", "reject"].forEach(function (decision) {
+            var button = document.createElement("button"); button.type = "button"; button.className = "action";
+            button.textContent = decision === "approve" ? "Authorize publication…" : "Reject publication…";
+            Object.assign(button.dataset, { action: "/v1/runs/" + encodeURIComponent(container.dataset.run) + "/authorize", binding: container.dataset.binding,
+              requestId: request.id, digest: request.digest, decision: decision,
+              target: JSON.stringify({ request: request.id, candidate: request.candidate, contract: request.contract, action: request.action }),
+              generation: container.dataset.binding, consequence: decision === "approve" ? "Records human approval evidence for this exact publication request. The kernel still verifies policy, final candidate eligibility, and independent assurance before publishing." : "Records failed human approval evidence and blocks this publication request." });
+            container.appendChild(button);
+          });
+        }).catch(function (error) {
+          if (container.isConnected && container.dataset.loaded === key) status.textContent = error.message;
         });
-      }).catch(function (error) { status.textContent = error.message; });
+    });
   }
 
   function loadWorkspaceOptions(attempt) {

@@ -10,6 +10,7 @@ type objectiveData struct {
 	Controller      Controller
 	BindingMismatch bool
 	Decisions       []workspaceDecision
+	Publications    []RunDetail
 }
 
 func (w *Web) handleObjective(rw http.ResponseWriter, r *http.Request) {
@@ -36,7 +37,7 @@ func (w *Web) handleObjective(rw http.ResponseWriter, r *http.Request) {
 		}
 		data.Graph = &detail
 		data.BindingMismatch = graph.ObjectivePlan.Revision != plan.Revision || graph.ObjectivePlan.Digest != plan.Digest
-		data.Decisions, _, err = workspaceGraphActions(w.Store, detail, plan.ID)
+		data.Decisions, data.Publications, err = workspaceGraphActions(w.Store, detail, plan.ID)
 		if err != nil {
 			w.renderError(rw, err)
 			return

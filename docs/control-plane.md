@@ -25,7 +25,13 @@ as Action Required. Inbox cards link back to their explicitly bound objective.
 Resolved holds disappear from durable reads after reconnect; resolution never
 starts a bypass run. Recorded review findings and current review eligibility
 are shown separately, alongside assurance and classified runtime failures.
-This navigation, guided plan and decision slice does not
+The Changes and PR section consumes outstanding publication requests through the
+existing authority preview and authorization path. It names candidate commit,
+tree and publication target before confirmation, preserves exact request binding,
+and links recorded PR numbers to GitHub. A missing request offers no publication
+action. A changed candidate or controller binding reloads the read preview;
+responses for superseded preview identities are ignored. No mutation is retried.
+This workflow composition does not
 establish completion of the browser objective-to-PR experience or #448 acceptance.
 
 Start the separate process against an existing runtime state directory:

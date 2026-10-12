@@ -74,7 +74,7 @@
   {{if .StopDisabled}}<p class="muted">Scheduling control unavailable: {{.StopDisabled}}</p>
   {{else if .Paused}}{{with .Controller}}<button type="button" data-action="/v1/runs/{{$s.ID}}/unpause" data-binding="{{.ControllerBinding}}" data-target="run {{$s.ID}}" data-generation="{{.ControllerBinding}}" data-consequence="Removes an operator pause. Runtime policy, evidence, and existing blockers still govern execution.">Unpause scheduling…</button>{{end}}
   {{else}}{{with .Controller}}<button type="button" data-action="/v1/runs/{{$s.ID}}/pause" data-binding="{{.ControllerBinding}}" data-target="run {{$s.ID}}" data-generation="{{.ControllerBinding}}" data-consequence="Pauses new admission for this run. In-flight operations may finish; no cancellation is recorded.">Pause scheduling…</button>{{end}}{{end}}
-  <div id="publication-actions" data-run="{{$s.ID}}" data-binding="{{with .Controller}}{{.ControllerBinding}}{{end}}"></div>
+  <div id="publication-actions" data-run="{{$s.ID}}" data-candidate="{{with $s.Candidate}}{{.Revision}}{{end}}" data-binding="{{with .Controller}}{{.ControllerBinding}}{{end}}"></div>
   {{if .StopDisabled}}<p class="muted">stop unavailable: {{.StopDisabled}}</p>
   {{else}}{{with .Controller}}<button type="button" class="action" data-action="/v1/runs/{{$s.ID}}/stop" data-binding="{{.ControllerBinding}}"
     data-target="run {{$s.ID}}" data-generation="{{with .LiveBuild}}{{.Kind}} {{.Version}} @ {{.SourceRevision}}{{end}} · binding {{.ControllerBinding}}"

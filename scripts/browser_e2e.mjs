@@ -317,6 +317,12 @@ try {
     assert.equal(events.events.filter(event => event.type === 'run.paused').length, 1);
     assert.equal(events.events.filter(event => event.type === 'run.unpaused').length, 1);
   });
+  await check('objective without publication gate stays incomplete and non-actionable', async () => {
+    await cdp.navigate('/objectives/' + process.env.ZENCHRON_E2E_PLAN);
+    assert(await cdp.evaluate(`/No outstanding human publication request/.test(document.querySelector('#changes').textContent)`));
+    assert(await cdp.evaluate(`!document.querySelector('#changes [data-action$="/authorize"]')`));
+    assert(await cdp.evaluate(`!document.querySelector('#changes a[href*="/pull/"]')`));
+  });
   await check('runtime refusal never exposes publication authorization', async () => {
     await cdp.navigate('/runs/browser-run');
     await until(() => cdp.evaluate(`!(/loading publication authority/i.test(document.querySelector('#publication-actions')?.textContent || ''))`), 'publication authority observation');
