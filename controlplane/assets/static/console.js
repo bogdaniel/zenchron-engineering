@@ -203,6 +203,7 @@
         if (!response.ok) throw new Error("Controller observation failed: HTTP " + response.status);
         return response.json();
       }).then(function (controller) { controllerUnavailable = !controller.live_reachable; })
+        .catch(function () { controllerUnavailable = true; })
     ]).then(function (responses) { return responses[0]; })
       .then(function (res) {
         if (!res.ok) throw new Error("refresh failed: http " + res.status);

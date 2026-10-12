@@ -85,6 +85,7 @@ try {
   cdp = new CDP(socket);
   await cdp.call('Page.enable');
   await cdp.call('Runtime.enable');
+  await cdp.call('Network.enable');
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
   await check('login rejects wrong token and keyboard submits correct token', async () => {
     await cdp.navigate('/overview');
@@ -128,6 +129,16 @@ try {
     await cdp.evaluate(`window.focusedControl=document.querySelector('a[href="/runs/browser-live"]');focusedControl.focus();window.initialFreshness=document.querySelector('#freshness')?.textContent`);
     await until(() => cdp.evaluate(`/live/i.test(document.querySelector('#live-indicator')?.textContent || '')`), 'confirmed freshness');
     assert(await cdp.evaluate(`document.activeElement === focusedControl`), 'focused node was replaced');
+  });
+  await check('controller observation failure does not block workspace refresh', async () => {
+    await cdp.call('Network.setBlockedURLs', { urls: [base + '/v1/controller*'] });
+    try {
+      await cdp.navigate('/overview');
+      await until(() => cdp.evaluate(`/controller offline/i.test(document.querySelector('#live-indicator')?.textContent || '') && /updated/.test(document.querySelector('#freshness')?.textContent || '')`), 'workspace refresh with controller offline');
+      assert(await cdp.evaluate(`Boolean(document.querySelector('#overview-live .meta')?.textContent)`), 'workspace content should remain rendered');
+    } finally {
+      await cdp.call('Network.setBlockedURLs', { urls: [] });
+    }
   });
   let binding;
   await check('stale generation and permission refusals leave durable run unchanged', async () => {
