@@ -115,11 +115,11 @@ func (c *composition) controlRunLifecycle(ctx context.Context, supervisor *runti
 		return controlError(err)
 	}
 	if request.Command == runtime.ControlRefresh {
-		outcome, err := supervisor.RefreshIssueRun(ctx, request.RunID)
-		if err != nil {
+		if _, err := c.recordPolicyGeneration(); err != nil {
 			return controlError(err)
 		}
-		if _, err := c.recordPolicyGeneration(); err != nil {
+		outcome, err := supervisor.RefreshIssueRun(ctx, request.RunID)
+		if err != nil {
 			return controlError(err)
 		}
 		return controlOK(outcome)

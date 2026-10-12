@@ -257,7 +257,7 @@
     byId("action-target").textContent = pending.target;
     byId("action-generation").textContent = pending.generation;
     byId("action-consequence").textContent = pending.consequence;
-    byId("action-note-field").hidden = false;
+    byId("action-note-field").hidden = /\/(stop|resume|refresh)$/.test(pending.action);
     byId("action-value-field").hidden = pending.outcomeKind !== "text";
     byId("action-value").value = "";
     byId("action-note").value = "";
@@ -284,7 +284,6 @@
         body.revision = Number(pending.revision);
         body.digest = pending.digest;
         if (pending.assignmentsDigest) body.assignments_digest = pending.assignmentsDigest;
-        if (byId("action-note").value) body.note = byId("action-note").value;
       }
       if (pending.requestId) {
         body.request_id = pending.requestId;
@@ -295,7 +294,7 @@
         body.outcome_kind = pending.outcomeKind;
         body.outcome_value = pending.outcomeKind === "text" ? byId("action-value").value : pending.outcomeValue;
       }
-      if (byId("action-note").value) body.note = byId("action-note").value;
+      if (!/\/(stop|resume|refresh)$/.test(pending.action) && byId("action-note").value) body.note = byId("action-note").value;
       var headers = authHeaders();
       headers["Content-Type"] = "application/json";
       fetch(pending.action, { method: "POST", headers: headers, body: JSON.stringify(body), signal: AbortSignal.timeout(pending.action.endsWith("/revise") ? 1270000 : 30000) })

@@ -144,7 +144,9 @@ try {
     await cdp.navigate('/runs/browser-run');
     await cdp.evaluate(`document.querySelector('[data-action="/v1/runs/browser-run/stop"]').click()`);
     assert(await cdp.evaluate(`document.querySelector('#action-dialog').open`));
+    assert(await cdp.evaluate(`document.querySelector('#action-note-field').hidden`), 'stop must not offer a note its endpoint refuses');
     assert(await cdp.evaluate(`document.querySelector('#action-dialog').innerText.includes('browser-run')`));
+    await cdp.evaluate(`document.querySelector('#action-note').value='must not be sent'`);
     await cdp.evaluate(`document.querySelector('#action-confirm').click();document.querySelector('#action-confirm').click()`);
     await until(() => cdp.evaluate(`/applied/.test(document.querySelector('#action-result')?.textContent || '')`), 'governed stop result');
     const duplicate = await post('/v1/runs/browser-run/stop', { controller_binding: binding });
@@ -223,7 +225,7 @@ try {
     await cdp.navigate('/runs/browser-live');
     assert(await cdp.evaluate(`Boolean(document.querySelector('[data-action="/v1/runs/browser-live/pause"]'))`));
     assert(await cdp.evaluate(`!document.querySelector('[data-action="/v1/runs/browser-live/unpause"]')`));
-    await cdp.evaluate(`document.querySelector('[data-action="/v1/runs/browser-live/pause"]').click();document.querySelector('#action-confirm').click()`);
+    await cdp.evaluate(`document.querySelector('[data-action="/v1/runs/browser-live/pause"]').click();document.querySelector('#action-note').value='pause reason';document.querySelector('#action-confirm').click()`);
     await until(() => cdp.evaluate(`/applied/.test(document.querySelector('#action-result')?.textContent || '')`), 'pause request');
     await cdp.evaluate(`document.querySelector('#action-close').click()`);
     await until(() => cdp.evaluate(`Boolean(document.querySelector('[data-action="/v1/runs/browser-live/unpause"]'))`), 'paused view');
@@ -305,3 +307,4 @@ try {
 	await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 if (results.some(result => result.status !== 'passed')) process.exitCode = 1;
+process.exit(process.exitCode || 0);
