@@ -79,6 +79,19 @@ func TestIssueObjectiveWithoutCandidateIsRefusedBeforePlanPersistence(t *testing
 	}
 }
 
+func TestPlanRefusesAnUninstalledPreferredProfile(t *testing.T) {
+	fixture := newAttemptFixture(t)
+	input := refusedProposal(fixture)
+	input.Profile = "missing-profile"
+	_, err := fixture.service.Propose(context.Background(), input)
+	if err == nil || !strings.Contains(err.Error(), `profile "missing-profile" is not installed`) {
+		t.Fatalf("uninstalled profile preference was accepted: %v", err)
+	}
+	if _, found, err := fixture.store.Plan(input.PlanID); err != nil || found {
+		t.Fatalf("invalid profile preference persisted a plan: found=%v err=%v", found, err)
+	}
+}
+
 func TestConcurrentProposalsNeverRecordOneRevisionTwice(t *testing.T) {
 	fixture := newPlanRunFixture(t, parallelStages())
 	contract := planFixtureContract(fixture.phase8Fixture)

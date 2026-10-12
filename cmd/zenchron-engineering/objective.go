@@ -51,7 +51,7 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 		built: c, engine: engine, service: plans, target: target, release: func() {},
 	}
 	flags := autonomyFlags{
-		Template: request.Template, Deterministic: request.Deterministic,
+		Template: request.Template, Profile: request.Profile, Deterministic: request.Deterministic,
 		Agent:           request.Agent,
 		SubstituteHuman: request.SubstituteHuman, Note: request.Note,
 	}
@@ -64,7 +64,54 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 			return runtime.PlanView{}, err
 		}
 	}
+	if request.ExpectedController != "" {
+		release, err := c.admitBrowserPlanning(planID)
+		if err != nil {
+			return runtime.PlanView{}, err
+		}
+		defer release()
+		current, err := plans.View(planID)
+		var absent *runtime.PlanRefusedError
+		if request.PlanID == "" && err == nil {
+			return current, nil
+		}
+		if request.PlanID == "" && !errors.As(err, &absent) {
+			return runtime.PlanView{}, err
+		}
+		if request.PlanID != "" {
+			if err != nil {
+				return runtime.PlanView{}, err
+			}
+			if current.Plan.Revision != request.Revision || current.Plan.Digest != request.Digest {
+				return runtime.PlanView{}, fmt.Errorf("plan revision does not match the revision the operator read")
+			}
+		}
+	}
 	serialize := supervisor.WithPlanLock
+	if request.ExpectedController != "" {
+		serialize = func(write func() error) error {
+			return supervisor.WithPlanLock(func() error {
+				current, err := plans.View(planID)
+				if request.PlanID == "" {
+					var absent *runtime.PlanRefusedError
+					if errors.As(err, &absent) {
+						return write()
+					}
+					if err != nil {
+						return err
+					}
+					return fmt.Errorf("objective already has plan %s at revision %d; refresh before requesting a revision", planID, current.Plan.Revision)
+				}
+				if err != nil {
+					return err
+				}
+				if current.Plan.Revision != request.Revision || current.Plan.Digest != request.Digest {
+					return fmt.Errorf("plan revision changed during planning; proposal refused")
+				}
+				return write()
+			})
+		}
+	}
 	if flags.SubstituteHuman != "" {
 		if request.PlanID == "" {
 			return runtime.PlanView{}, errors.New("substituting a human names the plan whose stage is being substituted")

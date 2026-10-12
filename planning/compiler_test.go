@@ -45,6 +45,46 @@ func TestTrivialChangeCompilesWithoutCeremony(t *testing.T) {
 	}
 }
 
+func TestPreferredProfileFillsOnlyUnspecifiedAgentStages(t *testing.T) {
+	input := planInput(t, "trivial.engineering-fact.json", nil)
+	input.PreferredProfile = "browser-implementer"
+	plan := compilePlan(t, input)
+	stage, found := plan.Stage("implementation")
+	if !found || stage.Profile != input.PreferredProfile {
+		t.Fatalf("default profile preference = %q, want %q", stage.Profile, input.PreferredProfile)
+	}
+	for _, stage := range plan.Stages {
+		if stage.Kind != domain.StageAgent && stage.Profile != "" {
+			t.Fatalf("gate %q received an execution profile %q", stage.ID, stage.Profile)
+		}
+	}
+
+	template := domain.EngineeringPlanTemplate{
+		SchemaVersion: domain.SchemaVersion, ID: "pinned-profile", Version: 1,
+		Stages: []domain.TemplateStage{{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer, Profile: "template-profile"}},
+		Source: domain.ArtifactSource{Type: domain.SourceOperatorFile, Location: "/operator/templates/pinned-profile.json"},
+	}
+	var err error
+	template.Digest, err = template.ContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Template = &template
+	plan = compilePlan(t, input)
+	stage, found = plan.Stage("implementation")
+	if !found || stage.Profile != "template-profile" {
+		t.Fatalf("template preference = %q, want its explicit profile", stage.Profile)
+	}
+
+	input.Template = nil
+	input.Proposed = []domain.PlanStage{{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer, Profile: "reasoned-profile"}}
+	plan = compilePlan(t, input)
+	stage, found = plan.Stage("implementation")
+	if !found || stage.Profile != "reasoned-profile" {
+		t.Fatalf("reasoning preference = %q, want its explicit profile", stage.Profile)
+	}
+}
+
 func TestPublicationDecisionGateRequiresAuthorityKernelHumanClaim(t *testing.T) {
 	action := domain.Action{Type: "git.pull_request.create", Target: "main"}
 	contract := domain.EngineeringWorkContract{

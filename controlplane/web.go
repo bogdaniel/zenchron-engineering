@@ -90,6 +90,11 @@ func (w *Web) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", w.handleRoot)
 	mux.HandleFunc("GET /overview", w.handleOverview)
+	mux.HandleFunc("GET /objectives", w.handleWorkspace)
+	mux.HandleFunc("GET /plans", w.handleWorkspace)
+	mux.HandleFunc("GET /decisions", w.handleWorkspace)
+	mux.HandleFunc("GET /agents", w.handleWorkspace)
+	mux.HandleFunc("GET /settings", w.handleWorkspace)
 	mux.HandleFunc("GET /runs", w.handleRuns)
 	mux.HandleFunc("GET /runs/{id}", w.handleRunDetail)
 	mux.HandleFunc("GET /plans/{id}", w.handlePlanDetail)
@@ -268,8 +273,10 @@ type runDetailData struct {
 	NextAfter  int64
 	HasMore    bool
 	// Controller and StopDisabled drive the governed stop action (#398).
-	Controller   Controller
-	StopDisabled string
+	Controller      Controller
+	StopDisabled    string
+	RefreshDisabled string
+	Paused          bool
 }
 
 func (w *Web) handleRunDetail(rw http.ResponseWriter, r *http.Request) {
@@ -308,8 +315,35 @@ func (w *Web) handleRunDetail(rw http.ResponseWriter, r *http.Request) {
 	}
 	data.Controller = w.liveController(now)
 	data.StopDisabled = data.Controller.ActionsDisabled()
-	if d := data.Status.Disposition; data.StopDisabled == "" && (d == rt.Completed || d == rt.Failed || d == rt.Cancelled) {
-		data.StopDisabled = "the run is already " + string(d)
+	data.RefreshDisabled = data.StopDisabled
+	data.Paused, err = w.Store.RunPaused(id)
+	if err != nil {
+		w.renderError(rw, err)
+		return
+	}
+	planBound, graphBound, found, err := w.Store.RunBinding(id)
+	if err != nil {
+		w.renderError(rw, err)
+		return
+	}
+	if !found {
+		w.renderRunNotFound(rw, id)
+		return
+	}
+	terminal := data.Status.Disposition == rt.Completed || data.Status.Disposition == rt.Failed || data.Status.Disposition == rt.Cancelled
+	if terminal {
+		data.StopDisabled = "the run is already " + string(data.Status.Disposition)
+		data.RefreshDisabled = "the run is already " + string(data.Status.Disposition)
+	}
+	if data.RefreshDisabled == "" {
+		switch {
+		case data.Status.Source == nil || data.Status.Source.Issue < 1:
+			data.RefreshDisabled = "this run has no GitHub issue source"
+		case planBound:
+			data.RefreshDisabled = "plan-bound work must be revised through its approved plan"
+		case graphBound:
+			data.RefreshDisabled = "WorkGraph-bound work must be revised through its WorkGraph"
+		}
 	}
 	w.render(rw, runDetailTemplate, data)
 }

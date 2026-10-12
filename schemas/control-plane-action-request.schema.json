@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Body of a governed Control Plane action (#398). POST /v1/runs/{id}/stop takes only controller_binding; POST /v1/plans/{id}/reject also binds the exact revision and digest. Unknown members are refused.",
-  "oneOf": [
+  "description": "Closed bodies for governed browser actions. Route chooses the operation; no command, operator, credential, path or authority grant is caller-selectable.",
+  "anyOf": [
     {
       "title": "stop",
       "type": "object",
@@ -39,6 +39,203 @@
         "digest": {
           "type": "string",
           "minLength": 1
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "title": "approve",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_binding",
+        "revision",
+        "digest",
+        "assignments_digest"
+      ],
+      "properties": {
+        "controller_binding": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "note": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "assignments_digest": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    {
+      "title": "revise",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_binding",
+        "revision",
+        "digest"
+      ],
+      "properties": {
+        "controller_binding": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "note": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agent": {
+          "type": "string"
+        },
+        "template": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "title": "objective",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_binding",
+        "repository",
+        "issue"
+      ],
+      "properties": {
+        "controller_binding": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "note": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "issue": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "agent": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "template": {
+          "type": "string"
+        },
+        "deterministic": {
+          "type": "boolean"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "digest": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "title": "decision",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_binding",
+        "outcome_kind",
+        "outcome_value"
+      ],
+      "properties": {
+        "controller_binding": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "note": {
+          "type": "string"
+        },
+        "outcome_kind": {
+          "enum": [
+            "allow_deny",
+            "selected_option",
+            "text"
+          ]
+        },
+        "outcome_value": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    {
+      "title": "authorize",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_binding",
+        "request_id",
+        "digest",
+        "decision"
+      ],
+      "properties": {
+        "controller_binding": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "note": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision": {
+          "enum": [
+            "approve",
+            "reject"
+          ]
+        }
+      }
+    },
+    {
+      "title": "pause",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_binding"
+      ],
+      "properties": {
+        "controller_binding": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
         },
         "note": {
           "type": "string"

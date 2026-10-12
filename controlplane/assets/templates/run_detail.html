@@ -4,7 +4,7 @@
 <div id="run-live" data-live>
 <section class="panel" data-run-id="{{$s.ID}}">
   <p class="breadcrumb"><a href="/runs">runs</a> / <span class="mono">{{$s.ID}}</span></p>
-  <h1 class="mono">{{$s.ID}}</h1>
+  <h1>{{$s.Repository}}{{with $s.Source}}{{if .Issue}} · Issue #{{.Issue}}{{end}}{{end}}</h1><details><summary>Run identifier</summary><span class="mono">{{$s.ID}}</span></details>
   <p class="meta">observed {{fmtTime .ObservedAt}} · {{$s.Repository}}{{with $s.Source}}{{if .Issue}} #{{.Issue}}{{end}}{{end}}</p>
 
   <div class="grid stats">
@@ -64,7 +64,17 @@
 </section>
 
 <section class="panel" id="run-actions">
-  <h2>operator action</h2>
+  <h2>Operator actions</h2>
+  {{if .StopDisabled}}<p class="muted">Resume unavailable: {{.StopDisabled}}</p>
+  {{else}}{{with .Controller}}<button type="button" data-action="/v1/runs/{{$s.ID}}/resume" data-binding="{{.ControllerBinding}}" data-target="run {{$s.ID}}" data-generation="{{.ControllerBinding}}" data-consequence="Requests the existing scheduler to reconcile this run. Runtime policy, leases, capacity, budgets and blockers still apply.">Resume / recheck…</button>{{end}}{{end}}
+  {{if .StopDisabled}}<p class="muted">Source refresh unavailable: {{.StopDisabled}}</p>
+  {{else if .RefreshDisabled}}<p class="muted">Source refresh unavailable: {{.RefreshDisabled}}</p>
+  {{else}}{{with .Controller}}<button type="button" data-action="/v1/runs/{{$s.ID}}/refresh" data-binding="{{.ControllerBinding}}" data-target="run {{$s.ID}}" data-generation="{{.ControllerBinding}}" data-consequence="Creates the next run generation from the current GitHub issue. The prior candidate is abandoned; inspect its evidence and pull request before continuing.">Refresh from issue…</button>{{end}}{{end}}
+  <p class="muted">Manual retry is unavailable. The existing scheduler retries only within the run’s approved budgets.</p>
+  {{if .StopDisabled}}<p class="muted">Scheduling control unavailable: {{.StopDisabled}}</p>
+  {{else if .Paused}}{{with .Controller}}<button type="button" data-action="/v1/runs/{{$s.ID}}/unpause" data-binding="{{.ControllerBinding}}" data-target="run {{$s.ID}}" data-generation="{{.ControllerBinding}}" data-consequence="Removes an operator pause. Runtime policy, evidence, and existing blockers still govern execution.">Unpause scheduling…</button>{{end}}
+  {{else}}{{with .Controller}}<button type="button" data-action="/v1/runs/{{$s.ID}}/pause" data-binding="{{.ControllerBinding}}" data-target="run {{$s.ID}}" data-generation="{{.ControllerBinding}}" data-consequence="Pauses new admission for this run. In-flight operations may finish; no cancellation is recorded.">Pause scheduling…</button>{{end}}{{end}}
+  <div id="publication-actions" data-run="{{$s.ID}}" data-binding="{{with .Controller}}{{.ControllerBinding}}{{end}}"></div>
   {{if .StopDisabled}}<p class="muted">stop unavailable: {{.StopDisabled}}</p>
   {{else}}{{with .Controller}}<button type="button" class="action" data-action="/v1/runs/{{$s.ID}}/stop" data-binding="{{.ControllerBinding}}"
     data-target="run {{$s.ID}}" data-generation="{{with .LiveBuild}}{{.Kind}} {{.Version}} @ {{.SourceRevision}}{{end}} · binding {{.ControllerBinding}}"

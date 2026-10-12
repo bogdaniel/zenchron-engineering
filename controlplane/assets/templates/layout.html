@@ -7,30 +7,38 @@
 <link rel="stylesheet" href="/static/console.css">
 </head>
 <body>
+<a class="skip-link" href="#workspace">Skip to workspace</a>
 <header class="topbar">
-  <a class="brand" href="/overview">zenchron-engineering</a>
-  <nav>
-    <a href="/overview">overview</a>
-    <a href="/runs">runs</a>
-    <a href="/products">products</a>
-    <a href="/workgraphs">work graphs</a>
+  <a class="brand" href="/overview"><span class="brand-mark" aria-hidden="true">Z</span><span>Zenchron<small>Engineering OS</small></span></a>
+  <nav aria-label="Workspace navigation">
+    <a href="/overview">Overview</a>
+    <a href="/objectives">Objectives</a>
+    <a href="/plans">Plans</a>
+    <a href="/runs">Runs</a>
+    <a href="/products">Products</a>
+    <a href="/workgraphs">WorkGraphs</a>
+    <a href="/decisions">Decisions</a>
+    <a href="/agents">Agents</a>
+    <a href="/settings">Settings</a>
   </nav>
+  <button id="theme-toggle" type="button" aria-label="Switch color theme">Theme</button>
   <span id="live-indicator" class="live stale" role="status" title="server snapshot; live refresh not confirmed">snapshot</span>
   <span id="freshness" class="muted" data-observed-at="{{.ObservedAt.UTC.Format "2006-01-02T15:04:05Z"}}">observed {{.ObservedAt.UTC.Format "15:04:05"}}Z</span>
 </header>
-<main>
+<main id="workspace" tabindex="-1">
 {{template "content" .Data}}
 </main>
 <dialog id="action-dialog" aria-labelledby="action-title">
-  <h2 id="action-title">confirm operator action</h2>
+  <h2 id="action-title">Review operator action</h2>
   <table class="kv">
     <tr><th>target</th><td class="mono" id="action-target"></td></tr>
     <tr><th>controller</th><td class="mono" id="action-generation"></td></tr>
   </table>
   <p id="action-consequence"></p>
+  <p id="action-value-field" hidden><label for="action-value">Decision response</label><textarea id="action-value" rows="3" maxlength="4000"></textarea></p>
   <p id="action-note-field" hidden><label for="action-note">note (optional)</label><br><textarea id="action-note" rows="2" maxlength="500"></textarea></p>
   <p id="action-result" role="status" aria-live="polite"></p>
-  <p><button type="button" id="action-confirm" class="action">confirm</button> <button type="button" id="action-close">close</button></p>
+  <p><button type="button" id="action-confirm" class="action">Confirm action</button> <button type="button" id="action-close">Close</button></p>
 </dialog>
 <script src="/static/console.js"></script>
 </body>

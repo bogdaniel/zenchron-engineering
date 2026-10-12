@@ -141,10 +141,12 @@ engineering intent
 
 ## Status
 
-The Authorization Kernel and the local Engineering Runtime are implemented. The
-current milestone makes that runtime a persistent, multi-agent, operator-usable
-control plane; the Engineering Planner above it is a later layer and is not
-built. See [`ROADMAP.md`](ROADMAP.md).
+The Authorization Kernel, persistent multi-agent Engineering Runtime and
+Engineering Planner are implemented. The browser workspace extends their local
+Control Plane with governed objective intake, exact plan approval and human
+decision controls. See [`ROADMAP.md`](ROADMAP.md) and
+[`docs/control-plane.md`](docs/control-plane.md) for the current surface and
+acceptance boundaries.
 
 ## Technology decisions
 

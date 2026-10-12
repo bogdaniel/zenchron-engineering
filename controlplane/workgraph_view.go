@@ -101,16 +101,25 @@ type DecisionWaitRef struct {
 	Detail    string `json:"detail,omitempty"`
 }
 
-// DecisionRef is one open #473 DecisionRequest: a question only a human or
-// designated authority may answer. It has no resolution in this console
-// (#398's governed action allowlist does not include decision-resolve) -
-// docs/control-plane.md and the console page say where to resolve it.
+// DecisionRef shows a live request's frozen answer grammar and exact subject.
+// Only the governed controller path may record a resolution.
 type DecisionRef struct {
-	ID          string    `json:"id"`
-	Purpose     string    `json:"purpose,omitempty"`
-	Body        string    `json:"body,omitempty"`
-	RequestedBy string    `json:"requested_by,omitempty"`
-	RequestedAt time.Time `json:"requested_at"`
+	ID                  string              `json:"id"`
+	Purpose             string              `json:"purpose,omitempty"`
+	Body                string              `json:"body,omitempty"`
+	RequestedBy         string              `json:"requested_by,omitempty"`
+	RequestedAt         time.Time           `json:"requested_at"`
+	ExpectedOutcomeKind string              `json:"expected_outcome_kind,omitempty"`
+	PermittedOptions    []string            `json:"permitted_options,omitempty"`
+	Subject             *DecisionSubjectRef `json:"subject,omitempty"`
+}
+
+type DecisionSubjectRef struct {
+	Handoff           string `json:"handoff"`
+	Owner             string `json:"owner"`
+	BaseRevision      string `json:"base_revision"`
+	CandidateRevision string `json:"candidate_revision"`
+	CandidateTree     string `json:"candidate_tree"`
 }
 
 // workGraphUnitDetailProjection projects one unit. run, review and decisions
@@ -147,7 +156,14 @@ func workGraphUnitDetailProjection(unit rt.WorkGraphUnitView, run *RunDetail, la
 
 // decisionRefProjection projects one open #473 message as a DecisionRef.
 func decisionRefProjection(m orchestration.EngineeringMessage) DecisionRef {
-	return DecisionRef{ID: m.ID, Purpose: m.Purpose, Body: m.Body, RequestedBy: m.Source.Unit, RequestedAt: m.AdmittedAt}
+	out := DecisionRef{ID: m.ID, Purpose: m.Purpose, Body: m.Body, RequestedBy: m.Source.Unit, RequestedAt: m.AdmittedAt,
+		ExpectedOutcomeKind: m.ExpectedOutcomeKind, PermittedOptions: append([]string(nil), m.PermittedOptions...)}
+	if m.Subject != nil {
+		out.Subject = &DecisionSubjectRef{Handoff: m.Subject.Handoff, Owner: m.Subject.Owner,
+			BaseRevision: m.Subject.Revision.BaseRevision, CandidateRevision: m.Subject.Revision.CandidateRevision,
+			CandidateTree: m.Subject.Revision.CandidateTree}
+	}
+	return out
 }
 
 // workGraphDetailProjection assembles one graph's detail. runOf, reviewOf and

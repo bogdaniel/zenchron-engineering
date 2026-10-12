@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
@@ -73,6 +74,9 @@ func main() {
 // passes the status to os.Exit unchanged, so the code a handler returns is the
 // code the process reports.
 func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
+	if root := strings.TrimSpace(os.Getenv("ZENCHRON_CONTROLLER_ROOT")); root != "" && !filepath.IsAbs(root) {
+		return exitUsage, fmt.Errorf("ZENCHRON_CONTROLLER_ROOT must be an absolute path")
+	}
 	if len(args) > 0 && args[0] == "control-plane" {
 		return controlPlane(args[1:], stdout)
 	}

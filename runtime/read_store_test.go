@@ -90,6 +90,72 @@ func TestReadStoreAndBoundedEventsPage(t *testing.T) {
 	}
 }
 
+func TestReadStoreRunBindingExposesOnlyGovernedLineage(t *testing.T) {
+	dir, store := openJournal(t)
+	planRun := newJournalRun("plan-run")
+	planRun.Plan = &RunPlanBinding{PlanID: "plan", StageID: "stage"}
+	graphRun := newJournalRun("graph-run")
+	graphRun.Orchestration = &RunOrchestrationBinding{BatchID: "graph"}
+	for _, run := range []EngineeringRun{newJournalRun("plain-run"), planRun, graphRun} {
+		if err := store.PutRun(run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := OpenReadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	for _, test := range []struct {
+		id                   string
+		plan, graph, present bool
+	}{{"plain-run", false, false, true}, {"plan-run", true, false, true}, {"graph-run", false, true, true}, {"missing", false, false, false}} {
+		plan, graph, present, err := reader.RunBinding(test.id)
+		if err != nil || plan != test.plan || graph != test.graph || present != test.present {
+			t.Errorf("RunBinding(%q) = %v, %v, %v, %v", test.id, plan, graph, present, err)
+		}
+	}
+}
+
+func TestReadStoreRunPausedReadsLatestDurablePauseEvent(t *testing.T) {
+	dir, store := openJournal(t)
+	for _, id := range []string{"never-paused", "paused", "resumed"} {
+		if err := store.PutRun(newJournalRun(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := time.Now().UTC()
+	if _, err := PauseRun(store, at, "paused", "operator pause", "operator-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PauseRun(store, at, "resumed", "operator pause", "operator-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnpauseRun(store, at.Add(time.Second), "resumed", "operator-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := OpenReadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	for _, test := range []struct {
+		id     string
+		paused bool
+	}{{"never-paused", false}, {"paused", true}, {"resumed", false}} {
+		paused, err := reader.RunPaused(test.id)
+		if err != nil || paused != test.paused {
+			t.Errorf("RunPaused(%q) = %v, %v", test.id, paused, err)
+		}
+	}
+}
+
 func TestEventsPageDoesNotDecodeUnboundedTail(t *testing.T) {
 	_, store := openJournal(t)
 	for _, e := range journalFixture(t, "r") {

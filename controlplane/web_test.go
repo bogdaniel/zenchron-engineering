@@ -78,6 +78,22 @@ func TestWebCookieGrantsAccessAndWrongTokenDoesNot(t *testing.T) {
 	getWeb(t, w, "/runs/missing", w.Token, 404)
 }
 
+func TestWebRunDetailExplainsUnavailableLifecycleActions(t *testing.T) {
+	w := webFrom(fixture(t, true))
+	body := getWeb(t, w, "/runs/r", w.Token, 200)
+	for _, text := range []string{
+		"Resume unavailable:", "Source refresh unavailable:",
+		"Manual retry is unavailable. The existing scheduler retries only within the run’s approved budgets.",
+	} {
+		if !bytes.Contains(body, []byte(text)) {
+			t.Errorf("run detail omitted %q", text)
+		}
+	}
+	if bytes.Contains(body, []byte("unavailable through this controller connection")) {
+		t.Fatal("run detail still hides implemented lifecycle actions behind a blanket message")
+	}
+}
+
 // The fixture run carries an EventRunWaiting event (api_test.go), so its
 // REPLAYED disposition is "waiting" regardless of the "active" value PutRun
 // wrote to the row - exactly the fact runtime/fleet.go's own doc comment

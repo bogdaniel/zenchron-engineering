@@ -68,7 +68,18 @@ func (s *ReadStore) PlanView(id string, revision int) (PlanView, error) {
 func (s *ReadStore) PlanEvents(id string) ([]EngineeringEvent, error) {
 	return s.store.PlanEvents(id)
 }
-func (s *ReadStore) HasRun(id string) (bool, error) { _, ok, err := s.store.Run(id); return ok, err }
+func (s *ReadStore) HasRun(id string) (bool, error)    { _, ok, err := s.store.Run(id); return ok, err }
+func (s *ReadStore) RunPaused(id string) (bool, error) { return s.store.RunPaused(id) }
+
+// RunBinding reports only whether a run belongs to a plan or WorkGraph.
+func (s *ReadStore) RunBinding(id string) (plan, workGraph, found bool, err error) {
+	run, found, err := s.store.Run(id)
+	if err != nil || !found {
+		return false, false, found, err
+	}
+	return run.Plan != nil, run.Orchestration != nil, true, nil
+}
+
 func (s *ReadStore) EventsPage(id string, after int64, limit int) ([]EngineeringEvent, bool, error) {
 	return s.store.EventsPage(id, after, limit)
 }
@@ -113,6 +124,10 @@ func (s *ReadStore) OrchestrationStatus(batchID string, now time.Time) (Orchestr
 // one place that fact actually lives.
 func (s *ReadStore) DecisionResolution(requestID string) (orchestration.DecisionResolution, bool, error) {
 	return s.store.DecisionResolutionByRequestID(requestID)
+}
+
+func (s *ReadStore) WorkUnitHold(requestID string) (orchestration.WorkUnitHold, bool, error) {
+	return s.store.WorkUnitHoldByID(requestID)
 }
 
 // Products lists one bounded, database-paged slice of every Product's
