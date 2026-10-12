@@ -41,6 +41,57 @@ func (s *SQLiteOperationStore) AdmitMessages(messages []orchestration.Engineerin
 	return tx.Commit()
 }
 
+// AdmitDeliveredFinding inserts ONE already-validated, cross-scope delivered
+// message (orchestration.DeliverFinding's result) atomically within the
+// destination scope's own #473 bound (orchestration.MaxScopeMessages) - the
+// same bound ordinary orchestration.AdmitMessages enforces from an
+// in-memory scope snapshot before a worker's own report is admitted, but
+// checked and inserted here in the SAME transaction, so a concurrent
+// delivery into the same scope cannot both pass the count check before
+// either writes (#475 review P1).
+//
+// A delivery already present under its own deterministic id is a no-op
+// (inserted=false, no error): an idempotent repeat of a record already
+// counted must never be refused merely because the scope has since filled
+// up around it.
+func (s *SQLiteOperationStore) AdmitDeliveredFinding(message orchestration.EngineeringMessage) (inserted bool, err error) {
+	if err := message.Validate(); err != nil {
+		return false, err
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var exists int
+	switch err := tx.QueryRow(`SELECT 1 FROM orchestration_messages WHERE id = ?`, message.ID).Scan(&exists); {
+	case err == nil:
+		return false, tx.Commit()
+	case !errors.Is(err, sql.ErrNoRows):
+		return false, err
+	}
+	var count int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM orchestration_messages WHERE scope = ?`, message.Scope).Scan(&count); err != nil {
+		return false, err
+	}
+	if count >= orchestration.MaxScopeMessages {
+		return false, fmt.Errorf("scope %s already holds %d messages, at the %d message bound; delivery refused",
+			message.Scope, count, orchestration.MaxScopeMessages)
+	}
+	document, err := CanonicalJSON(message)
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`INSERT INTO orchestration_messages
+		(id, scope, run_id, operation_id, attempt, supersedes, admitted_unix_nano, document)
+		VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?)`,
+		message.ID, message.Scope, message.Source.RunID, message.Source.OperationID, message.Source.Attempt,
+		message.Supersedes, message.AdmittedAt.UnixNano(), string(document)); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
 // ScopeMessages reads one scope's admitted messages in admission order.
 func (s *SQLiteOperationStore) ScopeMessages(scope string) ([]orchestration.EngineeringMessage, error) {
 	return queryScopeMessages(s.db, scope)
