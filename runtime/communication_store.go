@@ -105,23 +105,6 @@ func (s *SQLiteOperationStore) MessageByID(id string) (orchestration.Engineering
 	return queryMessageByID(s.db, id)
 }
 
-// MessageExists is a bare existence check against the message table's own
-// primary key, without decoding or validating a document - the cheap
-// already-delivered fast path a repeated reconcile pass uses to recognize a
-// delivery that already landed before paying for the full handoff lookup
-// and admission a fresh delivery requires (#475 review P2).
-func (s *SQLiteOperationStore) MessageExists(id string) (bool, error) {
-	var exists int
-	switch err := s.db.QueryRow(`SELECT 1 FROM orchestration_messages WHERE id = ?`, id).Scan(&exists); {
-	case err == nil:
-		return true, nil
-	case errors.Is(err, sql.ErrNoRows):
-		return false, nil
-	default:
-		return false, err
-	}
-}
-
 // queryMessageByID is the sqlExecutor-generic read ResolveDecisionRequest
 // (decision_store.go) pins inside its own linearized transaction, exactly as
 // the standalone MessageByID does outside one.

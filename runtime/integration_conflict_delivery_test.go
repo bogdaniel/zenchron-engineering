@@ -11,6 +11,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -217,6 +218,62 @@ func TestIntegrationConflictDeliveryFastPathSkipsAlreadyDeliveredFindings(t *tes
 	}
 	if !found {
 		t.Fatalf("the fast path fired for %v, not the actually-delivered finding %s", skippedIDs, delivered[0].ID)
+	}
+}
+
+// TestIntegrationConflictDeliveryRefusesAConflictingRecordUnderTheSameID is
+// #475 review P2's follow-up: the fast path must never trust a bare id
+// match alone. A row corrupted to disagree with what this exact delivery
+// would write (here, its scope) is recognized as a conflict, not silently
+// accepted as proof the work is already done.
+func TestIntegrationConflictDeliveryRefusesAConflictingRecordUnderTheSameID(t *testing.T) {
+	fixture, supervisor, view, cRunID := conflictedIntegrationFixture(t)
+	blamed := blamedProducer(t, fixture, view, cRunID)
+	blamedRun, ok := storedRun(t, fixture.phase8Fixture, blamed.RunID)
+	if !ok || blamedRun.Orchestration == nil {
+		t.Fatal("blamed producer's run not found or not orchestrated")
+	}
+	originalFinding := integratorConflictFinding(t, fixture, cRunID)
+	delivered := deliveredFindingsOf(t, fixture, blamedRun.Orchestration.BatchID, originalFinding.Subject.Handoff)
+	if len(delivered) != 1 {
+		t.Fatalf("delivery did not land before corrupting it: %d findings", len(delivered))
+	}
+	corruptDeliveredRowScope(t, fixture.store, delivered[0].ID)
+
+	report, err := supervisor.Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.clock.advance(61 * time.Second)
+	var sawConflict bool
+	for _, problem := range report.Orchestration {
+		if strings.Contains(problem, "already names a different record") {
+			sawConflict = true
+		}
+	}
+	if !sawConflict {
+		t.Fatalf("a corrupted record under the delivery's own id was silently treated as already delivered: %+v", report.Orchestration)
+	}
+}
+
+// corruptDeliveredRowScope simulates corruption or a digest collision: the
+// durable row at id still exists, but no longer agrees with what delivery
+// would write. There is no application-level UPDATE path for an insert-only
+// message (by design), so this reaches around it deliberately, exactly as a
+// test proving a guard against real corruption has to.
+func corruptDeliveredRowScope(t *testing.T, store *SQLiteOperationStore, id string) {
+	t.Helper()
+	stored, found, err := store.MessageByID(id)
+	if err != nil || !found {
+		t.Fatalf("delivered row %s not found to corrupt: found=%t err=%v", id, found, err)
+	}
+	stored.Scope += "-corrupted"
+	document, err := CanonicalJSON(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE orchestration_messages SET scope = ?, document = ? WHERE id = ?`, stored.Scope, string(document), id); err != nil {
+		t.Fatal(err)
 	}
 }
 

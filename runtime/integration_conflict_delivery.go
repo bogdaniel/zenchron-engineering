@@ -32,12 +32,18 @@ import (
 // or whose producer has no recorded activation yet, is simply retried next
 // pass - never a terminal error for this batch or any other.
 //
-// A conflict already delivered on an earlier pass is recognized by a bare
-// existence check on its own deterministic destination id (#475 review P2)
-// BEFORE this function pays for the heavier per-conflict work (reading the
-// producer's whole RunHandoffs and writing a transaction) - every one of
-// which otherwise repeats, unchanged, on every single supervisor tick for
-// the rest of that batch's durable history.
+// A conflict already delivered on an earlier pass is recognized by reading
+// its own deterministic destination id (#475 review P2) BEFORE this
+// function pays for the heavier per-conflict work (reading the producer's
+// whole RunHandoffs and writing a transaction) - every one of which
+// otherwise repeats, unchanged, on every single supervisor tick for the
+// rest of that batch's durable history. That read is never a bare
+// existence check (#475 review P2 follow-up): an id match alone cannot
+// tell a genuine prior delivery apart from an unrelated record that
+// happens to share it - a digest defect, corruption, or a stale row from
+// before a schema change - so the stored row's own scope, route and
+// provenance are compared against what THIS delivery would write before
+// it is ever trusted as proof the work is already done.
 func deliverIntegrationConflicts(store *SQLiteOperationStore, batches []orchestration.Batch) []string {
 	var problems []string
 	byID := make(map[string]orchestration.Batch, len(batches))
@@ -87,10 +93,16 @@ func deliverIntegrationConflicts(store *SQLiteOperationStore, batches []orchestr
 				problems = append(problems, boundedDetail(fmt.Sprintf("%s conflict delivery: %v", batch.ID, err)))
 				continue
 			}
-			if already, err := store.MessageExists(deliveredID); err != nil {
+			if stored, found, err := store.MessageByID(deliveredID); err != nil {
 				problems = append(problems, boundedDetail(fmt.Sprintf("%s conflict delivery: %v", batch.ID, err)))
 				continue
-			} else if already {
+			} else if found {
+				if !deliveredRecordMatches(stored, message, destination.ID, destinationUnit) {
+					problems = append(problems, boundedDetail(fmt.Sprintf(
+						"%s conflict delivery: id %s already names a different record in scope %s; refusing to treat it as this conflict's delivery",
+						batch.ID, deliveredID, stored.Scope)))
+					continue
+				}
 				if integrationConflictDeliverySkipped != nil {
 					integrationConflictDeliverySkipped(deliveredID)
 				}
@@ -123,6 +135,23 @@ func deliverIntegrationConflicts(store *SQLiteOperationStore, batches []orchestr
 		}
 	}
 	return problems
+}
+
+// deliveredRecordMatches reports whether a row already found under a
+// delivery's own deterministic id is genuinely THIS delivery - the four
+// runtime-owned facts that identify it, every one already in hand from the
+// SAME single row MessageByID just read plus the original message this
+// function is about to deliver, so this costs nothing beyond that one read.
+// It deliberately does not compare Subject.Revision: that field alone needs
+// the producer's full handoff record to recompute, which is exactly the
+// cost this fast path exists to avoid paying on every pass; Handoff
+// equality, together with the immutability of an admitted handoff's own
+// subject, is what makes re-deriving it unnecessary for this check.
+func deliveredRecordMatches(stored, original orchestration.EngineeringMessage, destinationScope, destinationUnit string) bool {
+	return stored.Scope == destinationScope &&
+		stored.Route == orchestration.MessageRoute{Audience: orchestration.AudienceUnit, Unit: destinationUnit} &&
+		stored.Source == original.Source &&
+		stored.Subject != nil && original.Subject != nil && stored.Subject.Handoff == original.Subject.Handoff
 }
 
 // integrationConflictDeliverySkipped is a test seam: it runs whenever the
