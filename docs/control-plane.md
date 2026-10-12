@@ -13,8 +13,13 @@ links to this workspace. Graphs without that binding remain diagnostic graphs.
 A missing graph is shown as unrecorded execution. Multiple matching graphs fail
 closed; a graph bound to a different plan revision is explicitly marked. Run,
 handoff, review and publication facts retain their independent identities.
-Publication is not objective completion. Current governed actions remain on the
-existing plan, decision and run surfaces; this first navigation slice does not
+Publication is not objective completion. The objective Plan section consumes the
+existing controller preview and offers exact-bound approval, rejection and
+revision through the same governed routes as the plan diagnostic page. A preview
+whose revision or digest differs from the rendered page is refused locally
+before actions are offered; the controller still validates every submitted
+binding. Intake links return to the continuing objective workspace. Decision and
+run diagnostics remain available. This navigation and guided plan slice does not
 establish completion of the browser objective-to-PR experience or #448 acceptance.
 
 Start the separate process against an existing runtime state directory:

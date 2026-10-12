@@ -323,9 +323,13 @@
         return response.json();
       }).then(function (plan) {
         var status = byId("plan-preview-status");
+        if (Number(container.dataset.revision) !== plan.revision || container.dataset.digest !== plan.digest) {
+          status.textContent = "The plan changed or this historical revision is no longer current. Reload and inspect the current plan before approving.";
+          return;
+        }
         status.textContent = "Revision " + plan.revision + " · " + (plan.shown || "unknown state");
         var objective = document.createElement("p"); objective.textContent = plan.objective || "Objective unavailable"; container.appendChild(objective);
-        var stages = document.createElement("div"); stages.className = "graph-map";
+        var stages = document.createElement("div"); stages.className = "grid";
         (plan.stages || []).forEach(function (stage) {
           var card = document.createElement("article"); card.className = "stat";
           var title = document.createElement("strong"); title.textContent = (plan.stage_objectives || {})[stage.stage_id] || stage.stage_id; card.appendChild(title);
@@ -362,6 +366,13 @@
           generation: plan.controller_binding || container.dataset.binding,
           consequence: "Requests a new AI proposal from the same objective. It does not approve that proposal or widen authority; existing governing work remains governed by its approved revision." });
         container.appendChild(revise);
+        var reject = document.createElement("button"); reject.type = "button"; reject.textContent = "Reject exact plan…";
+        Object.assign(reject.dataset, { action: "/v1/plans/" + encodeURIComponent(container.dataset.plan) + "/reject",
+          binding: plan.controller_binding || container.dataset.binding, revision: String(plan.revision), digest: plan.digest,
+          target: "Plan " + container.dataset.plan + " revision " + plan.revision + " digest " + plan.digest,
+          generation: plan.controller_binding || container.dataset.binding,
+          consequence: "Records a durable refusal of this exact revision. Existing governing work remains governed by its approved revision." });
+        container.appendChild(reject);
       }).catch(function (error) { byId("plan-preview-status").textContent = error.message; });
   }
 
@@ -516,7 +527,7 @@
             var status = byId("objective-status");
             status.textContent = result.error || [result.outcome, result.code, result.detail].filter(Boolean).join(" · ");
             if (result.state && result.state.plan_id) {
-              var link = document.createElement("a"); link.href = "/plans/" + encodeURIComponent(result.state.plan_id); link.textContent = "Inspect generated plan →";
+              var link = document.createElement("a"); link.href = "/objectives/" + encodeURIComponent(result.state.plan_id); link.textContent = "Review objective and generated plan →";
               status.appendChild(document.createElement("br")); status.appendChild(link);
             }
           }).catch(function () { byId("objective-status").textContent = "Outcome unconfirmed. Inspect Plans before submitting again; this request is never retried automatically."; });

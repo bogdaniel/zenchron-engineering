@@ -15,6 +15,8 @@
 <p>Plan approval, execution, acceptance and publication are separate facts. A published PR does not establish objective completion.</p>
 </section>
 <section class="panel" id="plan"><h2>Plan</h2><p><a href="/plans/{{.Plan.ID}}?revision={{.Plan.Revision}}">Inspect exact plan and governed approval</a></p>
+<p id="plan-preview-status" role="status" aria-live="polite">Loading exact plan and worker assignments…</p>
+<div id="plan-approval" data-plan="{{.Plan.ID}}" data-revision="{{.Plan.Revision}}" data-digest="{{.Plan.Digest}}" data-binding="{{.Controller.ControllerBinding}}"></div>
 <p>Child runs: {{.Plan.Budget.ChildRuns}} / {{.Plan.Budget.MaxChildRuns}} · Provider invocations: {{.Plan.Budget.ProviderInvocations}} / {{.Plan.Budget.MaxProviderInvocations}}</p>
 {{range .Plan.Stages}}<p>{{.ID}} · {{.Kind}} · {{if .State}}{{.State}}{{else}}State not recorded{{end}}{{if .RunID}} · <a href="/runs/{{.RunID}}">Inspect assigned run</a>{{end}}</p>{{end}}
 </section>
