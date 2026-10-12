@@ -150,6 +150,7 @@
         "runtime/journal.go",
         "runtime/state_storage.go",
         "runtime/read_store.go",
+        "runtime/read_objective.go",
         "runtime/projection.go",
         "runtime/event_payload.go",
         "runtime/run_summary.go"
@@ -158,6 +159,7 @@
         "runtime/sqlite_store_test.go",
         "runtime/journal_test.go",
         "runtime/read_store_test.go",
+        "runtime/read_objective_test.go",
         "runtime/read_scaling_test.go",
         "runtime/projection_test.go",
         "runtime/event_*_test.go",
