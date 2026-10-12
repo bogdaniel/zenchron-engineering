@@ -13,7 +13,15 @@
       "type": "string",
       "enum": [
         "stop",
-        "plan-reject"
+        "plan-reject",
+        "plan-approve",
+        "plan-revise",
+        "decision-resolve",
+        "authorize",
+        "pause",
+        "unpause",
+        "resume",
+        "refresh"
       ]
     },
     "target": {
@@ -30,6 +38,12 @@
           "type": "integer"
         },
         "digest": {
+          "type": "string"
+        },
+        "decision_id": {
+          "type": "string"
+        },
+        "request_id": {
           "type": "string"
         }
       }
@@ -58,7 +72,10 @@
         "plan_not_found",
         "not_awaiting_decision",
         "digest_mismatch",
-        "controller_not_actionable"
+        "controller_not_actionable",
+        "revision_mismatch",
+        "invalid_controller_response",
+        "request_cancelled"
       ]
     },
     "detail": {

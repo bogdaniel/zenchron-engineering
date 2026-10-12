@@ -115,6 +115,10 @@ func (s *ReadStore) DecisionResolution(requestID string) (orchestration.Decision
 	return s.store.DecisionResolutionByRequestID(requestID)
 }
 
+func (s *ReadStore) WorkUnitHold(requestID string) (orchestration.WorkUnitHold, bool, error) {
+	return s.store.WorkUnitHoldByID(requestID)
+}
+
 // Products lists one bounded, database-paged slice of every Product's
 // current revision (#476). hasMore is true when a page beyond this one
 // exists.

@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -596,9 +597,11 @@ func writeJSON(stdout io.Writer, value any) error {
 // construction with a different repository target, rather than two wirings that
 // can drift apart.
 type composition struct {
-	config runtime.Config
-	store  *runtime.SQLiteOperationStore
-	owner  string
+	planInvocationsMu sync.Mutex
+	planInvocations   map[string]struct{}
+	config            runtime.Config
+	store             *runtime.SQLiteOperationStore
+	owner             string
 	// drivers is the one record of leases this process's drivers hold
 	// (#485), shared by every engine the composition builds.
 	drivers     *runtime.DriverLeases

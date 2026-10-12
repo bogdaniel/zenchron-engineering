@@ -218,10 +218,12 @@ func TestActionCSRFBoundaryRefusesBeforeTheSocket(t *testing.T) {
 // DisallowUnknownFields.
 func TestActionRoutesAreAClosedAllowlist(t *testing.T) {
 	f := newActionFixture(t)
-	for _, path := range []string{"/v1/runs/s/resume", "/v1/runs/s/shutdown", "/v1/runs/s/stop-all", "/v1/runs/s/drain",
-		"/v1/plans/p/approve", "/v1/plans/p/revise", "/v1/actions/stop", "/v1/shutdown", "/v1/stop", "/v1/runs/s/stop/"} {
+	for _, path := range []string{"/v1/runs/s/shutdown", "/v1/runs/s/stop-all", "/v1/runs/s/drain",
+		"/v1/actions/stop", "/v1/shutdown", "/v1/stop", "/v1/runs/s/stop/"} {
 		post(t, f.api, validRequest(path, stopBody()), 404)
 	}
+	post(t, f.api, validRequest("/v1/plans/p/approve", stopBody()), 400)
+	post(t, f.api, validRequest("/v1/plans/p/revise", stopBody()), 400)
 	for _, body := range []string{
 		`{"controller_binding":"b","command":"shutdown"}`,
 		`{"controller_binding":"b","revision":1}`,
