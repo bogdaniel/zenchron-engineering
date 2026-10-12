@@ -177,6 +177,49 @@ func TestIntegrationConflictDeliveryIsIdempotentAcrossReconcilePasses(t *testing
 	}
 }
 
+// TestIntegrationConflictDeliveryFastPathSkipsAlreadyDeliveredFindings is
+// #475 review P2: once delivered, a later reconcile pass must recognize the
+// SAME conflict via the cheap existence check alone, never redo the full
+// handoff lookup and write transaction for it. integrationConflictDeliverySkipped
+// is the one seam that lets a test observe which path actually ran, the same
+// pattern afterMergeBeforeHeadRead/afterCommitGates already use elsewhere in
+// this package.
+func TestIntegrationConflictDeliveryFastPathSkipsAlreadyDeliveredFindings(t *testing.T) {
+	fixture, supervisor, view, cRunID := conflictedIntegrationFixture(t)
+	blamed := blamedProducer(t, fixture, view, cRunID)
+	blamedRun, ok := storedRun(t, fixture.phase8Fixture, blamed.RunID)
+	if !ok || blamedRun.Orchestration == nil {
+		t.Fatal("blamed producer's run not found or not orchestrated")
+	}
+	originalFinding := integratorConflictFinding(t, fixture, cRunID)
+	delivered := deliveredFindingsOf(t, fixture, blamedRun.Orchestration.BatchID, originalFinding.Subject.Handoff)
+	if len(delivered) != 1 {
+		t.Fatalf("delivery did not land before the fast path is exercised: %d findings", len(delivered))
+	}
+
+	var skippedIDs []string
+	integrationConflictDeliverySkipped = func(id string) { skippedIDs = append(skippedIDs, id) }
+	defer func() { integrationConflictDeliverySkipped = nil }()
+
+	if _, err := supervisor.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.clock.advance(61 * time.Second)
+
+	if len(skippedIDs) == 0 {
+		t.Fatal("a reconcile pass over an already-delivered conflict never engaged the fast already-delivered path")
+	}
+	found := false
+	for _, id := range skippedIDs {
+		if id == delivered[0].ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the fast path fired for %v, not the actually-delivered finding %s", skippedIDs, delivered[0].ID)
+	}
+}
+
 // storedBatchID is the integrator run's own batch id, read through the
 // durable store exactly as every other helper in this file does.
 func storedBatchID(t *testing.T, fixture *fleetFixture, runID string) string {

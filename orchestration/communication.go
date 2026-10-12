@@ -468,13 +468,17 @@ func MessageID(runID, operationID string, attempt, index int) (string, error) {
 // HandoffSubject, read by the caller from the destination's own durable
 // handoff record. The consuming unit's own scope can only reconstruct a
 // foreign input's subject from WorkUnitInputs, which carries no
-// BaseRevision - so message.Subject.Revision, copied from there, is never
-// the complete record an exact-subject staleness comparison in the
-// DESTINATION scope (InboxFor/AppliesTo, against that scope's own live
-// current handoff) can safely use. destinationRevision replaces it with the
-// real thing; the handoff identity itself (Subject.Handoff) is unchanged,
-// so this is completing the one record already named, never substituting
-// a different one.
+// BaseRevision - so message.Subject.Revision, copied from there, may be
+// missing it even though it names the SAME exact handoff. This function
+// completes that one gap and nothing else: destinationRevision's
+// CandidateRevision and CandidateTree must exactly match the original
+// message's own Subject.Revision, and its BaseRevision must match too
+// whenever the original already carried one (#475 review P1) - a mismatch
+// on any of those is refused outright, never silently accepted as though
+// delivery were free to rebind the Finding to a different candidate. Only a
+// genuinely absent BaseRevision is filled in; the handoff identity itself
+// (Subject.Handoff) is unchanged either way, so this is completing the one
+// record already named, never substituting a different one.
 //
 // Everything else about the message is preserved exactly: Kind, Source,
 // Category and Body are copied verbatim, so the producer reads the
@@ -505,7 +509,19 @@ func DeliverFinding(message EngineeringMessage, destinationScope, destinationUni
 	if destinationScope == message.Scope {
 		return EngineeringMessage{}, errors.New("a finding delivery's destination scope must differ from the scope it was admitted in")
 	}
-	id, err := deliveredFindingID(message.ID, destinationScope)
+	original := message.Subject.Revision
+	if original.CandidateRevision != destinationRevision.CandidateRevision || original.CandidateTree != destinationRevision.CandidateTree {
+		return EngineeringMessage{}, fmt.Errorf(
+			"a finding delivery's destination candidate %s/tree %s does not match the finding's own exact subject candidate %s/tree %s",
+			short12(destinationRevision.CandidateRevision), short12(destinationRevision.CandidateTree),
+			short12(original.CandidateRevision), short12(original.CandidateTree))
+	}
+	if original.BaseRevision != "" && original.BaseRevision != destinationRevision.BaseRevision {
+		return EngineeringMessage{}, fmt.Errorf(
+			"a finding delivery's destination base revision %s does not match the finding's own exact subject base revision %s",
+			short12(destinationRevision.BaseRevision), short12(original.BaseRevision))
+	}
+	id, err := DeliveredFindingID(message.ID, destinationScope)
 	if err != nil {
 		return EngineeringMessage{}, err
 	}
@@ -517,12 +533,23 @@ func DeliverFinding(message EngineeringMessage, destinationScope, destinationUni
 	return delivered, delivered.Validate()
 }
 
-// deliveredFindingID is the deterministic identity of one Finding delivered
+// short12 bounds an identity string in an error message.
+func short12(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
+// DeliveredFindingID is the deterministic identity of one Finding delivered
 // into one destination scope: the same original message delivered into the
-// same destination always names the same record, so replaying delivery after
-// a restart or a repeated reconcile pass finds the row it already wrote
-// instead of inserting a second one.
-func deliveredFindingID(originalID, destinationScope string) (string, error) {
+// same destination always names the same record, so replaying delivery
+// after a restart or a repeated reconcile pass finds the row it already
+// wrote instead of inserting a second one. A caller may compute it directly,
+// without the rest of DeliverFinding's work, to cheaply recognize a
+// delivery that already landed before paying for the delivery it would
+// otherwise require.
+func DeliveredFindingID(originalID, destinationScope string) (string, error) {
 	digest, err := domain.Digest(struct {
 		Original    string `json:"original"`
 		Destination string `json:"destination"`

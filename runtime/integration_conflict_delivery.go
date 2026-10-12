@@ -31,6 +31,13 @@ import (
 // admission leaves untouched. A conflict whose Finding has not landed yet,
 // or whose producer has no recorded activation yet, is simply retried next
 // pass - never a terminal error for this batch or any other.
+//
+// A conflict already delivered on an earlier pass is recognized by a bare
+// existence check on its own deterministic destination id (#475 review P2)
+// BEFORE this function pays for the heavier per-conflict work (reading the
+// producer's whole RunHandoffs and writing a transaction) - every one of
+// which otherwise repeats, unchanged, on every single supervisor tick for
+// the rest of that batch's durable history.
 func deliverIntegrationConflicts(store *SQLiteOperationStore, batches []orchestration.Batch) []string {
 	var problems []string
 	byID := make(map[string]orchestration.Batch, len(batches))
@@ -75,6 +82,20 @@ func deliverIntegrationConflicts(store *SQLiteOperationStore, batches []orchestr
 				continue
 			}
 			destinationUnit := orchestration.BatchItemUnit(destination.Items[0].Issue)
+			deliveredID, err := orchestration.DeliveredFindingID(message.ID, destination.ID)
+			if err != nil {
+				problems = append(problems, boundedDetail(fmt.Sprintf("%s conflict delivery: %v", batch.ID, err)))
+				continue
+			}
+			if already, err := store.MessageExists(deliveredID); err != nil {
+				problems = append(problems, boundedDetail(fmt.Sprintf("%s conflict delivery: %v", batch.ID, err)))
+				continue
+			} else if already {
+				if integrationConflictDeliverySkipped != nil {
+					integrationConflictDeliverySkipped(deliveredID)
+				}
+				continue
+			}
 			// The consuming unit's own scope can only reconstruct a foreign
 			// input's subject from WorkUnitInputs, which carries no
 			// BaseRevision (queryBatchMessageScope) - so message.Subject.Revision
@@ -96,13 +117,21 @@ func deliverIntegrationConflicts(store *SQLiteOperationStore, batches []orchestr
 				problems = append(problems, boundedDetail(fmt.Sprintf("%s conflict delivery: %v", batch.ID, err)))
 				continue
 			}
-			if err := store.AdmitMessages([]orchestration.EngineeringMessage{delivered}); err != nil {
+			if _, err := store.AdmitDeliveredFinding(delivered); err != nil {
 				problems = append(problems, boundedDetail(fmt.Sprintf("%s conflict delivery: %v", batch.ID, err)))
 			}
 		}
 	}
 	return problems
 }
+
+// integrationConflictDeliverySkipped is a test seam: it runs whenever the
+// already-delivered fast path short-circuits a conflict this function would
+// otherwise redo the full delivery work for, the same pattern
+// afterMergeBeforeHeadRead (integration.go) and afterCommitGates (git.go)
+// already use to let a test observe a code path without instrumenting
+// SQLite itself.
+var integrationConflictDeliverySkipped func(deliveredID string)
 
 // handoffSubject reads one run's exact admitted handoff by its own
 // immutable id, never by recency: a handoff since superseded by a newer one
