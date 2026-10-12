@@ -824,9 +824,19 @@ func TestTheSilentProviderFixtureReallyHasALiveDescendant(t *testing.T) {
 		<-done
 		t.Fatalf("the fixture never started: %v", err)
 	}
+	// Stat can see the file between shell redirection creating it and echo
+	// writing the PID; wait for the value before asserting both processes.
+	leaderPid := ""
+	deadline := time.Now().Add(5 * time.Second)
+	for leaderPid == "" && time.Now().Before(deadline) {
+		leaderPid = strings.TrimSpace(readFileOrEmpty(t, leader))
+		if leaderPid == "" {
+			time.Sleep(time.Millisecond)
+		}
+	}
 	// BOTH ARE REAL AND BOTH ARE RUNNING. The leader is the process group; the
 	// descendant is a separate process that a group-only kill would miss.
-	leaderPid, childPid := strings.TrimSpace(readFileOrEmpty(t, leader)), strings.TrimSpace(readFileOrEmpty(t, child))
+	childPid := strings.TrimSpace(readFileOrEmpty(t, child))
 	if leaderPid == "" || childPid == "" || leaderPid == childPid {
 		cancel()
 		<-done
