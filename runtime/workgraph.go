@@ -142,17 +142,22 @@ func (s *Supervisor) reconcileWorkGraphs() []string {
 	}
 	var problems []string
 	for _, graph := range graphs {
-		// The plan owns assignments, gates and aggregate budget.
-		if graph.ObjectivePlan != nil {
-			continue
-		}
-		problems = append(problems, s.activateGraphFrontier(graph.ID)...)
+		// The plan owns assignments, gates and aggregate budget, so an
+		// objective-bound graph's FRONTIER units are never claimed here. #581's
+		// remediation-epoch governance is a separate, graph-level concern the
+		// plan does not own at all (PlanReconciler never touches a remediation
+		// epoch), so it still runs for every graph, objective-bound or not -
+		// otherwise an approved epoch_authorization decision could never
+		// materialize its epoch's run for a plan-bound producer.
+		problems = append(problems, s.activateGraph(graph.ID, graph.ObjectivePlan == nil)...)
 	}
 	return problems
 }
 
-// activateGraphFrontier projects one graph and activates what it says is
-// runnable, holding the orchestration lock across BOTH.
+// activateGraph projects one graph and, when activateFrontierUnits is true,
+// activates what its frontier says is runnable; #581's remediation-epoch
+// governance below always runs, holding the orchestration lock across all of
+// it.
 //
 // The lock spans them deliberately. Adopting a revision validates a proposal
 // against the units already activated, so a frontier computed under revision N
@@ -161,7 +166,7 @@ func (s *Supervisor) reconcileWorkGraphs() []string {
 // inside the lock for the same reason, so every unit activated here comes from
 // the revision the frontier was computed from. Taken per graph, so one graph's
 // pass does not hold up adoption for another.
-func (s *Supervisor) activateGraphFrontier(graphID string) []string {
+func (s *Supervisor) activateGraph(graphID string, activateFrontierUnits bool) []string {
 	s.orchestrationMu.Lock()
 	defer s.orchestrationMu.Unlock()
 	// FAILS CLOSED. A hold source that cannot answer is not "no holds": the
@@ -179,9 +184,11 @@ func (s *Supervisor) activateGraphFrontier(graphID string) []string {
 		units[unit.UnitID] = unit
 	}
 	var problems []string
-	for _, unitID := range view.Frontier {
-		if err := s.activateWorkUnit(view, units[unitID]); err != nil {
-			problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s: %v", view.GraphID, unitID, err)))
+	if activateFrontierUnits {
+		for _, unitID := range view.Frontier {
+			if err := s.activateWorkUnit(view, units[unitID]); err != nil {
+				problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s: %v", view.GraphID, unitID, err)))
+			}
 		}
 	}
 	// #581: an invalidated integration_compose unit whose invalidation was
