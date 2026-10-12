@@ -29,7 +29,6 @@ func TestDeriveRemediationState(t *testing.T) {
 	cases := []struct {
 		name                       string
 		latestAttemptOutcome       EpochOutcome
-		latestAttemptSucceeded     bool
 		hasLivePendingDecision     bool
 		triggeringFindingDismissed bool
 		effectiveCeilingReached    bool
@@ -42,17 +41,13 @@ func TestDeriveRemediationState(t *testing.T) {
 		},
 		{
 			name:                 "a successful latest attempt resolves",
-			latestAttemptOutcome: EpochCompletedAdmitted, latestAttemptSucceeded: true,
-			want: RemediationResolved,
+			latestAttemptOutcome: EpochCompletedAdmitted,
+			want:                 RemediationResolved,
 		},
 		{
-			name: "an admitted outcome that is not the unit's current epoch does not resolve on its own",
-			// e.g. epoch 2 succeeded but a later epoch 3 is now running: this
-			// case is exercised by the caller passing epoch 3's own running
-			// outcome, never epoch 2's - included here to document the
-			// latestAttemptSucceeded flag's purpose explicitly.
-			latestAttemptOutcome: EpochRunning, latestAttemptSucceeded: false,
-			want: RemediationRunning,
+			name:                 "a running latest attempt reports running",
+			latestAttemptOutcome: EpochRunning,
+			want:                 RemediationRunning,
 		},
 		{
 			name:                 "a live pending decision suspends",
@@ -77,7 +72,7 @@ func TestDeriveRemediationState(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := DeriveRemediationState(c.latestAttemptOutcome, c.latestAttemptSucceeded,
+			got := DeriveRemediationState(c.latestAttemptOutcome,
 				c.hasLivePendingDecision, c.triggeringFindingDismissed, c.effectiveCeilingReached)
 			if got != c.want {
 				t.Fatalf("DeriveRemediationState(...) = %s, want %s", got, c.want)

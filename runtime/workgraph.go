@@ -184,6 +184,75 @@ func (s *Supervisor) activateGraphFrontier(graphID string) []string {
 			problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s: %v", view.GraphID, unitID, err)))
 		}
 	}
+	// #581: an invalidated integration_compose unit whose invalidation was
+	// caused by a DEPENDENCY's own legitimate remediation (never an
+	// arbitrary external replacement - TestWorkGraphIntegrationUnitInvalidatedWhenUpstreamOutputReplaced,
+	// runtime/workgraph_integration_test.go, proves #472's own external-
+	// replacement case must stay terminal, unchanged) is automatically,
+	// deterministically re-authorized for its own next epoch - no human
+	// judgment call needed, exactly like an ordinary first
+	// integration_compose attempt already needs none.
+	//
+	// Two conditions, both required:
+	//   - a dependency has ever remediated (latestAttemptEpoch > 1) - the
+	//     one fact that distinguishes "upstream's content changed because
+	//     of a governed #581 remediation" from "changed for some other,
+	//     arbitrary reason";
+	//   - unit.InputsDigest is non-empty - true precisely in the
+	//     ActivationInputsDigest-mismatch case (orchestration/workgraph_projection.go),
+	//     once the dependency is satisfied AGAIN with that new content, and
+	//     empty while a dependency is merely, temporarily unsatisfied (its
+	//     own remediation still in flight) - TestReplacedUpstreamSubjectInvalidatesDownstream
+	//     (orchestration package) proves an upstream that is merely
+	//     unsatisfied invalidates its dependent immediately, and this
+	//     second check is what stops that transient moment from being
+	//     mistaken for "ready to recompose".
+	//
+	// Every other invalidated unit, and every other execution kind, is
+	// UNCHANGED: still terminal, exactly as #472 has always made it.
+	for _, unit := range view.Units {
+		if unit.State != orchestration.UnitInvalidated || unit.ExecutionKind != orchestration.ExecutionKindIntegrationCompose || unit.InputsDigest == "" {
+			continue
+		}
+		remediatedDependency := false
+		for _, dependency := range unit.DependsOn {
+			epochs, err := s.deps.Store.WorkUnitRemediationEpochs(view.GraphID, dependency)
+			if err != nil {
+				problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s: %v", view.GraphID, unit.UnitID, err)))
+				continue
+			}
+			if latestAttemptEpoch(epochs) > 1 {
+				remediatedDependency = true
+				break
+			}
+		}
+		if !remediatedDependency {
+			continue
+		}
+		if err := admitAutomaticReintegrationAuthorization(s.deps.Store, view.GraphID, unit.UnitID, s.deps.Clock.Now()); err != nil {
+			problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s automatic reintegration: %v", view.GraphID, unit.UnitID, err)))
+		}
+	}
+	// #581: a unit's own next remediation epoch is never part of the
+	// frontier (it is not "unactivated" - it already has epoch 1 or later).
+	// Eligibility is a separate fact entirely: an authorized epoch exists
+	// for it that no epoch row yet claims. Checked for every unit, not only
+	// frontier ones, under the SAME lock for the SAME reason activateWorkUnit
+	// documents: deciding a new epoch's run identity must not race another
+	// writer deciding the same one.
+	for _, unit := range view.Units {
+		authorization, pending, err := pendingRemediationEpoch(s.deps.Store, view.GraphID, unit.UnitID)
+		if err != nil {
+			problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s: %v", view.GraphID, unit.UnitID, err)))
+			continue
+		}
+		if !pending {
+			continue
+		}
+		if err := s.activateRemediationEpoch(view, unit, authorization); err != nil {
+			problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s epoch %d: %v", view.GraphID, unit.UnitID, authorization.ProposedEpoch, err)))
+		}
+	}
 	return problems
 }
 

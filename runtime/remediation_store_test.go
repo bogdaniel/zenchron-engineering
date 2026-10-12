@@ -261,3 +261,97 @@ func TestRemediationEpochPrimaryKeyRefusesADuplicate(t *testing.T) {
 		t.Fatal("a second epoch-2 row for the same unit was accepted; the primary key did not refuse it")
 	}
 }
+
+// Batch 2: the two insert-only write paths.
+
+func TestAdmitRemediationAuthorizationIsIdempotentAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1700000000, 0).UTC()
+
+	policy := RemediationAuthorization{ID: "auth-policy", GraphID: "graph-1", UnitID: "a", ProposedEpoch: 2,
+		FindingID: "finding-1", AuthorizedBy: RemediationAuthorizedByPolicy, PolicyClauseRef: "clause-1", AuthorizedAt: now}
+	inserted, err := store.AdmitRemediationAuthorization(policy)
+	if err != nil || !inserted {
+		t.Fatalf("inserted=%t err=%v", inserted, err)
+	}
+	// A repeated proposal of the SAME authorization is a no-op, not a
+	// conflict - the exact idempotency a reconcile pass depends on.
+	inserted, err = store.AdmitRemediationAuthorization(policy)
+	if err != nil || inserted {
+		t.Fatalf("a repeated identical authorization re-inserted: inserted=%t err=%v", inserted, err)
+	}
+	got, found, err := store.RemediationAuthorizationByID("auth-policy")
+	if err != nil || !found || got.PolicyClauseRef != "clause-1" || got.AuthorizedBy != RemediationAuthorizedByPolicy {
+		t.Fatalf("got=%+v found=%t err=%v", got, found, err)
+	}
+
+	// A decision-authorized grant needs its resolution id and may carry a
+	// ceiling raise.
+	raise := 2
+	decision := RemediationAuthorization{ID: "auth-decision", GraphID: "graph-1", UnitID: "b", ProposedEpoch: 2,
+		FindingID: "finding-2", AuthorizedBy: RemediationAuthorizedByDecision, DecisionResolutionID: "resolution-1",
+		RaisesCeilingTo: &raise, AuthorizedAt: now}
+	if _, err := store.db.Exec(`INSERT INTO decision_resolutions (id, request_id, scope, resolved_unix_nano, document)
+		VALUES (?, ?, ?, ?, ?)`, "resolution-1", "request-1", "scope-1", now.UnixNano(), "{}"); err != nil {
+		t.Fatal(err)
+	}
+	inserted, err = store.AdmitRemediationAuthorization(decision)
+	if err != nil || !inserted {
+		t.Fatalf("inserted=%t err=%v", inserted, err)
+	}
+
+	// Mismatched shapes are refused before they ever reach the CHECK
+	// constraint - a clearer error than a bare SQL constraint violation.
+	for name, bad := range map[string]RemediationAuthorization{
+		"policy with a decision resolution": {ID: "x", GraphID: "g", UnitID: "u", ProposedEpoch: 2, FindingID: "f", AuthorizedBy: RemediationAuthorizedByPolicy, PolicyClauseRef: "c", DecisionResolutionID: "r", AuthorizedAt: now},
+		"decision with a policy clause":     {ID: "x", GraphID: "g", UnitID: "u", ProposedEpoch: 2, FindingID: "f", AuthorizedBy: RemediationAuthorizedByDecision, DecisionResolutionID: "r", PolicyClauseRef: "c", AuthorizedAt: now},
+		"policy with no clause reference":   {ID: "x", GraphID: "g", UnitID: "u", ProposedEpoch: 2, FindingID: "f", AuthorizedBy: RemediationAuthorizedByPolicy, AuthorizedAt: now},
+		"decision with no resolution":       {ID: "x", GraphID: "g", UnitID: "u", ProposedEpoch: 2, FindingID: "f", AuthorizedBy: RemediationAuthorizedByDecision, AuthorizedAt: now},
+		"epoch below 2":                     {ID: "x", GraphID: "g", UnitID: "u", ProposedEpoch: 1, FindingID: "f", AuthorizedBy: RemediationAuthorizedByPolicy, PolicyClauseRef: "c", AuthorizedAt: now},
+		"unrecognized authorized_by":        {ID: "x", GraphID: "g", UnitID: "u", ProposedEpoch: 2, FindingID: "f", AuthorizedBy: "bogus", AuthorizedAt: now},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := store.AdmitRemediationAuthorization(bad); err == nil {
+				t.Fatalf("%s: accepted", name)
+			}
+		})
+	}
+}
+
+func TestActivateRemediationEpochIsIdempotentAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1700000000, 0).UTC()
+	batchID := seedBatch(t, store, 404, "run-a-epoch2", now)
+	if _, err := store.AdmitRemediationAuthorization(RemediationAuthorization{
+		ID: "auth-1", GraphID: "graph-1", UnitID: "a", ProposedEpoch: 2, FindingID: "finding-1",
+		AuthorizedBy: RemediationAuthorizedByPolicy, PolicyClauseRef: "clause-1", AuthorizedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	epoch := RemediationEpoch{GraphID: "graph-1", UnitID: "a", Epoch: 2, BatchID: batchID,
+		RunID: "run-a-epoch2", InputsDigest: "digest-2", AuthorizationID: "auth-1", ActivatedAt: now}
+	inserted, err := store.ActivateRemediationEpoch(epoch)
+	if err != nil || !inserted {
+		t.Fatalf("inserted=%t err=%v", inserted, err)
+	}
+	// Replaying the SAME activation (e.g. after a crash before this call's
+	// caller observed success) claims nothing a second time.
+	inserted, err = store.ActivateRemediationEpoch(epoch)
+	if err != nil || inserted {
+		t.Fatalf("a replayed activation claimed the unit again: inserted=%t err=%v", inserted, err)
+	}
+	if _, err := store.ActivateRemediationEpoch(RemediationEpoch{GraphID: "graph-1", UnitID: "a", Epoch: 1,
+		BatchID: batchID, RunID: "run-x", InputsDigest: "d", AuthorizationID: "auth-1", ActivatedAt: now}); err == nil {
+		t.Fatal("an epoch below 2 was accepted")
+	}
+}

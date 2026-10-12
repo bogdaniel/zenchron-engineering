@@ -181,6 +181,14 @@ type UnitFacts struct {
 	// Meaningless, and never consulted, unless the unit declares
 	// RequiresReview.
 	ReviewApproved bool
+	// RemediationState is this unit's derived remediation posture (#581,
+	// DeriveRemediationState), supplied by the runtime exactly like
+	// ReviewApproved - this package performs no remediation-epoch read of
+	// its own. The zero value "" is RemediationNone: every unit that has
+	// never had a Finding-triggered remediation request against it, which
+	// is every unit before #581 and every unit #581 never touches,
+	// unaffected.
+	RemediationState RemediationState
 }
 
 // UnitProjection is one unit's decided state.
@@ -197,6 +205,12 @@ type UnitProjection struct {
 	Inputs WorkUnitInputs `json:"inputs,omitempty"`
 	// AwaitingDecision is the readiness hold behind UnitAwaitingDecision.
 	AwaitingDecision *DecisionWait `json:"awaiting_decision,omitempty"`
+	// RemediationState is this unit's derived remediation posture (#581),
+	// reported alongside its ordinary State (still its latest epoch's own
+	// child ItemState, unchanged - a remediating unit's "headline" state is
+	// not renamed). Empty is RemediationNone: no remediation activity, the
+	// unchanged behavior of every unit before #581.
+	RemediationState RemediationState `json:"remediation_state,omitempty"`
 }
 
 // WorkGraphProjection is the whole graph decided in one pass.
@@ -253,9 +267,6 @@ func ProjectWorkGraph(graph WorkGraph, facts map[string]UnitFacts) (WorkGraphPro
 		case !fact.Activated:
 			projection.Units[id] = UnitProjection{State: UnitReady, InputsDigest: digest, Inputs: inputs}
 			projection.Frontier = append(projection.Frontier, id)
-		case reason != "":
-			projection.Units[id] = UnitProjection{State: UnitInvalidated,
-				Reason: "activated against upstream output that no longer holds: " + reason}
 		case fact.Unreadable:
 			projection.Units[id] = UnitProjection{State: UnitUnknown, Reason: fact.UnreadableReason}
 		case stateErr != nil:
@@ -263,9 +274,31 @@ func ProjectWorkGraph(graph WorkGraph, facts map[string]UnitFacts) (WorkGraphPro
 			// state a newer binary wrote blocks what depends on it and leaves
 			// every other branch to proceed.
 			projection.Units[id] = UnitProjection{State: UnitUnknown, Reason: stateErr.Error()}
-		case fact.ActivationInputsDigest != digest:
+		case reason != "":
+			// Reverted #581 experiment: TestReplacedUpstreamSubjectInvalidatesDownstream
+			// proves this is correct, intentional, pre-#581 behavior - an
+			// upstream that stops being satisfied AT ALL (for any reason,
+			// including merely running again) invalidates its dependent
+			// immediately, exactly like an outright replacement, rather
+			// than leaving the dependent looking complete. #581's own
+			// timing fix lives in admitAutomaticReintegrationAuthorization's
+			// trigger condition (runtime/workgraph.go) instead: it now
+			// waits for InputsDigest to be non-empty (the digest-mismatch
+			// case below) before granting a reintegration authorization,
+			// rather than granting one the instant a dependency merely
+			// starts remediating.
 			projection.Units[id] = UnitProjection{State: UnitInvalidated,
-				Reason: "an upstream output was replaced after this unit was activated against it"}
+				Reason: "activated against upstream output that no longer holds: " + reason}
+		case fact.ActivationInputsDigest != digest:
+			// #581: InputsDigest/Inputs ARE populated here (previously
+			// omitted) - an invalidated unit's CURRENT input set is a real,
+			// useful fact (what it would be re-activated against), and it is
+			// what lets a downstream integration_compose unit's own
+			// remediation epoch (remediation_activation.go) reconstruct a
+			// fresh run against the upstream producer's NEW admitted output,
+			// never the stale one it was originally activated against.
+			projection.Units[id] = UnitProjection{State: UnitInvalidated,
+				Reason: "an upstream output was replaced after this unit was activated against it", InputsDigest: digest, Inputs: inputs}
 		default:
 			if fact.Item == ItemCompleted && fact.Output == nil {
 				// A completed child transferred an ADMITTED handoff by
@@ -273,7 +306,7 @@ func ProjectWorkGraph(graph WorkGraph, facts map[string]UnitFacts) (WorkGraphPro
 				// not a unit to carry forward as satisfied.
 				return WorkGraphProjection{}, fmt.Errorf("work unit %q is completed but names no admitted output", id)
 			}
-			projection.Units[id] = UnitProjection{State: state, InputsDigest: digest, Inputs: inputs}
+			projection.Units[id] = UnitProjection{State: state, InputsDigest: digest, Inputs: inputs, RemediationState: fact.RemediationState}
 			// #474: a review-gated unit's admitted handoff satisfies a
 			// dependent only once ReviewApproved is also true for it - one
 			// additional predicate on the SAME satisfaction fact, never a
@@ -282,6 +315,21 @@ func ProjectWorkGraph(graph WorkGraph, facts map[string]UnitFacts) (WorkGraphPro
 			// what downstream may consume from it is gated, and a dependent
 			// reads that through the existing "completed, no admitted
 			// handoff yet" blocked reason unsatisfiedReason already states.
+			//
+			// #581 deliberately does NOT add a RemediationState predicate
+			// here: this branch is reached only when every dependency's
+			// CURRENT epoch is itself ItemCompleted (reason == ""), which
+			// already means no remediation is actively running for it. A
+			// unit whose remediation is pending/running instead reports via
+			// the `case reason != "":` branch above (its own satisfied[]
+			// stays based on ItemCompleted alone there too) - between the
+			// two, "is this unit's run currently complete" already tracks
+			// "is its output currently fit to depend on" correctly, without
+			// a second predicate: a producer's epoch-2 RUN NOT YET COMPLETE
+			// already makes satisfied[] false here through the ordinary
+			// ItemCompleted check, and once it completes, THIS unit's own
+			// digest-mismatch branch (below, for whoever depends on it)
+			// picks up the new content on the very next pass.
 			satisfied[id] = fact.Item == ItemCompleted && (!unit.RequiresReview || fact.ReviewApproved)
 		}
 		// A unit nothing could still satisfy, decided once, and PROPAGATED: its
