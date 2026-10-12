@@ -10,6 +10,12 @@ The default listener is `127.0.0.1:8787`. `--listen` accepts only literal
 loopback IP addresses (including `::1`). `--controller-root` overrides the
 standard adopted-controller root when necessary.
 
+For an isolated supervisor and Control Plane, set `ZENCHRON_CONTROLLER_ROOT`
+to one absolute, owner-controlled directory for both processes. The variable
+overrides the usual `~/.zenchron-adopted-controller` root for controller
+commands as well; an unset value preserves the standard path. This separates
+development adoption state from the operator's normal controller installation.
+
 Every request requires `Authorization: Bearer <token>`. The process generates
 32 random bytes, hex-encoded in `control-plane.token`, inside the owner-only
 state directory. The file must be a regular file with mode 0600. Tokens never
