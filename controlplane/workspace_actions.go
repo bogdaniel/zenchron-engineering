@@ -78,11 +78,12 @@ func (a *API) controllerRead(w http.ResponseWriter, request rt.ControlRequest, v
 		return
 	}
 	status, err := a.Store.Controller(a.ControllerRoot, a.Observe, a.now())
-	if err != nil || controllerProjection(status).ActionsDisabled() != "" {
-		fail(w, 503, "controller_not_actionable")
+	if err != nil || !controllerProjection(status).LiveReachable {
+		fail(w, 503, "controller_unreachable")
 		return
 	}
-	request.ExpectedController = controllerProjection(status).ControllerBinding
+	// These controller commands only observe configuration or durable work;
+	// the local socket is their boundary, not mutation authority.
 	response, err := a.Send(request)
 	if err != nil {
 		fail(w, 503, "controller_unreachable")

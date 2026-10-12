@@ -31,11 +31,11 @@ func TestBrowserApprovalBindsAssignmentsAndDoesNotAcceptActor(t *testing.T) {
 	}
 }
 
-func TestBrowserReadsRequireActionableControllerAndBindTheRequest(t *testing.T) {
+func TestBrowserReadsRequireLiveControllerAndUseReadOnlyControl(t *testing.T) {
 	f := newActionFixture(t)
 	f.reply = func(request rt.ControlRequest) (rt.ControlResponse, error) {
-		if request.Command != rt.ControlPlanView || request.ExpectedController == "" {
-			t.Fatalf("read did not bind controller: %+v", request)
+		if request.Command != rt.ControlPlanView || request.ExpectedController != "" {
+			t.Fatalf("read should not request mutation authority: %+v", request)
 		}
 		view, err := f.api.Store.PlanView("p", 1)
 		if err != nil {
@@ -59,6 +59,27 @@ func TestBrowserReadsRequireActionableControllerAndBindTheRequest(t *testing.T) 
 	}
 	if err := schemas.Validate("control-plane-plan-preview", value); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceOptionsRemainReadableFromUnattestedDevelopmentController(t *testing.T) {
+	f := newActionFixture(t)
+	f.observe = func() (rt.LiveControllerSnapshot, error) {
+		return rt.LiveControllerSnapshot{Identity: rt.ControllerSelfRecord{Build: rt.ControllerBuild{Kind: rt.ControllerUnattested}, Unattested: true}, Role: rt.RoleHeld}, nil
+	}
+	f.reply = func(request rt.ControlRequest) (rt.ControlResponse, error) {
+		if request.Command != rt.ControlWorkspaceOptions || request.ExpectedController != "" {
+			t.Fatalf("read should not request mutation authority: %+v", request)
+		}
+		payload, _ := json.Marshal(WorkspaceOptions{Repositories: []string{}, Agents: []WorkspaceAgent{}, Profiles: []string{}, Templates: []string{}})
+		return rt.ControlResponse{OK: true, Payload: payload}, nil
+	}
+	req := httptest.NewRequest("GET", "/v1/workspace/options", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	out := httptest.NewRecorder()
+	f.api.Handler().ServeHTTP(out, req)
+	if out.Code != 200 {
+		t.Fatalf("development read returned %d: %s", out.Code, out.Body.String())
 	}
 }
 

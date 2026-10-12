@@ -367,7 +367,7 @@
           (budget.max_wall_seconds ? " · " + Math.round(budget.max_wall_seconds / 60) + " active minutes" : "") +
           (budget.max_cost_micros == null ? " · Cost ceiling unknown" : " · Cost ceiling " + budget.max_cost_micros + " micros") + ". Profile assignments resolve in the proposed plan.";
         byId("objective-submit").disabled = !form.dataset.binding || !options.repositories.length || !byId("objective-agent").options.length;
-        if (!form.dataset.binding) byId("objective-status").textContent = "A current controller binding is required. Reconnect the controller and reload.";
+        if (!form.dataset.binding) byId("objective-status").textContent = "This development controller is unattested. Objective generation and approvals require an adopted controller.";
       }).catch(function (error) {
         var status = byId("objective-status") || byId("agents-status");
         if (status) status.textContent = error.message;
