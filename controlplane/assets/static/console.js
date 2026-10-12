@@ -216,7 +216,7 @@
       .then(function (html) {
         swapRegions(new DOMParser().parseFromString(html, "text/html"));
         renderWorkGraphMaps();
-        loadPublicationRequest(true);
+        loadPublicationRequest();
         lastGood = Date.now();
         failure = "";
         confirmed = true;
@@ -381,22 +381,26 @@
       }).catch(function (error) { byId("plan-preview-status").textContent = error.message; });
   }
 
-  function loadPublicationRequest(onlyChanged) {
+  function loadPublicationRequest() {
     document.querySelectorAll("#publication-actions, [data-publication-run]").forEach(function (container) {
       var key = container.dataset.run + ":" + container.dataset.binding + ":" + container.dataset.candidate;
-      if (onlyChanged && container.dataset.loaded === key) return;
       container.dataset.loaded = key;
-      container.replaceChildren();
-      var status = document.createElement("p"); status.setAttribute("role", "status");
-      status.textContent = "Loading publication authority request…"; container.appendChild(status);
+      var sequence = String(Number(container.dataset.requestSequence || 0) + 1);
+      container.dataset.requestSequence = sequence;
       fetch("/v1/runs/" + encodeURIComponent(container.dataset.run) + "/authority", { headers: authHeaders(), signal: AbortSignal.timeout(10000) })
         .then(function (response) {
           if (!response.ok) throw new Error("Publication unavailable (HTTP " + response.status + ")");
           return response.json();
         }).then(function (request) {
-          if (!container.isConnected || container.dataset.loaded !== key) return;
+          if (!container.isConnected || container.dataset.loaded !== key || container.dataset.requestSequence !== sequence) return;
+          var identity = request && request.id ? JSON.stringify([request.id, request.digest, request.contract, request.action, request.candidate, request.requires]) : "none";
+          if (container.dataset.requestIdentity === identity) return;
+          container.dataset.requestIdentity = identity;
+          container.replaceChildren();
+          var status = document.createElement("p"); status.setAttribute("role", "status");
           if (!request || !request.id || !request.requires || !request.requires.length || !container.dataset.binding) {
             status.textContent = "No human publication authorization is currently available for this candidate.";
+            container.appendChild(status);
             return;
           }
           status.textContent = "Publication requires your decision for the exact candidate below.";
@@ -415,7 +419,12 @@
             container.appendChild(button);
           });
         }).catch(function (error) {
-          if (container.isConnected && container.dataset.loaded === key) status.textContent = error.message;
+          if (!container.isConnected || container.dataset.loaded !== key || container.dataset.requestSequence !== sequence) return;
+          container.dataset.requestIdentity = "unavailable";
+          container.replaceChildren();
+          var status = document.createElement("p"); status.setAttribute("role", "status");
+          status.textContent = error.message;
+          container.appendChild(status);
         });
     });
   }
