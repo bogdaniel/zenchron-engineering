@@ -104,6 +104,17 @@ try {
       assert(view.heading && !view.broken && view.navigation && !view.login, route + ': ' + JSON.stringify(view));
     }
   });
+  await check('overview surfaces controller health and authority queues', async () => {
+    await cdp.navigate('/overview');
+    assert(await cdp.evaluate(`Boolean(document.querySelector('#controller-health a[href="/settings"]'))`),
+      'controller health details must be one click away');
+    assert(await cdp.evaluate(`/connected|offline|unavailable/i.test(document.querySelector('#controller-health').textContent)`),
+      'controller state must be visible outside collapsed diagnostics');
+    const actionSummary = await cdp.evaluate(`document.querySelector('#action-required-summary').textContent`);
+    for (const queue of ['plan approvals', 'WorkUnit decisions', 'publication authority']) {
+      assert(actionSummary.includes(queue), queue + ' missing from Action Required summary');
+    }
+  });
   await check('agent configuration exposes profiles and template empty states', async () => {
     await cdp.navigate('/agents');
     await until(() => cdp.evaluate(`/installed profile/i.test(document.querySelector('#profiles-status')?.textContent || '')`), 'controller-owned profiles');

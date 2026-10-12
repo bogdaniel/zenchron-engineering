@@ -4,6 +4,10 @@
 <section class="panel">
   <p class="eyebrow">Engineering workspace</p><h1>Your engineering, in motion.</h1><p class="muted">Follow bounded work, review evidence, and decide what moves forward.</p>
   <p class="meta">observed {{fmtTime .ObservedAt}}</p>
+  <p class="meta" id="controller-health"
+    data-state="{{if .ControllerErr}}not_reachable{{else if not .Controller.LiveReachable}}not_reachable{{else if .Controller.ActionsDisabled}}blocked{{else}}healthy{{end}}">
+    Controller health: {{if .ControllerErr}}status unavailable{{else if not .Controller.LiveReachable}}offline{{else if .Controller.ActionsDisabled}}connected, actions unavailable{{else}}connected{{end}} · <a href="/settings">details</a>
+  </p>
 
   {{if .ControllerErr}}
   <p class="banner error" role="status">Objective intake is unavailable because controller status could not be read.</p>
@@ -11,6 +15,7 @@
   <p class="banner error" role="status">Governed browser actions unavailable: {{.Controller.ActionsDisabled}}. <a href="/settings">Review controller status →</a></p>
   {{end}}
   <p class="workspace-cta"><a class="primary-link" href="/objectives">Start an objective</a><a href="/decisions">Action Required →</a></p>
+  <p class="meta" id="action-required-summary">Review plan approvals, WorkUnit decisions and publication authority requests.</p>
   <details><summary>System diagnostics</summary>
   {{if .ControllerErr}}
   <p class="banner error">controller status unavailable</p>
