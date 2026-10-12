@@ -4,7 +4,7 @@
 <div id="plan-live" data-live>
 <section class="panel">
   <p class="breadcrumb"><a href="/overview">overview</a> / plans / <span class="mono">{{$p.ID}}</span></p>
-  <h1 class="mono">{{$p.ID}}</h1>
+  <h1>Engineering plan · revision {{$p.Revision}}</h1><details><summary>Plan identifier</summary><span class="mono">{{$p.ID}}</span></details>
   <p class="meta">observed {{fmtTime .ObservedAt}} · {{$p.Repository}} @ <span class="mono">{{$p.BaseRevision}}</span></p>
   <div class="grid stats">
     <div class="stat"><span class="label">showing revision</span><span class="value">{{$p.Revision}}</span></div>
@@ -16,13 +16,15 @@
     <tr><th>template</th><td>{{if $p.Template}}<span class="mono">{{$p.Template}}</span> <span class="muted">(planning input; grants nothing)</span>{{else}}<span class="muted">none</span>{{end}}</td></tr>
     {{with $p.BaseChange}}<tr><th>base change</th><td><span class="mono">{{.From}}</span> → <span class="mono">{{.To}}</span> <span class="muted">since revision {{.FromRevision}}</span></td></tr>{{end}}
     {{if eq $p.Shown "proposed"}}<tr><th>approving this would invalidate</th><td>{{range $p.Invalidated}}<span class="pill mono">{{.}}</span> {{else}}<span class="muted">no started stage</span>{{end}}</td></tr>{{end}}
-    <tr><th>assignment resolution</th><td><span class="muted">resolved by the governing controller from its own configuration; run <code>plan show {{$p.ID}}</code></span></td></tr>
+    <tr><th>assignment resolution</th><td><span class="muted">Resolved by the governing controller from its own configuration; exact assignments appear below before approval.</span></td></tr>
   </table>
   {{if $p.GoverningRevision}}{{if ne $p.Revision $p.GoverningRevision}}<p><a href="/plans/{{$p.ID}}?revision={{$p.GoverningRevision}}">show governing revision {{$p.GoverningRevision}} →</a></p>{{end}}{{end}}
 </section>
 
 <section class="panel" id="plan-actions">
-  <h2>operator action</h2>
+  <h2>Operator actions</h2>
+  <p id="plan-preview-status" role="status">Loading exact assignment binding…</p>
+  <div id="plan-approval" data-plan="{{$p.ID}}" data-binding="{{with .Controller}}{{.ControllerBinding}}{{end}}"></div>
   {{if .RejectDisabled}}<p class="muted">reject unavailable: {{.RejectDisabled}}</p>
   {{else}}{{with .Controller}}<button type="button" class="action" data-action="/v1/plans/{{$p.ID}}/reject" data-binding="{{.ControllerBinding}}"
     data-revision="{{$p.Revision}}" data-digest="{{$p.Digest}}"

@@ -1,0 +1,245 @@
+// Dependency-free automated Chrome E2E artifact runner. No HTTP interception or
+// mocked application APIs: every request reaches the real isolated Go service.
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtemp, readFile, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+const base = process.env.ZENCHRON_E2E_URL;
+assert(base && /^http:\/\/127\.0\.0\.1:\d+$/.test(base), 'isolated loopback service required');
+const chromePath = process.env.ZENCHRON_E2E_CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const artifacts = process.env.ZENCHRON_E2E_ARTIFACTS || '/private/tmp/zenchron-browser-evidence';
+await mkdir(artifacts, { recursive: true });
+const profile = await mkdtemp(path.join(tmpdir(), 'zenchron-chrome-'));
+const browser = spawn(chromePath, ['--headless=new', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
+  '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-sync',
+  '--disable-component-update', '--user-data-dir=' + profile, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+let chromeLog = '';
+browser.stderr.on('data', chunk => { chromeLog = (chromeLog + chunk).slice(-10000); });
+let cdp;
+const results = [];
+const deadline = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function until(check, label, timeout = 12000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    if (await check()) return;
+    await deadline(100);
+  }
+  throw new Error('timed out: ' + label);
+}
+class CDP {
+  constructor(socket) {
+    this.socket = socket;
+    this.next = 0;
+    this.pending = new Map();
+    socket.addEventListener('message', event => {
+      const message = JSON.parse(event.data);
+      const waiting = this.pending.get(message.id);
+      if (!waiting) return;
+      clearTimeout(waiting.timer);
+      this.pending.delete(message.id);
+      if (message.error) waiting.reject(new Error(JSON.stringify(message.error)));
+      else waiting.resolve(message.result);
+    });
+  }
+  call(method, params = {}) {
+    const id = ++this.next;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('CDP timeout: ' + method)); }, 15000);
+      this.pending.set(id, { resolve, reject, timer });
+      this.socket.send(JSON.stringify({ id, method, params }));
+    });
+  }
+  async evaluate(expression) {
+    const result = await this.call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+    if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+    return result.result.value;
+  }
+  async navigate(route) {
+    await this.call('Page.navigate', { url: base + route });
+    await until(() => this.evaluate(`location.pathname === ${JSON.stringify(route.split('?')[0])} && document.readyState === 'complete'`), route);
+  }
+}
+async function check(name, run) {
+  try { await run(); results.push({ name, status: 'passed' }); console.log('PASS ' + name); }
+  catch (error) { const diagnostic = cdp ? await cdp.evaluate(`[document.querySelector('#plan-preview-status')?.textContent, document.querySelector('#plan-approval pre')?.textContent, document.querySelector('#objective-status')?.textContent].filter(Boolean).join(' · ')`).catch(() => '') : ''; results.push({ name, status: 'failed', error: error.message, diagnostic }); console.log('FAIL ' + name + ': ' + error.message + ' ' + diagnostic); }
+}
+async function screenshot(name) {
+  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+  await writeFile(path.join(artifacts, name + '.png'), Buffer.from(data, 'base64'));
+}
+async function post(route, body, token = 'browser-test-token') {
+  return cdp.evaluate(`(async () => { const r = await fetch(${JSON.stringify(route)}, {method:'POST', headers:{'Content-Type':'application/json','Authorization':${JSON.stringify('Bearer ' + token)}},body:JSON.stringify(${JSON.stringify(body)})}); return {status:r.status, body:await r.json()}; })()`);
+}
+try {
+  let port;
+  await until(async () => {
+    try { port = (await readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]; return Boolean(port); }
+    catch { if (browser.exitCode !== null) throw new Error('Chrome exited: ' + chromeLog); return false; }
+  }, 'isolated Chrome launch');
+  const targets = await (await fetch('http://127.0.0.1:' + port + '/json/list')).json();
+  const socket = new WebSocket(targets.find(target => target.type === 'page').webSocketDebuggerUrl);
+  await once(socket, 'open');
+  cdp = new CDP(socket);
+  await cdp.call('Page.enable');
+  await cdp.call('Runtime.enable');
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+  await check('login rejects wrong token and keyboard submits correct token', async () => {
+    await cdp.navigate('/overview');
+    assert(await cdp.evaluate(`Boolean(document.querySelector('#login-form'))`));
+    await cdp.evaluate(`document.querySelector('#token').value='wrong';document.querySelector('#login-form').requestSubmit()`);
+    await until(() => cdp.evaluate(`!document.querySelector('#login-error').hidden`), 'wrong token refusal');
+    await cdp.evaluate(`document.querySelector('#token').value='browser-test-token';document.querySelector('#token').focus()`);
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', text: '\r', unmodifiedText: '\r', windowsVirtualKeyCode: 13 });
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+    await until(() => cdp.evaluate(`!document.querySelector('#login-form')`), 'authenticated overview');
+  });
+  await check('product navigation has functioning accessible routes', async () => {
+    for (const route of ['/overview', '/products', '/objectives', '/plans', '/workgraphs', '/runs', '/decisions', '/agents', '/settings']) {
+      await cdp.navigate(route);
+      const view = await cdp.evaluate(`({heading:document.querySelector('h1')?.textContent, broken:/render failed|not found/.test(document.body.innerText), navigation:Boolean(document.querySelector('nav')),login:Boolean(document.querySelector('#login-form'))})`);
+      assert(view.heading && !view.broken && view.navigation && !view.login, route + ': ' + JSON.stringify(view));
+    }
+  });
+  await check('desktop and mobile layout have no document overflow', async () => {
+    for (const width of [1440, 390]) {
+      await cdp.call('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: width < 500 });
+      for (const route of ['/overview', '/objectives', '/decisions', '/workgraphs', '/runs']) {
+        await cdp.navigate(route);
+        assert(await cdp.evaluate(`document.documentElement.scrollWidth <= innerWidth + 1`), route + ' overflows at ' + width);
+      }
+      await cdp.navigate('/overview');
+      await screenshot(width > 500 ? 'desktop-overview' : 'mobile-overview');
+    }
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+  });
+  await check('live refresh retains focused controls and honest freshness', async () => {
+    await cdp.navigate('/runs');
+    await cdp.evaluate(`window.focusedControl=document.querySelector('a[href="/runs/browser-live"]');focusedControl.focus();window.initialFreshness=document.querySelector('#freshness')?.textContent`);
+    await until(() => cdp.evaluate(`/live/i.test(document.querySelector('#live-indicator')?.textContent || '')`), 'confirmed freshness');
+    assert(await cdp.evaluate(`document.activeElement === focusedControl`), 'focused node was replaced');
+  });
+  let binding;
+  await check('stale generation and permission refusals leave durable run unchanged', async () => {
+    binding = await cdp.evaluate(`fetch('/v1/controller',{headers:{Authorization:'Bearer browser-test-token'}}).then(r=>r.json()).then(r=>r.controller_binding)`);
+    assert(binding);
+    const forbidden = await post('/v1/runs/browser-run/stop', { controller_binding: binding }, 'wrong');
+    assert.equal(forbidden.status, 401);
+    const stale = await post('/v1/runs/browser-run/stop', { controller_binding: '0'.repeat(64) });
+    assert.equal(stale.status, 409);
+    const state = await cdp.evaluate(`fetch('/v1/runs/browser-run',{headers:{Authorization:'Bearer browser-test-token'}}).then(r=>r.json())`);
+    assert.equal(state.disposition, 'active');
+  });
+  await check('stop requires confirmation and duplicate submissions have one effect', async () => {
+    await cdp.navigate('/runs/browser-run');
+    await cdp.evaluate(`document.querySelector('[data-action="/v1/runs/browser-run/stop"]').click()`);
+    assert(await cdp.evaluate(`document.querySelector('#action-dialog').open`));
+    assert(await cdp.evaluate(`document.querySelector('#action-dialog').innerText.includes('browser-run')`));
+    await cdp.evaluate(`document.querySelector('#action-confirm').click();document.querySelector('#action-confirm').click()`);
+    await until(() => cdp.evaluate(`/applied/.test(document.querySelector('#action-result')?.textContent || '')`), 'governed stop result');
+    const duplicate = await post('/v1/runs/browser-run/stop', { controller_binding: binding });
+    assert.equal(duplicate.status, 200);
+    assert.equal(duplicate.body.outcome, 'already_applied');
+    const events = await cdp.evaluate(`fetch('/v1/runs/browser-run/events',{headers:{Authorization:'Bearer browser-test-token'}}).then(r=>r.json())`);
+    assert.equal(events.events.filter(event => event.type === 'run.cancelled').length, 1);
+  });
+  await check('stale plan revision is refused without authorization', async () => {
+    const plan = process.env.ZENCHRON_E2E_PLAN;
+    await cdp.navigate('/plans/' + plan);
+    const button = await cdp.evaluate(`(() => {const e=document.querySelector('[data-action$="/reject"]');return e ? {revision:Number(e.dataset.revision),digest:e.dataset.digest}:null})()`);
+    assert(button);
+    const response = await post('/v1/plans/' + plan + '/reject', { controller_binding: binding, revision: button.revision, digest: '0'.repeat(64) });
+    assert.equal(response.status, 409);
+    assert.equal(response.body.code, 'digest_mismatch');
+    await screenshot('desktop-plan');
+  });
+  await check('plan approval binds exact assignment and starts no work before confirmation', async () => {
+    const plan = process.env.ZENCHRON_E2E_PLAN;
+    await cdp.navigate('/plans/' + plan);
+    await until(() => cdp.evaluate(`Boolean(document.querySelector('[data-action$=\"/approve\"]'))`), 'approval assignment preview');
+    await until(() => cdp.evaluate(`/profile browser-implementer@/.test(document.body.innerText)`), 'resolved AgentProfile in preview');
+    const bindingData = await cdp.evaluate(`(() => {const e=document.querySelector('[data-action$=\"/approve\"]');return {revision:Number(e.dataset.revision),digest:e.dataset.digest,assignments_digest:e.dataset.assignmentsDigest}})()`);
+    assert(bindingData.assignments_digest);
+    assert(await cdp.evaluate(`!document.querySelector('a[href^=\"/runs/run-plan-\"]')`), 'unapproved plan has a stage run');
+    await cdp.evaluate(`document.querySelector('[data-action$=\"/approve\"]').click()`);
+    assert(await cdp.evaluate(`document.querySelector('#action-dialog').innerText.includes(${JSON.stringify(bindingData.assignments_digest)})`));
+    await cdp.evaluate(`document.querySelector('#action-confirm').click()`);
+    await until(() => cdp.evaluate(`/applied/.test(document.querySelector('#action-result')?.textContent || '')`), 'bound approval');
+    const duplicate = await post('/v1/plans/' + plan + '/approve', {controller_binding:binding,...bindingData});
+    assert.equal(duplicate.body.outcome, 'already_applied');
+    const changed = await post('/v1/plans/' + plan + '/approve', {controller_binding:binding,...bindingData,assignments_digest:'0'.repeat(64)});
+    assert.equal(changed.status, 409);
+  });
+  await check('browser objective intake reuses existing plan without duplicate planning', async () => {
+    await cdp.navigate('/objectives');
+    await until(() => cdp.evaluate(`!document.querySelector('#objective-submit').disabled`), 'eligible intake options');
+    await cdp.evaluate(`document.querySelector('#objective-issue').value='41';document.querySelector('#objective-form').requestSubmit();document.querySelector('#objective-form').requestSubmit()`);
+    await until(() => cdp.evaluate(`Boolean(document.querySelector('#objective-status a[href^=\"/plans/\"]'))`), 'idempotent objective plan result');
+    assert(await cdp.evaluate(`document.querySelector('#objective-submit').disabled`), 'ambiguous intake must not silently retry');
+    assert.equal(await cdp.evaluate(`document.querySelector('#objective-status a').getAttribute('href')`), '/plans/' + process.env.ZENCHRON_E2E_PLAN);
+    await screenshot('desktop-objective-intake');
+  });
+  await check('WorkGraph displays dependencies and preactivation authority hold', async () => {
+    await cdp.navigate('/workgraphs/' + process.env.ZENCHRON_E2E_GRAPH);
+    const text = await cdp.evaluate(`document.body.innerText`);
+    assert(text.includes('implementation') && text.includes('integration') && /decision|hold/i.test(text));
+    await screenshot('desktop-workgraph');
+    await cdp.call('Emulation.setDeviceMetricsOverride', {width:390,height:1000,deviceScaleFactor:1,mobile:true});
+    assert(await cdp.evaluate(`document.documentElement.scrollWidth <= innerWidth + 1`));
+    await screenshot('mobile-workgraph');
+    await cdp.call('Emulation.setDeviceMetricsOverride', {width:1440,height:1000,deviceScaleFactor:1,mobile:false});
+  });
+  await check('designated operator resolves exact WorkUnit hold through browser', async () => {
+    await cdp.navigate('/decisions');
+    const decision = process.env.ZENCHRON_E2E_DECISION;
+    const selector = '[data-action=\"/v1/decisions/' + decision + '/resolve\"][data-outcome-value=\"allow\"]';
+    assert(await cdp.evaluate(`Boolean(document.querySelector(${JSON.stringify(selector)}))`), 'preactivation hold absent from Action Required');
+    await cdp.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+    assert(await cdp.evaluate(`document.querySelector('#action-dialog').innerText.includes(${JSON.stringify(decision)})`));
+    await cdp.evaluate(`document.querySelector('#action-confirm').click()`);
+    await until(() => cdp.evaluate(`/applied/.test(document.querySelector('#action-result')?.textContent || '')`), 'decision resolution');
+    const duplicate = await post('/v1/decisions/' + decision + '/resolve', {controller_binding:binding,outcome_kind:'allow_deny',outcome_value:'allow'});
+    assert.equal(duplicate.body.outcome,'already_applied');
+    const changedReason = await post('/v1/decisions/' + decision + '/resolve', {controller_binding:binding,outcome_kind:'allow_deny',outcome_value:'allow',note:'changed rationale'});
+    assert.equal(changedReason.status,409);
+    const conflicting = await post('/v1/decisions/' + decision + '/resolve', {controller_binding:binding,outcome_kind:'allow_deny',outcome_value:'deny'});
+    assert.equal(conflicting.status,409);
+  });
+  await check('theme control is keyboard reachable and changes appearance', async () => {
+    await cdp.navigate('/overview');
+    const prior = await cdp.evaluate(`getComputedStyle(document.body).backgroundColor`);
+    await cdp.evaluate(`document.querySelector('#theme-toggle').focus()`);
+    await cdp.call('Input.dispatchKeyEvent', {type:'keyDown',key:'Enter',code:'Enter',text:'\r',windowsVirtualKeyCode:13});
+    await cdp.call('Input.dispatchKeyEvent', {type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
+    assert.notEqual(await cdp.evaluate(`getComputedStyle(document.body).backgroundColor`), prior);
+    await screenshot('desktop-dark-overview');
+    await cdp.call('Emulation.setDeviceMetricsOverride', {width:390,height:1000,deviceScaleFactor:1,mobile:true});
+    await screenshot('mobile-dark-overview');
+    await cdp.call('Emulation.setDeviceMetricsOverride', {width:1440,height:1000,deviceScaleFactor:1,mobile:false});
+  });
+  await check('controller disconnect disables governed actions', async () => {
+    console.log('CONTROL:disconnect');
+    await until(async () => { const r = await cdp.evaluate(`fetch('/v1/controller',{headers:{Authorization:'Bearer browser-test-token'}}).then(r=>r.json())`); return r.live_reachable === false; }, 'controller disconnect');
+    await cdp.navigate('/runs/browser-live');
+    assert(await cdp.evaluate(`!document.querySelector('[data-action="/v1/runs/browser-live/stop"]')`));
+    const result = await post('/v1/runs/browser-live/stop', { controller_binding: binding });
+    assert.equal(result.status, 409);
+  });
+  await check('HTTP disconnect marks retained data stale', async () => {
+    await cdp.navigate('/runs');
+    console.log('CONTROL:server-disconnect');
+    await until(() => cdp.evaluate(`/stale/i.test(document.querySelector('#live-indicator')?.textContent || '')`), 'stale indicator', 25000);
+    assert(await cdp.evaluate(`Boolean(document.querySelector('a[href="/runs/browser-live"]'))`));
+    await screenshot('disconnected-workspace');
+  });
+} finally {
+  await writeFile(path.join(artifacts, 'results.json'), JSON.stringify({ base, results }, null, 2));
+  if (cdp) cdp.socket.close();
+  browser.kill('SIGTERM');
+  await Promise.race([once(browser, 'exit'), deadline(3000)]);
+  if (browser.exitCode === null) browser.kill('SIGKILL');
+	await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+if (results.some(result => result.status !== 'passed')) process.exitCode = 1;

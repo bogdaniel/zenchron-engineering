@@ -3,6 +3,7 @@ package controlplane
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -59,6 +60,7 @@ func PlanPreviewProjection(view rt.PlanView) PlanPreview {
 			out.Stages[i].Agent = assignment.Agent.ID
 			out.Stages[i].ProviderKind = assignment.Agent.ProviderKind
 			out.Stages[i].TrustMode = string(assignment.Agent.TrustMode)
+			out.Stages[i].BoundProfile = fmt.Sprintf("%s@%d", assignment.Profile.ID, assignment.Profile.Version)
 		}
 	}
 	return out

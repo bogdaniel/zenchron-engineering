@@ -4,7 +4,7 @@
 <div id="workgraph-live" data-live>
 <section class="panel">
   <p class="breadcrumb"><a href="/overview">overview</a> / <a href="/workgraphs">work graphs</a> / <span class="mono">{{$g.ID}}</span></p>
-  <h1 class="mono">{{$g.Name}}</h1>
+  <h1>{{$g.Name}}</h1>
   <p class="meta">observed {{fmtTime .ObservedAt}} · {{$g.Repository}} · agent <span class="mono">{{$g.AgentID}}</span> · revision {{$g.Revision}}</p>
   {{with $g.Product}}<p class="meta">product <a href="/products/{{.ID}}">{{.Name}}</a></p>{{else}}<p class="meta muted">not associated with a product yet</p>{{end}}
   <div class="grid stats">
@@ -18,6 +18,9 @@
   <p><strong>runnable frontier:</strong> {{range $g.Frontier}}<span class="pill mono">{{.}}</span> {{else}}<span class="muted">nothing runnable right now</span>{{end}}</p>
 </section>
 
+<section class="panel"><h2>Execution map</h2><p class="muted">Dependencies advance only through admitted handoffs. Select a work unit to inspect its evidence and next step.</p><div class="graph-map" role="list">
+{{range $g.Units}}<a class="graph-node" role="listitem" href="#unit-{{.UnitID}}"><span class="label">{{.Role}} · Issue #{{.Issue}}</span><strong>{{.Purpose}}</strong><span data-state="{{.State}}">{{.State}}</span><small>Depends on: {{range .DependsOn}}{{.}} {{else}}No dependencies{{end}}</small></a>{{end}}
+</div></section>
 {{range $g.Units}}
 <section class="panel unit" aria-labelledby="unit-{{.UnitID}}">
   <h2 id="unit-{{.UnitID}}" class="mono">{{.UnitID}} <span class="muted">· {{.Role}}</span> · <span data-state="{{.State}}">{{.State}}</span></h2>
@@ -50,7 +53,7 @@
   <div class="banner">
     <p><strong>held by an operator decision</strong>{{if .Reference}} ({{.Reference}}){{end}}</p>
     {{if .Detail}}<p>{{.Detail}}</p>{{end}}
-    <p class="muted">no resolve action in this console yet - resolve from the operator CLI: <code>zenchron-engineering autonomy workgraph resolve &lt;request-id&gt; &lt;outcome&gt;</code></p>
+    <p class="muted"><a href="/decisions">Open Action Required</a> to review and resolve the exact authorized request.</p>
   </div>
   {{end}}
 
@@ -81,7 +84,7 @@
       <tr><th>id</th><td class="mono">{{.ID}}</td></tr>
     </table>
     {{end}}
-    <p class="muted">no resolve action in this console yet - resolve from the operator CLI: <code>zenchron-engineering autonomy workgraph resolve &lt;request-id&gt; &lt;outcome&gt;</code></p>
+    <p class="muted"><a href="/decisions">Open Action Required</a> to review and resolve the exact authorized request.</p>
   </div>
   {{end}}
 </section>

@@ -3,28 +3,9 @@
 <section class="panel">
   <h1>products</h1>
   <p class="meta" id="products-meta" data-live>observed {{fmtTime .ObservedAt}} · {{len .Products}} product{{if ne (len .Products) 1}}s{{end}}</p>
-  <table class="runs" id="products-table" data-live>
-    <thead>
-      <tr>
-        <th>product</th>
-        <th>name</th>
-        <th>revision</th>
-        <th>repositories</th>
-      </tr>
-    </thead>
-    <tbody>
-      {{range .Products}}
-      <tr>
-        <td><a class="mono" href="/products/{{.ID}}">{{.ID}}</a></td>
-        <td>{{.Name}}</td>
-        <td>{{.Revision}}</td>
-        <td>{{range .Repositories}}<span class="pill mono">{{.}}</span> {{else}}<span class="muted">none</span>{{end}}</td>
-      </tr>
-      {{else}}
-      <tr><td colspan="4" class="empty">no product has been adopted yet</td></tr>
-      {{end}}
-    </tbody>
-  </table>
+  <div class="graph-map" id="products-table" data-live>
+    {{range .Products}}<article class="stat"><a href="/products/{{.ID}}"><strong>{{.Name}}</strong></a>{{range .Repositories}}<span class="pill">{{.}}</span>{{end}}<span class="muted">Revision {{.Revision}}</span><details><summary>Technical details</summary><span class="mono">{{.ID}}</span></details></article>{{else}}<p class="empty">no product has been adopted yet</p>{{end}}
+  </div>
   <nav class="pager">
     {{if .PrevLink}}<a href="{{.PrevLink}}">&larr; previous</a>{{end}}
     {{if .NextLink}}<a href="{{.NextLink}}">next &rarr;</a>{{end}}

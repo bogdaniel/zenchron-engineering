@@ -1,0 +1,8 @@
+{{define "title"}}Objectives{{end}}
+{{define "content"}}
+<section class="panel"><p class="eyebrow">Intent → plan → evidence → authority</p><h1>Start an engineering objective</h1><p class="muted">Choose an existing GitHub issue. The controller proposes bounded work; execution waits for your approval.</p>
+<form id="objective-form" data-binding="{{.Controller.ControllerBinding}}">
+<div class="objective-fields"><label>Repository<select name="repository" id="objective-repository" required><option value="">Loading repositories…</option></select></label><label>GitHub issue<input name="issue" id="objective-issue" type="number" min="1" required placeholder="Issue number"></label><label>Execution agent<select name="agent" id="objective-agent" required><option value="">Loading workers…</option></select></label><label>Plan template<select name="template" id="objective-template"><option value="">Controller default</option></select></label></div>
+<p id="objective-budget" class="muted">Loading bounded execution options…</p><p id="objective-status" role="status" aria-live="polite"></p><button type="submit" id="objective-submit" disabled>Generate proposed plan</button>
+</form></section>
+{{end}}
