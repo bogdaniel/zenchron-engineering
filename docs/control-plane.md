@@ -25,6 +25,12 @@ It reconstructs context after reload from the existing plan and the WorkGraph's
 explicit `objective_plan` binding; it creates no lifecycle record or execution
 authority. Product-associated graph summaries expose optional `objective_plan_id`
 links to this workspace. Graphs without that binding remain diagnostic graphs.
+The composed page reads these owner projections separately, so concurrent writes
+can make sections reflect adjacent durable observations rather than one atomic
+cross-domain snapshot. It remains informational: plan approval binds the exact
+revision and digest, decision resolution names the durable request, and
+publication authorization binds the exact request ID and digest; the controller
+revalidates each action. After a refusal, reload before acting again.
 
 A missing graph is shown as unrecorded execution. Multiple matching graphs fail
 closed; a graph bound to a different plan revision is explicitly marked. Run,
@@ -46,7 +52,9 @@ existing authority preview and authorization path. It names candidate commit,
 tree and publication target before confirmation, preserves exact request binding,
 and links recorded PR numbers to GitHub. A missing request offers no publication
 action. A changed candidate or controller binding reloads the read preview;
-responses for superseded preview identities are ignored. No mutation is retried.
+responses for superseded preview identities are ignored. Authority reads refresh
+on the bounded page cadence, replacing controls when request identity, digest,
+contract, action or candidate changes. No mutation is retried.
 This workflow composition does not
 establish completion of the browser objective-to-PR experience or #448 acceptance.
 
