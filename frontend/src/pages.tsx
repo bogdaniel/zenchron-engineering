@@ -132,7 +132,7 @@ export function Overview({
                       ? "Observation unavailable · execution and result unknown"
                       : `${r.phase} · ${r.disposition}`}
                     <br />
-                    Agent {r.agent || "unassigned"}
+                    Agent {r.agent || "Identity unavailable"}
                   </li>
                 ))}
               </ul>
@@ -280,17 +280,17 @@ export function Workspace({ context }: { context: Context }) {
                 <h3>{stage.stage_id}</h3>
                 <dl className="binding-list">
                   <dt>Required role</dt>
-                  <dd>{stage.role || "No agent role"}</dd>
+                <dd>{stage.role || "Not recorded"}</dd>
                   <dt>Bound profile</dt>
-                  <dd>{stage.bound_profile || "Not bound"}</dd>
+                <dd>{stage.bound_profile || "Not recorded"}</dd>
                   <dt>Execution agent</dt>
-                  <dd>{stage.agent || "Not bound"}</dd>
+                <dd>{stage.agent || "Not recorded"}</dd>
                   <dt>Provider / trust</dt>
                   <dd>
                     {stage.provider_kind || "Unknown"} / {stage.trust_mode || "Unknown"}
                   </dd>
                   <dt>Run</dt>
-                  <dd>{stage.run_id || (stage.kind === "agent" ? "Not started" : "Gate creates no run")}</dd>
+                <dd>{stage.run_id || (stage.kind === "agent" ? "Run not recorded" : "Gate creates no run")}</dd>
                 </dl>
                 {stage.review && (
                   <p>

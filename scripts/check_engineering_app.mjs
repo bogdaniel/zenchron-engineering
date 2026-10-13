@@ -151,6 +151,7 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
     await page.getByText(/1 loaded · offset 0/).waitFor();
     await page.getByRole("link", { name: "Issue #41 · example/repo" }).click();
     await page.getByRole("heading", { name: "Plan dependency inspection" }).waitFor();
+    assert.match(await page.getByRole("region", { name: "Selected stage" }).innerText(), /Run not recorded/);
     assert.match(await page.locator("main").innerText(), /Build <script>text<\/script>/);
     assert.equal(await page.locator("main script").count(), 0);
     await page.getByRole("button", { name: /Gate/ }).click();
