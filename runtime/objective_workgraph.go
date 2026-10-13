@@ -265,6 +265,15 @@ func (r *EngineeringRuntime) refuseFlatObjectiveRecovery(batchID string) error {
 	if !found || batch.Origin == nil {
 		return nil
 	}
+	// A remediation epoch's batch (#581) is never a flat recovery
+	// fabrication: AdmitRemediationEpochBatch is its only writer, and it
+	// always commits the batch together with its governing
+	// RemediationAuthorization/RemediationEpoch rows in one transaction, so
+	// the batch's mere existence already proves it was authorized through
+	// the approved plan's own remediation seam, never invented here.
+	if batch.Origin.Epoch > 0 {
+		return nil
+	}
 	graph, found, err := r.deps.Store.WorkGraph(batch.Origin.GraphID)
 	if err != nil {
 		return err
