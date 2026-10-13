@@ -39,13 +39,11 @@ func (w *Web) handleWorkspace(rw http.ResponseWriter, r *http.Request) {
 	now := w.now()
 	data := workspaceData{ObservedAt: now, Controller: w.liveController(now), Offset: offset}
 	switch r.URL.Path {
-	case "/objectives":
-		w.render(rw, objectivesTemplate, data)
 	case "/agents":
 		w.render(rw, agentsTemplate, data)
 	case "/settings":
 		w.render(rw, settingsTemplate, data)
-	case "/plans":
+	case "/plans", "/objectives":
 		fleet, err := w.Store.Fleet(now)
 		if err != nil {
 			w.renderError(rw, err)
@@ -56,6 +54,10 @@ func (w *Web) handleWorkspace(rw http.ResponseWriter, r *http.Request) {
 			data.Plans = append(data.Plans, planProjection(fleet.Plans[i]))
 		}
 		data.PrevLink, data.NextLink = pageLinks(r.URL.Path, "offset", offset, end < int64(len(fleet.Plans)))
+		if r.URL.Path == "/objectives" {
+			w.render(rw, objectivesTemplate, data)
+			return
+		}
 		w.render(rw, plansTemplate, data)
 	case "/decisions":
 		plansOffset, ok := pageOffset(r, "plans_offset")

@@ -11,11 +11,20 @@ import (
 
 // WorkGraphSummary is one WorkGraph (#472) as a list sees it.
 type WorkGraphSummary struct {
-	ID         string `json:"graph_id"`
-	Repository string `json:"repository"`
-	AgentID    string `json:"agent_id"`
-	Name       string `json:"name"`
-	Revision   int    `json:"revision"`
+	ID              string `json:"graph_id"`
+	Repository      string `json:"repository"`
+	AgentID         string `json:"agent_id"`
+	Name            string `json:"name"`
+	Revision        int    `json:"revision"`
+	ObjectivePlanID string `json:"objective_plan_id,omitempty"`
+}
+
+func workGraphSummaryProjection(g orchestration.WorkGraph) WorkGraphSummary {
+	out := WorkGraphSummary{ID: g.ID, Repository: g.Repository, AgentID: g.AgentID, Name: g.Name, Revision: g.Revision}
+	if g.ObjectivePlan != nil {
+		out.ObjectivePlanID = g.ObjectivePlan.ID
+	}
+	return out
 }
 
 // WorkGraphDetail is one WorkGraph's current revision through its units -
@@ -319,7 +328,7 @@ func (a *API) workGraphs(w http.ResponseWriter, r *http.Request) {
 	}
 	out := WorkGraphs{WorkGraphs: []WorkGraphSummary{}, Offset: int(offset), HasMore: hasMore}
 	for _, g := range graphs {
-		out.WorkGraphs = append(out.WorkGraphs, WorkGraphSummary{ID: g.ID, Repository: g.Repository, AgentID: g.AgentID, Name: g.Name, Revision: g.Revision})
+		out.WorkGraphs = append(out.WorkGraphs, workGraphSummaryProjection(g))
 	}
 	send(w, 200, out)
 }

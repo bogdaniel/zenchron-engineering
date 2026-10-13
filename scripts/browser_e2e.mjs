@@ -187,6 +187,28 @@ try {
     assert.equal(response.body.code, 'digest_mismatch');
     await screenshot('desktop-plan');
   });
+  await check('objective workspace survives reload and preserves durable plan context', async () => {
+    const plan = process.env.ZENCHRON_E2E_PLAN;
+    await cdp.navigate('/objectives');
+    assert(await cdp.evaluate(`Boolean(document.querySelector('a[href="/objectives/${plan}"]'))`));
+    await cdp.navigate('/objectives/' + plan);
+    for (let visit = 0; visit < 2; visit++) {
+      assert(await cdp.evaluate(`Boolean(document.querySelector('a[href="/plans/${plan}?revision=1"]'))`));
+      for (const section of ['summary', 'plan', 'execution', 'decisions', 'evidence', 'changes']) {
+        assert(await cdp.evaluate(`Boolean(document.getElementById('${section}'))`), section);
+      }
+      if (visit === 0) {
+        const previousTimeOrigin = await cdp.evaluate('performance.timeOrigin');
+        await cdp.call('Page.reload');
+        await until(() => cdp.evaluate(`performance.timeOrigin !== ${JSON.stringify(previousTimeOrigin)} && document.readyState === 'complete'`), 'durable objective after reload');
+      }
+    }
+    await screenshot('desktop-objective');
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: 390, height: 1000, deviceScaleFactor: 1, mobile: true });
+    assert(await cdp.evaluate(`document.documentElement.scrollWidth <= innerWidth`), 'mobile objective overflow');
+    await screenshot('mobile-objective');
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+  });
   await check('plan approval binds exact assignment and starts no work before confirmation', async () => {
     const plan = process.env.ZENCHRON_E2E_PLAN;
     await cdp.navigate('/plans/' + plan);
