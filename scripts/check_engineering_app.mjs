@@ -58,7 +58,7 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
     await page.route("**/v1/**", async (route) => {
       const req = route.request(),
         url = new URL(req.url());
-      assert.match(req.headers().authorization || "", /^Bearer [a-f0-9]{64}$/);
+      assert.equal(/^Bearer [a-f0-9]{64}$/.test(req.headers().authorization || ""), true, "Bearer credential required");
       assert.equal(req.method(), "GET", "This boundary check never attempts authority");
       if (mode === "unauthorized") return route.fulfill({ status: 401, json: { error: "unauthorized" } });
       if (mode === "permission") return route.fulfill({ status: 403, json: { error: "forbidden_origin" } });
