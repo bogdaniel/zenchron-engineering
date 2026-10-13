@@ -108,7 +108,7 @@ func (w *Web) handleWorkspace(rw http.ResponseWriter, r *http.Request) {
 				w.renderError(rw, nil)
 				return
 			}
-			decisions, publications, err := workspaceGraphActions(w.Store, detail)
+			decisions, publications, err := workspaceGraphActions(w.Store, detail, graph)
 			if err != nil {
 				w.renderError(rw, err)
 				return
@@ -137,10 +137,15 @@ func bindWorkspaceDecisionActions(decisions []workspaceDecision, controller Cont
 	return decisions
 }
 
-func workspaceGraphActions(store *rt.ReadStore, detail WorkGraphDetail) ([]workspaceDecision, []workspacePublication, error) {
+func workspaceGraphActions(store *rt.ReadStore, detail WorkGraphDetail, graph orchestration.WorkGraph) ([]workspaceDecision, []workspacePublication, error) {
 	var decisions []workspaceDecision
 	var publications []workspacePublication
 	unavailable := ""
+	objectivePlanID := detail.ObjectivePlanID
+	if graph.Revision != detail.Revision || graph.ObjectivePlan == nil && detail.ObjectivePlanID != "" || graph.ObjectivePlan != nil &&
+		(graph.ObjectivePlan.ID != detail.ObjectivePlanID || graph.ObjectivePlan.Revision != detail.ObjectivePlanRevision || graph.ObjectivePlan.Digest != detail.ObjectivePlanDigest) {
+		unavailable = "the execution graph changed while its decision context was read"
+	}
 	if detail.ObjectivePlanID != "" {
 		view, err := store.PlanView(detail.ObjectivePlanID, detail.ObjectivePlanRevision)
 		var refused *rt.PlanRefusedError
@@ -150,6 +155,8 @@ func workspaceGraphActions(store *rt.ReadStore, detail WorkGraphDetail) ([]works
 		if err != nil || view.Plan.Digest != detail.ObjectivePlanDigest {
 			unavailable = "the execution graph's exact plan binding cannot be verified"
 		}
+	} else if graph.ObjectivePlan != nil {
+		unavailable = "the execution graph's exact plan binding cannot be verified"
 	}
 	for _, unit := range detail.Units {
 		if unit.Hold != nil {
@@ -166,7 +173,7 @@ func workspaceGraphActions(store *rt.ReadStore, detail WorkGraphDetail) ([]works
 					return nil, nil, fmt.Errorf("decision hold %s is unavailable", unit.Hold.Reference)
 				}
 				decisions = append(decisions, workspaceDecision{
-					Unavailable: unavailable, ObjectivePlanID: detail.ObjectivePlanID,
+					Unavailable: unavailable, ObjectivePlanID: objectivePlanID,
 					ObjectivePlanRevision: detail.ObjectivePlanRevision, ObjectivePlanDigest: detail.ObjectivePlanDigest,
 					GraphID: detail.ID, GraphName: detail.Name, Repository: detail.Repository, UnitID: unit.UnitID,
 					Decision: DecisionRef{ID: hold.ID, Purpose: hold.Purpose, RequestedBy: hold.RequestedBy.Actor,
@@ -176,7 +183,7 @@ func workspaceGraphActions(store *rt.ReadStore, detail WorkGraphDetail) ([]works
 		}
 		for _, decision := range unit.OpenDecisions {
 			decisions = append(decisions, workspaceDecision{
-				Unavailable: unavailable, ObjectivePlanID: detail.ObjectivePlanID,
+				Unavailable: unavailable, ObjectivePlanID: objectivePlanID,
 				ObjectivePlanRevision: detail.ObjectivePlanRevision, ObjectivePlanDigest: detail.ObjectivePlanDigest,
 				GraphID: detail.ID, GraphName: detail.Name, Repository: detail.Repository,
 				UnitID: unit.UnitID, Decision: decision,

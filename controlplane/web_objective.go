@@ -60,13 +60,12 @@ func (w *Web) handleObjective(rw http.ResponseWriter, r *http.Request) {
 			w.renderError(rw, nil)
 			return
 		}
-		if detail.ObjectivePlanID != plan.ID {
-			w.renderError(rw, nil)
-			return
-		}
 		data.Graph = &detail
-		data.BindingMismatch = detail.ObjectivePlanRevision != plan.Revision || detail.ObjectivePlanDigest != plan.Digest
-		data.Decisions, data.Publications, err = workspaceGraphActions(w.Store, detail)
+		data.BindingMismatch = graph.Revision != detail.Revision || graph.ObjectivePlan == nil ||
+			graph.ObjectivePlan.ID != detail.ObjectivePlanID || graph.ObjectivePlan.Revision != detail.ObjectivePlanRevision ||
+			graph.ObjectivePlan.Digest != detail.ObjectivePlanDigest || detail.ObjectivePlanID != plan.ID ||
+			detail.ObjectivePlanRevision != plan.Revision || detail.ObjectivePlanDigest != plan.Digest
+		data.Decisions, data.Publications, err = workspaceGraphActions(w.Store, detail, graph)
 		if err != nil {
 			w.renderError(rw, err)
 			return

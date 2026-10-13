@@ -172,8 +172,14 @@ func TestInboxNeverOffersDecisionFromUnverifiedPlanBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := webFrom(f.api)
-	body := getWeb(t, w, "/decisions", w.Token, 200)
-	if bytes.Contains(body, []byte(`data-action="/v1/decisions/`+id+`/resolve"`)) || !bytes.Contains(body, []byte("exact plan binding cannot be verified")) {
-		t.Fatal("unverified plan binding became actionable")
+	target := []byte(`data-action="/v1/decisions/` + id + `/resolve"`)
+	for _, check := range []struct{ route, reason string }{
+		{"/objectives/p", "differs from the execution graph binding"},
+		{"/decisions", "exact plan binding cannot be verified"},
+	} {
+		body := getWeb(t, w, check.route, w.Token, 200)
+		if bytes.Contains(body, target) || !bytes.Contains(body, []byte(check.reason)) {
+			t.Fatalf("unverified plan binding became actionable at %s", check.route)
+		}
 	}
 }
