@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -13,6 +14,7 @@ import (
 // it still goes through the controller; this projection grants no authority.
 type workspaceDecision struct {
 	Binding         string
+	Unavailable     string
 	ObjectivePlanID string
 	GraphID         string
 	GraphName       string
@@ -94,11 +96,7 @@ func (w *Web) handleWorkspace(rw http.ResponseWriter, r *http.Request) {
 				w.renderError(rw, nil)
 				return
 			}
-			objectivePlanID := ""
-			if graph.ObjectivePlan != nil {
-				objectivePlanID = graph.ObjectivePlan.ID
-			}
-			decisions, publications, err := workspaceGraphActions(w.Store, detail, objectivePlanID)
+			decisions, publications, err := workspaceGraphActions(w.Store, detail, graph)
 			if err != nil {
 				w.renderError(rw, err)
 				return
@@ -106,17 +104,46 @@ func (w *Web) handleWorkspace(rw http.ResponseWriter, r *http.Request) {
 			data.Decisions = append(data.Decisions, decisions...)
 			data.Publications = append(data.Publications, publications...)
 		}
-		for i := range data.Decisions {
-			data.Decisions[i].Binding = data.Controller.ControllerBinding
-		}
+		data.Decisions = bindWorkspaceDecisionActions(data.Decisions, data.Controller)
 		data.PrevLink, data.NextLink = pageLinks(r.URL.Path, "offset", offset, more)
 		w.render(rw, decisionsTemplate, data)
 	}
 }
 
-func workspaceGraphActions(store *rt.ReadStore, detail WorkGraphDetail, objectivePlanID string) ([]workspaceDecision, []RunDetail, error) {
+func bindWorkspaceDecisionActions(decisions []workspaceDecision, controller Controller) []workspaceDecision {
+	unavailable := controller.ActionsDisabled()
+	for i := range decisions {
+		decisions[i].Binding = ""
+		if decisions[i].Unavailable != "" {
+			continue
+		}
+		decisions[i].Unavailable = unavailable
+		if unavailable == "" {
+			decisions[i].Binding = controller.ControllerBinding
+		}
+	}
+	return decisions
+}
+
+func workspaceGraphActions(store *rt.ReadStore, detail WorkGraphDetail, graph orchestration.WorkGraph) ([]workspaceDecision, []RunDetail, error) {
 	var decisions []workspaceDecision
 	var publications []RunDetail
+	unavailable := ""
+	objectivePlanID := ""
+	if graph.Revision != detail.Revision {
+		unavailable = "the execution graph changed while its decision context was read"
+	}
+	if graph.ObjectivePlan != nil {
+		objectivePlanID = graph.ObjectivePlan.ID
+		view, err := store.PlanView(graph.ObjectivePlan.ID, graph.ObjectivePlan.Revision)
+		var refused *rt.PlanRefusedError
+		if err != nil && !errors.As(err, &refused) {
+			return nil, nil, err
+		}
+		if err != nil || view.Plan.Digest != graph.ObjectivePlan.Digest {
+			unavailable = "the execution graph's exact plan binding cannot be verified"
+		}
+	}
 	for _, unit := range detail.Units {
 		if unit.Hold != nil {
 			_, resolved, err := store.DecisionResolution(unit.Hold.Reference)
@@ -132,7 +159,7 @@ func workspaceGraphActions(store *rt.ReadStore, detail WorkGraphDetail, objectiv
 					return nil, nil, fmt.Errorf("decision hold %s is unavailable", unit.Hold.Reference)
 				}
 				decisions = append(decisions, workspaceDecision{
-					ObjectivePlanID: objectivePlanID, GraphID: detail.ID, GraphName: detail.Name, Repository: detail.Repository, UnitID: unit.UnitID,
+					Unavailable: unavailable, ObjectivePlanID: objectivePlanID, GraphID: detail.ID, GraphName: detail.Name, Repository: detail.Repository, UnitID: unit.UnitID,
 					Decision: DecisionRef{ID: hold.ID, Purpose: hold.Purpose, RequestedBy: hold.RequestedBy.Actor,
 						RequestedAt: hold.RequestedAt, ExpectedOutcomeKind: orchestration.DecisionAllowDeny},
 				})
@@ -140,7 +167,7 @@ func workspaceGraphActions(store *rt.ReadStore, detail WorkGraphDetail, objectiv
 		}
 		for _, decision := range unit.OpenDecisions {
 			decisions = append(decisions, workspaceDecision{
-				ObjectivePlanID: objectivePlanID, GraphID: detail.ID, GraphName: detail.Name, Repository: detail.Repository,
+				Unavailable: unavailable, ObjectivePlanID: objectivePlanID, GraphID: detail.ID, GraphName: detail.Name, Repository: detail.Repository,
 				UnitID: unit.UnitID, Decision: decision,
 			})
 		}

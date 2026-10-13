@@ -35,14 +35,19 @@ func (w *Web) handleObjective(rw http.ResponseWriter, r *http.Request) {
 			return
 		}
 		data.Graph = &detail
-		data.BindingMismatch = graph.ObjectivePlan.Revision != plan.Revision || graph.ObjectivePlan.Digest != plan.Digest
-		data.Decisions, _, err = workspaceGraphActions(w.Store, detail, plan.ID)
+		data.BindingMismatch = graph.Revision != detail.Revision || graph.ObjectivePlan == nil ||
+			graph.ObjectivePlan.ID != plan.ID || graph.ObjectivePlan.Revision != plan.Revision || graph.ObjectivePlan.Digest != plan.Digest
+		data.Decisions, _, err = workspaceGraphActions(w.Store, detail, graph)
 		if err != nil {
 			w.renderError(rw, err)
 			return
 		}
-		for i := range data.Decisions {
-			data.Decisions[i].Binding = data.Controller.ControllerBinding
+		data.Decisions = bindWorkspaceDecisionActions(data.Decisions, data.Controller)
+		if data.BindingMismatch {
+			for i := range data.Decisions {
+				data.Decisions[i].Binding = ""
+				data.Decisions[i].Unavailable = "inspect the execution graph's exact plan context before resolving this request"
+			}
 		}
 	}
 	w.render(rw, objectiveTemplate, data)

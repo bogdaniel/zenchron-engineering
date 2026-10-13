@@ -3,6 +3,7 @@ package controlplane
 import (
 	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,6 +69,78 @@ func TestObjectiveWorkspaceUsesExplicitGraphBindingAndExposesRevisionMismatch(t 
 	for _, text := range []string{"Implement bounded feature", "/workgraphs/" + graph.ID, "differs from the execution graph binding"} {
 		if !bytes.Contains(body, []byte(text)) {
 			t.Fatalf("missing %q", text)
+		}
+	}
+}
+
+func TestDecisionControlsDisappearForIneligibleControllerOrPlanBinding(t *testing.T) {
+	f := newActionFixture(t)
+	at := time.Unix(100, 0).UTC()
+	graph, err := (orchestration.WorkGraphProposal{Name: "decision-eligibility", Revision: 1, Units: []orchestration.WorkUnit{{ID: "build", Purpose: "bounded work", Role: domain.RoleImplementer, Issue: 41}}}).Compose("example/repo", "claude", "operator-1", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph.ObjectivePlan = &domain.PlanRef{ID: "p", Revision: 1, Digest: f.digest}
+	if _, _, err := f.store.AdoptWorkGraphRevision(graph); err != nil {
+		t.Fatal(err)
+	}
+	id, err := orchestration.WorkUnitHoldID(graph.ID, "build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold := orchestration.WorkUnitHold{SchemaVersion: orchestration.WorkUnitHoldSchemaVersion, ID: id, GraphID: graph.ID, UnitID: "build", Purpose: "approve bounded work", RequestedAt: at, RequestedBy: orchestration.DecisionResolutionAuthority{Actor: "operator-1", AuthorityKind: orchestration.AuthorityKindOperator, Provenance: "local_control_endpoint"}}
+	if _, _, err := f.store.PlaceWorkUnitHold(hold); err != nil {
+		t.Fatal(err)
+	}
+	w := webFrom(f.api)
+	target := []byte(`data-action="/v1/decisions/` + id + `/resolve"`)
+	for _, route := range []string{"/objectives/p", "/decisions"} {
+		if !bytes.Contains(getWeb(t, w, route, w.Token, 200), target) {
+			t.Fatalf("eligible decision absent at %s", route)
+		}
+	}
+	observe := f.observe
+	f.observe = func() (rt.LiveControllerSnapshot, error) {
+		live, err := observe()
+		live.Role = rt.RoleNotHeld
+		return live, err
+	}
+	for _, route := range []string{"/objectives/p", "/decisions"} {
+		body := getWeb(t, w, route, w.Token, 200)
+		if bytes.Contains(body, target) || !bytes.Contains(body, []byte("Resolution unavailable")) {
+			t.Fatalf("role-less controller offered decision at %s", route)
+		}
+	}
+}
+
+func TestDecisionControlsDisappearForUnverifiedPlanBinding(t *testing.T) {
+	f := newActionFixture(t)
+	at := time.Unix(100, 0).UTC()
+	graph, err := (orchestration.WorkGraphProposal{Name: "unverified-plan", Revision: 1, Units: []orchestration.WorkUnit{{ID: "build", Purpose: "bounded work", Role: domain.RoleImplementer, Issue: 41}}}).Compose("example/repo", "claude", "operator-1", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph.ObjectivePlan = &domain.PlanRef{ID: "p", Revision: 1, Digest: strings.Repeat("0", 64)}
+	if _, _, err := f.store.AdoptWorkGraphRevision(graph); err != nil {
+		t.Fatal(err)
+	}
+	id, err := orchestration.WorkUnitHoldID(graph.ID, "build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold := orchestration.WorkUnitHold{SchemaVersion: orchestration.WorkUnitHoldSchemaVersion, ID: id, GraphID: graph.ID, UnitID: "build", Purpose: "approve bounded work", RequestedAt: at, RequestedBy: orchestration.DecisionResolutionAuthority{Actor: "operator-1", AuthorityKind: orchestration.AuthorityKindOperator, Provenance: "local_control_endpoint"}}
+	if _, _, err := f.store.PlaceWorkUnitHold(hold); err != nil {
+		t.Fatal(err)
+	}
+	w := webFrom(f.api)
+	target := []byte(`data-action="/v1/decisions/` + id + `/resolve"`)
+	for _, check := range []struct{ route, reason string }{
+		{"/objectives/p", "differs from the execution graph binding"},
+		{"/decisions", "exact plan binding cannot be verified"},
+	} {
+		body := getWeb(t, w, check.route, w.Token, 200)
+		if bytes.Contains(body, target) || !bytes.Contains(body, []byte(check.reason)) {
+			t.Fatalf("unverified plan binding became actionable at %s: %s", check.route, body)
 		}
 	}
 }
