@@ -226,7 +226,7 @@ func PlanEvidence(reg Registry, repo Repo, changed []string) Plan {
 		plan.Reasons = append(plan.Reasons, fmt.Sprintf("%s, %d tests: %s", label, len(tests), strings.Join(reasons, ", ")))
 	}
 	if inert > 0 {
-		plan.Reasons = append(plan.Reasons, fmt.Sprintf("no behavioral evidence: %d inert path(s)", inert))
+		plan.Reasons = append(plan.Reasons, fmt.Sprintf("no focused runtime evidence: %d inert path(s)", inert))
 	}
 	plan.Run, plan.Race = sortedKeys(run), sortedKeys(race)
 	return plan

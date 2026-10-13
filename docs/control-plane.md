@@ -1,5 +1,22 @@
 # Local Control Plane read API and console
 
+## Persistent objective workspace
+
+`/objectives` lists durable plans alongside issue-backed intake. Selecting an
+objective opens `/objectives/{plan-id}`, a bookmarkable read-side composition
+with Summary, Plan, Execution, Decisions, Evidence, and Changes and PR sections.
+It reconstructs context after reload from the existing plan and the WorkGraph's
+explicit `objective_plan` binding; it creates no lifecycle record or execution
+authority. Product-associated graph summaries expose optional `objective_plan_id`
+links to this workspace. Graphs without that binding remain diagnostic graphs.
+
+A missing graph is shown as unrecorded execution. Multiple matching graphs fail
+closed; a graph bound to a different plan revision is explicitly marked. Run,
+handoff, review and publication facts retain their independent identities.
+Publication is not objective completion. Current governed actions remain on the
+existing plan, decision and run surfaces; this first navigation slice does not
+establish completion of the browser objective-to-PR experience or #448 acceptance.
+
 Start the separate process against an existing runtime state directory:
 
 ```

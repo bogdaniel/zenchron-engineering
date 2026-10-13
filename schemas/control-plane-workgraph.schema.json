@@ -21,6 +21,10 @@
           "revision"
         ],
         "properties": {
+          "objective_plan_id": {
+            "type": "string",
+            "minLength": 1
+          },
           "graph_id": {
             "type": "string"
           },
