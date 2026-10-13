@@ -18,7 +18,8 @@
         "forbidden_origin",
         "unsupported_media_type",
         "invalid_request",
-        "stream_unsupported"
+        "stream_unsupported",
+        "snapshot_changed"
       ]
     }
   }

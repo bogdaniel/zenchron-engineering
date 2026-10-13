@@ -1,0 +1,346 @@
+import { useEffect, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
+import * as api from "./api";
+import { ControllerFacts, Empty, Head, Panel } from "./components";
+import { Overview, Portfolio, Workspace } from "./pages";
+import { Decisions } from "./decisions";
+
+const navigation = [
+  ["overview", "Engineering overview", "▦"],
+  ["objectives", "Objectives", "≡"],
+  ["actions", "Action required", "◇"],
+  ["controller", "Controller health", "⌁"],
+] as const;
+type Route = { page: string; id: string; revision: number };
+type Snapshot = { controller?: api.Controller; index?: api.PlanIndex; runs?: api.Runs; context?: api.Context };
+function route(): Route {
+  try {
+    const parts = location.hash.replace(/^#\/?/, "").split("/");
+    const revision = parts[2] ? Number(parts[2]) : 0;
+    if (!Number.isSafeInteger(revision) || revision < 0 || parts.length > 3) throw new Error();
+    return { page: parts[0] || "overview", id: decodeURIComponent(parts[1] || ""), revision };
+  } catch {
+    return { page: "invalid", id: "", revision: 0 };
+  }
+}
+function Screen({ route: r }: { route: Route }) {
+  const [data, setData] = useState<Snapshot | null>(null);
+  const [loading, setLoading] = useState(true),
+    [error, setError] = useState("");
+  const [receivedAt, setReceivedAt] = useState(""),
+    [stale, setStale] = useState(false);
+  const [offset, setOffset] = useState(0),
+    [query, setQuery] = useState(""),
+    [filter, setFilter] = useState("all");
+  const [refreshKey, setRefreshKey] = useState(0);
+  useEffect(() => {
+    const owner = new AbortController();
+    let expiry: ReturnType<typeof setTimeout> | undefined;
+    setLoading(true);
+    setError("");
+    setStale(true);
+    Promise.all([
+      ["overview", "actions", "controller"].includes(r.page)
+        ? api.controller(owner.signal)
+        : Promise.resolve(undefined),
+      ["overview", "actions"].includes(r.page) || (r.page === "objectives" && !r.id)
+        ? api.plans(owner.signal, offset, query)
+        : Promise.resolve(undefined),
+      r.page === "overview" ? api.runs(owner.signal) : Promise.resolve(undefined),
+      r.id ? api.context(r.id, owner.signal, r.revision) : Promise.resolve(undefined),
+    ])
+      .then(([controller, index, runs, context]) => {
+        if (owner.signal.aborted) return;
+        setData({ controller, index, runs, context });
+        setReceivedAt(new Date().toISOString());
+        setStale(false);
+        // UI observation age only; no liveness or authority lease is inferred.
+        expiry = setTimeout(() => setStale(true), 30000);
+      })
+      .catch((e) => {
+        if (!owner.signal.aborted) {
+          setError(e instanceof Error ? e.message : "read_failed");
+          setStale(true);
+        }
+      })
+      .finally(() => {
+        if (!owner.signal.aborted) setLoading(false);
+      });
+    return () => {
+      owner.abort();
+      if (expiry) clearTimeout(expiry);
+    };
+  }, [r.page, r.id, r.revision, offset, query, refreshKey]);
+  const refresh = () => setRefreshKey((k) => k + 1);
+  let content;
+  if (!data)
+    content = loading ? (
+      <section className="panel loading-state" aria-busy="true">
+        <div className="skeleton wide" />
+        <div className="skeleton tall" />
+        <p role="status">Reading runtime state…</p>
+      </section>
+    ) : (
+      <Panel title="Engineering state unavailable">
+        <Empty title="This view could not be read">{error}. No unknown fact is interpreted as success.</Empty>
+        <div className="panel-footer">
+          <button className="button" onClick={refresh}>
+            Retry read
+          </button>
+          {error === "unauthorized" && (
+            <a href="/app" className="button">
+              Sign in again
+            </a>
+          )}
+        </div>
+      </Panel>
+    );
+  else if (r.page === "overview" && data.runs && data.controller && data.index)
+    content = <Overview controller={data.controller} index={data.index} runs={data.runs} stale={stale || loading} />;
+  else if (r.page === "objectives" && !r.id && data.index)
+    content = (
+      <Portfolio
+        index={data.index}
+        query={query}
+        filter={filter}
+        onFilter={setFilter}
+        onQuery={(q) => {
+          setQuery(q);
+          setOffset(0);
+        }}
+        onPage={setOffset}
+      />
+    );
+  else if (r.page === "objectives" && data.context)
+    content = <Workspace key={`${r.id}/${data.context.plan.revision}`} context={data.context} />;
+  else if (r.page === "actions" && data.index && data.controller)
+    content = (
+      <Decisions
+        index={data.index}
+        context={data.context}
+        controller={data.controller}
+        stale={stale || loading}
+        refresh={refresh}
+      />
+    );
+  else if (r.page === "controller" && data.controller)
+    content = (
+      <>
+        <Head eyebrow="SYSTEM / CONTROLLER" title="Controller health">
+          Identity attestation and live endpoint reachability are independent observations.
+        </Head>
+        <Panel title="Controller dimensions">
+          <ControllerFacts controller={data.controller} stale={stale} />
+        </Panel>
+      </>
+    );
+  else
+    content = (
+      <Panel title="Destination unavailable">
+        <Empty title="No supported destination">
+          Use Overview, Objectives or Action required. No subject is inferred from an invalid route.
+        </Empty>
+      </Panel>
+    );
+  return (
+    <>
+      <div className="preview-bar">
+        <div>
+          <span className="fixture-label">RUNTIME</span>
+          <span>Observed API data</span>
+        </div>
+        <button className="button" disabled={loading} onClick={refresh}>
+          {loading ? "Reading…" : "Refresh"}
+        </button>
+      </div>
+      <main id="main" tabIndex={-1}>
+        {data && (stale || error || loading) && (
+          <div className="banner orange connection-banner" role="status">
+            <div>
+              <strong>
+                {error
+                  ? `Read unavailable · ${error}`
+                  : loading
+                    ? "Refreshing · decisions unavailable"
+                    : "Snapshot stale · decisions unavailable"}
+              </strong>
+              <p>Retained observations are historical. Refresh the exact subject before acting.</p>
+            </div>
+          </div>
+        )}
+        {content}
+      </main>
+      <footer className="app-footer">
+        <span>{receivedAt ? `Browser received ${receivedAt}` : "No snapshot received"}</span>
+        <span>Receipt time does not establish live reachability.</span>
+      </footer>
+    </>
+  );
+}
+function App() {
+  const [current, setCurrent] = useState(route);
+  const [theme, setTheme] = useState(() => (localStorage.getItem("zenchron-theme") === "light" ? "light" : "dark"));
+  const [menu, setMenu] = useState(false);
+  const [mobile, setMobile] = useState(() => matchMedia("(max-width: 760px)").matches);
+  const sidebar = useRef<HTMLElement>(null),
+    toggle = useRef<HTMLButtonElement>(null);
+  const menuOpener = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    const media = matchMedia("(max-width: 760px)");
+    const changed = () => {
+      setMobile(media.matches);
+      if (!media.matches) setMenu(false);
+    };
+    media.addEventListener("change", changed);
+    return () => media.removeEventListener("change", changed);
+  }, []);
+  const openMenu = (opener: HTMLButtonElement) => {
+    menuOpener.current = opener;
+    setMenu(true);
+  };
+  const closeMenu = () => {
+    setMenu(false);
+    requestAnimationFrame(() => menuOpener.current?.focus());
+  };
+  useEffect(() => {
+    const changed = () => {
+      setCurrent(route());
+      setMenu(false);
+      requestAnimationFrame(() => {
+        window.scrollTo(0, 0);
+        document.getElementById("main")?.focus({ preventScroll: true });
+      });
+    };
+    addEventListener("hashchange", changed);
+    return () => removeEventListener("hashchange", changed);
+  }, []);
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("zenchron-theme", theme);
+  }, [theme]);
+  useEffect(() => {
+    if (!menu) return;
+    const container = sidebar.current;
+    const controls = () => [...(container?.querySelectorAll<HTMLElement>("a,button") || [])];
+    controls()[0]?.focus();
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        closeMenu();
+      }
+      if (e.key === "Tab") {
+        const items = controls(),
+          first = items[0],
+          last = items.at(-1);
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last?.focus();
+        }
+        if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first?.focus();
+        }
+      }
+    };
+    document.querySelector(".application")?.setAttribute("inert", "");
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("keydown", key);
+      document.querySelector(".application")?.removeAttribute("inert");
+    };
+  }, [menu]);
+  return (
+    <>
+      <aside
+        ref={sidebar}
+        className={`sidebar ${menu ? "is-open" : ""}`}
+        aria-label="Engineering OS navigation"
+        inert={mobile && !menu}
+        role={menu ? "dialog" : undefined}
+        aria-modal={menu ? true : undefined}
+      >
+        <div className="brand">
+          <div className="brand-symbol" aria-hidden="true">
+            Z<span>+</span>
+          </div>
+          <div>
+            ZENCHRON<small>ENGINEERING OS</small>
+          </div>
+        </div>
+        <div className="local-workspace">
+          <div className="workspace-mark">Z</div>
+          <div>
+            <strong>Local control plane</strong>
+            <small>Governed runtime</small>
+          </div>
+        </div>
+        <div className="nav-label eyebrow">OPERATIONS</div>
+        <nav>
+          {navigation.map(([to, label, icon]) => (
+            <a key={to} href={`#/${to}`} aria-current={current.page === to ? "page" : undefined}>
+              <span aria-hidden="true">{icon}</span>
+              {label}
+            </a>
+          ))}
+        </nav>
+        <div className="sidebar-bottom">
+          <p className="sidebar-health">Identity records and endpoint reachability are inspected separately.</p>
+          <div className="sidebar-edition">
+            <span>LOCAL CONTROL PLANE</span>
+            <span>Existing governed backend</span>
+          </div>
+        </div>
+        {menu && (
+          <button className="button" onClick={closeMenu}>
+            Close navigation
+          </button>
+        )}
+      </aside>
+      <div className="application">
+        <header className="topbar">
+          <div className="topbar-location">
+            <button
+              ref={toggle}
+              className="icon-button menu-toggle"
+              aria-label="Open navigation"
+              aria-expanded={menu}
+              onClick={(event) => openMenu(event.currentTarget)}
+            >
+              ☰
+            </button>
+            <span className="topbar-product">Engineering OS</span>
+            <span className="topbar-slash">/</span>
+            <span className="muted">Local workspace</span>
+          </div>
+          <div className="topbar-tools">
+            <button
+              className="icon-button"
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            >
+              {theme === "dark" ? "☀" : "◐"}
+            </button>
+          </div>
+        </header>
+        <Screen key={`${current.page}/${current.id}/${current.revision}`} route={current} />
+        <nav className="mobile-nav" aria-label="Mobile navigation">
+          {navigation
+            .filter(([to]) => to !== "controller")
+            .map(([to, label, icon]) => (
+              <a key={to} href={`#/${to}`} aria-current={current.page === to ? "page" : undefined}>
+                <span aria-hidden="true">{icon}</span>
+                <span>{to === "overview" ? "Overview" : to === "actions" ? "Decisions" : label}</span>
+              </a>
+            ))}
+          <button aria-label="More navigation" onClick={(event) => openMenu(event.currentTarget)}>
+            <span aria-hidden="true">☰</span>
+            <span>More</span>
+          </button>
+        </nav>
+      </div>
+    </>
+  );
+}
+const root = document.getElementById("app");
+if (!root) throw new Error("Application root missing");
+document.title = "Zenchron · Engineering OS";
+createRoot(root).render(<App />);

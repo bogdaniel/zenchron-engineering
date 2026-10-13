@@ -1,0 +1,36 @@
+{
+  "source": "Isolated test data, actual controller/socket/role/journal; no production fleet measurements",
+  "phase": "reject",
+  "checks": [
+    "390px exact subject, visible actions, collapsed binding; unsupported approval disabled",
+    "Fresh review reads; exact digest/controller POST; real governed rejection; durable receipt; focus retained; one submission"
+  ],
+  "captures": [
+    "overview-1440-dark.png",
+    "portfolio-1440-dark.png",
+    "workspace-1440-dark.png",
+    "actions-1440-dark.png",
+    "overview-1920-dark.png",
+    "portfolio-1920-dark.png",
+    "workspace-1920-dark.png",
+    "actions-1920-dark.png",
+    "overview-390-dark.png",
+    "portfolio-390-dark.png",
+    "workspace-390-dark.png",
+    "actions-390-dark.png",
+    "overview-1440-light.png",
+    "portfolio-1440-light.png",
+    "workspace-1440-light.png",
+    "actions-1440-light.png",
+    "overview-1920-light.png",
+    "portfolio-1920-light.png",
+    "workspace-1920-light.png",
+    "actions-1920-light.png",
+    "overview-390-light.png",
+    "portfolio-390-light.png",
+    "workspace-390-light.png",
+    "actions-390-light.png",
+    "confirmation-390-expanded.png",
+    "receipt-390-dark.png"
+  ]
+}

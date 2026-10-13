@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["plan", "pending"],
+  "properties": {
+    "plan": {"$ref": "control-plane-plan-detail.schema.json"},
+    "pending": {"type": "boolean"},
+    "receipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "revision", "digest", "sequence", "occurred_at"],
+      "properties": {
+        "status": {"enum": ["approved", "rejected"]},
+        "revision": {"type": "integer", "minimum": 1}, "digest": {"type": "string"},
+        "sequence": {"type": "integer", "minimum": 1}, "occurred_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

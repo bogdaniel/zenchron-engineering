@@ -292,6 +292,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{id}/events", a.events)
 	mux.HandleFunc("GET /v1/runs/{id}/stream", a.stream)
 	mux.HandleFunc("GET /v1/plans/{id}", a.plan)
+	mux.HandleFunc("GET /v1/plans", a.plans)
+	mux.HandleFunc("GET /v1/plans/{id}/context", a.planContext)
 	mux.HandleFunc("GET /v1/plans/{id}/detail", a.planDetail)
 	mux.HandleFunc("GET /v1/products", a.products)
 	mux.HandleFunc("GET /v1/products/{id}", a.product)

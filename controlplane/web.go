@@ -97,6 +97,7 @@ func (w *Web) Handler() http.Handler {
 	mux.HandleFunc("GET /products/{id}", w.handleProductDetail)
 	mux.HandleFunc("GET /workgraphs", w.handleWorkGraphs)
 	mux.HandleFunc("GET /workgraphs/{id}", w.handleWorkGraphDetail)
+	w.registerEngineeringApplication(mux)
 	mux.Handle("GET /static/", http.FileServerFS(webStaticFiles))
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Cache-Control", "no-store")

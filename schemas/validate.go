@@ -57,6 +57,8 @@ func mustCompile() map[string]*jsonschema.Schema {
 		"control-plane-run-stream",
 		"control-plane-plan",
 		"control-plane-plan-detail",
+		"control-plane-plan-index",
+		"control-plane-plan-context",
 		"control-plane-product",
 		"control-plane-product-detail",
 		"control-plane-workgraph",

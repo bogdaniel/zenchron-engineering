@@ -155,6 +155,26 @@ introduce an independently maintained projection cache.
 
 ## Console
 
+### Visual design checkpoint
+
+An authenticated, fixture-only replacement preview is available at `/design` on
+this same listener. It includes Engineering Overview, Objectives Portfolio,
+Objective Workspace and Action Required, with dark/light themes and mobile layouts.
+Its simulated decisions never call the runtime. The current console and all
+`/v1/` contracts remain supported during review; no legacy interface has been removed.
+The accepted React/TypeScript application is being implemented at `/app` on this same listener.
+Its first batch reads controller state and bounded plan/source contexts, inspects exact plan
+revisions and submits only the existing governed `plan-reject` action. Approval and publication
+controls remain disabled. Full operational parity is pending; the legacy console remains available.
+Build the embedded asset with `npm ci --ignore-scripts` and `npm run build` inside `frontend/` before
+building Go. Production uses the Go binary alone, with no independent frontend server.
+The additive read endpoints `/v1/plans?limit=50&offset=0&q=...` and
+`/v1/plans/{id}/context?revision=...` expose sanitized source identities, canonical pending state
+and exact historical decision receipts. A torn context read returns 409 `snapshot_changed`;
+it grants no authority and is never retried implicitly.
+See [the implementation batch](design/runtime-integration.md), [the design checkpoint](design/README.md) and
+[the frontend consolidation inventory](design/frontend-inventory.md).
+
 The same process also serves a server-rendered operator console on every
 other path, behind the identical bearer token, listener and store this
 document already describes - there is no second HTTP server, token lifecycle
