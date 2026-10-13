@@ -49,6 +49,9 @@ func TestBrowserWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(built.release)
+	if _, err := built.store.ClaimPlanAttempt("browser-planning-only", "zenchron/seeded", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(built.agent.CredentialPath, []byte("unused-browser-boundary-fixture"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +73,22 @@ func TestBrowserWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	service, err := built.planService()
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := service.DurableView(plan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objectiveGraph, err := service.BindObjectivePlan(view.Plan, 41, built.agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objectiveHold, err := driver.PlaceWorkUnitHold(runtime.ControlRequest{GraphID: objectiveGraph, UnitID: "implementation", Operator: "operator-1", Note: "Inspect exact objective context"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	graph, err := (orchestration.WorkGraphProposal{Name: "browser-approval-flow", Revision: 1, Units: []orchestration.WorkUnit{
 		{ID: "implementation", Purpose: "Implement widget behavior", Role: domain.RoleImplementer, Issue: 41},
 		{ID: "integration", Purpose: "Integrate verified widget", Role: domain.RoleIntegrator, Issue: 42, DependsOn: []string{"implementation"}},
@@ -85,7 +104,7 @@ func TestBrowserWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runBrowserFixture(t, root, built, driver, []string{"ZENCHRON_E2E_PLAN=" + plan, "ZENCHRON_E2E_GRAPH=" + graph.ID, "ZENCHRON_E2E_DECISION=" + hold.ID})
+	runBrowserFixture(t, root, built, driver, []string{"ZENCHRON_E2E_PLAN=" + plan, "ZENCHRON_E2E_GRAPH=" + graph.ID, "ZENCHRON_E2E_DECISION=" + hold.ID, "ZENCHRON_E2E_OBJECTIVE_DECISION=" + objectiveHold.ID, "ZENCHRON_E2E_OBJECTIVE_GRAPH=" + objectiveGraph})
 }
 
 func runBrowserFixture(t *testing.T, root string, built *composition, driver *runtime.Supervisor, environment []string) {

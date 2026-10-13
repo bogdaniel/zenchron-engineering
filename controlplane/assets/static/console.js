@@ -159,7 +159,11 @@
       return;
     }
     if (current.nodeType !== Node.ELEMENT_NODE) return;
-    if (current.matches("input, textarea, select, form, #plan-approval, #plan-preview-status, #publication-actions")) return;
+    if (current.matches("#publication-actions, [data-publication-run]")) {
+      ["run", "binding", "candidate"].forEach(function (key) { current.dataset[key] = next.dataset[key] || ""; });
+      return;
+    }
+    if (current.matches("input, textarea, select, form, #plan-approval, #plan-preview-status")) return;
     Array.from(current.attributes).forEach(function (attribute) {
       if (!next.hasAttribute(attribute.name) && !(current.tagName === "DETAILS" && attribute.name === "open")) {
         current.removeAttribute(attribute.name);
@@ -212,6 +216,7 @@
       .then(function (html) {
         swapRegions(new DOMParser().parseFromString(html, "text/html"));
         renderWorkGraphMaps();
+        loadPublicationRequest();
         lastGood = Date.now();
         failure = "";
         confirmed = true;
@@ -323,9 +328,13 @@
         return response.json();
       }).then(function (plan) {
         var status = byId("plan-preview-status");
+        if (Number(container.dataset.revision) !== plan.revision || container.dataset.digest !== plan.digest) {
+          status.textContent = "The plan changed or this historical revision is no longer current. Reload and inspect the current plan before approving.";
+          return;
+        }
         status.textContent = "Revision " + plan.revision + " · " + (plan.shown || "unknown state");
         var objective = document.createElement("p"); objective.textContent = plan.objective || "Objective unavailable"; container.appendChild(objective);
-        var stages = document.createElement("div"); stages.className = "graph-map";
+        var stages = document.createElement("div"); stages.className = "grid";
         (plan.stages || []).forEach(function (stage) {
           var card = document.createElement("article"); card.className = "stat";
           var title = document.createElement("strong"); title.textContent = (plan.stage_objectives || {})[stage.stage_id] || stage.stage_id; card.appendChild(title);
@@ -362,38 +371,72 @@
           generation: plan.controller_binding || container.dataset.binding,
           consequence: "Requests a new AI proposal from the same objective. It does not approve that proposal or widen authority; existing governing work remains governed by its approved revision." });
         container.appendChild(revise);
+        var reject = document.createElement("button"); reject.type = "button"; reject.textContent = "Reject exact plan…";
+        Object.assign(reject.dataset, { action: "/v1/plans/" + encodeURIComponent(container.dataset.plan) + "/reject",
+          binding: plan.controller_binding || container.dataset.binding, revision: String(plan.revision), digest: plan.digest,
+          target: "Plan " + container.dataset.plan + " revision " + plan.revision + " digest " + plan.digest,
+          generation: plan.controller_binding || container.dataset.binding,
+          consequence: "Records a durable refusal of this exact revision. Existing governing work remains governed by its approved revision." });
+        container.appendChild(reject);
       }).catch(function (error) { byId("plan-preview-status").textContent = error.message; });
   }
 
   function loadPublicationRequest() {
-    var container = byId("publication-actions");
-    if (!container) return;
-    container.replaceChildren();
-    var status = document.createElement("p"); status.setAttribute("role", "status");
-    status.textContent = "Loading publication authority request…"; container.appendChild(status);
-    fetch("/v1/runs/" + encodeURIComponent(container.dataset.run) + "/authority", { headers: authHeaders(), signal: AbortSignal.timeout(10000) })
-      .then(function (response) {
-        if (!response.ok) throw new Error("Publication unavailable (HTTP " + response.status + ")");
-        return response.json();
-      }).then(function (request) {
-        if (!request || !request.id || !request.requires || !request.requires.length || !container.dataset.binding) {
-          status.textContent = "No human publication authorization is currently available for this candidate.";
-          return;
-        }
-        status.textContent = "Publication requires your decision for the exact candidate below.";
-        var details = document.createElement("details");
-        var summary = document.createElement("summary"); summary.textContent = "Candidate, contract, action, and evidence binding"; details.appendChild(summary);
-        var exact = document.createElement("pre"); exact.textContent = JSON.stringify(request, null, 2); details.appendChild(exact); container.appendChild(details);
-        ["approve", "reject"].forEach(function (decision) {
-          var button = document.createElement("button"); button.type = "button"; button.className = "action";
-          button.textContent = decision === "approve" ? "Authorize publication…" : "Reject publication…";
-          Object.assign(button.dataset, { action: "/v1/runs/" + encodeURIComponent(container.dataset.run) + "/authorize", binding: container.dataset.binding,
-            requestId: request.id, digest: request.digest, decision: decision,
-            target: JSON.stringify({ request: request.id, candidate: request.candidate, contract: request.contract, action: request.action }),
-            generation: container.dataset.binding, consequence: decision === "approve" ? "Records human approval evidence for this exact publication request. The kernel still verifies policy, final candidate eligibility, and independent assurance before publishing." : "Records failed human approval evidence and blocks this publication request." });
-          container.appendChild(button);
+    document.querySelectorAll("#publication-actions, [data-publication-run]").forEach(function (container) {
+      var key = container.dataset.run + ":" + container.dataset.binding + ":" + container.dataset.candidate;
+      if (container.dataset.loaded !== key) {
+        if (container.publicationReadController) container.publicationReadController.abort();
+        container.dataset.loaded = key;
+        container.dataset.requestSequence = String(Number(container.dataset.requestSequence || 0) + 1);
+        container.dataset.requestIdentity = "";
+        container.replaceChildren();
+      }
+      if (container.publicationReadController) return;
+      var sequence = container.dataset.requestSequence;
+      var readController = new AbortController();
+      container.publicationReadController = readController;
+      fetch("/v1/runs/" + encodeURIComponent(container.dataset.run) + "/authority", { headers: authHeaders(), signal: AbortSignal.any([readController.signal, AbortSignal.timeout(10000)]) })
+        .then(function (response) {
+          if (!response.ok) throw new Error("Publication unavailable (HTTP " + response.status + ")");
+          return response.json();
+        }).then(function (request) {
+          if (!container.isConnected || container.dataset.loaded !== key || container.dataset.requestSequence !== sequence) return;
+          var identity = request && request.id ? JSON.stringify([request.id, request.digest, request.contract, request.action, request.candidate, request.requires]) : "none";
+          if (container.dataset.requestIdentity === identity) return;
+          container.dataset.requestIdentity = identity;
+          container.replaceChildren();
+          var status = document.createElement("p"); status.setAttribute("role", "status");
+          if (!request || !request.id || !request.requires || !request.requires.length || !container.dataset.binding) {
+            status.textContent = "No human publication authorization is currently available for this candidate.";
+            container.appendChild(status);
+            return;
+          }
+          status.textContent = "Publication requires your decision for the exact candidate below.";
+          var target = document.createElement("p"); target.textContent = "Target: " + request.action.target + " · Candidate: " + request.candidate.revision + " · Tree: " + request.candidate.tree;
+          target.className = "mono"; container.appendChild(target);
+          var details = document.createElement("details");
+          var summary = document.createElement("summary"); summary.textContent = "Candidate, contract, action, and evidence binding"; details.appendChild(summary);
+          var exact = document.createElement("pre"); exact.textContent = JSON.stringify(request, null, 2); details.appendChild(exact); container.appendChild(details);
+          ["approve", "reject"].forEach(function (decision) {
+            var button = document.createElement("button"); button.type = "button"; button.className = "action";
+            button.textContent = decision === "approve" ? "Authorize publication…" : "Reject publication…";
+            Object.assign(button.dataset, { action: "/v1/runs/" + encodeURIComponent(container.dataset.run) + "/authorize", binding: container.dataset.binding,
+              requestId: request.id, digest: request.digest, decision: decision,
+              target: JSON.stringify({ request: request.id, candidate: request.candidate, contract: request.contract, action: request.action }),
+              generation: container.dataset.binding, consequence: decision === "approve" ? "Records human approval evidence for this exact publication request. The kernel still verifies policy, final candidate eligibility, and independent assurance before publishing." : "Records failed human approval evidence and blocks this publication request." });
+            container.appendChild(button);
+          });
+        }).catch(function (error) {
+          if (!container.isConnected || container.dataset.loaded !== key || container.dataset.requestSequence !== sequence) return;
+          container.dataset.requestIdentity = "unavailable";
+          container.replaceChildren();
+          var status = document.createElement("p"); status.setAttribute("role", "status");
+          status.textContent = error.message;
+          container.appendChild(status);
+        }).finally(function () {
+          if (container.publicationReadController === readController) delete container.publicationReadController;
         });
-      }).catch(function (error) { status.textContent = error.message; });
+    });
   }
 
   function loadWorkspaceOptions(attempt) {
@@ -516,7 +559,7 @@
             var status = byId("objective-status");
             status.textContent = result.error || [result.outcome, result.code, result.detail].filter(Boolean).join(" · ");
             if (result.state && result.state.plan_id) {
-              var link = document.createElement("a"); link.href = "/plans/" + encodeURIComponent(result.state.plan_id); link.textContent = "Inspect generated plan →";
+              var link = document.createElement("a"); link.href = "/objectives/" + encodeURIComponent(result.state.plan_id); link.textContent = "Review objective and generated plan →";
               status.appendChild(document.createElement("br")); status.appendChild(link);
             }
           }).catch(function () { byId("objective-status").textContent = "Outcome unconfirmed. Inspect Plans before submitting again; this request is never retried automatically."; });
