@@ -24,7 +24,7 @@
 <section class="panel" id="plan-actions">
   <h2>Operator actions</h2>
   <p id="plan-preview-status" role="status">Loading exact assignment binding…</p>
-  <div id="plan-approval" data-plan="{{$p.ID}}" data-binding="{{with .Controller}}{{.ControllerBinding}}{{end}}"></div>
+  <div id="plan-approval" data-plan="{{$p.ID}}" data-revision="{{$p.Revision}}" data-digest="{{$p.Digest}}" data-binding="{{with .Controller}}{{.ControllerBinding}}{{end}}"></div>
   {{if .RejectDisabled}}<p class="muted">reject unavailable: {{.RejectDisabled}}</p>
   {{else}}{{with .Controller}}<button type="button" class="action" data-action="/v1/plans/{{$p.ID}}/reject" data-binding="{{.ControllerBinding}}"
     data-revision="{{$p.Revision}}" data-digest="{{$p.Digest}}"

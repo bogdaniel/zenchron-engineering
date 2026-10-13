@@ -209,6 +209,17 @@ try {
     await screenshot('mobile-objective');
     await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
   });
+  await check('objective offers exact guided plan actions and refuses changed preview identity', async () => {
+    const plan = process.env.ZENCHRON_E2E_PLAN;
+    await cdp.navigate('/objectives/' + plan);
+    await until(() => cdp.evaluate(`Boolean(document.querySelector('[data-action$="/approve"]'))`), 'objective approval preview');
+    assert(await cdp.evaluate(`Boolean(document.querySelector('[data-action$="/revise"]'))`));
+    assert(await cdp.evaluate(`Boolean(document.querySelector('[data-action$="/reject"]'))`));
+    assert(await cdp.evaluate(`/profile browser-implementer@/.test(document.querySelector('#plan-approval').textContent)`));
+    await cdp.evaluate(`document.querySelector('#plan-approval').dataset.revision='0';document.querySelector('#action-dialog').showModal();document.querySelector('#action-dialog').close()`);
+    await until(() => cdp.evaluate(`/plan changed/.test(document.querySelector('#plan-preview-status').textContent)`), 'changed preview refusal');
+    assert(await cdp.evaluate(`!document.querySelector('#plan-approval [data-action]')`));
+  });
   await check('plan approval binds exact assignment and starts no work before confirmation', async () => {
     const plan = process.env.ZENCHRON_E2E_PLAN;
     await cdp.navigate('/plans/' + plan);
@@ -231,16 +242,16 @@ try {
     await until(() => cdp.evaluate(`!document.querySelector('#objective-submit').disabled`), 'eligible intake options');
     assert(await cdp.evaluate(`Array.from(document.querySelector('#objective-profile').options).some(option => option.value === 'browser-implementer-alt')`), 'installed profiles must be selectable');
     await cdp.evaluate(`document.querySelector('#objective-issue').value='41';document.querySelector('#objective-form').requestSubmit();document.querySelector('#objective-form').requestSubmit()`);
-    await until(() => cdp.evaluate(`Boolean(document.querySelector('#objective-status a[href^=\"/plans/\"]'))`), 'idempotent objective plan result');
+    await until(() => cdp.evaluate(`Boolean(document.querySelector('#objective-status a[href^=\"/objectives/\"]'))`), 'idempotent objective plan result');
     assert(await cdp.evaluate(`document.querySelector('#objective-submit').disabled`), 'ambiguous intake must not silently retry');
-    assert.equal(await cdp.evaluate(`document.querySelector('#objective-status a').getAttribute('href')`), '/plans/' + process.env.ZENCHRON_E2E_PLAN);
+    assert.equal(await cdp.evaluate(`document.querySelector('#objective-status a').getAttribute('href')`), '/objectives/' + process.env.ZENCHRON_E2E_PLAN);
     await screenshot('desktop-objective-intake');
   });
   await check('selected profile preference reaches a deterministic objective plan', async () => {
     await cdp.navigate('/objectives');
     await until(() => cdp.evaluate(`!document.querySelector('#objective-submit').disabled`), 'eligible intake options');
     await cdp.evaluate(`document.querySelector('#objective-issue').value='42';document.querySelector('#objective-profile').value='browser-implementer-alt';document.querySelector('#objective-deterministic').checked=true;document.querySelector('#objective-form').requestSubmit()`);
-    await until(() => cdp.evaluate(`Boolean(document.querySelector('#objective-status a[href^="/plans/"]'))`), 'profile-bound plan proposal');
+    await until(() => cdp.evaluate(`Boolean(document.querySelector('#objective-status a[href^="/objectives/"]'))`), 'profile-bound plan proposal');
     const href = await cdp.evaluate(`document.querySelector('#objective-status a').getAttribute('href')`);
     await cdp.navigate(href);
     await until(() => cdp.evaluate(`/browser-implementer-alt@1/.test(document.body.innerText)`), 'selected profile assignment');
