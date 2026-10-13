@@ -58,6 +58,7 @@ export type Run = {
   phase: string;
   disposition: string;
   executing: boolean;
+  unavailable: boolean;
 };
 export type Runs = { runs: Run[]; has_more: boolean; offset: number };
 export type ActionResult = {
@@ -251,6 +252,7 @@ export async function runs(signal: AbortSignal): Promise<Runs> {
         phase: str(x.phase),
         disposition: str(x.disposition),
         executing: bool(x.executing),
+        unavailable: x.unavailable === undefined ? false : bool(x.unavailable),
       };
     }),
   };

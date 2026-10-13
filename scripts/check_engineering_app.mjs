@@ -110,10 +110,37 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
           },
         });
       }
-      if (url.pathname === "/v1/runs") return route.fulfill({ json: { runs: [], offset: 0, has_more: false } });
+      if (url.pathname === "/v1/runs")
+        return route.fulfill({
+          json: {
+            runs:
+              mode === "unavailable-run"
+                ? [
+                    {
+                      run_id: "unreadable-run",
+                      phase: "execution",
+                      disposition: "active",
+                      executing: true,
+                      unavailable: true,
+                    },
+                  ]
+                : [],
+            offset: 0,
+            has_more: false,
+          },
+        });
       throw new Error("Unexpected read path " + url.pathname);
     });
     await page.setViewportSize({ width: 1440, height: 1080 });
+    mode = "unavailable-run";
+    await page.goto(base + "/app#/overview");
+    await page.getByText("Observation unavailable · execution and result unknown", { exact: true }).waitFor();
+    assert.match(await page.locator(".pipeline-cell").nth(2).innerText(), /≥0[\s\S]*1 unknown/);
+    assert.match(
+      await page.locator("main").innerText(),
+      /0 known executing runs in loaded page · 1 unknown observations/,
+    );
+    mode = "ready";
     await page.goto(base + "/app#/objectives");
     await page.getByRole("heading", { name: "Objectives", exact: true }).waitFor();
     assert.equal(await page.locator("tbody tr").count(), 50);

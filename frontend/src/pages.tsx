@@ -61,10 +61,16 @@ export function Overview({
   stale: boolean;
 }) {
   const pending = index.plans.filter((p) => p.pending);
+  const executing = runs.runs.filter((r) => !r.unavailable && r.executing).length;
+  const unavailable = runs.runs.filter((r) => r.unavailable).length;
   const dimensions = [
     ["Intent", index.plans.length.toString(), "Plan source contexts loaded"],
     ["Plan", pending.length.toString(), "Revisions awaiting a human decision"],
-    ["Execute", runs.runs.filter((r) => r.executing).length.toString(), "Executing runs loaded"],
+    [
+      "Execute",
+      `${unavailable ? "≥" : ""}${executing}`,
+      `Executing runs loaded${unavailable ? ` · ${unavailable} unknown` : ""}`,
+    ],
     ["Assure", "Unavailable", "No aggregate evidence projection"],
     ["Authorize", stale || blocker(controller) ? "0" : pending.length.toString(), "Rejections available at read time"],
     ["Publish", "Unavailable", "No accepted-change series"],
@@ -112,8 +118,9 @@ export function Overview({
         <Panel title="Execution capacity & recent results">
           <div className="product-body">
             <p>
-              {runs.runs.filter((r) => r.executing).length} executing runs in loaded page · installed-agent capacity
-              ceiling unavailable.
+              {executing} known executing runs in loaded page
+              {unavailable ? ` · ${unavailable} unknown observations` : ""} · installed-agent capacity ceiling
+              unavailable.
             </p>
             {runs.runs.length ? (
               <ul className="diagnostic-list">
@@ -121,7 +128,9 @@ export function Overview({
                   <li key={r.run_id}>
                     <span className="mono exact-value">{r.run_id}</span>
                     <br />
-                    {r.phase} · {r.disposition}
+                    {r.unavailable
+                      ? "Observation unavailable · execution and result unknown"
+                      : `${r.phase} · ${r.disposition}`}
                     <br />
                     Agent {r.agent || "unassigned"}
                   </li>
