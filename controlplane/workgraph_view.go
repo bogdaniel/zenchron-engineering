@@ -32,15 +32,18 @@ func workGraphSummaryProjection(g orchestration.WorkGraph) WorkGraphSummary {
 // #476 product this graph is associated with, when any; a graph adopted
 // before any association exists has none, never a fabricated one.
 type WorkGraphDetail struct {
-	ID         string                `json:"graph_id"`
-	Repository string                `json:"repository"`
-	AgentID    string                `json:"agent_id"`
-	Name       string                `json:"name"`
-	Revision   int                   `json:"revision"`
-	Frontier   []string              `json:"frontier,omitempty"`
-	Counts     map[string]int        `json:"counts"`
-	Units      []WorkGraphUnitDetail `json:"units"`
-	Product    *ProductSummary       `json:"product,omitempty"`
+	ObjectivePlanID       string                `json:"objective_plan_id,omitempty"`
+	ObjectivePlanRevision int                   `json:"objective_plan_revision,omitempty"`
+	ObjectivePlanDigest   string                `json:"objective_plan_digest,omitempty"`
+	ID                    string                `json:"graph_id"`
+	Repository            string                `json:"repository"`
+	AgentID               string                `json:"agent_id"`
+	Name                  string                `json:"name"`
+	Revision              int                   `json:"revision"`
+	Frontier              []string              `json:"frontier,omitempty"`
+	Counts                map[string]int        `json:"counts"`
+	Units                 []WorkGraphUnitDetail `json:"units"`
+	Product               *ProductSummary       `json:"product,omitempty"`
 }
 
 // WorkGraphUnitDetail is one unit, its own already-projected facts
@@ -194,6 +197,11 @@ func workGraphDetailProjection(view rt.WorkGraphView, product *ProductSummary,
 			"failed":            view.Counts.Activated.Failed,
 			"stopped":           view.Counts.Activated.Stopped,
 		},
+	}
+	if view.ObjectivePlan != nil {
+		out.ObjectivePlanID = view.ObjectivePlan.ID
+		out.ObjectivePlanRevision = view.ObjectivePlan.Revision
+		out.ObjectivePlanDigest = view.ObjectivePlan.Digest
 	}
 	for _, unit := range view.Units {
 		var run *RunDetail

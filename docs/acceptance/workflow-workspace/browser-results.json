@@ -1,0 +1,105 @@
+{
+  "base": "http://127.0.0.1:53488",
+  "results": [
+    {
+      "name": "login rejects wrong token and keyboard submits correct token",
+      "status": "passed"
+    },
+    {
+      "name": "product navigation has functioning accessible routes",
+      "status": "passed"
+    },
+    {
+      "name": "overview surfaces controller health and authority queues",
+      "status": "passed"
+    },
+    {
+      "name": "agent configuration exposes profiles and template empty states",
+      "status": "passed"
+    },
+    {
+      "name": "desktop and mobile layout have no document overflow",
+      "status": "passed"
+    },
+    {
+      "name": "live refresh retains focused controls and honest freshness",
+      "status": "passed"
+    },
+    {
+      "name": "controller observation failure does not block workspace refresh",
+      "status": "passed"
+    },
+    {
+      "name": "stale generation and permission refusals leave durable run unchanged",
+      "status": "passed"
+    },
+    {
+      "name": "stop requires confirmation and duplicate submissions have one effect",
+      "status": "passed"
+    },
+    {
+      "name": "stale plan revision is refused without authorization",
+      "status": "passed"
+    },
+    {
+      "name": "objective workspace survives reload and preserves durable plan context",
+      "status": "passed"
+    },
+    {
+      "name": "planning identity survives reload without invented plan approval",
+      "status": "passed"
+    },
+    {
+      "name": "objective offers exact guided plan actions and refuses changed preview identity",
+      "status": "passed"
+    },
+    {
+      "name": "objective-scoped decision resolves durably without bypass execution",
+      "status": "passed"
+    },
+    {
+      "name": "plan approval binds exact assignment and starts no work before confirmation",
+      "status": "passed"
+    },
+    {
+      "name": "browser objective intake reuses existing plan without duplicate planning",
+      "status": "passed"
+    },
+    {
+      "name": "selected profile preference reaches a deterministic objective plan",
+      "status": "passed"
+    },
+    {
+      "name": "WorkGraph displays dependencies and preactivation authority hold",
+      "status": "passed"
+    },
+    {
+      "name": "run detail offers only the current pause transition",
+      "status": "passed"
+    },
+    {
+      "name": "objective without publication gate stays incomplete and non-actionable",
+      "status": "passed"
+    },
+    {
+      "name": "runtime refusal never exposes publication authorization",
+      "status": "passed"
+    },
+    {
+      "name": "designated operator resolves exact WorkUnit hold through browser",
+      "status": "passed"
+    },
+    {
+      "name": "theme control is keyboard reachable and changes appearance",
+      "status": "passed"
+    },
+    {
+      "name": "controller disconnect disables governed actions",
+      "status": "passed"
+    },
+    {
+      "name": "HTTP disconnect marks retained data stale",
+      "status": "passed"
+    }
+  ]
+}

@@ -81,7 +81,7 @@ func TestActionRequiredPaginatesPlanApprovalsSeparately(t *testing.T) {
 	}
 
 	second := string(getWeb(t, w, "/decisions?plans_offset=100", w.Token, 200))
-	if !strings.Contains(second, "/plans/plan-100") || strings.Contains(second, "/plans/plan-000") {
+	if !strings.Contains(second, "/objectives/plan-100#plan") || strings.Contains(second, "/objectives/plan-000#plan") {
 		t.Fatal("second page does not show only the remaining plan approval")
 	}
 	if !strings.Contains(second, `href="/decisions"`) || strings.Contains(second, "Next plans") {
