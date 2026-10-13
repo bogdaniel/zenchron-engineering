@@ -19,11 +19,12 @@ import (
 
 // WorkGraphView is one graph read through its units.
 type WorkGraphView struct {
-	GraphID    string `json:"graph_id"`
-	Repository string `json:"repository"`
-	AgentID    string `json:"agent_id"`
-	Name       string `json:"name"`
-	Revision   int    `json:"revision"`
+	GraphID       string          `json:"graph_id"`
+	Repository    string          `json:"repository"`
+	AgentID       string          `json:"agent_id"`
+	Name          string          `json:"name"`
+	Revision      int             `json:"revision"`
+	ObjectivePlan *domain.PlanRef `json:"objective_plan,omitempty"`
 	// RevisionDigest is the content identity of the revision this view read.
 	RevisionDigest string                        `json:"revision_digest"`
 	RequestedBy    string                        `json:"requested_by,omitempty"`
@@ -159,7 +160,8 @@ func WorkGraphStatus(store *SQLiteOperationStore, stateDir, graphID string, now 
 	}
 	view := WorkGraphView{
 		GraphID: graph.ID, Repository: graph.Repository, AgentID: graph.AgentID, Name: graph.Name,
-		Revision: graph.Revision, RevisionDigest: digest, RequestedBy: graph.RequestedBy,
+		Revision: graph.Revision, ObjectivePlan: graph.ObjectivePlan,
+		RevisionDigest: digest, RequestedBy: graph.RequestedBy,
 		CreatedAt: graph.CreatedAt, Frontier: projection.Frontier,
 	}
 	for _, unit := range graph.Units {

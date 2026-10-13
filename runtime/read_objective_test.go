@@ -36,6 +36,10 @@ func TestObjectiveGraphReadsExplicitBindingAcrossReopenAndRefusesAmbiguity(t *te
 		if err != nil || !found || got.ID != graph.ID || *got.ObjectivePlan != *graph.ObjectivePlan {
 			t.Fatalf("binding after reopen: graph=%+v found=%t err=%v", got, found, err)
 		}
+		view, err := reader.WorkGraphStatus(graph.ID, time.Now().UTC())
+		if err != nil || view.ObjectivePlan == nil || *view.ObjectivePlan != *graph.ObjectivePlan {
+			t.Fatalf("projected graph lost its own exact plan binding: %+v err=%v", view.ObjectivePlan, err)
+		}
 		if _, found, err := reader.ObjectiveGraph("missing"); err != nil || found {
 			t.Fatalf("missing binding: found=%t err=%v", found, err)
 		}

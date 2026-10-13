@@ -209,6 +209,19 @@ try {
     await screenshot('mobile-objective');
     await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
   });
+  await check('planning identity survives reload without invented plan approval', async () => {
+    await cdp.navigate('/objectives');
+    assert(await cdp.evaluate(`Boolean(document.querySelector('a[href="/objectives/browser-planning-only"]'))`));
+    await cdp.navigate('/objectives/browser-planning-only');
+    for (let visit = 0; visit < 2; visit++) {
+      assert(await cdp.evaluate(`/No plan revision is recorded/.test(document.querySelector('#plan').textContent)`));
+      assert(await cdp.evaluate(`!document.querySelector('#plan-approval') && !document.querySelector('[data-action$="/approve"]')`));
+      if (visit === 0) {
+        await cdp.call('Page.reload');
+        await until(() => cdp.evaluate(`Boolean(document.querySelector('#objective-live'))`), 'planning identity reload');
+      }
+    }
+  });
   await check('objective offers exact guided plan actions and refuses changed preview identity', async () => {
     const plan = process.env.ZENCHRON_E2E_PLAN;
     await cdp.navigate('/objectives/' + plan);
@@ -224,7 +237,7 @@ try {
     const plan = process.env.ZENCHRON_E2E_PLAN;
     const decision = process.env.ZENCHRON_E2E_OBJECTIVE_DECISION;
     await cdp.navigate('/decisions');
-    assert(await cdp.evaluate(`Boolean(document.querySelector('a[href="/objectives/${plan}#decisions"]'))`), 'inbox must return to objective context');
+    assert(await cdp.evaluate(`Boolean(document.querySelector('a[href="/objectives/${plan}?revision=1#decisions"]'))`), 'inbox must return to objective context');
     await cdp.navigate('/objectives/' + plan);
     await cdp.evaluate(`document.querySelector('a[href="#decisions"]').click()`);
     const selector = '[data-action="/v1/decisions/' + decision + '/resolve"][data-outcome-value="allow"]';

@@ -5,6 +5,7 @@
 <section class="panel">
   <p class="breadcrumb"><a href="/overview">overview</a> / <a href="/workgraphs">work graphs</a> / <span class="mono">{{$g.ID}}</span></p>
   <h1>{{$g.Name}}</h1>
+  {{if $g.ObjectivePlanID}}<p><a href="/objectives/{{$g.ObjectivePlanID}}">Return to objective workspace</a></p>{{end}}
   <p class="meta">observed {{fmtTime .ObservedAt}} · {{$g.Repository}} · agent <span class="mono">{{$g.AgentID}}</span> · revision {{$g.Revision}}</p>
   {{with $g.Product}}<p class="meta">product <a href="/products/{{.ID}}">{{.Name}}</a></p>{{else}}<p class="meta muted">not associated with a product yet</p>{{end}}
   <div class="grid stats">

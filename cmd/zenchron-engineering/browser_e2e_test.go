@@ -49,6 +49,9 @@ func TestBrowserWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(built.release)
+	if _, err := built.store.ClaimPlanAttempt("browser-planning-only", "zenchron/seeded", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(built.agent.CredentialPath, []byte("unused-browser-boundary-fixture"), 0600); err != nil {
 		t.Fatal(err)
 	}

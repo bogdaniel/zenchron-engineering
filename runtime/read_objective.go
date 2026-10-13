@@ -9,6 +9,7 @@ import (
 // ObjectiveGraph reads the existing explicit plan binding. Multiple matches
 // are corruption, never a choice the experience layer may make.
 func (s *ReadStore) ObjectiveGraph(planID string) (orchestration.WorkGraph, bool, error) {
+	// ponytail: JSON binding scan is fine for hundreds of graphs; index the binding if lookups grow.
 	rows, err := s.store.db.Query(`SELECT document FROM work_graph_revisions AS current
 		WHERE revision = (SELECT MAX(revision) FROM work_graph_revisions WHERE graph_id = current.graph_id)
 		AND json_extract(document, '$.objective_plan.id') = ? LIMIT 2`, planID)
