@@ -133,7 +133,7 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
     });
     await page.setViewportSize({ width: 1440, height: 1080 });
     mode = "unavailable-run";
-    await page.goto(base + "/app#/overview");
+    await page.reload();
     await page.getByText("Observation unavailable · execution and result unknown", { exact: true }).waitFor();
     assert.match(await page.locator(".pipeline-cell").nth(2).innerText(), /≥0[\s\S]*1 unknown/);
     assert.match(
