@@ -220,6 +220,29 @@ try {
     await until(() => cdp.evaluate(`/plan changed/.test(document.querySelector('#plan-preview-status').textContent)`), 'changed preview refusal');
     assert(await cdp.evaluate(`!document.querySelector('#plan-approval [data-action]')`));
   });
+  await check('objective-scoped decision resolves durably without bypass execution', async () => {
+    const plan = process.env.ZENCHRON_E2E_PLAN;
+    const decision = process.env.ZENCHRON_E2E_OBJECTIVE_DECISION;
+    await cdp.navigate('/decisions');
+    assert(await cdp.evaluate(`Boolean(document.querySelector('a[href="/objectives/${plan}#decisions"]'))`), 'inbox must return to objective context');
+    await cdp.navigate('/objectives/' + plan);
+    await cdp.evaluate(`document.querySelector('a[href="#decisions"]').click()`);
+    const selector = '[data-action="/v1/decisions/' + decision + '/resolve"][data-outcome-value="allow"]';
+    assert(await cdp.evaluate(`Boolean(document.querySelector(${JSON.stringify(selector)}))`));
+    const invalid = await post('/v1/decisions/' + decision + '/resolve', { controller_binding: binding, outcome_kind: 'allow_deny', outcome_value: 'invalid' });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.body.error, "invalid_request");
+    await cdp.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+    assert(await cdp.evaluate(`document.querySelector('#action-dialog').innerText.includes(${JSON.stringify(decision)})`));
+    await cdp.evaluate(`document.querySelector('#action-confirm').click()`);
+    await until(() => cdp.evaluate(`/applied/.test(document.querySelector('#action-result').textContent)`), 'objective decision resolution');
+    const graph = await cdp.evaluate(`fetch('/v1/workgraphs/${process.env.ZENCHRON_E2E_OBJECTIVE_GRAPH}', {headers:{Authorization:'Bearer browser-test-token'}}).then(r=>r.json())`);
+    const unit = graph.units.find(unit => unit.unit_id === 'implementation');
+    assert.equal(unit.hold, undefined);
+    assert.equal(unit.run, undefined, 'resolving a hold must not create bypass execution');
+    await cdp.navigate('/objectives/' + plan);
+    assert(await cdp.evaluate(`!document.querySelector(${JSON.stringify(selector)})`), 'resolved request must disappear after reconnect');
+  });
   await check('plan approval binds exact assignment and starts no work before confirmation', async () => {
     const plan = process.env.ZENCHRON_E2E_PLAN;
     await cdp.navigate('/plans/' + plan);
