@@ -1,5 +1,5 @@
-// Dependency-free automated Chrome E2E artifact runner. No HTTP interception or
-// mocked application APIs: every request reaches the real isolated Go service.
+// Dependency-free automated Chrome runner. Browser/backend cases use the real
+// isolated Go service; one labeled presentation regression mocks authority reads.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -209,6 +209,19 @@ try {
     await screenshot('mobile-objective');
     await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
   });
+  await check('planning identity survives reload without invented plan approval', async () => {
+    await cdp.navigate('/objectives');
+    assert(await cdp.evaluate(`Boolean(document.querySelector('a[href="/objectives/browser-planning-only"]'))`));
+    await cdp.navigate('/objectives/browser-planning-only');
+    for (let visit = 0; visit < 2; visit++) {
+      assert(await cdp.evaluate(`/No plan revision is recorded/.test(document.querySelector('#plan').textContent)`));
+      assert(await cdp.evaluate(`!document.querySelector('#plan-approval') && !document.querySelector('[data-action$="/approve"]')`));
+      if (visit === 0) {
+        await cdp.call('Page.reload');
+        await until(() => cdp.evaluate(`Boolean(document.querySelector('#objective-live'))`), 'planning identity reload');
+      }
+    }
+  });
   await check('objective offers exact guided plan actions and refuses changed preview identity', async () => {
     const plan = process.env.ZENCHRON_E2E_PLAN;
     await cdp.navigate('/objectives/' + plan);
@@ -224,7 +237,7 @@ try {
     const plan = process.env.ZENCHRON_E2E_PLAN;
     const decision = process.env.ZENCHRON_E2E_OBJECTIVE_DECISION;
     await cdp.navigate('/decisions');
-    assert(await cdp.evaluate(`Boolean(document.querySelector('a[href="/objectives/${plan}#decisions"]'))`), 'inbox must return to objective context');
+    assert(await cdp.evaluate(`Boolean(document.querySelector('a[href="/objectives/${plan}?revision=1#decisions"]'))`), 'inbox must return to objective context');
     await cdp.navigate('/objectives/' + plan);
     await cdp.evaluate(`document.querySelector('a[href="#decisions"]').click()`);
     const selector = '[data-action="/v1/decisions/' + decision + '/resolve"][data-outcome-value="allow"]';
@@ -318,6 +331,12 @@ try {
     assert.equal(events.events.filter(event => event.type === 'run.paused').length, 1);
     assert.equal(events.events.filter(event => event.type === 'run.unpaused').length, 1);
   });
+  await check('objective without publication gate stays incomplete and non-actionable', async () => {
+    await cdp.navigate('/objectives/' + process.env.ZENCHRON_E2E_PLAN);
+    assert(await cdp.evaluate(`/No outstanding human publication request/.test(document.querySelector('#changes').textContent)`));
+    assert(await cdp.evaluate(`!document.querySelector('#changes [data-action$="/authorize"]')`));
+    assert(await cdp.evaluate(`!document.querySelector('#changes a[href*="/pull/"]')`));
+  });
   await check('runtime refusal never exposes publication authorization', async () => {
     await cdp.navigate('/runs/browser-run');
     await until(() => cdp.evaluate(`!(/loading publication authority/i.test(document.querySelector('#publication-actions')?.textContent || ''))`), 'publication authority observation');
@@ -326,6 +345,51 @@ try {
     assert.equal(authority.body.error, 'runtime_refused');
     assert(await cdp.evaluate(`/publication unavailable \\(http 409\\)/i.test(document.querySelector('#publication-actions').textContent)`));
     assert(await cdp.evaluate(`!Array.from(document.querySelectorAll('#publication-actions button')).some(button => /authorize publication/i.test(button.textContent))`));
+  });
+  await check('presentation coalesces slow reads and replaces publication authority for the same candidate', async () => {
+    await cdp.navigate('/runs/browser-run');
+    await until(() => cdp.evaluate(`/publication unavailable \\(http 409\\)/i.test(document.querySelector('#publication-actions').textContent)`), 'initial real authority refusal');
+    await cdp.evaluate(`(() => {
+      const original = window.fetch.bind(window);
+      const requests = [
+        {id:'publication-a',digest:'digest-a',requires:['human_approval'],contract:{id:'contract-a'},action:{target:'open PR'},candidate:{revision:1,tree:'tree-a'}},
+        {id:'publication-b',digest:'digest-b',requires:['human_approval'],contract:{id:'contract-b'},action:{target:'open PR'},candidate:{revision:1,tree:'tree-a'}},
+        {id:'publication-c',digest:'digest-c',requires:['human_approval'],contract:{id:'contract-c'},action:{target:'open PR'},candidate:{revision:1,tree:'tree-a'}}
+      ];
+      window.__authorityReadCount = 0;
+      window.__authorityOffline = false;
+      window.fetch = function (input, init) {
+        if (String(input).includes('/v1/runs/browser-run/authority')) {
+          const index = window.__authorityReadCount++;
+          if (window.__authorityOffline) return Promise.resolve(new Response(JSON.stringify({error:'offline'}), {status:503}));
+          const request = requests[Math.min(index, requests.length - 1)];
+          const response = () => new Response(JSON.stringify(request), {status:200,headers:{'Content-Type':'application/json'}});
+          return index === 0 ? new Promise(resolve => setTimeout(() => resolve(response()), 5500)) : Promise.resolve(response());
+        }
+        return original(input, init);
+      };
+    })()`);
+    await until(() => cdp.evaluate(`window.__authorityReadCount > 0`), 'slow authority read begins');
+    await new Promise(resolve => setTimeout(resolve, 5200));
+    assert.equal(await cdp.evaluate(`window.__authorityReadCount`), 1, 'periodic refresh must not start overlapping authority reads');
+    await until(() => cdp.evaluate(`Boolean(document.querySelector('#publication-actions [data-request-id="publication-a"]'))`), 'first authority request');
+    await until(() => cdp.evaluate(`Boolean(document.querySelector('#publication-actions [data-request-id="publication-b"]'))`), 'replacement authority request', 12000);
+    assert.equal(await cdp.evaluate(`document.querySelectorAll('#publication-actions [data-request-id="publication-a"]').length`), 0);
+    assert.equal(await cdp.evaluate(`document.querySelector('#publication-actions [data-request-id="publication-b"]').dataset.digest`), 'digest-b');
+    const readsBeforeDisconnect = await cdp.evaluate(`window.__authorityReadCount`);
+    await cdp.evaluate(`window.__authorityOffline = true`);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await cdp.evaluate(`document.querySelector('#publication-actions [data-request-id="publication-b"]').click()`);
+    assert(await cdp.evaluate(`document.querySelector('#action-dialog').open`), 'authority action should open confirmation dialog');
+    await cdp.evaluate(`document.querySelector('#action-close').click()`);
+    await until(() => cdp.evaluate(`window.__authorityReadCount > ${readsBeforeDisconnect}`), 'disconnect authority read begins');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await until(() => cdp.evaluate(`/publication unavailable \\(http 503\\)/i.test(document.querySelector('#publication-actions').textContent)`), 'authority disconnect', 12000);
+    assert.equal(await cdp.evaluate(`document.querySelectorAll('#publication-actions button').length`), 0, 'disconnect must remove stale authority controls');
+    await cdp.evaluate(`window.__authorityOffline = false`);
+    await cdp.evaluate(`document.querySelector('#action-dialog').showModal();document.querySelector('#action-close').click()`);
+    await until(() => cdp.evaluate(`Boolean(document.querySelector('#publication-actions [data-request-id="publication-c"]'))`), 'authority reconnect', 12000);
+    assert.equal(await cdp.evaluate(`document.querySelectorAll('#publication-actions [data-request-id="publication-b"]').length`), 0);
   });
   await check('designated operator resolves exact WorkUnit hold through browser', async () => {
     await cdp.navigate('/decisions');

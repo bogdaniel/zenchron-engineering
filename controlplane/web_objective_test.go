@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"bytes"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -73,7 +74,37 @@ func TestObjectiveWorkspaceUsesExplicitGraphBindingAndExposesRevisionMismatch(t 
 	}
 }
 
-func TestDecisionControlsDisappearForIneligibleControllerOrPlanBinding(t *testing.T) {
+func TestObjectiveWorkspaceRetainsPlanningIdentityWithoutOfferingApproval(t *testing.T) {
+	dir := t.TempDir()
+	store, err := rt.OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimPlanAttempt("planning-only", "acme/repo", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := rt.OpenReadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	w := &Web{Store: reader, Token: "test-token", ControllerRoot: filepath.Join(dir, "controller")}
+	body := getWeb(t, w, "/objectives/planning-only", w.Token, 200)
+	if !bytes.Contains(body, []byte("No plan revision is recorded")) || bytes.Contains(body, []byte(`id="plan-approval"`)) {
+		t.Fatalf("unrecorded plan became actionable: %s", body)
+	}
+	list := getWeb(t, w, "/objectives", w.Token, 200)
+	if !bytes.Contains(list, []byte(`href="/objectives/planning-only"`)) {
+		t.Fatal("planning identity disappeared from navigation")
+	}
+	getWeb(t, w, "/objectives/planning-only?revision=1", w.Token, 404)
+	getWeb(t, w, "/objectives/planning-only?revision=0", w.Token, 200)
+}
+
+func TestObjectiveDecisionControlsDisappearWhenControllerLosesRole(t *testing.T) {
 	f := newActionFixture(t)
 	at := time.Unix(100, 0).UTC()
 	graph, err := (orchestration.WorkGraphProposal{Name: "decision-eligibility", Revision: 1, Units: []orchestration.WorkUnit{{ID: "build", Purpose: "bounded work", Role: domain.RoleImplementer, Issue: 41}}}).Compose("example/repo", "claude", "operator-1", at)
@@ -94,9 +125,17 @@ func TestDecisionControlsDisappearForIneligibleControllerOrPlanBinding(t *testin
 	}
 	w := webFrom(f.api)
 	target := []byte(`data-action="/v1/decisions/` + id + `/resolve"`)
+	var projected WorkGraphDetail
+	wireBody := wire(t, f.api, "/v1/workgraphs/"+graph.ID, "GET", f.api.Token, "workgraph-detail", 200)
+	if err := json.Unmarshal(wireBody, &projected); err != nil {
+		t.Fatal(err)
+	}
+	if projected.ObjectivePlanID != "p" || projected.ObjectivePlanRevision != 1 || projected.ObjectivePlanDigest != f.digest {
+		t.Fatalf("wire lost exact graph binding: %+v", projected)
+	}
 	for _, route := range []string{"/objectives/p", "/decisions"} {
 		if !bytes.Contains(getWeb(t, w, route, w.Token, 200), target) {
-			t.Fatalf("eligible decision absent at %s", route)
+			t.Fatalf("fixture never offered eligible decision at %s", route)
 		}
 	}
 	observe := f.observe
@@ -113,7 +152,7 @@ func TestDecisionControlsDisappearForIneligibleControllerOrPlanBinding(t *testin
 	}
 }
 
-func TestDecisionControlsDisappearForUnverifiedPlanBinding(t *testing.T) {
+func TestInboxNeverOffersDecisionFromUnverifiedPlanBinding(t *testing.T) {
 	f := newActionFixture(t)
 	at := time.Unix(100, 0).UTC()
 	graph, err := (orchestration.WorkGraphProposal{Name: "unverified-plan", Revision: 1, Units: []orchestration.WorkUnit{{ID: "build", Purpose: "bounded work", Role: domain.RoleImplementer, Issue: 41}}}).Compose("example/repo", "claude", "operator-1", at)
@@ -140,7 +179,7 @@ func TestDecisionControlsDisappearForUnverifiedPlanBinding(t *testing.T) {
 	} {
 		body := getWeb(t, w, check.route, w.Token, 200)
 		if bytes.Contains(body, target) || !bytes.Contains(body, []byte(check.reason)) {
-			t.Fatalf("unverified plan binding became actionable at %s: %s", check.route, body)
+			t.Fatalf("unverified plan binding became actionable at %s", check.route)
 		}
 	}
 }

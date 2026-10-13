@@ -5,10 +5,32 @@
 `/objectives` lists durable plans alongside issue-backed intake. Selecting an
 objective opens `/objectives/{plan-id}`, a bookmarkable read-side composition
 with Summary, Plan, Execution, Decisions, Evidence, and Changes and PR sections.
+Objective, plan and inbox plan pages are database-bounded before lifecycle replay.
+The inbox pages through all plans, showing only pending approvals and unobservable
+records on each page; an empty page is not proof that no later approval exists.
+Planning identities with revision zero remain visible after reload, explicitly
+without a stored proposal or approval controls. A positive revision whose document
+is missing fails closed. Repository and issue identities label the objective list;
+private objective prose is not copied into the durable list projection.
+Summary uses the runtime's existing governing-plan lifecycle and WorkGraph counts,
+preserving concurrent dimensions. It does not derive an objective authority state.
+WorkGraph detail JSON adds optional `objective_plan_id`, `objective_plan_revision`
+and `objective_plan_digest` together, from the same graph revision that produced
+its unit projection. Native WorkGraph status also includes the existing
+`objective_plan` reference. Strict schema consumers need the updated schema;
+persisted formats and controller commands are unchanged. A conflicting displayed
+revision or an unverifiable graph binding offers no objective decision/publication
+action; navigation opens the graph's exact plan context instead.
 It reconstructs context after reload from the existing plan and the WorkGraph's
 explicit `objective_plan` binding; it creates no lifecycle record or execution
 authority. Product-associated graph summaries expose optional `objective_plan_id`
 links to this workspace. Graphs without that binding remain diagnostic graphs.
+The composed page reads these owner projections separately, so concurrent writes
+can make sections reflect adjacent durable observations rather than one atomic
+cross-domain snapshot. It remains informational: plan approval binds the exact
+revision and digest, decision resolution names the durable request, and
+publication authorization binds the exact request ID and digest; the controller
+revalidates each action. After a refusal, reload before acting again.
 
 A missing graph is shown as unrecorded execution. Multiple matching graphs fail
 closed; a graph bound to a different plan revision is explicitly marked. Run,
@@ -25,7 +47,15 @@ as Action Required. Inbox cards link back to their explicitly bound objective.
 Resolved holds disappear from durable reads after reconnect; resolution never
 starts a bypass run. Recorded review findings and current review eligibility
 are shown separately, alongside assurance and classified runtime failures.
-This navigation, guided plan and decision slice does not
+The Changes and PR section consumes outstanding publication requests through the
+existing authority preview and authorization path. It names candidate commit,
+tree and publication target before confirmation, preserves exact request binding,
+and links recorded PR numbers to GitHub. A missing request offers no publication
+action. A changed candidate or controller binding reloads the read preview;
+responses for superseded preview identities are ignored. Authority reads refresh
+on the bounded page cadence, replacing controls when request identity, digest,
+contract, action or candidate changes. No mutation is retried.
+This workflow composition does not
 establish completion of the browser objective-to-PR experience or #448 acceptance.
 
 Start the separate process against an existing runtime state directory:

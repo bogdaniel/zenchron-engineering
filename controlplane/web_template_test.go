@@ -185,12 +185,12 @@ func TestObjectiveEvidenceRendersPlanStageReviewWithoutWorkGraph(t *testing.T) {
 }
 
 func TestObjectivesListDistinguishesPlanWorkspaceLinks(t *testing.T) {
-	data := workspaceData{Plans: []Plan{
-		{ID: "plan-one", Revision: 1, State: "awaiting_approval"},
-		{ID: "plan-two", Revision: 1, State: "awaiting_approval"},
+	data := workspaceData{Objectives: []objectiveListItem{
+		{Plan: Plan{ID: "plan-one", Revision: 1, State: "awaiting_approval"}, Repository: "example/one"},
+		{Plan: Plan{ID: "plan-two", Revision: 1, State: "awaiting_approval"}, Repository: "example/two"},
 	}}
 	out := renderTemplate(t, objectivesTemplate, data)
-	for _, want := range []string{"Open objective · plan-one", "Open objective · plan-two"} {
+	for _, want := range []string{"example/one · engineering objective · plan-one", "example/two · engineering objective · plan-two"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("objectives list missing %q: %s", want, out)
 		}
