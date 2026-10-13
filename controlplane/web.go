@@ -123,7 +123,7 @@ func (w *Web) Handler() http.Handler {
 		// Static assets carry no run, controller or fleet state - only this
 		// console's own CSS and JS - so they are the one route that predates
 		// the token: the login page itself needs them to render.
-		if strings.HasPrefix(pattern, "GET /static/") {
+		if strings.HasPrefix(pattern, "GET /static/") || engineeringBootstrapPath(r.URL.Path) {
 			mux.ServeHTTP(rw, r)
 			return
 		}
@@ -171,56 +171,6 @@ func (w *Web) handleOverview(rw http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 // Runs list
 // ---------------------------------------------------------------------------
-
-// runsFilter is read from query parameters, so a filtered view is a plain,
-// bookmarkable URL that keeps working with JavaScript disabled.
-type runsFilter struct {
-	Status string
-	Source string
-}
-
-func runsFilterFromQuery(values map[string][]string) runsFilter {
-	get := func(key string) string {
-		if v, ok := values[key]; ok && len(v) > 0 {
-			return strings.TrimSpace(v[0])
-		}
-		return ""
-	}
-	return runsFilter{Status: get("status"), Source: get("source")}
-}
-
-// matches reports whether one run satisfies the filter. "held" is not a
-// Disposition: it asks Run.Held directly, independent of which terminal
-// disposition a held run settled into.
-func (f runsFilter) matches(s Run) bool {
-	if f.Status != "" {
-		if f.Status == "held" {
-			if !s.Held {
-				return false
-			}
-		} else if string(s.Disposition) != f.Status {
-			return false
-		}
-	}
-	if f.Source != "" && !matchesSource(s, f.Source) {
-		return false
-	}
-	return true
-}
-
-// matchesSource accepts either "owner/repo#123" or a bare issue number: an
-// operator watching one issue rarely remembers which repository it was filed
-// against and should not have to type it to filter on it.
-func matchesSource(s Run, source string) bool {
-	if repo, issue, ok := strings.Cut(source, "#"); ok {
-		number, err := strconv.Atoi(strings.TrimSpace(issue))
-		return err == nil && s.Repository == repo && s.Issue == number
-	}
-	if number, err := strconv.Atoi(source); err == nil {
-		return s.Issue == number
-	}
-	return false
-}
 
 func filterWebRuns(runs []Run, filter runsFilter) []Run {
 	out := make([]Run, 0, len(runs))

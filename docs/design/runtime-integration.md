@@ -1,142 +1,131 @@
-# React implementation batch 01
+# React implementation — batches 01 and 02
 
-The visual gate is accepted across desktop/mobile, dark/light and negative states. Its identity and
-primary composition are frozen. This is the first operational implementation batch, **not complete
-frontend parity, production approval or authorization to remove the old console**.
+The visual identity and primary composition are frozen. `/app` implements the four main
+experiences and the remaining existing browser read workflows through the same Go listener.
+The operational replacement still needs operator acceptance before legacy deletion.
+No production work was approved, published or merged.
 
-## Implemented scope
+## Current capability map
 
-| Destination | Real source and behavior |
+| Destination | Source and behavior |
 | --- | --- |
-| `/app#/overview` | Independent controller, 50-plan index and 50-run reads; overlapping activity scopes, partial-count labels, human request summary and execution observations |
-| `/app#/objectives` | SQL-paged plan/source-context index, repository/plan/issue search across the index, request filter explicitly scoped to the loaded page, exact workspace navigation |
-| `/app#/objectives/{plan-id}` | Canonical immutable plan detail; proposed versus governing revision, selectable dependency stages, role/profile/agent/provider/trust distinctions, budget consumption, review subject and historical decision receipt |
-| `/app#/actions/{plan-id}/{revision}` | Pinned revision/digest, consequence and restrictions, independent live-controller inspection, fresh review reads, existing governed rejection, historical receipt and reconciliation |
-| `/app#/controller` | Durable generation, live endpoint, live identity, serving, role, generation match, admission and durable consistency as separate facts |
+| `/app#/overview` | Controller, SQL-paged plan identities, 50 run summaries, canonical fleet aggregates; overlapping activity scopes, pending/actionable distinction, unknown capacity |
+| `/app#/objectives` | Full-index repository/issue/plan search, 50-row pages, explicitly local request filter |
+| `/app#/objectives/{id}[/{revision}]` | Exact plan revision, proposed/governing distinction, revision selection, requirements versus bindings, gates/evidence references, review subjects, change preview, budgets and journal history |
+| `/app#/attempts/{id}` | Metadata history for refused attempts with no executable revision; typed refusal detail remains `autonomy plan show` |
+| `/app#/actions/{id}/{revision}` | Frozen exact-subject plan rejection, fresh controller/revision review, durable historical receipt, fail-closed reconciliation and predictable focus |
+| `/app#/runs` | Full-fleet disposition/held/source filters before paging; local keyword filter is explicitly scoped to the loaded page |
+| `/app#/runs/{id}[/{after}]` | Lifecycle, operation/heartbeat versus journal, worker and controller provenance, candidate/contract, budgets, evidence/publication obligations, held material, diagnostics and governed stop |
+| `/app#/workgraphs[/{id}]` | Actual dependencies, authoritative frontier/counts, selected unit, admitted handoff, independent review, readiness hold and unresolved human request context |
+| `/app#/products[/{id}]` | Product repositories/configuration references; SQL-paged associated graph summaries with exact navigation |
+| `/app#/agents` | Recorded agent/provider/model/trust bindings per loaded run; installed registry/readiness stays in the existing CLI |
+| `/app#/controller` | Separate identity/reachability/role/admission/projection/consistency dimensions, findings and diagnostic guidance |
+| `/app` without a valid credential | React login verifies the existing bearer token before setting the existing cookie; preserves destination; no legacy JS/CSS dependency |
 
-Objective text is private in the existing API. The portfolio therefore names repository/source issue
-and plan identity; it does not expose objective/rationale/provider prose or invent readable intent.
-A plan is not a WorkGraph. No declared plan-to-WorkGraph association is exposed here, so the workspace
-explicitly marks that integration unavailable instead of presenting PlanStages as WorkUnits.
-Throughput/trends/cycle time/capacity ceilings remain unavailable. Full plan activity, standalone
-runs/history, Products, WorkGraphs, installed agent inventory, diagnostics and stop remain migration
-items supported by the retained console/CLI. The four React destinations are functional slices,
-not claims of complete capability consolidation.
+Objective prose is private in the existing HTTP contract. Source issue/repository identifies a plan;
+private objective/rationale/provider prose is not republished as a title. A PlanStage is not a WorkUnit.
+No plan-to-WorkGraph association is fabricated. Publication, plan approval and decision resolution
+remain on their existing governed CLI paths: the frozen HTTP allowlist permits only stop/rejection.
+These limitations must be included in operator acceptance, rather than hidden by fixture controls.
 
-## One delivery pipeline and reusable components
-
-`frontend/` has one pinned React/React DOM/TypeScript/types/esbuild manifest and lockfile. This is
-necessary build infrastructure for the explicitly requested React/TypeScript application; there is
-no new router, state framework, test framework or production server. `npm ci --ignore-scripts` and
-`npm run build` produce the checked-in generated `assets/design/react.js`. The existing Go listener
-embeds it and the authoritative shared CSS. Production needs only the Go binary.
-
-`/app` and `/design` reuse the same authenticated HTML and CSS. Only the entry module differs.
-The former unaccepted read-only prototype adapters were removed; the retained `/design` module is
-fixture-only and cannot connect to runtime. React never imports fixture modules. The legacy token
-login/`console.js` bootstrap is a documented temporary dependency until replacement login parity.
+## Shared implementation and state ownership
 
 | Owner | Responsibility |
 | --- | --- |
-| `components.tsx` | Head, Panel, Badge, Link, Empty, Disclosure, Binding, ControllerFacts, Pagination, focus-contained native Dialog |
-| `pages.tsx` | Overview, source-context table/portfolio and plan workspace compositions |
-| `main.tsx` | Local route/theme/filter/page selection, canceled reads, retained snapshot/failure/age; inert closed mobile navigation |
-| `decisions.tsx` | Local frozen confirmation subject, one submission, uncertain-outcome reconciliation and historical receipt focus |
-| `api.ts` | Typed/validated sanitized DTOs, bounded transport and one allowlisted rejection POST |
-| Shared tokens/layout/components CSS | The accepted dark/light identity, dense desktop layout and deliberate mobile anatomy |
+| `components.tsx` | Head, Panel, Badge, Link, Empty, native Disclosure/Dialog, exact Binding, ControllerFacts and named Pagination |
+| `pages.tsx` | Overview, portfolio and plan workspace compositions |
+| `main.tsx` | One shell/navigation/theme; route-local observation ownership, cancellation, refresh and stale/error handling |
+| `history.tsx` | Shared run/plan metadata timeline, exclusive cursor, 50-record window and back navigation |
+| `runs.tsx`, `workgraphs.tsx`, `system.tsx` | Execution, graph/product and system compositions; reusable factual inspector |
+| `decisions.tsx`, `stop-run.tsx` | Local frozen confirmation, one submission, uncertain-outcome reconciliation and historical feedback/focus |
+| `login.tsx` | Existing token authentication, focused failure recovery and destination preservation |
+| `api.ts`, `operations-api.ts` | One typed integration layer: sole bearer transport, wire validation, bounded reads and existing action contracts |
+| Tokens/layout/components/runtime CSS | One dark/light design system; runtime inspector rules are scoped to avoid changing the approved fixture composition |
 
-Presentation abstractions satisfy repository §6(c), the explicit reusable-component requirement.
-The HTTP boundary satisfies §6(b). No backend interface, workflow database, scheduler, policy or
-authority state machine was added. Literal search is a linear index scan and each page performs at
-most 50 canonical plan reductions; the code names those ceilings. Wire paging does not bound the
-length of a plan journal or prove production reduction latency.
+Observed DTOs, local selection/filter/confirmation state and server action results have separate
+owners. No UI transition grants authority. Native React/TypeScript and the existing esbuild pipeline
+remain the only frontend dependencies; no new dependency was added in batch 02. Presentation
+satisfies repository §6(c); HTTP integration is §6(b). There is no new backend interface, runtime,
+scheduler, policy system, workflow database, authoritative state machine or production Node server.
 
-## Three corrected distinctions
+The app and exact code-only bootstrap assets are public so React can render login. API observations
+still require Bearer authentication. Mutation checks still require exact Host/Origin, JSON shape,
+controller binding and the controller's own role/authority. Fixture modules remain gated; `/design`
+forbids runtime connections. Its measurements are never loaded by React.
 
-1. Durable identity records never imply endpoint health. Disconnected or stale observations display
-   unreachable/unobserved live state even when a durable generation remains attested/recorded.
-2. Pending requests come from the canonical `PlanSnapshot.AwaitingDecision` predicate. Currently
-   actionable counts additionally require a fresh, observed serving controller with attestation,
-   role and generation match. **Actionable here means rejection only**, scoped to the loaded page.
-3. Resolved/rejected receipts are historical journal facts. The selected URL stays pinned to its
-   revision, the request leaves the pending list and focus moves to the receipt heading. No next
-   request is silently selected. Reload/reconnect re-read the same historical subject. Cancellation
-   restores the exact opener; “Other human requests” is explicit navigation.
+Visible views reobserve every 20 seconds. Hidden tabs and open confirmations suspend this polling.
+After 30 seconds a snapshot becomes historical and review is disabled. Refresh failure retains only
+that view's historical observations. Browser receipt time is not controller liveness. Historical
+journal browsing is separately refreshed and uses its own cursor; heartbeat is not a journal event.
 
-Browser receipt time is not a controller observation or liveness lease. After 30 seconds, the UI
-marks an observation stale and disables review; a failed refresh retains only that view's historical
-snapshot. Controller/index/detail reads are independent observations. This narrowing UI behavior
-never replaces the server's authority checks.
+## Genuine decision and stop workflows
 
-## Genuine governed workflow
+Review re-reads the exact plan or run and the live controller. Plan confirmation binds immutable
+revision/digest, protected action and consequence; stop names the immutable run, current observed
+context and controller binding. Full technical bindings remain disclosed on demand. Confirmation
+footers stay visible while their bodies scroll. The server independently rechecks eligibility,
+proves the expected controller on the connection and executes inside the existing role/plan lock.
 
-The first live action is **reject a proposed plan revision**, the existing `POST /v1/plans/{id}/reject`.
-Approval is disabled because prospective assignment bindings are unavailable in the current read
-surface. Publication, merge, decision-resolve and other controller verbs were not added.
+Each confirmation submits once. A lost/invalid response is an unknown outcome; neither action is
+resent automatically. Reconciliation reads the exact durable receipt or cancellation. A failed read
+stays closed. Known results remain visible even if a follow-up read fails. Resolved requests leave
+the pending list; the exact route remains historical and focus moves to the receipt. Cancel returns
+to the exact opener. No next request is silently selected.
 
-Review reads the exact revision and live controller again. A changed digest, resolved request or
-changed controller refuses confirmation. Confirmation shows the exact plan ID/revision/digest,
-protected action and consequence, with full controller binding available. It submits once; it never
-refreshes a binding silently or retries an uncertain write. The existing server independently
-re-observes eligibility, proves the expected controller on that connection, executes under the
-actual controller role and plan lock, and verifies the pending revision/digest before journal append.
-Unknown outcomes stay unavailable when a re-read still has no receipt; a pending GET cannot prove
-that an earlier command will not complete. Known applied/refused responses are retained when the
-follow-up read fails. Lost-reply/idempotency behavior remains the existing durable-effect reconciliation, not a client
-state transition. Transport or response-validation failure after POST is an unknown outcome;
-reconciliation reads the pinned revision before offering another review.
+`TestEngineeringOSPlanRejectEndToEnd` uses the actual composition, serve control handler, owner-only
+socket, real role and SQLite/hash-chained journals. It tests normal and discarded-response variants
+for rejection and stop, with one durable effect each. Controller identity is self-measured by the
+compiled test binary; its declared source/build adoption is isolated test input, not production CI
+attestation. The forge/provider boundary stays offline; no worker or scheduler is run.
 
-Two additive GET contracts reuse the existing read store/journal:
+The test closes/reopens reader/composition/socket/role, then starts a separate OS controller process,
+crashes it, and starts a new process against preserved state. Fresh browsers recover rejection and
+cancellation without resending. Wrong digest/controller, unattested build, released role and
+unreachable pending requests refuse without a decision. This proves actual backend behavior on
+isolated test data; it is not an acceptance claim for an operator's adopted production generation.
 
-- `/v1/plans?limit=50&offset=0&q=...`: bounded identities, including refused attempts with no revision.
-- `/v1/plans/{id}/context?revision=...`: existing sanitized PlanDetail, canonical pending predicate
-  and historical receipt metadata. Private objective, note, operator and event payload stay excluded.
+## Additive read contracts and compatibility
 
-A context read checks the journal tip against the reduced view and returns 409 `snapshot_changed`
-for a torn read. It never merges a stale pending projection with a newer receipt. No persisted format,
-SQL migration, role policy or action allowlist changed; rollback is a frontend/API code rollback.
+Batch 01 added `/v1/plans` and `/v1/plans/{id}/context`. Batch 02 adds:
 
-## Evidence and visual review
+- `GET /v1/fleet`: existing canonical aggregates; omits unbounded run/plan collections. Capacity
+  zero means unknown to this reader, and is never rendered as a zero concurrency ceiling.
+- `GET /v1/plans/{id}/events?after=&limit=`: indexed, bounded, plan-local journal metadata,
+  including attempt-only identities. No event payload, private reason or operator note crosses.
+- Optional `status` and `source` filters on `/v1/runs`, applied before offset/limit. Shared source
+  matching now prevents issue zero from selecting runs that have no issue. A regression first
+  reproduced that defect, then passed through the shared rule used by both API and legacy renderer.
 
-`TestEngineeringOSPlanRejectEndToEnd` seeds only an isolated test workspace, invokes the actual
-`serve` control handler over the owner-only Unix socket, holds the real controller role and writes
-its real hash-chained plan journal. The browser driver never mocks `API.Send` or supplies an
-acceptance verdict. It verifies exact-subject rejection, one POST, durable receipt, no resubmission
-on reload, and recovery after closing/reopening the read store, controller composition, role and
-socket. Negative HTTP cases cover changed digest/controller, unattested generation, released role
-and disconnected pending requests. A separate transport fault discards the reply after an actual journal write; a failed reconciliation
-read stays closed, and a later read recovers the receipt without resubmitting. Existing governed
-tests retain racing-decision and stop proofs.
-This is actual backend behavior on deterministic **test data**, not production fleet acceptance.
+Plan history uses the existing stream index/canonical event reader; strict JSON Schemas are registered.
+Context still rejects torn reductions with `snapshot_changed`. No persisted format/SQL migration,
+controller policy or action allowlist changed. Rollback is a code/asset rollback with preserved state.
 
-The retained preview suite separately covers synthetic layouts/negative states and HTTP-boundary
-presentation mocks. Those mocks are never cited as governed-action evidence or captured as runtime
-measurements. React checks cover 50-row rendering across a 500-row contract, full-index search,
-plain-text rendering, gate/run separation, changed-subject review refusal, stale/permission/malformed/
-mismatched/disconnected reads, historical receipts, keyboard navigation and dark/light text contrast.
+Client DOM stays bounded to 50 records/nodes. WorkGraph topology uses actual dependencies; cycles
+are reported, never drawn as fabricated order. Desktop graphs scroll within their panel, mobile uses
+a native picker plus one selected unit and inspector. Event history has a bounded scrolling viewport.
+Product association and plan identity pages are SQL bounded. Run filtering/fleet aggregates reuse the
+existing cached fleet projection and still inspect the fleet internally; wire bounds do not prove
+bounded backend replay cost. Production-scale latency and full accessibility qualification remain open.
 
-Thirty primary React captures plus seven lost-reply/reconciliation captures use visibly labeled isolated test data and the actual controller path:
+## Evidence and acceptance boundary
 
-| Experience | 1440 | 1920 | 390 | Light example |
-| --- | --- | --- | --- | --- |
-| Overview | [Dark](screenshots/batch-01/overview-1440-dark.png) | [Dark](screenshots/batch-01/overview-1920-dark.png) | [Dark](screenshots/batch-01/overview-390-dark.png) | [Mobile](screenshots/batch-01/overview-390-light.png) |
-| Portfolio | [Dark](screenshots/batch-01/portfolio-1440-dark.png) | [Dark](screenshots/batch-01/portfolio-1920-dark.png) | [Dark](screenshots/batch-01/portfolio-390-dark.png) | [Mobile](screenshots/batch-01/portfolio-390-light.png) |
-| Workspace | [Dark](screenshots/batch-01/workspace-1440-dark.png) | [Dark](screenshots/batch-01/workspace-1920-dark.png) | [Dark](screenshots/batch-01/workspace-390-dark.png) | [Mobile](screenshots/batch-01/workspace-390-light.png) |
-| Action Required | [Dark](screenshots/batch-01/actions-1440-dark.png) | [Dark](screenshots/batch-01/actions-1920-dark.png) | [Dark](screenshots/batch-01/actions-390-dark.png) | [Mobile](screenshots/batch-01/actions-390-light.png) |
+The maintained browser entry is `scripts/check_design_preview.mjs`; helpers cover actual login,
+React read boundaries and explicitly labeled operational HTTP fixtures. Real-controller browser
+checks are invoked by the Go integration test through `check_live_decision.mjs`.
 
-[Expanded confirmation](screenshots/batch-01/confirmation-390-expanded.png),
-[historical rejection](screenshots/batch-01/receipt-390-dark.png),
-[disconnected receipt](screenshots/batch-01/receipt-disconnected-390.png),
-[disconnected controller](screenshots/batch-01/controller-disconnected-390.png),
-[reconnected receipt](screenshots/batch-01/receipt-reconnected-390.png),
-[unknown outcome after actual journal write](screenshots/batch-01/lost-reply/unknown-outcome-390.png).
+Captures cover 1440/1920 desktop and 390 mobile, both themes. Actual Go captures say isolated test
+data. Mock operational captures say HTTP FIXTURE and are presentation evidence only. The browser
+checks cover hundreds of index rows, a 10,000-event contract, 120 units, focus containment/return,
+exact-subject refusal, escaped reports, invalid cursors/dependencies/subjects, stale/error states,
+contrast, names and reflow. These are focused accessibility and structural visual regression proofs,
+not a complete WCAG certification or an approved pixel-diff baseline.
 
-Actual captures were inspected and refined: mobile action visibility, exact opener/receipt focus,
-light disabled-control contrast and closed-drawer shadow/focus. Automated visual regression evidence
-is layout/reflow/visibility contracts plus rendered contrast checks; there is no approved pixel-diff
-baseline yet. Screen-reader/high-zoom qualification, production load performance, complete parity
-and operator acceptance of the operational replacement remain open. See
-[validation](validation.md) and the [final legacy-removal inventory](frontend-inventory.md).
+Rendered inspection caused a focused revision: history scrolling, earlier run controls, mobile unit
+picker/one selected node, readable full-width identity values, and a scrolling navigation drawer.
+The primary approved Action Required composition was preserved.
 
-No old template, CSS, JavaScript, route or duplicate template test has been retired. Removal is gated
-on complete parity and operator acceptance. No production plan was approved, published or merged.
+See [validation](validation.md), [batch 02 review evidence](batch-02-review.md) and the
+[legacy-removal inventory](frontend-inventory.md). Old screenshots under `batch-01` are historical;
+new screenshots/results belong to their tested source head. No old template, legacy CSS/JS,
+presentation route or template test has been retired. Removal requires operator acceptance after
+parity review. No production plan was approved, published or merged.

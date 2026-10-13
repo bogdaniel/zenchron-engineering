@@ -21,14 +21,16 @@ The read routes are GET (the two governed POST routes are in "Governed actions" 
 | Route | Projection |
 | --- | --- |
 | `/v1/controller` | Controller consistency, serving, projection, role, admission, generation match |
-| `/v1/runs?offset=0&limit=100` | Runtime fleet run summaries |
+| `/v1/fleet` | Existing fleet aggregates without run/plan collections; zero capacity means unknown |
+| `/v1/runs?offset=0&limit=100` | Runtime run summaries; optional `status`/`source` filters apply before paging |
 | `/v1/runs/{id}` | Runtime status, lifecycle times, operation progress and its source |
 | `/v1/runs/{id}/events?after=0&limit=100` | Run-local event metadata |
 | `/v1/runs/{id}/stream` | Per-run SSE: snapshot, then events (below) |
 | `/v1/plans/{id}` | Plan summary, revisions and stage counts |
 | `/v1/plans/{id}/detail` | Plan stages, dependencies, bindings, review verdicts and budget envelope |
+| `/v1/plans/{id}/events?after=0&limit=100` | Plan-local journal metadata, including refused attempts; no payload/prose |
 | `/v1/products` | Product (#476) summaries: identity, revision, repositories |
-| `/v1/products/{id}` | One product's current configuration and every associated WorkGraph's full detail (see `/v1/workgraphs/{id}` below) - the Product Workspace's one-page entry point (#479) |
+| `/v1/products/{id}` | One product's configuration and a SQL-paged association list (`graphs_offset`/`graphs_limit`); inspect each graph separately |
 | `/v1/workgraphs` | WorkGraph (#472) summaries |
 | `/v1/workgraphs/{id}` | One WorkGraph's units, frontier, independent-review state, each unit's full run detail and its own open #473 decisions |
 
@@ -163,9 +165,11 @@ Objective Workspace and Action Required, with dark/light themes and mobile layou
 Its simulated decisions never call the runtime. The current console and all
 `/v1/` contracts remain supported during review; no legacy interface has been removed.
 The accepted React/TypeScript application is being implemented at `/app` on this same listener.
-Its first batch reads controller state and bounded plan/source contexts, inspects exact plan
-revisions and submits only the existing governed `plan-reject` action. Approval and publication
-controls remain disabled. Full operational parity is pending; the legacy console remains available.
+It includes Overview, Objectives, exact plan workspaces, Action Required, Runs/history, WorkGraphs,
+Products, agent observations, controller diagnostics and React token login. Existing governed stop
+and plan rejection have real-controller integration proofs, including lost responses and process
+restart. Approval/publication/decision resolution remain on their existing CLI paths. Legacy retirement
+requires operator acceptance; old pages remain operational during migration.
 Build the embedded asset with `npm ci --ignore-scripts` and `npm run build` inside `frontend/` before
 building Go. Production uses the Go binary alone, with no independent frontend server.
 The additive read endpoints `/v1/plans?limit=50&offset=0&q=...` and

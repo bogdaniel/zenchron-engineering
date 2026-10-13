@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/controlplane"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
+	"github.com/bogdaniel/zenchron-engineering/product"
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
@@ -50,6 +52,44 @@ func checkEngineeringOSPlanReject(t *testing.T, lostReply bool) {
 		t.Fatal(err)
 	}
 	t.Cleanup(built.release)
+	// Isolated persisted input records; controller behavior is never faked.
+	at := time.Now().UTC()
+	runID := "engineering-os-stop"
+	if err := built.store.PutRun(runtime.EngineeringRun{SchemaVersion: runtime.SchemaVersion, ID: runID,
+		Repository: "zenchron/seeded", Phase: runtime.Execute, Disposition: runtime.Active, CreatedAt: at, UpdatedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := built.store.AppendEvent(runtime.EngineeringEvent{SchemaVersion: runtime.SchemaVersion, ID: runID + "-created",
+		RunID: runID, Type: runtime.EventRunCreated, OccurredAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	proposal := orchestration.WorkGraphProposal{Name: "Bounded credential isolation", Revision: 1, Units: []orchestration.WorkUnit{
+		{ID: "isolate", Purpose: "Isolate credential access", Role: "implementer", Issue: 41},
+		{ID: "verify", Purpose: "Independently verify isolation", Role: "reviewer", Issue: 42, DependsOn: []string{"isolate"}},
+	}}
+	graph, err := proposal.Compose("zenchron/seeded", "claude", "test-operator", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := built.store.AdoptWorkGraphRevision(graph); err != nil {
+		t.Fatal(err)
+	}
+	productID, err := product.ProductID("Engineering test product")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := product.Product{SchemaVersion: product.ProductSchemaVersion, ID: productID, Name: "Engineering test product",
+		Revision: 1, Repositories: []string{"zenchron/seeded"}, CreatedAt: at}
+	if _, _, err := built.store.AdoptProductRevision(p); err != nil {
+		t.Fatal(err)
+	}
+	association, err := product.NewGraphAssociation(productID, graph.ID, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := built.store.AssociateWorkGraph(association); err != nil {
+		t.Fatal(err)
+	}
 	role, err := runtime.AcquireControllerRole(state)
 	if err != nil {
 		t.Fatal(err)
@@ -178,7 +218,7 @@ func checkEngineeringOSPlanReject(t *testing.T, lostReply bool) {
 	}
 	captureDirectory := os.Getenv("ZENCHRON_LIVE_SCREENSHOTS")
 	if captureDirectory == "" {
-		captureDirectory = filepath.Join(repositoryRoot, "docs/design/screenshots/batch-01")
+		captureDirectory = filepath.Join(repositoryRoot, "docs/design/screenshots/batch-02")
 	}
 	if lostReply {
 		captureDirectory = filepath.Join(captureDirectory, "lost-reply")
@@ -193,6 +233,8 @@ func checkEngineeringOSPlanReject(t *testing.T, lostReply bool) {
 		cmd := exec.CommandContext(ctx, "node", filepath.Join(repositoryRoot, "scripts/check_live_decision.mjs"))
 		cmd.Env = append(os.Environ(), "ZENCHRON_LIVE_URL="+server.URL, "ZENCHRON_LIVE_TOKEN_FILE="+tokenFile,
 			"ZENCHRON_LIVE_PLAN="+id, "ZENCHRON_LIVE_PHASE="+phase,
+			"ZENCHRON_LIVE_RUN="+runID, "ZENCHRON_LIVE_GRAPH="+graph.ID, "ZENCHRON_LIVE_PRODUCT="+productID,
+			"ZENCHRON_LIVE_STOPPED=true",
 			"ZENCHRON_LIVE_SCREENSHOTS="+captureDirectory)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("browser %s: %v\n%s", phase, err, out)
@@ -211,6 +253,9 @@ func checkEngineeringOSPlanReject(t *testing.T, lostReply bool) {
 	}
 	if planRejections(t, built, id) != 1 {
 		t.Fatal("one rejection must be durably journalled")
+	}
+	if browser && cancellations(t, state, runID) != 1 {
+		t.Fatal("one stop must be durably journalled, including a lost response")
 	}
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
@@ -247,9 +292,31 @@ func checkEngineeringOSPlanReject(t *testing.T, lostReply bool) {
 		t.Fatal(err)
 	}
 	built.role = role
-	_ = start()
+	listener = start()
 	runBrowser("reconnected")
 	if result := post(digest, binding, 200); result.Outcome != controlplane.OutcomeAlreadyApplied || planRejections(t, built, id) != 1 {
 		t.Fatalf("durable duplicate protection after reconnect: %+v", result)
 	}
+	// Stop the in-process handler before launching the sole serving controller
+	// in another OS process. No two controllers run or hold the role together.
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := role.Release(); err != nil {
+		t.Fatal(err)
+	}
+	built.release()
+	stopProcess := controllerProcess(t, config)
+	runBrowser("process-started")
+	stopProcess()
+	if browser && cancellations(t, state, runID) != 1 {
+		t.Fatal("controller process restart duplicated or lost cancellation")
+	}
+	runBrowser("process-disconnected")
+	stopProcess = controllerProcess(t, config)
+	runBrowser("process-restarted")
+	if result := post(digest, binding, 200); result.Outcome != controlplane.OutcomeAlreadyApplied {
+		t.Fatalf("decision survived OS-process restart: %+v", result)
+	}
+	stopProcess()
 }

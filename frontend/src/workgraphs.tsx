@@ -1,0 +1,489 @@
+import { useMemo, useState } from "react";
+import type { GraphDetail, GraphRow, Graphs, ProductDetail, Products, Unit } from "./operations-api";
+import { Badge, Disclosure, Empty, Head, Link, Pagination, Panel } from "./components";
+import { Facts } from "./runs";
+
+export function GraphTable({ rows }: { rows: GraphRow[] }) {
+  return rows.length ? (
+    <div className="table-scroll" tabIndex={0} role="region" aria-label="WorkGraph inventory">
+      <table className="data-table">
+        <thead>
+          <tr>
+            {["WorkGraph", "Repository", "Agent / revision"].map((v) => (
+              <th key={v} scope="col">
+                {v}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((g) => (
+            <tr key={g.graph_id}>
+              <td data-label="WorkGraph">
+                <Link to={`workgraphs/${encodeURIComponent(g.graph_id)}`}>{g.name || "Unnamed WorkGraph"}</Link>
+                <small className="row-meta mono exact-value">{g.graph_id}</small>
+              </td>
+              <td data-label="Repository">{g.repository}</td>
+              <td data-label="Agent / revision">
+                {g.agent_id || "Not recorded"} · r{g.revision}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  ) : (
+    <Empty title="No WorkGraphs in this page">
+      WorkGraphs remain separate from engineering plans. No relationship is inferred from a shared repository.
+    </Empty>
+  );
+}
+export function GraphPortfolio({ graphs, onPage }: { graphs: Graphs; onPage: (v: number) => void }) {
+  return (
+    <>
+      <Head eyebrow="OPERATIONS / DEPENDENCIES" title="WorkGraphs">
+        Issue-backed WorkUnits, admitted handoffs and the controller's runnable frontier.
+      </Head>
+      <Panel title="Operational graph inventory">
+        <GraphTable rows={graphs.workgraphs} />
+        <Pagination
+          label="WorkGraph pagination"
+          offset={graphs.offset}
+          more={graphs.has_more}
+          count={graphs.workgraphs.length}
+          onPage={onPage}
+        />
+      </Panel>
+    </>
+  );
+}
+// One pass over actual dependencies. A cycle is a malformed observation,
+// never a invented edge or inferred ordering of independent units.
+function positions(units: Unit[]) {
+  const nodes = new Map(
+    units.map((u) => [u.unit_id, { unit: u, depth: 0, remaining: u.depends_on.length, children: [] as string[] }]),
+  );
+  for (const u of units) for (const parent of u.depends_on) nodes.get(parent)!.children.push(u.unit_id);
+  const queue = units.filter((u) => !u.depends_on.length).map((u) => u.unit_id);
+  for (let i = 0; i < queue.length; i++) {
+    const node = nodes.get(queue[i])!;
+    for (const child of node.children) {
+      const next = nodes.get(child)!;
+      next.depth = Math.max(next.depth, node.depth + 1);
+      if (--next.remaining === 0) queue.push(child);
+    }
+  }
+  return queue.length === units.length ? nodes : null;
+}
+function DependencyMap({
+  graph,
+  rows,
+  selected,
+  select,
+}: {
+  graph: GraphDetail;
+  rows: Unit[];
+  selected: string;
+  select: (v: string) => void;
+}) {
+  const layout = useMemo(() => positions(graph.units), [graph]);
+  const depths = [...new Set(rows.map((u) => layout?.get(u.unit_id)?.depth || 0))].sort((a, b) => a - b);
+  const heights = new Map<number, number>();
+  const points = new Map(
+    rows.map((u) => {
+      const depth = layout?.get(u.unit_id)?.depth || 0,
+        row = heights.get(depth) || 0;
+      heights.set(depth, row + 1);
+      return [u.unit_id, { x: depths.indexOf(depth) * 260 + 20, y: row * 115 + 20 }];
+    }),
+  );
+  const node = (u: Unit) => (
+    <>
+      <span className="eyebrow">
+        {u.role || "Role not recorded"} · #{u.issue}
+      </span>
+      <strong>{u.purpose}</strong>
+      <span className="small">
+        {u.state} {graph.frontier.includes(u.unit_id) ? "· frontier" : ""}
+      </span>
+      <span className="small muted">After: {u.depends_on.join(", ") || "No dependency"}</span>
+    </>
+  );
+  return (
+    <>
+      <div className="filter-bar">
+        <label htmlFor="workunit-picker">Inspect unit</label>
+        <select id="workunit-picker" value={selected} onChange={(e) => select(e.target.value)}>
+          {rows.map((u) => (
+            <option key={u.unit_id} value={u.unit_id}>
+              {u.purpose} · {u.state}
+            </option>
+          ))}
+        </select>
+      </div>
+      {layout ? (
+        <div className="dependency-map" tabIndex={0} role="region" aria-label="Dependency map; scroll to inspect">
+          <svg
+            width={Math.max(560, depths.length * 260)}
+            height={Math.max(160, ...[...heights.values()].map((v) => v * 115 + 20))}
+            role="group"
+            aria-label="WorkUnit dependency edges"
+          >
+            {rows.flatMap((u) =>
+              u.depends_on
+                .filter((p) => points.has(p))
+                .map((p) => {
+                  const from = points.get(p)!,
+                    to = points.get(u.unit_id)!;
+                  return (
+                    <path
+                      className="dependency-edge"
+                      key={`${p}/${u.unit_id}`}
+                      d={`M${from.x + 220},${from.y + 43} C${from.x + 245},${from.y + 43} ${to.x - 25},${to.y + 43} ${to.x},${to.y + 43}`}
+                    />
+                  );
+                }),
+            )}
+            {rows.map((u) => {
+              const p = points.get(u.unit_id)!;
+              return (
+                <g
+                  key={u.unit_id}
+                  className={`dependency-node ${selected === u.unit_id ? "selected" : ""}`}
+                  transform={`translate(${p.x},${p.y})`}
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={selected === u.unit_id}
+                  aria-label={`${u.purpose} · ${u.state} · after ${u.depends_on.join(", ") || "no dependency"}`}
+                  onClick={() => select(u.unit_id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      select(u.unit_id);
+                    }
+                  }}
+                >
+                  <rect width="220" height="86" rx="4" />
+                  <text x="12" y="21" className="dependency-meta">
+                    {u.role.slice(0, 25)} · #{u.issue}
+                  </text>
+                  <text x="12" y="44">
+                    {u.purpose.length > 26 ? `${u.purpose.slice(0, 25)}…` : u.purpose}
+                  </text>
+                  <text x="12" y="67" className="dependency-meta">
+                    {u.state}
+                    {graph.frontier.includes(u.unit_id) ? " · frontier" : ""}
+                  </text>
+                </g>
+              );
+            })}
+          </svg>
+        </div>
+      ) : (
+        <div className="product-body" role="alert">
+          Dependency ordering unavailable: a cycle was observed. Inspect each unit's recorded dependencies.
+        </div>
+      )}
+      <div className={`dependency-mobile plan-dependency-grid ${layout ? "" : "dependency-fallback"}`}>
+        {rows
+          .filter((u) => u.unit_id === selected)
+          .map((u) => (
+            <button
+              key={u.unit_id}
+              className={`graph-node ${selected === u.unit_id ? "selected" : ""}`}
+              aria-pressed={selected === u.unit_id}
+              onClick={() => select(u.unit_id)}
+            >
+              {node(u)}
+            </button>
+          ))}
+      </div>
+    </>
+  );
+}
+function UnitInspector({ unit: u }: { unit: Unit }) {
+  return (
+    <div className="product-body" role="region" aria-label="Selected WorkUnit">
+      <h3>{u.purpose}</h3>
+      <Facts
+        rows={[
+          ["Unit identity", u.unit_id],
+          ["Role / execution kind", `${u.role || "Unknown"} / ${u.execution_kind || "Not recorded"}`],
+          ["Observed state", u.state],
+          ["Blocker", u.reason || "None reported"],
+          ["Dependencies", u.depends_on.join(", ") || "No dependencies"],
+          [
+            "Readiness hold",
+            u.hold ? `${u.hold.reference || "No reference"} · ${u.hold.detail || "No detail"}` : "None reported",
+          ],
+          [
+            "Independent review",
+            u.requires_review
+              ? u.review_approved
+                ? "Admitted"
+                : "Required; not admitted"
+              : "Not required by this unit",
+          ],
+        ]}
+      />
+      {u.run ? (
+        <Link to={`runs/${encodeURIComponent(u.run.run_id)}`}>
+          Inspect run · {u.run.phase} · {u.run.disposition}
+        </Link>
+      ) : (
+        <p className="muted">Run not recorded; no worker execution is inferred.</p>
+      )}
+      {u.output && (
+        <Disclosure title="Admitted handoff & producer report">
+          <Facts
+            rows={[
+              ["Handoff", u.output.handoff_id],
+              ["Candidate revision", u.output.candidate_revision],
+              ["Candidate tree", u.output.candidate_tree],
+              ["Reported outcome", u.output.outcome],
+            ]}
+          />
+          <p>Producer-authored report; this prose grants no authority.</p>
+          <p>{u.output.summary || "Summary not recorded"}</p>
+          <p>Unresolved: {u.output.unresolved.join("; ") || "None reported"}</p>
+          <p>Recommended next: {u.output.recommended_next.join("; ") || "None reported"}</p>
+        </Disclosure>
+      )}
+      {u.review && (
+        <Disclosure title="Independent review evidence">
+          <Facts
+            rows={[
+              ["Verdict", u.review.verdict],
+              ["Exact candidate", u.review.candidate],
+              ["Reviewer identity", u.review.reviewer || "Not recorded"],
+            ]}
+          />
+          <ul className="diagnostic-list">
+            {u.review.findings.map((f, i) => (
+              <li key={i}>
+                {f.severity} · {f.signature}
+                <p>{f.detail}</p>
+              </li>
+            ))}
+          </ul>
+        </Disclosure>
+      )}
+      {u.open_decisions.length > 0 && (
+        <section aria-label="Human requests">
+          <h3>Pending human requests</h3>
+          <p>
+            Resolution is available through <span className="mono">autonomy workgraph resolve</span>; no HTTP resolution
+            action is authorized.
+          </p>
+          {u.open_decisions.map((d) => (
+            <Disclosure key={d.id} title={d.purpose || "Human decision"}>
+              <Facts
+                rows={[
+                  ["Exact request", d.id],
+                  ["Requested by", d.requested_by],
+                  ["Requested at", d.requested_at],
+                ]}
+              />
+              <p>{d.body || "Request body not recorded"}</p>
+            </Disclosure>
+          ))}
+        </section>
+      )}
+    </div>
+  );
+}
+export function GraphWorkspace({ graph: g }: { graph: GraphDetail }) {
+  const [offset, setOffset] = useState(0),
+    [selected, setSelected] = useState(g.units[0]?.unit_id || "");
+  const rows = g.units.slice(offset, offset + 50),
+    unit = g.units.find((u) => u.unit_id === selected);
+  return (
+    <>
+      <div className="breadcrumb">
+        <Link to="workgraphs">WorkGraphs</Link>
+        <span>/</span>
+        <span>Operational dependencies</span>
+      </div>
+      <Head
+        eyebrow="WORKGRAPH / OPERATIONAL WORKSPACE"
+        title={g.name || "Unnamed WorkGraph"}
+        extra={<Badge>Revision {g.revision}</Badge>}
+      >
+        {g.repository} · authoritative unit states and admitted dependency handoffs.
+      </Head>
+      <div className="workspace-grid">
+        <div className="workspace-main">
+          <Panel
+            title="WorkUnit dependency graph"
+            extra={
+              <span className="muted small">
+                {g.units.length} units · {g.frontier.length} frontier
+              </span>
+            }
+          >
+            <div className="graph-description">
+              <p>
+                Edges are recorded dependencies; readiness comes from the controller.{" "}
+                {g.units.length > 50
+                  ? "Only edges within this 50-unit window are drawn; full dependency identities remain in the inspector."
+                  : "Select a unit to inspect its exact output and blockers."}
+              </p>
+            </div>
+            {rows.length ? (
+              <DependencyMap graph={g} rows={rows} selected={selected} select={setSelected} />
+            ) : (
+              <Empty title="No WorkUnits recorded">An empty graph has no inferred execution.</Empty>
+            )}
+            <Pagination
+              label="WorkUnit pagination"
+              offset={offset}
+              more={offset + 50 < g.units.length}
+              count={rows.length}
+              onPage={(v) => {
+                setOffset(v);
+                setSelected(g.units[v]?.unit_id || "");
+              }}
+            />
+            {unit && <UnitInspector key={unit.unit_id} unit={unit} />}
+          </Panel>
+        </div>
+        <aside className="workspace-aside">
+          <Panel title="Runtime counts">
+            <Facts rows={Object.entries(g.counts)} />
+          </Panel>
+          <Panel title="Scope & identity">
+            <Facts
+              rows={[
+                ["Graph", g.graph_id],
+                ["Repository", g.repository],
+                ["Execution agent", g.agent_id || "Not recorded"],
+              ]}
+            />
+            <div className="product-body">
+              {g.product ? (
+                <Link to={`products/${encodeURIComponent(g.product.product_id)}`}>Product · {g.product.name}</Link>
+              ) : (
+                <p>No product association recorded.</p>
+              )}
+            </div>
+          </Panel>
+          <Panel title="Runnable frontier">
+            <div className="product-body">
+              {g.frontier.length ? (
+                <ul className="diagnostic-list">
+                  {g.frontier.map((id) => (
+                    <li className="mono exact-value" key={id}>
+                      {id}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>No dependency-ready unit reported.</p>
+              )}
+              <p className="muted">Frontier membership does not grant execution or acceptance authority.</p>
+            </div>
+          </Panel>
+        </aside>
+      </div>
+    </>
+  );
+}
+export function ProductPortfolio({ products, onPage }: { products: Products; onPage: (v: number) => void }) {
+  return (
+    <>
+      <Head eyebrow="OPERATIONS / PRODUCT SCOPE" title="Products">
+        Recorded product scope and its associated operational graphs.
+      </Head>
+      <Panel title="Product inventory">
+        {products.products.length ? (
+          <div className="table-scroll" tabIndex={0} role="region" aria-label="Products">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  {["Product", "Repositories", "Revision"].map((v) => (
+                    <th key={v} scope="col">
+                      {v}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {products.products.map((p) => (
+                  <tr key={p.product_id}>
+                    <td data-label="Product">
+                      <Link to={`products/${encodeURIComponent(p.product_id)}`}>{p.name}</Link>
+                      <small className="row-meta mono exact-value">{p.product_id}</small>
+                    </td>
+                    <td data-label="Repositories">{p.repositories.join(", ") || "None recorded"}</td>
+                    <td data-label="Revision">r{p.revision}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <Empty title="No products in this page">Repository names alone do not establish product membership.</Empty>
+        )}
+        <Pagination
+          label="Product pagination"
+          offset={products.offset}
+          more={products.has_more}
+          count={products.products.length}
+          onPage={onPage}
+        />
+      </Panel>
+    </>
+  );
+}
+export function ProductWorkspace({ product: p, onPage }: { product: ProductDetail; onPage: (v: number) => void }) {
+  return (
+    <>
+      <div className="breadcrumb">
+        <Link to="products">Products</Link>
+        <span>/</span>
+        <span>Product scope</span>
+      </div>
+      <Head eyebrow="PRODUCT / SCOPE WORKSPACE" title={p.name} extra={<Badge>Revision {p.revision}</Badge>}>
+        {p.repositories.join(", ") || "No repositories recorded"}
+      </Head>
+      <div className="workspace-grid">
+        <div className="workspace-main">
+          <Panel title="Associated WorkGraphs">
+            <GraphTable rows={p.graphs} />
+            <Pagination
+              label="Associated WorkGraph pagination"
+              offset={p.graphs_offset}
+              more={p.graphs_has_more}
+              count={p.graphs.length}
+              onPage={onPage}
+            />
+          </Panel>
+        </div>
+        <aside className="workspace-aside">
+          <Panel title="Configuration references">
+            {p.configuration ? (
+              <>
+                <Facts
+                  rows={[
+                    ["Product identity", p.product_id],
+                    ["Configuration revision", p.configuration.revision],
+                    ["Policy identity", p.configuration.policy?.id || "Not recorded"],
+                    ["Policy revision", p.configuration.policy?.revision ?? "Not recorded"],
+                    ["Context policy", p.configuration.context_policy || "Not recorded"],
+                  ]}
+                />
+                <Disclosure title="Recorded settings">
+                  <Facts rows={Object.entries(p.configuration.settings)} />
+                </Disclosure>
+              </>
+            ) : (
+              <Empty title="Configuration not recorded">
+                Product presence does not imply a policy or context selection.
+              </Empty>
+            )}
+          </Panel>
+        </aside>
+      </div>
+    </>
+  );
+}

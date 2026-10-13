@@ -12,13 +12,14 @@ the real governed controller path and durable journal, never an operator's produ
   wire boundary, authenticated preview/runtime delivery and relevant governed action behavior.
 - Focused race-enabled CLI/controller tests pass for real plan rejection, same-request controller
   proof, plan-lock racing protection and stop. `TestEngineeringOSPlanRejectEndToEnd` uses actual
-  controller composition, socket, controller role and real journal. Its browser submits one POST,
+  controller composition, socket, controller role and real journal. Its browser submits one rejection POST and one stop POST,
   preserves the selected revision, focuses the historical receipt and rehydrates it after controller
-  composition/read-store/role/socket reconstruction. A discarded reply after the actual journal write and a failed reconciliation
-  read remain closed; the later receipt read never resends the action. Changed digest/controller, unattested build,
+  composition/read-store/role/socket reconstruction and actual OS-process crash/restart. A discarded reply after the actual journal write and a failed reconciliation
+  read remain closed; the later receipt/cancellation read never resends either action. Changed digest/controller, unattested build,
   released role and disconnected pending request cases refuse without a journal decision.
-- `scripts/check_design_preview.mjs` passes the frozen fixture interactions and 52 captures:
-  50 explicitly synthetic design images and two genuine isolated empty-runtime API images.
+- `scripts/check_design_preview.mjs` passes the frozen fixture interactions and 76 captures:
+  50 explicitly synthetic design images, two genuine isolated empty-runtime API images, six actual
+  unauthenticated login captures and 18 explicitly labeled HTTP projection fixtures.
   Synthetic 500-objective/10,000-event checks render at most 50 records. Their timings describe
   browser fixture interaction, not production throughput or runtime reduction cost.
 - Its React helper verifies bearer transport, 50-row paging across a 500-row HTTP contract,
@@ -26,10 +27,10 @@ the real governed controller path and durable journal, never an operator's produ
   review refusal, independent identity/reachability, stale observation handling under a controlled
   clock, permission/malformed/mismatched/disconnected reads and historical receipts. These HTTP
   mocks are presentation evidence only and are not captured as genuine runtime state.
-- 37 further browser captures exercise the actual isolated controller flow at 1440, 1920 and
+- 71 further browser captures exercise the actual isolated controller flow at 1440, 1920 and
   390 px in both actual themes. Captures visibly say isolated test data. Fresh documents prevent
   stale Chrome compositor images; selected theme is asserted before capture. Metadata is in
-  `screenshots/batch-01/{reject,disconnected,reconnected}-validation.json`.
+  `screenshots/batch-02/*-validation.json`. No fixture provides the governed result.
 - Keyboard proofs cover modal containment, Escape to the exact opener, receipt focus, closed
   mobile-sidebar inertness, drawer containment and return, and route-preserving recovery inspection.
   First-screen mobile decision buttons and expanded-binding confirmation footer remain visible.
@@ -75,7 +76,7 @@ it remains the GitHub CI gate.
 no task diff for that file or its baseline. This was not hidden, waived or repaired by unrelated
 runtime changes. All added source files remain below 500 lines; no changed source crossed 500 and
 no size exception was introduced. `controlplane/api.go` was already in the warning zone and gained
-two registrations. The repository completion gate remains red until the separate overage is resolved.
+read routes and bounded run-filter validation. The repository completion gate remains red until the separate overage is resolved.
 
 ## Review and remaining gates
 
@@ -86,9 +87,14 @@ The server action allowlist, same-request proof, role/plan lock, journal, privat
 uncertain-write reconciliation remain authoritative. No backend workflow interface or state machine
 was added; presentation satisfies §6(c), HTTP integration §6(b).
 
-Full objective/public-title and product scope projection, WorkGraph association, complete plan
-activity, governed approval bindings, remaining operational screens/login, real process-level restart
-qualification, production-load performance and operator acceptance remain open. Controller
-reconstruction evidence above is not represented as an operating-system process-restart test.
+Runs, Products, WorkGraphs, controller findings, agent bindings, login, plan revision inspection
+and bounded plan activity now share the React shell. Product/graph association is observed directly;
+no invented objective/graph relationship is presented. Approval/publication/human-gate resolution,
+private objective prose and installed-agent registry remain established CLI boundaries.
+Production-load performance, full screen-reader/high-zoom qualification, an approved pixel baseline
+and operator acceptance remain open. Process-restart proof uses the actual controller composition
+and measured test binary with explicit isolated test attestation; it does not qualify a production build.
 The [complete legacy-removal inventory](frontend-inventory.md) is retained. No obsolete Go-template
 page, static asset, old navigation route or template test has been removed.
+
+[Batch 02 review](batch-02-review.md) records the focused fixes and current operational scope.

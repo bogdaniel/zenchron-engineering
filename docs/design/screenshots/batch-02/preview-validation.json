@@ -1,0 +1,190 @@
+{
+  "viewports": [
+    {
+      "name": "overview",
+      "width": 1440,
+      "height": 1080,
+      "theme": "dark",
+      "overflow": false
+    },
+    {
+      "name": "portfolio",
+      "width": 1440,
+      "height": 1080,
+      "theme": "dark",
+      "overflow": false
+    },
+    {
+      "name": "workspace",
+      "width": 1440,
+      "height": 1080,
+      "theme": "dark",
+      "overflow": false
+    },
+    {
+      "name": "actions",
+      "width": 1440,
+      "height": 1080,
+      "theme": "dark",
+      "overflow": false
+    },
+    {
+      "name": "overview",
+      "width": 1920,
+      "height": 1080,
+      "theme": "dark",
+      "overflow": false
+    },
+    {
+      "name": "portfolio",
+      "width": 1920,
+      "height": 1080,
+      "theme": "dark",
+      "overflow": false
+    },
+    {
+      "name": "workspace",
+      "width": 1920,
+      "height": 1080,
+      "theme": "dark",
+      "overflow": false
+    },
+    {
+      "name": "actions",
+      "width": 1920,
+      "height": 1080,
+      "theme": "dark",
+      "overflow": false
+    },
+    {
+      "name": "overview",
+      "width": 390,
+      "height": 844,
+      "theme": "dark",
+      "overflow": false
+    },
+    {
+      "name": "portfolio",
+      "width": 390,
+      "height": 844,
+      "theme": "dark",
+      "overflow": false
+    },
+    {
+      "name": "workspace",
+      "width": 390,
+      "height": 844,
+      "theme": "dark",
+      "overflow": false
+    },
+    {
+      "name": "actions",
+      "width": 390,
+      "height": 844,
+      "theme": "dark",
+      "overflow": false
+    }
+  ],
+  "checks": [
+    "Search, combined filters, no-results state, filter reset",
+    "Dependency blockers navigate to their objective; unmatched decisions never retarget",
+    "WorkGraph selection, plan/evidence/activity navigation",
+    "Simulated-only status, exact action confirmation, changed binding refusal, context-preserving rejected/resolved receipts",
+    "Runtime-owned evidence recheck and handoff repair are outside the human inbox",
+    "Disconnected, stale, permission-refused and failed execution disable decisions",
+    "Grounded counts, overlapping activity, unavailable metrics/capacity and unified preview navigation",
+    "500 objectives / 10000 events, bounded 50-row pages, searchable full fixture index and retained local filters",
+    "Mobile bottom navigation and accessible drawer destinations",
+    "Mobile decision chooser navigates to exact plan context",
+    "Dark and light theme switching",
+    "All system states and keyboard-accessible global search",
+    "360/720px reflow and enlarged text spacing; confirmation/drawer focus containment and return",
+    "Rendered text contrast, button names, no horizontal overflow, no script errors, no writes"
+  ],
+  "accessibility": [
+    {
+      "mode": "dark",
+      "route": "overview",
+      "issues": []
+    },
+    {
+      "mode": "dark",
+      "route": "objectives",
+      "issues": []
+    },
+    {
+      "mode": "dark",
+      "route": "objectives/OBJ-612",
+      "issues": []
+    },
+    {
+      "mode": "dark",
+      "route": "actions/OBJ-612",
+      "issues": []
+    },
+    {
+      "mode": "light",
+      "route": "overview",
+      "issues": []
+    },
+    {
+      "mode": "light",
+      "route": "objectives",
+      "issues": []
+    },
+    {
+      "mode": "light",
+      "route": "objectives/OBJ-612",
+      "issues": []
+    },
+    {
+      "mode": "light",
+      "route": "actions/OBJ-612",
+      "issues": []
+    }
+  ],
+  "previewFixtureOnly": true,
+  "login": {
+    "captures": 6,
+    "source": "Actual isolated Go authentication boundary; no fixtures",
+    "checks": [
+      "Public code-only shell; wrong token refused without session; current token accepted",
+      "Destination preserved; credential absent from local storage; no legacy asset imports",
+      "Dark/light login, 1440/1920/390 reflow, keyboard start and readable contrast"
+    ]
+  },
+  "scale": {
+    "objectives": 500,
+    "events": 10000,
+    "renderedPageLimit": 50,
+    "timings": {
+      "portfolioPageMs": 58,
+      "portfolioSearchMs": 8,
+      "activityPageMs": 30
+    },
+    "includesBrowserAutomationOverhead": true
+  },
+  "integration": {
+    "captures": 2,
+    "httpMocksOnlyAfterRealCaptures": true,
+    "checks": [
+      "Genuine isolated empty API captures; React app never imports fixtures",
+      "500-row paged HTTP contract; full-index search; gate/run distinction; escaped text",
+      "Pending versus actionable; identity independent of reachability; changed request refused before confirmation",
+      "Historical receipt, route-preserving recovery, refused/malformed/mismatched/disconnected reads retain stale context",
+      "Eight dark/light contrast/name checks; no writes in this boundary-only suite"
+    ]
+  },
+  "operations": {
+    "captures": 18,
+    "source": "Explicitly labeled HTTP projection fixtures; no controller acceptance claims",
+    "checks": [
+      "Run and association paging, bounded 10000-event history cursor; changed cursor refused",
+      "120 WorkUnits, 50-node windows, actual dependency edges, mobile inspectors, escaped reports and exact evidence",
+      "Exact stop review without submission; keyboard return focus; dark/light desktop/mobile contrast and reflow",
+      "Run subject mismatch and missing graph dependency fail closed"
+    ]
+  },
+  "captureCount": 76,
+  "captureMethod": "Native viewport/dialog images; full-page mobile captures put sticky chrome in document flow to avoid Chrome tile artifacts."
+}

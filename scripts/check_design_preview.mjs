@@ -2,6 +2,8 @@
 // No package installation, test runner, runtime writes, or production frontend server.
 import assert from "node:assert/strict";
 import { checkEngineeringApplication } from "./check_engineering_app.mjs";
+import { checkOperationalViews } from "./check_operational_views.mjs";
+import { checkEngineeringLogin } from "./check_engineering_login.mjs";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -47,6 +49,8 @@ async function captureFullPage(page, options) {
 
 try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1080 }, reducedMotion: "reduce" });
+  report.login = await checkEngineeringLogin(browser, base, out);
+  captures += report.login.captures;
   const page = await context.newPage();
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("request", (request) => {
@@ -453,6 +457,8 @@ try {
   }
   report.integration = await checkEngineeringApplication(page, base, out, captureFullPage);
   captures += report.integration.captures;
+  report.operations = await checkOperationalViews(page, base, out, captureFullPage);
+  captures += report.operations.captures;
   assert.deepEqual(errors, [], "Browser script errors");
   assert.deepEqual(writes, [], "Prototype must not make non-GET requests");
   report.checks.push("Rendered text contrast, button names, no horizontal overflow, no script errors, no writes");

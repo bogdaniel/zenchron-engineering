@@ -1,6 +1,6 @@
 # Frontend consolidation inventory
 
-Status: **design gate accepted; React batch 01 implemented; legacy deletion pending complete parity and operator acceptance**.
+Status: **design gate accepted; React batches 01–02 implemented; legacy deletion pending complete parity and operator acceptance**.
 Audit of this checkout on 2026-10-13. The working tree was clean before this task.
 The four interactive fixture experiences are at `/design`. Existing routes remain operational.
 
@@ -238,3 +238,57 @@ See [the precise batch scope and acceptance proof](runtime-integration.md). Dele
 **none of the thirteen legacy templates, two static assets, old route registrations or template tests
 has been deleted**. The deletion candidates and route mappings above remain the final cutover list;
 record actual deleted paths and evidence in this document when operator acceptance permits cutover.
+
+## Migration update: batch 02 (2026-10-14)
+
+The new app now covers all existing HTML read-page families and the existing browser action allowlist.
+React login has no dependency on `login.html`, `console.js` or `console.css`; those remain solely for
+legacy routes and the gated `/design` checkpoint. Shared source-filter rules moved from presentation
+code into `controlplane/runs_filter.go`, which must survive retirement.
+
+| Legacy capability | Replacement parity / remaining acceptance |
+| --- | --- |
+| Overview controller/fleet/plan observations | Implemented; dimensions, scoped counts and unknown ceilings retained |
+| Run filters/detail/operation/history/held material/publication obligations | Implemented; source/disposition/held filters before paging, bounded cursor history, exact candidate/contract and provenance |
+| Governed stop and plan reject | Implemented; actual controller/browser, ambiguity, one durable effect and process-restart proof |
+| Plan revisions/bindings/gates/review/budgets/change preview | Implemented; no gate run or proposal/execution conflation |
+| Product list/configuration/association paging | Implemented using existing Product DTO and SQL association page |
+| WorkGraph list/units/frontier/output/review/holds/open requests | Implemented with actual edges, selected inspector and retained CLI resolution boundary |
+| Login/read errors/missing routes/stale observations | React implementation and bearer boundary proofs; public bootstrap contains code only |
+| Agents and diagnostics | Recorded bindings/controller findings are implemented; installed readiness and full doctor remain existing CLI capabilities |
+| Private objective prose, prospective assignment approval, publication evidence/decision resolution | Existing HTTP gaps remain explicit; do not invent public data or expand the frozen action allowlist |
+| Old bookmark redirects, sole root shell, deleted frontend/templates/tests | Not applied until operator acceptance; mappings above remain the cutover plan |
+
+Exact template deletion candidates (after acceptance):
+
+```text
+controlplane/assets/templates/layout.html
+controlplane/assets/templates/login.html
+controlplane/assets/templates/overview.html
+controlplane/assets/templates/runs.html
+controlplane/assets/templates/run_detail.html
+controlplane/assets/templates/plan_detail.html
+controlplane/assets/templates/products.html
+controlplane/assets/templates/product_detail.html
+controlplane/assets/templates/workgraphs.html
+controlplane/assets/templates/workgraph_detail.html
+controlplane/assets/templates/error.html
+controlplane/assets/templates/not_found.html
+controlplane/assets/templates/run_not_found.html
+controlplane/assets/static/console.css
+controlplane/assets/static/console.js
+controlplane/web_templates.go
+controlplane/web_product.go
+```
+
+`web.go` must retain/refactor method/path/auth protections while deleting rendering/data structs,
+legacy handlers and `filterWebRuns`. `web_design.go` must become the sole app/asset delivery boundary;
+retire the fixture entry/modules and route, keep shared CSS/build output, and replace old URLs with
+compatibility routing. Preserve `api.go`, `actions.go`, DTO projections, `plan_context.go`,
+`plan_events.go`, `fleet_view.go`, `runs_filter.go`, read-store services, schemas and all authority paths.
+Retire `web_template_test.go` and replace presentation assertions in the other listed tests only after
+equivalent shell/browser/compatibility coverage. Keep their projection, privacy and security proofs.
+
+**Actual legacy deletion in batches 01–02: none.** Operational acceptance, final accessibility/load
+qualification, current-head CI and the pre-existing file-size overage remain unresolved. The final
+system must have one supported app; temporary migration availability is not an accepted parallel UI.

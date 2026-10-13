@@ -1,9 +1,9 @@
 # Observed state and measurement contract
 
-Industrial visual direction is accepted. Production design and live integration are pending.
+Industrial visual direction is accepted. The visual gate is accepted; operational replacement acceptance remains pending.
 All `/design` values are explicitly synthetic; `/app` is now a separate observed-data mode of the
-same application, described in [the first runtime slice](runtime-integration.md); this audit is code inspection, not a runtime observation.
-No API or governed action is added by this checkpoint.
+same application, described in [runtime integration](runtime-integration.md); this audit is code inspection, not a runtime observation.
+The inventory below records the initial audit; implementation updates are recorded afterward.
 
 ## Activity dimensions, not an exclusive funnel
 
@@ -25,7 +25,7 @@ never be summed into a total, converted into completion, or treated as exclusive
 | Run elapsed time | Run `elapsed`, `active_elapsed`, `external_wait_elapsed` | Separate run wall/active/wait durations, not an objective lifecycle duration |
 | Budget consumed | Plan detail `budget.child_runs/max_child_runs`, `provider_invocations/max_provider_invocations`, `wall_seconds/max_wall_seconds` | A consumed-budget meter is defensible; it is never engineering completion. Missing/unverifiable ceiling means no ratio |
 | Cost | Plan detail `budget.cost_known`, optional `cost_micros` | Unknown stays unknown; never insert zero or sum a partially known fleet into an apparently complete cost |
-| Workers / capacity | Run worker identity and executing counts; plan bound agent/provider/trust fields | Installed readiness and per-agent ceilings are not exposed. Internal `Fleet.capacity == 0` can mean unknown and has no registered fleet route |
+| Workers / capacity | Run worker identity and executing counts; plan bound agent/provider/trust fields | Installed readiness and per-agent ceilings are not exposed. Internal `Fleet.capacity == 0` can mean unknown and is now exposed by `/v1/fleet`, with zero still meaning unknown |
 | Controller | `/v1/controller` independent dimensions | Preserve reachability, serving, role/admission, consistency and generation match; one green “healthy” badge cannot replace them |
 | History | `/v1/runs/{id}/events`: sequence, type, occurred_at, next_after, has_more; stream | Fetch bounded pages per exact run. Do not manufacture rich event prose from sanitized metadata |
 
@@ -104,3 +104,19 @@ objective prose. Read views remain independent snapshots. No throughput, histori
 percentage, agent ceiling or plan-to-WorkGraph association was introduced. Actual test controller
 behavior and synthetic browser measurements are separately labeled in
 [the implementation evidence](runtime-integration.md).
+
+## React batch 02 source update
+
+`/v1/fleet` exposes the existing canonical fleet counts/capacity classes without unbounded collections.
+The activity strip still uses its explicitly partial pages; aggregate scope is separately labeled.
+Capacity zero stays unknown. `/v1/plans/{id}/events` reuses the existing stream index, canonical reader
+and plan-local exclusive cursor, including attempts that produced no revision. Payloads stay private.
+Run disposition/held/source filters now apply to the full fleet before paging, through the same shared
+matching rule as the legacy renderer.
+
+Standalone run/WorkGraph/Product inspectors now consume their existing DTOs, including operation
+progress provenance, held material, exact handoff/review subjects, unresolved human requests and
+product associations. Recorded agent bindings are available; installed readiness remains the CLI.
+No trend, completion percentage, plan/graph association or authoritative client workflow is inferred.
+Real controller stop/rejection, lost replies and actual OS-process restart are separately proved from
+the labeled HTTP fixture presentation checks. See [runtime integration](runtime-integration.md).

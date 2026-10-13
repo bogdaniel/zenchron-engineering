@@ -49,3 +49,22 @@ Failed-run context: [Workspace](screenshots/workspace-failed-execution-1440.png)
 [37 additional captures and genuine controller-path evidence](runtime-integration.md) use explicitly
 labeled isolated test data. They do not represent production fleet measurements. The accepted fixture
 checkpoint above and real operational workflow evidence remain separate.
+
+## React batch 02
+
+[Reviewed implementation and source classifications](batch-02-review.md) accompany the current
+runtime captures. These images use explicitly labeled isolated test inputs and actual Go read APIs;
+they are not production observations. The separate `operational-http-fixtures` gallery exercises
+larger graphs and histories through labeled HTTP mocks. Login images use the actual Go listener.
+
+| Experience | 1440 dark | 1920 dark | 390 dark |
+| --- | --- | --- | --- |
+| Overview | [View](screenshots/batch-02/overview-1440-dark.png) | [View](screenshots/batch-02/overview-1920-dark.png) | [View](screenshots/batch-02/overview-390-dark.png) |
+| Objectives | [View](screenshots/batch-02/portfolio-1440-dark.png) | [View](screenshots/batch-02/portfolio-1920-dark.png) | [View](screenshots/batch-02/portfolio-390-dark.png) |
+| Objective workspace | [View](screenshots/batch-02/workspace-1440-dark.png) | [View](screenshots/batch-02/workspace-1920-dark.png) | [View](screenshots/batch-02/workspace-390-dark.png) |
+| Action required | [View](screenshots/batch-02/actions-1440-dark.png) | [View](screenshots/batch-02/actions-1920-dark.png) | [View](screenshots/batch-02/actions-390-dark.png) |
+
+All four views and Run/WorkGraph/Product workspaces also have light captures at all three widths
+in the same directory. Historical and controller restart states are retained with their validation
+records. [Mobile confirmation with expanded binding](screenshots/batch-02/confirmation-390-expanded.png)
+keeps the protected action and footer visible. [Full evidence and current limits](validation.md).

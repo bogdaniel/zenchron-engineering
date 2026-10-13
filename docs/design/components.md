@@ -23,7 +23,7 @@ rejection workflow. Complete operational parity remains pending.
 
 The fixture compositions remain the frozen checkpoint. Runtime implementation now uses React
 shared components in `frontend/src/components.tsx`, the authoritative CSS above, and one typed
-API boundary in `frontend/src/api.ts`. Local route/filter/selection/confirmation state stays separate
+API integration layer in `frontend/src/api.ts` and `operations-api.ts`. Local route/filter/selection/confirmation state stays separate
 from observed server DTOs; no local state transition grants authority. The superseded read-only
 `api.js`/`runtime.js` adapters were removed. Reusable presentation satisfies repository §6(c),
 the explicitly requested component foundation; the HTTP boundary satisfies §6(b).
@@ -45,8 +45,8 @@ See [the precise React component and state inventory](runtime-integration.md).
 
 The ordinary fixture verifies eligibility only for its two synthetic human requests. The shared
 blocker also handles absent/unverified eligibility. Production must replace this with server facts,
-subject-specific refusals, independent freshness and governed action responses; the design checkpoint
-has deliberately not built that integration. See [the data contract](data-sources.md).
+subject-specific refusals, independent freshness and governed action responses; the fixture checkpoint
+never calls that integration. See [the data contract](data-sources.md).
 
 ## Mobile decision anatomy
 
@@ -68,3 +68,16 @@ live workflow is governed plan rejection, with server-side exact-subject verific
 The browser check verifies first-screen mobile buttons, exact confirmation context, closed/expanded
 bindings, disabled scenarios, keyboard focus and local filter preservation. Rendered screenshots and
 human review remain required; these structural checks alone do not establish production acceptance.
+
+## Operational component additions
+
+React reuses the same tokens and shell. Shared pagination now has a scope-specific accessible name.
+`history.tsx` owns one bounded run/plan cursor timeline; the factual inspector is reused across runs,
+products, graph units, evidence and diagnostics. WorkGraphs use real dependency edges and a mobile
+unit picker plus one selected card, preserving the default inspector. Native stop confirmation reuses
+the approved scrolling-body/persistent-footer anatomy. The React login uses the same theme tokens
+and existing bearer/cookie session, with focused errors and no old CSS/JS imports.
+
+Visible observations refresh every 20 seconds, suspend while hidden/confirming, and age to stale at
+30 seconds. Read DTOs, local selections and server action results remain separate; neither a graph
+selection nor an agent's execution trust authorizes an engineering outcome.

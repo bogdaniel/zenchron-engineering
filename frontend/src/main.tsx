@@ -1,18 +1,39 @@
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import * as api from "./api";
-import { ControllerFacts, Empty, Head, Panel } from "./components";
+import { Empty, Head, Link, Panel } from "./components";
 import { Overview, Portfolio, Workspace } from "./pages";
 import { Decisions } from "./decisions";
+import { Login } from "./login";
+import { Agents, ControllerWorkspace } from "./system";
+import { JournalHistory } from "./history";
+import * as ops from "./operations-api";
+import { RunPortfolio, RunWorkspace } from "./runs";
+import { GraphPortfolio, GraphWorkspace, ProductPortfolio, ProductWorkspace } from "./workgraphs";
 
 const navigation = [
   ["overview", "Engineering overview", "▦"],
   ["objectives", "Objectives", "≡"],
   ["actions", "Action required", "◇"],
+  ["runs", "Runs & activity", "▷"],
+  ["workgraphs", "WorkGraphs", "⌘"],
+  ["products", "Products", "□"],
+  ["agents", "Agents", "∘"],
   ["controller", "Controller health", "⌁"],
 ] as const;
 type Route = { page: string; id: string; revision: number };
-type Snapshot = { controller?: api.Controller; index?: api.PlanIndex; runs?: api.Runs; context?: api.Context };
+type Snapshot = {
+  controller?: api.Controller;
+  index?: api.PlanIndex;
+  runs?: api.Runs;
+  context?: api.Context;
+  run?: ops.RunDetail;
+  graphs?: ops.Graphs;
+  graph?: ops.GraphDetail;
+  products?: ops.Products;
+  product?: ops.ProductDetail;
+  fleet?: ops.Fleet;
+};
 function route(): Route {
   try {
     const parts = location.hash.replace(/^#\/?/, "").split("/");
@@ -34,24 +55,42 @@ function Screen({ route: r }: { route: Route }) {
     [filter, setFilter] = useState("all");
   const [refreshKey, setRefreshKey] = useState(0);
   useEffect(() => {
+    const timer = setInterval(() => {
+      // Pause observation while hidden or confirming an immutable action.
+      if (document.visibilityState === "visible" && !document.querySelector("dialog[open]"))
+        setRefreshKey((k) => k + 1);
+    }, 20000);
+    return () => clearInterval(timer);
+  }, []);
+  useEffect(() => {
     const owner = new AbortController();
     let expiry: ReturnType<typeof setTimeout> | undefined;
     setLoading(true);
     setError("");
     setStale(true);
     Promise.all([
-      ["overview", "actions", "controller"].includes(r.page)
+      ["overview", "actions", "controller"].includes(r.page) || (r.page === "runs" && !!r.id)
         ? api.controller(owner.signal)
         : Promise.resolve(undefined),
       ["overview", "actions"].includes(r.page) || (r.page === "objectives" && !r.id)
         ? api.plans(owner.signal, offset, query)
         : Promise.resolve(undefined),
-      r.page === "overview" ? api.runs(owner.signal) : Promise.resolve(undefined),
-      r.id ? api.context(r.id, owner.signal, r.revision) : Promise.resolve(undefined),
+      ["overview", "agents"].includes(r.page) || (r.page === "runs" && !r.id)
+        ? api.runs(owner.signal, offset, filter === "all" ? "" : filter, query)
+        : Promise.resolve(undefined),
+      r.id && ["objectives", "actions"].includes(r.page)
+        ? api.context(r.id, owner.signal, r.revision)
+        : Promise.resolve(undefined),
+      r.page === "runs" && r.id ? ops.run(r.id, owner.signal) : Promise.resolve(undefined),
+      r.page === "workgraphs" && !r.id ? ops.graphs(offset, owner.signal) : Promise.resolve(undefined),
+      r.page === "workgraphs" && r.id ? ops.graph(r.id, owner.signal) : Promise.resolve(undefined),
+      r.page === "products" && !r.id ? ops.products(offset, owner.signal) : Promise.resolve(undefined),
+      r.page === "products" && r.id ? ops.product(r.id, offset, owner.signal) : Promise.resolve(undefined),
+      r.page === "overview" ? ops.fleet(owner.signal) : Promise.resolve(undefined),
     ])
-      .then(([controller, index, runs, context]) => {
+      .then(([controller, index, runs, context, run, graphs, graph, products, product, fleet]) => {
         if (owner.signal.aborted) return;
-        setData({ controller, index, runs, context });
+        setData({ controller, index, runs, context, run, graphs, graph, products, product, fleet });
         setReceivedAt(new Date().toISOString());
         setStale(false);
         // UI observation age only; no liveness or authority lease is inferred.
@@ -70,7 +109,7 @@ function Screen({ route: r }: { route: Route }) {
       owner.abort();
       if (expiry) clearTimeout(expiry);
     };
-  }, [r.page, r.id, r.revision, offset, query, refreshKey]);
+  }, [r.page, r.id, r.revision, offset, query, filter, refreshKey]);
   const refresh = () => setRefreshKey((k) => k + 1);
   let content;
   if (!data)
@@ -88,15 +127,29 @@ function Screen({ route: r }: { route: Route }) {
             Retry read
           </button>
           {error === "unauthorized" && (
-            <a href="/app" className="button">
+            <button
+              className="button"
+              onClick={() => {
+                api.disconnect();
+                location.reload();
+              }}
+            >
               Sign in again
-            </a>
+            </button>
           )}
         </div>
       </Panel>
     );
   else if (r.page === "overview" && data.runs && data.controller && data.index)
-    content = <Overview controller={data.controller} index={data.index} runs={data.runs} stale={stale || loading} />;
+    content = (
+      <Overview
+        controller={data.controller}
+        index={data.index}
+        runs={data.runs}
+        stale={stale || loading}
+        fleet={data.fleet}
+      />
+    );
   else if (r.page === "objectives" && !r.id && data.index)
     content = (
       <Portfolio
@@ -113,6 +166,52 @@ function Screen({ route: r }: { route: Route }) {
     );
   else if (r.page === "objectives" && data.context)
     content = <Workspace key={`${r.id}/${data.context.plan.revision}`} context={data.context} />;
+  else if (r.page === "runs" && !r.id && data.runs)
+    content = (
+      <RunPortfolio
+        runs={data.runs}
+        onPage={setOffset}
+        status={filter}
+        source={query}
+        onStatus={(v) => {
+          setFilter(v);
+          setOffset(0);
+        }}
+        onSource={(v) => {
+          setQuery(v);
+          setOffset(0);
+        }}
+      />
+    );
+  else if (r.page === "runs" && data.run && data.controller)
+    content = <RunWorkspace run={data.run} controller={data.controller} stale={stale || loading} after={r.revision} />;
+  else if (r.page === "workgraphs" && data.graphs) content = <GraphPortfolio graphs={data.graphs} onPage={setOffset} />;
+  else if (r.page === "workgraphs" && data.graph)
+    content = <GraphWorkspace key={`${r.id}/${data.graph.revision}`} graph={data.graph} />;
+  else if (r.page === "products" && data.products)
+    content = <ProductPortfolio products={data.products} onPage={setOffset} />;
+  else if (r.page === "products" && data.product)
+    content = <ProductWorkspace product={data.product} onPage={setOffset} />;
+  else if (r.page === "agents" && data.runs) content = <Agents runs={data.runs} onPage={setOffset} />;
+  else if (r.page === "attempts" && r.id)
+    content = (
+      <>
+        <Head eyebrow="PLANNING / ATTEMPT HISTORY" title="Planning attempt history">
+          A refused attempt has no compiled or executable plan revision. Journal metadata remains inspectable.
+        </Head>
+        <Panel title="Source identity">
+          <div className="product-body">
+            <p className="mono exact-value">{r.id}</p>
+            <p>
+              Inspect typed refusal detail through <span className="mono">autonomy plan show</span>. Private reasoning
+              and payloads stay outside the read API.
+            </p>
+            <Link to="objectives">Back to objectives</Link>
+          </div>
+        </Panel>
+        <JournalHistory kind="plan" id={r.id} />
+      </>
+    );
   else if (r.page === "actions" && data.index && data.controller)
     content = (
       <Decisions
@@ -124,16 +223,7 @@ function Screen({ route: r }: { route: Route }) {
       />
     );
   else if (r.page === "controller" && data.controller)
-    content = (
-      <>
-        <Head eyebrow="SYSTEM / CONTROLLER" title="Controller health">
-          Identity attestation and live endpoint reachability are independent observations.
-        </Head>
-        <Panel title="Controller dimensions">
-          <ControllerFacts controller={data.controller} stale={stale} />
-        </Panel>
-      </>
-    );
+    content = <ControllerWorkspace controller={data.controller} stale={stale || loading} />;
   else
     content = (
       <Panel title="Destination unavailable">
@@ -178,6 +268,7 @@ function Screen({ route: r }: { route: Route }) {
   );
 }
 function App() {
+  const [connected, setConnected] = useState(api.hasCredential);
   const [current, setCurrent] = useState(route);
   const [theme, setTheme] = useState(() => (localStorage.getItem("zenchron-theme") === "light" ? "light" : "dark"));
   const [menu, setMenu] = useState(false);
@@ -248,11 +339,19 @@ function App() {
       document.querySelector(".application")?.removeAttribute("inert");
     };
   }, [menu]);
+  if (!connected)
+    return (
+      <Login
+        connected={() => setConnected(true)}
+        theme={theme}
+        toggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
+      />
+    );
   return (
     <>
       <aside
         ref={sidebar}
-        className={`sidebar ${menu ? "is-open" : ""}`}
+        className={`sidebar runtime-sidebar ${menu ? "is-open" : ""}`}
         aria-label="Engineering OS navigation"
         inert={mobile && !menu}
         role={menu ? "dialog" : undefined}
@@ -324,7 +423,7 @@ function App() {
         <Screen key={`${current.page}/${current.id}/${current.revision}`} route={current} />
         <nav className="mobile-nav" aria-label="Mobile navigation">
           {navigation
-            .filter(([to]) => to !== "controller")
+            .filter(([to]) => ["overview", "objectives", "actions"].includes(to))
             .map(([to, label, icon]) => (
               <a key={to} href={`#/${to}`} aria-current={current.page === to ? "page" : undefined}>
                 <span aria-hidden="true">{icon}</span>

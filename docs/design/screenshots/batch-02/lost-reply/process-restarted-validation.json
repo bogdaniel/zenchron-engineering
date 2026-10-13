@@ -1,0 +1,12 @@
+{
+  "source": "Isolated test data, actual controller/socket/role/journal; no production fleet measurements",
+  "phase": "process-restarted",
+  "checks": [
+    "Reopened read store and controller socket/role; historical receipt recovered; independent identity/reachability; no mutation",
+    "Durable run cancellation recovered after disconnect/reconnect and real OS-process restart"
+  ],
+  "captures": [
+    "receipt-process-restarted-390.png",
+    "controller-process-restarted-390.png"
+  ]
+}

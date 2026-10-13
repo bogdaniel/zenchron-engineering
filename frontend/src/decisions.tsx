@@ -329,9 +329,13 @@ export function Decisions({
       <section id="runtime-recovery" className="recovery-section" tabIndex={-1}>
         <Panel title="Runtime-owned recovery">
           <Empty title="Recovery aggregate unavailable">
-            No automatic runtime failure is promoted into a human authority request. Complete recovery projection
-            remains in the parity inventory.
+            No automatic runtime failure is promoted into a human authority request. Inspect individual runs for failure
+            classes, held material and successors; no aggregate count is inferred.
           </Empty>
+          <div className="panel-footer">
+            <Link to="runs">Inspect run recovery</Link>
+            <Link to="workgraphs">Inspect WorkUnit human requests</Link>
+          </div>
         </Panel>
       </section>
       {confirmation && (

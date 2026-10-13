@@ -1,33 +1,30 @@
-# Engineering OS frontend — batch 01
+# Engineering OS frontend
 
-React/TypeScript implements the accepted industrial composition at `/app`. Shared tokens,
-layout and component CSS remain in `controlplane/assets/design/`; the fixture-only `/design`
-checkpoint uses those same styles. There is one runtime frontend entry, one bundle, and no
-frontend production listener. Legacy Go pages remain until behavioral parity and operator acceptance.
-
-Build from this directory:
+React/TypeScript implements the accepted industrial composition at `/app`, including the four main
+experiences, Runs/history, WorkGraphs, Products, agent observations, controller diagnostics and login.
+Shared tokens and component CSS live in `controlplane/assets/design/`. `/design` is the frozen fixture
+checkpoint. Legacy Go pages remain until verified parity and operator acceptance.
 
 ```sh
 npm ci --ignore-scripts
 npm run build
 ```
 
-Then run `go build ./...` from the repository root. `build.mjs` writes the checked-in generated
-`controlplane/assets/design/react.js`; Go embeds it alongside the shared CSS. Production needs only
-the Go binary. Commit bundle updates with their source and lockfile. Rebuild and use `git diff`
-to verify the generated asset is current. There is no Vite, router, client domain store, icon
-dependency or new browser test framework. React, React DOM, TypeScript, their types and esbuild
-are the build dependencies required by the requested React/TypeScript implementation.
+Then build Go from the repository root. The build writes checked-in generated
+`controlplane/assets/design/react.js`; Go embeds the bundle and CSS. Production needs only the Go binary.
+Commit bundle updates with source; rebuild to verify deterministic output. There is no Vite, router,
+state framework, production frontend listener or new browser test framework.
 
-`src/api.ts` owns bearer transport, sanitized DTO validation and the sole `plan-reject` submission.
-`main.tsx` owns navigation, theme, canceled reads and historical snapshot handling.
-`components.tsx` owns reusable presentation and native disclosures/dialogs. `pages.tsx` composes
-the read surfaces; `decisions.tsx` owns local confirmation and reconciliation. None owns workflow
-authority. The server independently verifies the immutable subject, pending decision, current
-controller generation and held role before any journal write.
+`api.ts` owns the sole bearer transport and shared validation; `operations-api.ts` decodes the existing
+sanitized operational contracts. `main.tsx` owns shell/navigation and canceled observations. Shared
+components, history and factual inspectors compose the pages. Decisions and stop own only local bound
+confirmation/reconciliation, while the Go controller owns eligibility, authority and durable effects.
 
-The live workflow is deliberately **rejection only**. Approval requires unavailable assignment
-bindings; publication and merge are unsupported. Missing aggregate metrics, WorkGraph association,
-complete activity and installed-agent capacity stay unavailable rather than inferred.
-See [runtime scope and proof](../docs/design/runtime-integration.md) and the
-[legacy retirement inventory](../docs/design/frontend-inventory.md).
+Visible views reobserve every 20 seconds; hidden tabs and open confirmations suspend observation.
+Stale/error snapshots disable review. Token login verifies the existing credential before setting the
+existing cookie, with no token in URL/local storage. Runtime never imports fixture measurements.
+
+The HTTP action allowlist remains plan rejection and run stop. Plan/publication approval and decision
+resolution stay in the existing CLI. Unavailable titles, associations, trends and installed capacity are
+explicit. See [runtime scope/proof](../docs/design/runtime-integration.md),
+[batch review](../docs/design/batch-02-review.md) and [retirement inventory](../docs/design/frontend-inventory.md).

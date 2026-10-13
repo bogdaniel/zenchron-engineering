@@ -10,6 +10,17 @@ import (
 //go:embed assets/design
 var designAssets embed.FS
 
+// The app and its exact bootstrap assets contain code only. Runtime reads
+// still require Bearer authentication; fixture modules retain their gate.
+func engineeringBootstrapPath(p string) bool {
+	switch p {
+	case "/app", "/design/assets/react.js", "/design/assets/tokens.css", "/design/assets/layout.css",
+		"/design/assets/components.css", "/design/assets/runtime.css":
+		return true
+	}
+	return false
+}
+
 func designPreviewHeaders(rw http.ResponseWriter) {
 	rw.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
 	rw.Header().Set("Referrer-Policy", "no-referrer")

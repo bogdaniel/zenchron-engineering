@@ -130,6 +130,8 @@ export function ControllerFacts({ controller: c, stale = false }: { controller: 
       <dd>{c.work_admission || "Unknown"}</dd>
       <dt>Durable consistency</dt>
       <dd>{c.durable_consistency}</dd>
+      <dt>Controller projection</dt>
+      <dd>{c.projection}</dd>
     </dl>
   );
 }
@@ -138,14 +140,16 @@ export function Pagination({
   more,
   count,
   onPage,
+  label = "Plan pagination",
 }: {
   offset: number;
   more: boolean;
   count: number;
   onPage: (v: number) => void;
+  label?: string;
 }) {
   return (
-    <div className="page-controls panel-footer" role="group" aria-label="Plan pagination">
+    <div className="page-controls panel-footer" role="group" aria-label={label}>
       <span>
         {count} loaded · offset {offset}
         {more ? " · more available" : ""}

@@ -50,6 +50,8 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
       budget: {
         child_runs: 0,
         max_child_runs: 2,
+        max_concurrency: 1,
+        wall_seconds: 0,
         provider_invocations: 0,
         max_provider_invocations: 5,
         cost_known: false,
@@ -63,6 +65,33 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
       if (mode === "unauthorized") return route.fulfill({ status: 401, json: { error: "unauthorized" } });
       if (mode === "permission") return route.fulfill({ status: 403, json: { error: "forbidden_origin" } });
       if (mode === "failed") return route.abort("connectionfailed");
+      if (url.pathname === "/v1/fleet")
+        return route.fulfill({
+          json: {
+            capacity: 0,
+            executing: 0,
+            active: mode === "unavailable-run" ? 1 : 0,
+            supervisor_running: reachable,
+            counts: {
+              active: mode === "unavailable-run" ? 1 : 0,
+              waiting: 0,
+              failed: 0,
+              completed: 0,
+              cancelled: 0,
+              held: 0,
+            },
+            classes: {
+              working: 0,
+              observing: 0,
+              runnable: 0,
+              waiting: 0,
+              paused: 0,
+              unavailable: mode === "unavailable-run" ? 1 : 0,
+            },
+          },
+        });
+      if (url.pathname.endsWith("/events"))
+        return route.fulfill({ json: { plan_id: "test-plan", events: [], next_after: 0, has_more: false } });
       if (url.pathname === "/v1/controller")
         return route.fulfill({
           json: {
@@ -94,7 +123,17 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
         const subject = { ...plan, plan_id: decodeURIComponent(url.pathname.split("/")[3]) };
         return route.fulfill({
           json: {
-            plan: mode === "mismatch" ? { ...subject, plan_id: "other-plan" } : subject,
+            plan:
+              mode === "mismatch"
+                ? { ...subject, plan_id: "other-plan" }
+                : mode === "gate-run"
+                  ? {
+                      ...subject,
+                      stages: [
+                        { stage_id: "Gate", kind: "human_decision_gate", depends_on: [], run_id: "invented-run" },
+                      ],
+                    }
+                  : subject,
             pending,
             ...(!pending
               ? {
@@ -188,10 +227,17 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
     await page.clock.install();
     await page.reload();
     await page.getByRole("button", { name: "Refresh", exact: true }).waitFor();
+    // Hidden tabs suspend observation; the snapshot must still age out.
+    await page.evaluate(() =>
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" }),
+    );
     await page.clock.fastForward(31000);
     await page.getByText("Snapshot stale · decisions unavailable", { exact: true }).waitFor();
     assert.equal(await page.getByRole("button", { name: "Reject", exact: true }).isDisabled(), true);
     assert.match(await page.locator(".request-summary").innerText(), /50 pending · 0 actionable/);
+    await page.evaluate(() =>
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" }),
+    );
     await page.getByRole("button", { name: "Refresh", exact: true }).click();
     await page.getByText("50 pending · 50 actionable · rejection only", { exact: true }).waitFor();
     const before = reads;
@@ -210,7 +256,7 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
     assert.equal(await page.getByRole("button", { name: "Reject", exact: true }).isDisabled(), true);
     await page.goto(base + "/app#/controller");
     await page.getByText("Identity record; does not prove reachability", { exact: true }).waitFor();
-    assert.match(await page.locator(".binding-list").innerText(), /Unreachable/);
+    assert.match(await page.locator(".workspace-main .binding-list").innerText(), /Unreachable/);
     reachable = true;
     await page.goto(base + "/app#/actions/test-plan/1");
     await page.getByRole("button", { name: "Reject", exact: true }).waitFor();
@@ -226,6 +272,7 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
       ["permission", "permission_refused"],
       ["malformed", "invalid_response"],
       ["mismatch", "subject_mismatch"],
+      ["gate-run", "invalid_response"],
       ["failed", "Failed to fetch"],
     ]) {
       mode = state;

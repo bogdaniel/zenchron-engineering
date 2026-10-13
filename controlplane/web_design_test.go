@@ -10,8 +10,12 @@ import (
 func TestDesignPreviewSharesAuthenticationAndCannotMutate(t *testing.T) {
 	w := webFrom(fixture(t, true))
 	for _, route := range []string{"/design", "/app", "/design/assets/app.js", "/design/assets/fixtures.js", "/design/assets/react.js"} {
-		getWeb(t, w, route, "", http.StatusUnauthorized)
-		getWeb(t, w, route, "wrong-token", http.StatusUnauthorized)
+		status := http.StatusUnauthorized
+		if engineeringBootstrapPath(route) {
+			status = http.StatusOK
+		}
+		getWeb(t, w, route, "", status)
+		getWeb(t, w, route, "wrong-token", status)
 		getWeb(t, w, route, w.Token, http.StatusOK)
 		req := httptest.NewRequest(http.MethodPost, route, nil)
 		req.AddCookie(&http.Cookie{Name: webTokenCookie, Value: w.Token})
@@ -77,4 +81,16 @@ func TestEngineeringApplicationSharesShellAndKeepsBearerAPI(t *testing.T) {
 	if result.Code != http.StatusUnauthorized {
 		t.Fatal("frontend integration must not weaken bearer API authentication")
 	}
+}
+
+func TestEngineeringBootstrapIsCodeOnlyWithoutCredential(t *testing.T) {
+	w := webFrom(fixture(t, true))
+	for _, route := range []string{"/app", "/design/assets/react.js", "/design/assets/tokens.css", "/design/assets/layout.css", "/design/assets/components.css", "/design/assets/runtime.css"} {
+		body := getWeb(t, w, route, "", http.StatusOK)
+		if strings.Contains(string(body), "SECRET_PRIVATE_GOAL") || strings.Contains(string(body), "SECRET_DIAGNOSTIC") {
+			t.Fatalf("private observation escaped through bootstrap: %s", route)
+		}
+	}
+	getWeb(t, w, "/design/assets/fixtures.js", "", http.StatusUnauthorized)
+	getWeb(t, w, "/overview", "", http.StatusUnauthorized)
 }

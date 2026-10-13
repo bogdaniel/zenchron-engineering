@@ -35,3 +35,27 @@ func (s *ReadStore) PlanIdentitiesPage(offset, limit int, query string) ([]PlanI
 	}
 	return identities, more, nil
 }
+
+// PlanEventsPage uses the existing journal index, including attempt-only
+// identities. It checks canonical event documents through the shared reader.
+func (s *ReadStore) PlanEventsPage(id string, after int64, limit int) ([]EngineeringEvent, bool, error) {
+	if after < 0 || limit < 1 || limit > 500 {
+		return nil, false, fmt.Errorf("invalid event page bounds")
+	}
+	events, err := queryStreamEventsLimited(s.store.db, `stream_kind = ? AND run_id = '' AND plan_id = ? AND sequence > ?`,
+		` LIMIT ?`, streamPlan, id, after, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	more := len(events) > limit
+	if more {
+		events = events[:limit]
+	}
+	return events, more, nil
+}
+
+func (s *ReadStore) HasPlanIdentity(id string) (bool, error) {
+	var exists bool
+	err := s.store.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM plans WHERE id = ?)`, id).Scan(&exists)
+	return exists, err
+}

@@ -1,6 +1,6 @@
 # Zenchron visual design checkpoint
 
-Status: **Action Required design accepted across desktop/mobile, dark/light and negative states; identity frozen; React batch 01; production parity pending**.
+Status: **Action Required design accepted across desktop/mobile, dark/light and negative states; identity frozen; React batches 01–02; operational acceptance and legacy retirement pending**.
 `/design` retains the fixture checkpoint. `/app` implements the four destinations using React/TypeScript,
 shared CSS and the existing Go listener. Its first live workflow is governed plan rejection.
 Approval/publication remain disabled; this is not complete operational parity or legacy retirement.

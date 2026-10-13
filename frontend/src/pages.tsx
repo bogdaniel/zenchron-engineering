@@ -2,6 +2,9 @@ import { useState } from "react";
 import type { Context, Controller, PlanIndex, Runs } from "./api";
 import { blocker } from "./api";
 import { Badge, Binding, ControllerFacts, Disclosure, Empty, Head, Link, Pagination, Panel } from "./components";
+import { Facts } from "./runs";
+import { JournalHistory } from "./history";
+import type { Fleet } from "./operations-api";
 
 export function PlanTable({ index }: { index: PlanIndex }) {
   return index.plans.length ? (
@@ -19,7 +22,7 @@ export function PlanTable({ index }: { index: PlanIndex }) {
           {index.plans.map((p) => (
             <tr key={p.plan_id}>
               <td data-label="Source / plan">
-                <Link to={`objectives/${encodeURIComponent(p.plan_id)}`}>
+                <Link to={`${p.current_revision ? "objectives" : "attempts"}/${encodeURIComponent(p.plan_id)}`}>
                   {p.source_issue ? `Issue #${p.source_issue} · ${p.repository}` : p.repository}
                 </Link>
                 <small className="row-meta mono">
@@ -54,11 +57,13 @@ export function Overview({
   index,
   runs,
   stale,
+  fleet,
 }: {
   controller: Controller;
   index: PlanIndex;
   runs: Runs;
   stale: boolean;
+  fleet?: Fleet;
 }) {
   const pending = index.plans.filter((p) => p.pending);
   const executing = runs.runs.filter((r) => !r.unavailable && r.executing).length;
@@ -94,8 +99,9 @@ export function Overview({
         ))}
       </section>
       <p className="flow-explanation muted">
-        Counts cover at most 50 plans and 50 runs{index.has_more || runs.has_more ? "; further pages exist" : ""}. Reads
-        are independent observations. No completion percentage is inferred.
+        Activity-strip counts cover at most 50 plans and 50 runs
+        {index.has_more || runs.has_more ? "; further pages exist" : ""}. Reads are independent observations. No
+        completion percentage is inferred.
       </p>
       <div className="overview-grid">
         <Panel title="Active objective contexts" extra={<Link to="objectives">Browse portfolio</Link>}>
@@ -117,6 +123,20 @@ export function Overview({
         </Panel>
         <Panel title="Execution capacity & recent results">
           <div className="product-body">
+            {fleet && <p className="muted small">Fleet aggregate · all indexed runs · separate read</p>}
+            {fleet && (
+              <Facts
+                rows={[
+                  ["Nonterminal runs", fleet.active],
+                  [
+                    "Executing",
+                    `${fleet.classes.unavailable ? "≥" : ""}${fleet.executing} · ${fleet.classes.unavailable} unavailable observations`,
+                  ],
+                  ["Work concurrency ceiling", fleet.capacity || "Unknown to this reader"],
+                  ["Supervisor role presence", fleet.supervisor_running ? "Present at read time" : "Not reported"],
+                ]}
+              />
+            )}
             <p>
               {executing} known executing runs in loaded page
               {unavailable ? ` · ${unavailable} unknown observations` : ""} · installed-agent capacity ceiling
@@ -126,7 +146,7 @@ export function Overview({
               <ul className="diagnostic-list">
                 {runs.runs.slice(0, 5).map((r) => (
                   <li key={r.run_id}>
-                    <span className="mono exact-value">{r.run_id}</span>
+                    <Link to={`runs/${encodeURIComponent(r.run_id)}`}>{r.run_id}</Link>
                     <br />
                     {r.unavailable
                       ? "Observation unavailable · execution and result unknown"
@@ -139,6 +159,18 @@ export function Overview({
             ) : (
               <Empty title="No runs observed">An empty page does not imply successful execution.</Empty>
             )}
+            {fleet && (
+              <Disclosure title="Fleet dispositions & capacity classes">
+                <Facts
+                  rows={[
+                    ...Object.entries(fleet.counts).map(([key, n]): [string, number] => [`Disposition / ${key}`, n]),
+                    ...Object.entries(fleet.classes).map(([key, n]): [string, number] => [`Capacity / ${key}`, n]),
+                  ]}
+                />
+                <p>Capacity classes partition nonterminal runs; they are separate from objective lifecycle stages.</p>
+              </Disclosure>
+            )}
+            <Link to="runs">Inspect executions</Link>
           </div>
         </Panel>
       </div>
@@ -222,6 +254,7 @@ export function Portfolio({
 export function Workspace({ context }: { context: Context }) {
   const p = context.plan;
   const [selected, setSelected] = useState(p.stages[0]?.stage_id || "");
+  const [revision, setRevision] = useState(p.revision);
   const stage = p.stages.find((s) => s.stage_id === selected);
   return (
     <>
@@ -239,6 +272,33 @@ export function Workspace({ context }: { context: Context }) {
         {p.repository} · shown r{p.revision} {p.shown} · governing{" "}
         {p.governing_revision ? `r${p.governing_revision}` : "none"}
       </Head>
+      <form
+        className="portfolio-toolbar revision-picker"
+        onSubmit={(e) => {
+          e.preventDefault();
+          location.hash = `#/objectives/${encodeURIComponent(p.plan_id)}/${revision}`;
+        }}
+      >
+        <label>
+          Plan revision{" "}
+          <input
+            type="number"
+            value={revision}
+            min={1}
+            max={2147483647}
+            required
+            aria-label="Plan revision"
+            onChange={(e) => setRevision(Number(e.target.value))}
+          />
+        </label>
+        <button className="button">Inspect revision</button>
+        <Link to={`objectives/${encodeURIComponent(p.plan_id)}`}>Latest revision</Link>
+        {p.governing_revision > 0 && (
+          <Link to={`objectives/${encodeURIComponent(p.plan_id)}/${p.governing_revision}`}>
+            Governing r{p.governing_revision}
+          </Link>
+        )}
+      </form>
       <div className="workspace-grid">
         <div className="workspace-main">
           <Panel title="Engineering lifecycle">
@@ -254,6 +314,18 @@ export function Workspace({ context }: { context: Context }) {
                 A proposal does not govern execution. Only agent stages create runs; assurance and human gates reference
                 existing evidence and authority.
               </p>
+              {(p.base_change || p.invalidated.length > 0) && (
+                <Disclosure title="Revision change preview">
+                  <Facts
+                    rows={[
+                      ["Invalidated stages", p.invalidated.join(", ") || "None reported"],
+                      ["Previous base revision", p.base_change?.from || "Not recorded"],
+                      ["Offered base revision", p.base_change?.to || "Not recorded"],
+                      ["Compared plan revision", p.base_change?.from_revision ?? "Not recorded"],
+                    ]}
+                  />
+                </Disclosure>
+              )}
             </div>
           </Panel>
           <Panel
@@ -280,17 +352,31 @@ export function Workspace({ context }: { context: Context }) {
                 <h3>{stage.stage_id}</h3>
                 <dl className="binding-list">
                   <dt>Required role</dt>
-                <dd>{stage.role || "Not recorded"}</dd>
+                  <dd>{stage.role || "Not recorded"}</dd>
                   <dt>Bound profile</dt>
-                <dd>{stage.bound_profile || "Not recorded"}</dd>
+                  <dd>{stage.bound_profile || "Not recorded"}</dd>
+                  <dt>Required profile</dt>
+                  <dd>{stage.profile || "No explicit profile required"}</dd>
+                  <dt>Context policy</dt>
+                  <dd>{stage.context_policy || "Not recorded"}</dd>
+                  <dt>Assignment identity</dt>
+                  <dd className="mono exact-value">{stage.assignment_id || "Not recorded"}</dd>
                   <dt>Execution agent</dt>
-                <dd>{stage.agent || "Not recorded"}</dd>
+                  <dd>{stage.agent || "Not recorded"}</dd>
                   <dt>Provider / trust</dt>
                   <dd>
                     {stage.provider_kind || "Unknown"} / {stage.trust_mode || "Unknown"}
                   </dd>
                   <dt>Run</dt>
-                <dd>{stage.run_id || (stage.kind === "agent" ? "Run not recorded" : "Gate creates no run")}</dd>
+                  <dd>
+                    {stage.run_id ? (
+                      <Link to={`runs/${encodeURIComponent(stage.run_id)}`}>{stage.run_id}</Link>
+                    ) : stage.kind === "agent" ? (
+                      "Run not recorded"
+                    ) : (
+                      "Gate creates no run"
+                    )}
+                  </dd>
                 </dl>
                 {stage.review && (
                   <p>
@@ -299,16 +385,38 @@ export function Workspace({ context }: { context: Context }) {
                     <span className="mono exact-value">{stage.review.tree}</span>
                   </p>
                 )}
+                {stage.gate && (
+                  <Disclosure title="Gate evidence & authority references">
+                    <Facts
+                      rows={[
+                        ["Satisfied claims", stage.gate.claims.join(", ") || "Not recorded"],
+                        ["Evidence identity", stage.gate.evidence?.id || "Not recorded"],
+                        ["Evidence revision", stage.gate.evidence?.revision || "Not recorded"],
+                        ["Authority decision", stage.gate.decision?.id || "Not recorded"],
+                        ["Decision revision", stage.gate.decision?.revision || "Not recorded"],
+                        ["Human evidence", stage.gate.human_evidence_id || "Not recorded"],
+                        ["Proven run heads", stage.gate.proven_heads.join(", ") || "Not recorded"],
+                      ]}
+                    />
+                    <p>
+                      Recorded gate satisfaction refers to these exact subjects. It is not a fresh verification of a
+                      different candidate.
+                    </p>
+                  </Disclosure>
+                )}
               </div>
             )}
           </Panel>
           <Panel title="WorkGraph">
             <Empty title="No plan-to-WorkGraph association exposed">
               A WorkUnit is issue-backed operational work; a PlanStage is a planning responsibility. This application
-              does not fabricate an association. WorkGraph migration remains in the parity inventory.
+              does not fabricate an association.
             </Empty>
+            <div className="panel-footer">
+              <Link to="workgraphs">Inspect operational WorkGraphs</Link>
+            </div>
           </Panel>
-          <Panel title="Decisions & activity">
+          <Panel title="Decision receipt">
             {context.receipt ? (
               <ol className="activity-timeline">
                 <li>
@@ -325,11 +433,11 @@ export function Workspace({ context }: { context: Context }) {
               </ol>
             ) : (
               <Empty title="No decision receipt on this revision">
-                Full plan activity pagination remains a migration gap; missing history is not an empty authoritative
-                timeline.
+                Inspect the plan journal below. An absent receipt grants no authority.
               </Empty>
             )}
           </Panel>
+          <JournalHistory kind="plan" id={p.plan_id} />
         </div>
         <aside className="workspace-aside">
           <Panel title="Budget envelope">
@@ -346,6 +454,12 @@ export function Workspace({ context }: { context: Context }) {
               <dd>
                 {p.budget.cost_known && p.budget.cost_micros !== undefined ? `${p.budget.cost_micros} µUSD` : "Unknown"}
               </dd>
+              <dt>Concurrency ceiling</dt>
+              <dd>{p.budget.max_concurrency}</dd>
+              <dt>Wall seconds</dt>
+              <dd>
+                {p.budget.wall_seconds} / {p.budget.max_wall_seconds || "No ceiling recorded"}
+              </dd>
             </dl>
           </Panel>
           <Panel title="Exact subject">
@@ -358,6 +472,11 @@ export function Workspace({ context }: { context: Context }) {
               <p>
                 No publication or merge authority is granted by this page. Plan approval integration is pending
                 assignment-binding parity.
+              </p>
+              <p>
+                Review and approve plans through <span className="mono">autonomy plan show</span> and{" "}
+                <span className="mono">autonomy plan approve</span>, using the exact plan, revision, digest and
+                prospective assignments binding.
               </p>
             </div>
           </Panel>

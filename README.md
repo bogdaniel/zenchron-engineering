@@ -105,7 +105,7 @@ requires protected execution" - see the known limitations in `ROADMAP.md`.
 | [`docs/supervisor.md`](docs/supervisor.md) | `serve`, its control endpoint, drain/shutdown/stop-all |
 | [`docs/configuration.md`](docs/configuration.md) | every configuration member and which layer owns it |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | symptom, cause, fix |
-| [`docs/design/README.md`](docs/design/README.md) | accepted desktop design, mobile review evidence, first read-only application slice |
+| [`docs/design/README.md`](docs/design/README.md) | accepted design, React implementation, actual controller evidence and migration inventory |
 | [`ROADMAP.md`](ROADMAP.md) | where this sits, and what comes next |
 | [`docs/product-architecture.md`](docs/product-architecture.md) | the running system |
 | [`docs/architecture.md`](docs/architecture.md) | the Authorization Kernel |

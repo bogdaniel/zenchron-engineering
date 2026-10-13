@@ -79,6 +79,9 @@ try {
           ["portfolio", "objectives"],
           ["workspace", `objectives/${encodeURIComponent(id)}`],
           ["actions", destination],
+          ["run", `runs/${encodeURIComponent(process.env.ZENCHRON_LIVE_RUN)}`],
+          ["workgraph", `workgraphs/${encodeURIComponent(process.env.ZENCHRON_LIVE_GRAPH)}`],
+          ["product", `products/${encodeURIComponent(process.env.ZENCHRON_LIVE_PRODUCT)}`],
         ]) {
           await visit(route);
           assert.equal(
@@ -171,16 +174,82 @@ try {
     assert.match(await page.locator(".request-summary").innerText(), /0 pending · 0 actionable/);
     await capture(`receipt-${phase}-390`);
     await visit("controller");
-    assert.match(await page.locator(".binding-list").innerText(), /Identity record; does not prove reachability/);
     assert.match(
-      await page.locator(".binding-list").innerText(),
-      phase === "disconnected" ? /Unreachable/ : /Reachable at read time/,
+      await page.locator(".workspace-main .binding-list").innerText(),
+      /Identity record; does not prove reachability/,
+    );
+    assert.match(
+      await page.locator(".workspace-main .binding-list").innerText(),
+      phase.includes("disconnected") ? /Unreachable/ : /Reachable at read time/,
     );
     await capture(`controller-${phase}-390`);
     assert.equal(writes.length, 0, "Reload/reconnect must never resubmit a decision");
     report.checks.push(
       "Reopened read store and controller socket/role; historical receipt recovered; independent identity/reachability; no mutation",
     );
+  }
+  if (phase.startsWith("reject")) {
+    await visit(`runs/${encodeURIComponent(process.env.ZENCHRON_LIVE_RUN)}`);
+    await page.getByRole("button", { name: "Review stop", exact: true }).click();
+    await page.getByRole("dialog").waitFor();
+    assert.match(await page.getByRole("dialog").innerText(), /Protected action: stop/);
+    await capture("stop-confirmation-390");
+    await page.getByRole("dialog").locator("summary").click();
+    const stopBox = await page.getByRole("button", { name: "Confirm stop", exact: true }).boundingBox();
+    assert(stopBox.y + stopBox.height <= 844, "Stop confirmation stays visible with technical binding expanded");
+    await page.getByRole("dialog").locator("summary").click();
+    if (losesReply)
+      await page.route("**/v1/runs/*/stop", async (route) => {
+        const response = await route.fetch();
+        assert.equal((await response.json()).outcome, "applied", "Actual durable stop precedes the response fault");
+        await route.abort("connectionfailed");
+      });
+    await page.getByRole("button", { name: "Confirm stop", exact: true }).click();
+    if (losesReply) {
+      await page
+        .getByText("Stop outcome unknown; response unavailable or invalid. Re-read durable state without resending.", {
+          exact: true,
+        })
+        .waitFor();
+      assert.equal(await page.getByRole("button", { name: "Review stop", exact: true }).isDisabled(), true);
+      await page.route("**/v1/runs/engineering-os-stop", (route) => route.abort("connectionfailed"));
+      await page.getByRole("button", { name: "Re-read cancellation", exact: true }).click();
+      await page
+        .getByText("Durable run state unavailable. Outcome remains unknown; stop stays disabled.", { exact: true })
+        .waitFor();
+      await page.unroute("**/v1/runs/engineering-os-stop");
+      await page.getByRole("button", { name: "Re-read cancellation", exact: true }).click();
+      await page
+        .getByText("Historical cancellation observed in durable run state. No request was resent.", { exact: true })
+        .waitFor();
+      report.checks.push(
+        "Stop response lost after actual journal write; failed reconciliation stays closed; durable read recovers without resend",
+      );
+    } else {
+      await page
+        .getByText("Stop applied; cancellation acknowledged. Refresh run state to inspect it.", { exact: true })
+        .waitFor();
+    }
+    assert.equal(writes.length, 2, "One rejection and one governed stop, no retries");
+    assert.match(writes[1].postDataJSON().controller_binding, /^[a-f0-9]{64}$/);
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await page.locator(".page-head .badge").filter({ hasText: "cancelled" }).waitFor();
+    await visit(`runs/${encodeURIComponent(process.env.ZENCHRON_LIVE_RUN)}`);
+    await page.getByText("Run is cancelled; no new stop offered", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "Review stop", exact: true }).isDisabled(), true);
+    report.checks.push(
+      "Actual socket-governed stop, exact run/controller confirmation, durable cancellation and no second submission",
+    );
+    await capture("cancelled-run-390");
+  }
+  if (process.env.ZENCHRON_LIVE_STOPPED === "true" && !phase.startsWith("reject")) {
+    // Every fresh browser after reader/controller reconstruction and actual
+    // OS-process crashes recovers canonical cancellation without another POST.
+    await visit(`runs/${encodeURIComponent(process.env.ZENCHRON_LIVE_RUN)}`);
+    await page.locator(".page-head .badge").filter({ hasText: "cancelled" }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "Review stop", exact: true }).isDisabled(), true);
+    assert.equal(writes.length, 0);
+    report.checks.push("Durable run cancellation recovered after disconnect/reconnect and real OS-process restart");
   }
   assert.deepEqual(failures, []);
   await writeFile(resolve(out, `${phase}-validation.json`), JSON.stringify(report, null, 2) + "\n");
