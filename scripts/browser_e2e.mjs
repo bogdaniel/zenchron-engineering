@@ -346,28 +346,50 @@ try {
     assert(await cdp.evaluate(`/publication unavailable \\(http 409\\)/i.test(document.querySelector('#publication-actions').textContent)`));
     assert(await cdp.evaluate(`!Array.from(document.querySelectorAll('#publication-actions button')).some(button => /authorize publication/i.test(button.textContent))`));
   });
-  await check('presentation replaces publication authority for the same candidate', async () => {
+  await check('presentation coalesces slow reads and replaces publication authority for the same candidate', async () => {
     await cdp.navigate('/runs/browser-run');
     await until(() => cdp.evaluate(`/publication unavailable \\(http 409\\)/i.test(document.querySelector('#publication-actions').textContent)`), 'initial real authority refusal');
     await cdp.evaluate(`(() => {
       const original = window.fetch.bind(window);
       const requests = [
         {id:'publication-a',digest:'digest-a',requires:['human_approval'],contract:{id:'contract-a'},action:{target:'open PR'},candidate:{revision:1,tree:'tree-a'}},
-        {id:'publication-b',digest:'digest-b',requires:['human_approval'],contract:{id:'contract-b'},action:{target:'open PR'},candidate:{revision:1,tree:'tree-a'}}
+        {id:'publication-b',digest:'digest-b',requires:['human_approval'],contract:{id:'contract-b'},action:{target:'open PR'},candidate:{revision:1,tree:'tree-a'}},
+        {id:'publication-c',digest:'digest-c',requires:['human_approval'],contract:{id:'contract-c'},action:{target:'open PR'},candidate:{revision:1,tree:'tree-a'}}
       ];
       window.__authorityReadCount = 0;
+      window.__authorityOffline = false;
       window.fetch = function (input, init) {
         if (String(input).includes('/v1/runs/browser-run/authority')) {
-          const request = requests[Math.min(window.__authorityReadCount++, requests.length - 1)];
-          return Promise.resolve(new Response(JSON.stringify(request), {status:200,headers:{'Content-Type':'application/json'}}));
+          const index = window.__authorityReadCount++;
+          if (window.__authorityOffline) return Promise.resolve(new Response(JSON.stringify({error:'offline'}), {status:503}));
+          const request = requests[Math.min(index, requests.length - 1)];
+          const response = () => new Response(JSON.stringify(request), {status:200,headers:{'Content-Type':'application/json'}});
+          return index === 0 ? new Promise(resolve => setTimeout(() => resolve(response()), 5500)) : Promise.resolve(response());
         }
         return original(input, init);
       };
     })()`);
+    await until(() => cdp.evaluate(`window.__authorityReadCount > 0`), 'slow authority read begins');
+    await new Promise(resolve => setTimeout(resolve, 5200));
+    assert.equal(await cdp.evaluate(`window.__authorityReadCount`), 1, 'periodic refresh must not start overlapping authority reads');
     await until(() => cdp.evaluate(`Boolean(document.querySelector('#publication-actions [data-request-id="publication-a"]'))`), 'first authority request');
     await until(() => cdp.evaluate(`Boolean(document.querySelector('#publication-actions [data-request-id="publication-b"]'))`), 'replacement authority request', 12000);
     assert.equal(await cdp.evaluate(`document.querySelectorAll('#publication-actions [data-request-id="publication-a"]').length`), 0);
     assert.equal(await cdp.evaluate(`document.querySelector('#publication-actions [data-request-id="publication-b"]').dataset.digest`), 'digest-b');
+    const readsBeforeDisconnect = await cdp.evaluate(`window.__authorityReadCount`);
+    await cdp.evaluate(`window.__authorityOffline = true`);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await cdp.evaluate(`document.querySelector('#publication-actions [data-request-id="publication-b"]').click()`);
+    assert(await cdp.evaluate(`document.querySelector('#action-dialog').open`), 'authority action should open confirmation dialog');
+    await cdp.evaluate(`document.querySelector('#action-close').click()`);
+    await until(() => cdp.evaluate(`window.__authorityReadCount > ${readsBeforeDisconnect}`), 'disconnect authority read begins');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await until(() => cdp.evaluate(`/publication unavailable \\(http 503\\)/i.test(document.querySelector('#publication-actions').textContent)`), 'authority disconnect', 12000);
+    assert.equal(await cdp.evaluate(`document.querySelectorAll('#publication-actions button').length`), 0, 'disconnect must remove stale authority controls');
+    await cdp.evaluate(`window.__authorityOffline = false`);
+    await cdp.evaluate(`document.querySelector('#action-dialog').showModal();document.querySelector('#action-close').click()`);
+    await until(() => cdp.evaluate(`Boolean(document.querySelector('#publication-actions [data-request-id="publication-c"]'))`), 'authority reconnect', 12000);
+    assert.equal(await cdp.evaluate(`document.querySelectorAll('#publication-actions [data-request-id="publication-b"]').length`), 0);
   });
   await check('designated operator resolves exact WorkUnit hold through browser', async () => {
     await cdp.navigate('/decisions');

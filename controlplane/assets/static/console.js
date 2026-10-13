@@ -384,10 +384,18 @@
   function loadPublicationRequest() {
     document.querySelectorAll("#publication-actions, [data-publication-run]").forEach(function (container) {
       var key = container.dataset.run + ":" + container.dataset.binding + ":" + container.dataset.candidate;
-      container.dataset.loaded = key;
-      var sequence = String(Number(container.dataset.requestSequence || 0) + 1);
-      container.dataset.requestSequence = sequence;
-      fetch("/v1/runs/" + encodeURIComponent(container.dataset.run) + "/authority", { headers: authHeaders(), signal: AbortSignal.timeout(10000) })
+      if (container.dataset.loaded !== key) {
+        if (container.publicationReadController) container.publicationReadController.abort();
+        container.dataset.loaded = key;
+        container.dataset.requestSequence = String(Number(container.dataset.requestSequence || 0) + 1);
+        container.dataset.requestIdentity = "";
+        container.replaceChildren();
+      }
+      if (container.publicationReadController) return;
+      var sequence = container.dataset.requestSequence;
+      var readController = new AbortController();
+      container.publicationReadController = readController;
+      fetch("/v1/runs/" + encodeURIComponent(container.dataset.run) + "/authority", { headers: authHeaders(), signal: AbortSignal.any([readController.signal, AbortSignal.timeout(10000)]) })
         .then(function (response) {
           if (!response.ok) throw new Error("Publication unavailable (HTTP " + response.status + ")");
           return response.json();
@@ -425,6 +433,8 @@
           var status = document.createElement("p"); status.setAttribute("role", "status");
           status.textContent = error.message;
           container.appendChild(status);
+        }).finally(function () {
+          if (container.publicationReadController === readController) delete container.publicationReadController;
         });
     });
   }
