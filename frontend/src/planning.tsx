@@ -3,6 +3,7 @@ import * as api from "./api";
 import * as workspace from "./workspace-api";
 import { GovernedAction, type ActionReview } from "./governed-action";
 import { Disclosure, Empty, Head, Panel, Link } from "./components";
+import { CheckboxField, NumberField, SelectField } from "./form";
 
 export async function freshController(signal: AbortSignal, expected?: string) {
   const live = await api.controller(signal),
@@ -164,14 +165,11 @@ export function PlanControls({
       ) : (
         <p role="status">{error ? `Controller preview unavailable · ${error}` : "Reading exact controller preview…"}</p>
       )}
-      <label className="checkbox-label">
-        <input
-          type="checkbox"
-          checked={deterministicRevision}
-          onChange={(e) => setDeterministicRevision(e.target.checked)}
-        />
-        Use deterministic revision
-      </label>
+      <CheckboxField
+        label="Use deterministic revision"
+        checked={deterministicRevision}
+        onChange={(e) => setDeterministicRevision(e.target.checked)}
+      />
       <div className="plan-control-actions">
         {approval}
         <GovernedAction
@@ -268,52 +266,38 @@ export function ObjectiveIntake() {
       </Head>
       <Panel title="Engineering intent">
         <div className="product-body intake-form">
-          <label>
-            Repository
-            <select aria-label="Repository" value={repository} onChange={(e) => setRepository(e.target.value)}>
-              {options?.repositories.map((r) => (
-                <option key={r}>{r}</option>
+          <SelectField label="Repository" value={repository} onChange={(e) => setRepository(e.target.value)}>
+            {options?.repositories.map((r) => (
+              <option key={r}>{r}</option>
+            ))}
+          </SelectField>
+          <NumberField label="Existing issue" min="1" value={issue} onChange={(e) => setIssue(e.target.value)} />
+          <SelectField label="Execution agent" value={agent} onChange={(e) => setAgent(e.target.value)}>
+            {options?.agents
+              .filter((a) => a.eligible)
+              .map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.id} · {a.kind}
+                </option>
               ))}
-            </select>
-          </label>
-          <label>
-            Existing issue
-            <input type="number" min="1" value={issue} onChange={(e) => setIssue(e.target.value)} />
-          </label>
-          <label>
-            Execution agent
-            <select aria-label="Execution agent" value={agent} onChange={(e) => setAgent(e.target.value)}>
-              {options?.agents
-                .filter((a) => a.eligible)
-                .map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.id} · {a.kind}
-                  </option>
-                ))}
-            </select>
-          </label>
-          <label>
-            Agent profile
-            <select aria-label="Agent profile" value={profile} onChange={(e) => setProfile(e.target.value)}>
-              <option value="">Resolve from policy and plan</option>
-              {options?.profiles.map((p) => (
-                <option key={p}>{p}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Plan template
-            <select aria-label="Plan template" value={template} onChange={(e) => setTemplate(e.target.value)}>
-              <option value="">Controller default</option>
-              {options?.templates.map((t) => (
-                <option key={t}>{t}</option>
-              ))}
-            </select>
-          </label>
-          <label className="checkbox-label">
-            <input type="checkbox" checked={deterministic} onChange={(e) => setDeterministic(e.target.checked)} />
-            Use deterministic planning
-          </label>
+          </SelectField>
+          <SelectField label="Agent profile" value={profile} onChange={(e) => setProfile(e.target.value)}>
+            <option value="">Resolve from policy and plan</option>
+            {options?.profiles.map((p) => (
+              <option key={p}>{p}</option>
+            ))}
+          </SelectField>
+          <SelectField label="Plan template" value={template} onChange={(e) => setTemplate(e.target.value)}>
+            <option value="">Controller default</option>
+            {options?.templates.map((t) => (
+              <option key={t}>{t}</option>
+            ))}
+          </SelectField>
+          <CheckboxField
+            label="Use deterministic planning"
+            checked={deterministic}
+            onChange={(e) => setDeterministic(e.target.checked)}
+          />
           {options && (
             <p>
               Envelope: {options.budget.max_child_runs} worker runs · {options.budget.max_concurrency} concurrent ·{" "}

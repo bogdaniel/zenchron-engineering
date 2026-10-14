@@ -577,11 +577,6 @@ dialog h2 { font-size: 22px; line-height: 1.35; margin-bottom: 12px; }
 dialog > p { font-size: 12px; }
 dialog .binding-list { margin-top: 6px; grid-template-columns: 115px minmax(0,1fr); }
 @layer components {
-  .note-label {
-    @apply mx-0 mt-[18px] mb-2 block text-[12px];
-  }
-}
-@layer components {
   textarea, #global-search {
     @apply w-full resize-y rounded-[4px] border border-control-border bg-bg p-2.5 text-[12px];
   }

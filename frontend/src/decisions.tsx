@@ -3,6 +3,7 @@ import { HumanRequests } from "./human-requests";
 import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { Badge, Binding, Dialog, Disclosure, Empty, Head, Link, Pagination, Panel } from "./components";
+import { TextareaField } from "./form";
 
 type Confirmation = { plan: api.Plan; binding: string };
 export function Decisions({
@@ -380,19 +381,14 @@ export function Decisions({
             <Disclosure title="Exact technical binding">
               <Binding plan={confirmation.plan} binding={confirmation.binding} action="plan-reject" />
             </Disclosure>
-            <label className="note-label" htmlFor="decision-note">
-              Operator note (optional, 500 characters)
-            </label>
-            <textarea
-              id="decision-note"
+            <TextareaField
+              label="Operator note (optional, 500 characters)"
               value={note}
               maxLength={500}
               rows={2}
               onChange={(e) => setNote(e.target.value)}
+              help="The controller independently checks the subject and its authority before writing a durable decision."
             />
-            <p className="muted small">
-              The controller independently checks the subject and its authority before writing a durable decision.
-            </p>
           </div>
           <div className="dialog-buttons">
             <button className="button" disabled={busy} onClick={() => setConfirmation(null)}>

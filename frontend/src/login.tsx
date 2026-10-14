@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
+import { TextField } from "./form";
 
 export function Login({
   connected,
@@ -75,10 +76,9 @@ export function Login({
               void submit();
             }}
           >
-            <label htmlFor="token">Control Plane token</label>
-            <input
+            <TextField
               ref={input}
-              id="token"
+              label="Control Plane token"
               type="password"
               value={token}
               onChange={(e) => setToken(e.target.value)}
@@ -87,17 +87,9 @@ export function Login({
               autoComplete="off"
               spellCheck={false}
               disabled={busy}
-              aria-describedby={error ? "login-error" : "login-help"}
-              aria-invalid={!!error}
+              help="The token stays out of URLs and local storage. Connecting grants no new controller authority."
+              error={error}
             />
-            <p id="login-help" className="muted small">
-              The token stays out of URLs and local storage. Connecting grants no new controller authority.
-            </p>
-            {error && (
-              <p id="login-error" role="alert">
-                {error}
-              </p>
-            )}
             <button className="button primary" disabled={busy}>
               {busy ? "Connecting…" : "Connect"}
             </button>

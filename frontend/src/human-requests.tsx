@@ -5,6 +5,7 @@ import * as workspace from "./workspace-api";
 import { GovernedAction, type ActionReview } from "./governed-action";
 import { freshController } from "./planning";
 import { Disclosure, Empty, Link, Pagination, Panel } from "./components";
+import { SelectField, TextField } from "./form";
 
 async function verifyContext(row: workspace.HumanRequest, signal: AbortSignal) {
   const graph = await ops.graph(row.graph_id, signal);
@@ -106,25 +107,22 @@ export function HumanDecision({
           </p>
         ))}
       </Disclosure>
-      <label className="field-label">
-        Requested outcome
-        {options.length ? (
-          <select aria-label="Requested outcome" value={value} onChange={(e) => setValue(e.target.value)}>
-            <option value="">Choose outcome</option>
-            {options.map((v) => (
-              <option key={v}>{v}</option>
-            ))}
-          </select>
-        ) : (
-          <input
-            aria-label="Requested outcome"
-            maxLength={2000}
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            disabled={!supported}
-          />
-        )}
-      </label>
+      {options.length ? (
+        <SelectField label="Requested outcome" value={value} onChange={(e) => setValue(e.target.value)}>
+          <option value="">Choose outcome</option>
+          {options.map((v) => (
+            <option key={v}>{v}</option>
+          ))}
+        </SelectField>
+      ) : (
+        <TextField
+          label="Requested outcome"
+          maxLength={2000}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          disabled={!supported}
+        />
+      )}
       <GovernedAction label="Review decision" reason={why} prepare={prepare} onSettled={onSettled} />
       <Link to={`workgraphs/${encodeURIComponent(row.graph_id)}`}>Inspect owning WorkGraph</Link>
     </div>
