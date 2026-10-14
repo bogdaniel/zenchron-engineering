@@ -440,14 +440,14 @@ function App() {
         role={menu ? "dialog" : undefined}
         aria-modal={menu ? true : undefined}
       >
-        <div className="brand">
+        <Link to="overview" className="brand">
           <div className="brand-symbol" aria-hidden="true">
             Z<span>+</span>
           </div>
           <div>
             ZENCHRON<small>ENGINEERING OS</small>
           </div>
-        </div>
+        </Link>
         <div className="local-workspace">
           <div className="workspace-mark">Z</div>
           <div>
