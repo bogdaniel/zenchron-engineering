@@ -1,0 +1,30 @@
+{
+  "checks": [
+    "React login and routing-safe keyboard skip after login/route changes",
+    "Controller-owned installed agents, profiles and templates",
+    "Lost objective response survives navigation/reload; exact receipt recovers one unapproved proposal",
+    "Exact assignment refusal uses the real controller; fresh approval records one durable receipt",
+    "Lost revision response retains the original revision across navigation to the latest plan",
+    "Typed graph decision resolves through the controller and retains historical context/focus",
+    "Publication exact subject, real evidence recording, lost response reconciliation without resend",
+    "Pause/unpause use durable run state; resume/refresh refuse unowned input",
+    "Lost resume/refresh responses survive navigation and recover exact admission/successor receipts without resend",
+    "Unavailable browser recovery storage refuses before sending any command",
+    "Dark/light responsive and accessible actual application compositions"
+  ],
+  "posts": [
+    "/v1/objectives",
+    "/v1/plans/plan-66baec4d5516598556ff9ae1d65d7520/approve",
+    "/v1/plans/plan-66baec4d5516598556ff9ae1d65d7520/approve",
+    "/v1/plans/plan-b9a1e0c4f6810c7970a26980d9ca30c8/revise",
+    "/v1/decisions/workgraph-hold-3d9b0580377a46b7b90261e3100824cd/resolve",
+    "/v1/runs/run-6264dff1de286164d167e0db4ae26b5c/authorize",
+    "/v1/runs/browser-run/pause",
+    "/v1/runs/browser-run/unpause",
+    "/v1/runs/browser-run/resume",
+    "/v1/runs/browser-run/refresh",
+    "/v1/runs/run-6264dff1de286164d167e0db4ae26b5c/resume",
+    "/v1/runs/run-6264dff1de286164d167e0db4ae26b5c/refresh"
+  ],
+  "errors": []
+}

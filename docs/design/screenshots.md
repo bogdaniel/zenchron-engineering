@@ -72,5 +72,8 @@ keeps the protected action and footer visible. [Full evidence and current limits
 ## Reconciliation actual application
 
 [Latest 1440/1920/390 dark/light application renders and mobile confirmations](screenshots/reconciliation/README.md)
+
+[Original-operation recovery and latest actual application renders](screenshots/action-recovery/README.md)
+cover PR #594's focused P1 fix; [scope, proof and compatibility limits](action-recovery-review.md).
 use the actual isolated governed controller. Fixture checkpoint and older runtime captures above
 remain historical evidence; this gallery is the current review submission.

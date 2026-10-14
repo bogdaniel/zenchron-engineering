@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Dialog, Disclosure } from "./components";
+import { Dialog, Disclosure, Link } from "./components";
+import { useActionRecovery, readActionReceipt } from "./action-recovery";
 import * as workspace from "./workspace-api";
 export type ActionReview = {
   title: string;
@@ -12,7 +13,6 @@ export type ActionReview = {
   body: Record<string, unknown>;
   timeout?: number;
   readReceipt?: (signal: AbortSignal) => Promise<workspace.Receipt | null>;
-  after?: (result: workspace.Result) => void;
 };
 // One local confirmation/submission owner. Server projections and controller
 // actions remain authoritative; an unknown write is never retried.
@@ -25,6 +25,7 @@ export function GovernedAction({
   children,
   alternatives = [],
   onBlocked,
+  recoveryKey,
 }: {
   label: string;
   reason: string;
@@ -34,7 +35,9 @@ export function GovernedAction({
   children?: ReactNode;
   alternatives?: { label: string; prepare: (note: string, signal: AbortSignal) => Promise<ActionReview> }[];
   onBlocked?: (blocked: boolean) => void;
+  recoveryKey?: string;
 }) {
+  const recovery = useActionRecovery(recoveryKey);
   const [review, setReview] = useState<ActionReview | null>(null),
     [busy, setBusy] = useState(false),
     [note, setNote] = useState(""),
@@ -52,11 +55,20 @@ export function GovernedAction({
     requestAnimationFrame(() => result.current?.focus());
   };
   useEffect(() => {
-    onBlocked?.(busy || !!review || !!unknown);
-  }, [busy, review, unknown, onBlocked]);
+    onBlocked?.(busy || !!review || !!unknown || recovery.pending.length > 0 || !!recovery.error);
+  }, [busy, review, unknown, recovery.pending.length, recovery.error, onBlocked]);
   useEffect(() => () => onBlocked?.(false), [onBlocked]);
   const begin = async (button: HTMLButtonElement, choose = prepare) => {
-    if (lock.current || reason || unknown || acknowledged) return;
+    if (
+      lock.current ||
+      reason ||
+      unknown ||
+      acknowledged ||
+      recovery.loading ||
+      recovery.error ||
+      recovery.pending.length
+    )
+      return;
     lock.current = true;
     setBusy(true);
     setMessage("");
@@ -96,7 +108,9 @@ export function GovernedAction({
     owner.current = new AbortController();
     const bound = { ...review, body: { ...review.body, ...(noteAllowed && "note" in review.body ? { note } : {}) } };
     let outcome: workspace.Result | undefined;
+    let saved: Awaited<ReturnType<typeof recovery.remember>> | undefined;
     try {
+      if (recoveryKey) saved = await recovery.remember(bound, owner.current.signal);
       outcome = await workspace.send(
         bound.path,
         bound.action,
@@ -104,24 +118,65 @@ export function GovernedAction({
         bound.body,
         owner.current.signal,
         bound.timeout,
+        saved?.operation_id,
       );
       setReview(null);
       announce(`${outcome.outcome}${outcome.code ? ` · ${outcome.code}` : ""}`);
       if (["applied", "already_applied"].includes(outcome.outcome)) {
+        if (saved) {
+          const receipt = await readActionReceipt(saved, owner.current.signal);
+          if (!receipt) throw new Error("Exact delivery receipt unavailable");
+          recovery.forget(saved);
+          setReceipt(receipt);
+          setAcknowledged(true);
+          announce("Exact original request receipt observed. No request was resent.");
+          if (receipt.destination) location.hash = "#/" + receipt.destination;
+          return;
+        }
         setAcknowledged(true);
-        bound.after?.(outcome);
         await read(bound, true);
         onSettled?.();
       } else if (outcome.outcome === "unknown") {
         setUnknown(bound);
         await read(bound, false);
-      } else onSettled?.();
+      } else {
+        if (saved && ["refused", "unreachable"].includes(outcome.outcome)) recovery.forget(saved);
+        onSettled?.();
+      }
     } catch {
       setReview(null);
+      if (recoveryKey && !saved) {
+        announce("Recovery reference could not be saved. Nothing was sent.");
+        return;
+      }
       setUnknown(bound);
       announce(
         `${outcome ? outcome.outcome + " response · " : ""}Outcome unresolved. Re-read the exact subject; do not resend.`,
       );
+    } finally {
+      lock.current = false;
+      if (!owner.current.signal.aborted) setBusy(false);
+    }
+  };
+  const recoverSaved = async (saved: (typeof recovery.pending)[number]) => {
+    if (lock.current) return;
+    lock.current = true;
+    setBusy(true);
+    owner.current = new AbortController();
+    try {
+      const value = await readActionReceipt(saved, owner.current.signal);
+      if (!value) {
+        announce("No exact delivery receipt observed. Outcome remains unknown; no request was resent.");
+        return;
+      }
+      recovery.forget(saved);
+      setReceipt(value);
+      setUnknown(null);
+      setAcknowledged(true);
+      announce("Exact original request receipt observed. No request was resent.");
+      onSettled?.();
+    } catch {
+      announce("Reconciliation unavailable. Outcome remains unknown; no request was resent.");
     } finally {
       lock.current = false;
       if (!owner.current.signal.aborted) setBusy(false);
@@ -146,7 +201,15 @@ export function GovernedAction({
       {children}
       <button
         className="button"
-        disabled={busy || !!reason || !!unknown || acknowledged}
+        disabled={
+          busy ||
+          !!reason ||
+          !!unknown ||
+          acknowledged ||
+          recovery.loading ||
+          !!recovery.error ||
+          !!recovery.pending.length
+        }
         onClick={(e) => void begin(e.currentTarget)}
       >
         {busy ? "Reading…" : label}
@@ -162,6 +225,31 @@ export function GovernedAction({
         </button>
       ))}
       {reason && <p className="muted small governed-reason">{reason}</p>}
+      {recovery.error && <p role="alert">{recovery.error}</p>}
+      {recovery.pending.map((saved) => (
+        <section className="governed-feedback" role="status" key={saved.operation_id}>
+          <h3>Unresolved original operation</h3>
+          <p>
+            {saved.action} · {saved.subject}
+          </p>
+          <Disclosure title="Original delivery reference">
+            <p className="mono exact-value">
+              {saved.operation_id} · {saved.request_digest}
+            </p>
+            <p className="mono exact-value">
+              {saved.path} · controller {saved.controller_binding}
+            </p>
+            {Object.entries(saved.bindings).map(([k, v]) => (
+              <p className="mono exact-value" key={k}>
+                {k}: {String(v)}
+              </p>
+            ))}
+          </Disclosure>
+          <button className="button" disabled={busy} onClick={() => void recoverSaved(saved)}>
+            Re-read exact receipt
+          </button>
+        </section>
+      ))}
       {(message || receipt) && (
         <section className="governed-feedback" ref={result} tabIndex={-1} role="status">
           {receipt ? (
@@ -169,6 +257,7 @@ export function GovernedAction({
               <h3>{receipt.title}</h3>
               <p className="mono exact-value">{receipt.detail}</p>
               {receipt.at && <time>{receipt.at}</time>}
+              {receipt.destination && <Link to={receipt.destination}>Inspect recorded result</Link>}
             </>
           ) : (
             <p>{message}</p>

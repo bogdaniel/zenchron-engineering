@@ -94,9 +94,9 @@ func TestSchemasCompile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Twenty-four Control Plane contracts include the operational React reads
+	// Twenty-five Control Plane contracts include the operational React reads
 	// and exact request/receipt projections, validated against actual HTTP/SSE bytes.
-	if want := len(fixtureSchemas) + 1 + 24; len(files) != want {
+	if want := len(fixtureSchemas) + 1 + 25; len(files) != want {
 		t.Fatalf("found %d schemas, want %d (documents, vocabulary and Control Plane wire contracts)", len(files), want)
 	}
 

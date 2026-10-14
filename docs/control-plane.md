@@ -476,3 +476,14 @@ and the consequence in one sentence; only its confirm sends, once, with the
 Bearer header. The dialog then shows pending, and the outcome with the
 resulting durable state; it never retries, and closing it is blocked while a
 request is in flight.
+
+### Exact operator delivery recovery
+
+Creation/revision/resume/refresh may carry `X-Zenchron-Operation-ID` (a canonical UUID). After normal
+auth/CSRF checks the API hashes the exact escaped path and bounded JSON wire body and passes the
+correlation through the existing governed socket command. The controller appends successful delivery
+observations to the existing plan/run journal before replying.
+`GET /v1/operator-action-receipts/{id}?digest=SHA256` returns only a hash/subject-checked historical
+receipt under bearer authentication. Receipt-write failure is `unknown`, never proof of refusal;
+missing receipts cannot establish non-execution. Legacy callers need no header.
+[Complete semantics, privacy and paired-build rollback limits](design/action-recovery-review.md).

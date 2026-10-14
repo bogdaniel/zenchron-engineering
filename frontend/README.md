@@ -31,3 +31,8 @@ No frontend state grants authority. Publication authorization records evidence a
 or merge. Both implementations remain until parity, independent review and operator acceptance.
 See [runtime scope/proof](../docs/design/runtime-integration.md),
 [batch review](../docs/design/batch-02-review.md) and [retirement inventory](../docs/design/frontend-inventory.md).
+
+`action-recovery.ts` persists only original delivery references for creation/revision/resume/refresh
+and reads exact journal receipts after navigation/reload. It stores neither credentials nor notes,
+never resends an unresolved operation and grants no authority.
+[Failure and compatible rollback boundary](../docs/design/action-recovery-review.md).

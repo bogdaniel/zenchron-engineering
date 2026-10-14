@@ -118,16 +118,7 @@ export function PlanControls({
               };
             },
           }
-        : {
-            after: (r: workspace.Result) => {
-              if (r.state) {
-                const next = api.decodePlan(r.state);
-                if (next.plan_id !== plan.plan_id || next.revision <= plan.revision)
-                  throw new Error("invalid_response");
-                location.hash = `#/objectives/${encodeURIComponent(next.plan_id)}/${next.revision}`;
-              }
-            },
-          }),
+        : {}),
     };
   };
   const approval = (
@@ -185,6 +176,7 @@ export function PlanControls({
         {approval}
         <GovernedAction
           label="Review plan revision"
+          recoveryKey={`plan/${plan.plan_id}/revise`}
           reason={why || error || (!preview ? "Exact preview required" : "")}
           prepare={(note, signal) => prepare(note, signal, false)}
           onSettled={onSettled}
@@ -267,11 +259,6 @@ export function ObjectiveIntake() {
         note,
       },
       timeout: 1270000,
-      after: (r) => {
-        const p = api.decodePlan(r.state);
-        if (p.repository !== repository) throw new Error("subject_mismatch");
-        location.hash = `#/objectives/${encodeURIComponent(p.plan_id)}/${p.revision}`;
-      },
     };
   };
   return (
@@ -334,7 +321,12 @@ export function ObjectiveIntake() {
               {options.budget.max_cost_micros === undefined ? "unknown" : options.budget.max_cost_micros + " micros"}.
             </p>
           )}
-          <GovernedAction label="Review objective proposal" reason={why} prepare={prepare} />
+          <GovernedAction
+            label="Review objective proposal"
+            recoveryKey="objective-intake"
+            reason={why}
+            prepare={prepare}
+          />
           <Link to="objectives">Back to objectives</Link>
         </div>
       </Panel>

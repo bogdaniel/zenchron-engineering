@@ -19,7 +19,8 @@
         "unsupported_media_type",
         "invalid_request",
         "stream_unsupported",
-        "snapshot_changed"
+        "snapshot_changed",
+        "subject_mismatch"
       ]
     }
   }

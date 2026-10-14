@@ -610,7 +610,7 @@ func (c *composition) governedControl(ctx context.Context, supervisor *runtime.S
 	}
 	var response runtime.ControlResponse
 	if err := c.role.WithAuthority(func() error {
-		response = c.dispatchControl(ctx, supervisor, shutdown, request, true)
+		response = c.dispatchWithReceipt(ctx, supervisor, shutdown, request)
 		return nil
 	}); err != nil {
 		return controlError(err)

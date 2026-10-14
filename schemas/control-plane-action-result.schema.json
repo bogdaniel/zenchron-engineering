@@ -75,7 +75,8 @@
         "controller_not_actionable",
         "revision_mismatch",
         "invalid_controller_response",
-        "request_cancelled"
+        "request_cancelled",
+        "action_outcome_unknown"
       ]
     },
     "detail": {

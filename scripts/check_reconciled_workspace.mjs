@@ -44,6 +44,62 @@ const capture = async (name) => {
   );
   await page.screenshot({ path: resolve(out, name + ".png") });
 };
+const loseReply = async (pattern) => {
+  await page.route(pattern, async (route) => {
+    const response = await route.fetch();
+    assert.equal((await response.json()).outcome, "applied");
+    await route.abort("connectionfailed");
+  });
+};
+const recoverAfterNavigation = async (destination, label, captureName) => {
+  await page.getByText(/Outcome unresolved/).waitFor();
+  await visit("overview");
+  await visit(destination);
+  await page.reload();
+  await page.getByRole("heading", { name: "Unresolved original operation", exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: label, exact: true }).isDisabled(), true);
+  if (captureName === "recovered-revision") {
+    await page.getByText("Original delivery reference", { exact: true }).click();
+    const original = page.getByRole("heading", { name: "Unresolved original operation", exact: true }).locator("..");
+    assert.match(await original.innerText(), /revision: 1\b/);
+    assert.match(await page.locator("main").innerText(), /plan r2/);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await capture("unresolved-revision-390-expanded");
+    await page.getByText("Original delivery reference", { exact: true }).click();
+    await capture("unresolved-revision-390-collapsed");
+    await page.setViewportSize({ width: 1440, height: 1080 });
+  }
+  // A real authenticated read with a wrong exact digest must not resolve it.
+  await page.route("**/v1/operator-action-receipts/**", async (route) => {
+    const url = new URL(route.request().url());
+    url.searchParams.set("digest", "0".repeat(64));
+    await route.continue({ url: url.href });
+  });
+  await page.getByRole("button", { name: "Re-read exact receipt", exact: true }).click();
+  await page
+    .getByText("Reconciliation unavailable. Outcome remains unknown; no request was resent.", { exact: true })
+    .waitFor();
+  assert.equal(await page.getByRole("button", { name: label, exact: true }).isDisabled(), true);
+  await page.unroute("**/v1/operator-action-receipts/**");
+  await page.route("**/v1/operator-action-receipts/**", async (route) => {
+    const url = new URL(route.request().url());
+    url.pathname = "/v1/operator-action-receipts/00000000-0000-0000-0000-000000000000";
+    await route.continue({ url: url.href });
+  });
+  await page.getByRole("button", { name: "Re-read exact receipt", exact: true }).click();
+  await page
+    .getByText("No exact delivery receipt observed. Outcome remains unknown; no request was resent.", { exact: true })
+    .waitFor();
+  await page.unroute("**/v1/operator-action-receipts/**");
+  await page.reload();
+  await page.getByRole("heading", { name: "Unresolved original operation", exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: label, exact: true }).isDisabled(), true);
+  await page.getByRole("button", { name: "Re-read exact receipt", exact: true }).click();
+  await page.getByRole("heading", { name: "Historical operator action receipt", exact: true }).waitFor();
+  assert.equal(await page.locator(".governed-feedback[tabindex]").evaluate((n) => n === document.activeElement), true);
+  await capture(captureName);
+  await page.getByRole("link", { name: "Inspect recorded result", exact: true }).click();
+};
 try {
   await check("React login and routing-safe keyboard skip after login/route changes", async () => {
     await page.goto(base + "/app#/objectives");
@@ -66,19 +122,35 @@ try {
     await page.getByRole("region", { name: "Installed agent inventory", exact: true }).waitFor();
     assert.match(await page.locator("main").innerText(), /browser-implementer/);
   });
-  await check("Create one deterministic objective from an existing issue; no execution approval", async () => {
-    await visit("intake");
-    await page.getByLabel("Existing issue", { exact: true }).fill("42");
-    await page.getByLabel("Agent profile", { exact: true }).selectOption("browser-implementer");
-    await page.getByLabel("Use deterministic planning", { exact: true }).check();
-    await page.getByRole("button", { name: "Review objective proposal", exact: true }).click();
-    await page.getByRole("dialog").waitFor();
-    assert.match(await page.getByRole("dialog").innerText(), /zenchron\/seeded[\s\S]*issue #42\b/);
-    await confirm("plan revise");
-    await page.getByRole("heading", { name: "Plan dependency inspection", exact: true }).waitFor();
-    assert.match(await page.locator("main").innerText(), /unapproved/);
-    assert.equal(writes.filter((r) => r.path === "/v1/objectives").length, 1);
-  });
+  await check(
+    "Lost objective response survives navigation/reload; exact receipt recovers one unapproved proposal",
+    async () => {
+      await visit("intake");
+      await page.getByLabel("Existing issue", { exact: true }).fill("42");
+      await page.getByLabel("Agent profile", { exact: true }).selectOption("browser-implementer");
+      await page.getByLabel("Use deterministic planning", { exact: true }).check();
+      await page.getByRole("button", { name: "Review objective proposal", exact: true }).click();
+      await page.getByRole("dialog").waitFor();
+      assert.match(await page.getByRole("dialog").innerText(), /zenchron\/seeded[\s\S]*issue #42\b/);
+      await loseReply("**/v1/objectives");
+      await page.getByLabel("Decision note (optional)", { exact: true }).fill("PRIVATE_RECOVERY_NOTE");
+      await confirm("plan revise");
+      await page.getByText(/Outcome unresolved/).waitFor();
+      const saved = await page.evaluate(() =>
+        Object.keys(localStorage)
+          .filter((k) => k.startsWith("zenchron.action-recovery."))
+          .map((k) => localStorage.getItem(k))
+          .join("\n"),
+      );
+      assert(!saved.includes("PRIVATE_RECOVERY_NOTE"));
+      assert(!saved.includes((await readFile(process.env.ZENCHRON_E2E_TOKEN_FILE, "utf8")).trim()));
+      await recoverAfterNavigation("intake", "Review objective proposal", "recovered-objective");
+      await page.unroute("**/v1/objectives");
+      await page.getByRole("heading", { name: "Plan dependency inspection", exact: true }).waitFor();
+      assert.match(await page.locator("main").innerText(), /unapproved/);
+      assert.equal(writes.filter((r) => r.path === "/v1/objectives").length, 1);
+    },
+  );
   await check(
     "Exact assignment refusal uses the real controller; fresh approval records one durable receipt",
     async () => {
@@ -103,12 +175,19 @@ try {
       assert.match(await page.locator("main").innerText(), /Plan approved/);
     },
   );
-  await check("Revision through the governed planner keeps a new proposal unapproved", async () => {
+  await check("Lost revision response retains the original revision across navigation to the latest plan", async () => {
     await visit("objectives/" + encodeURIComponent(process.env.ZENCHRON_E2E_PLAN));
     await page.getByLabel("Use deterministic revision", { exact: true }).check();
     await page.getByRole("button", { name: "Review plan revision", exact: true }).click();
     await page.getByRole("dialog").waitFor();
+    await loseReply("**/v1/plans/*/revise");
     await confirm("plan revise");
+    await recoverAfterNavigation(
+      "objectives/" + encodeURIComponent(process.env.ZENCHRON_E2E_PLAN),
+      "Review plan revision",
+      "recovered-revision",
+    );
+    await page.unroute("**/v1/plans/*/revise");
     await page.getByRole("heading", { name: /plan r2/ }).waitFor();
     assert.match(await page.locator("main").innerText(), /unapproved|proposed/);
   });
@@ -189,25 +268,60 @@ try {
     }
   });
   await check(
-    "Controller-created run resumes and refreshes through the existing scheduler admission path",
+    "Lost resume/refresh responses survive navigation and recover exact admission/successor receipts without resend",
     async () => {
       await visit("runs/" + encodeURIComponent(process.env.ZENCHRON_E2E_PUBLICATION_RUN));
       await page.getByRole("button", { name: "Review resume", exact: true }).click();
       await page.getByRole("dialog").waitFor();
+      await loseReply("**/v1/runs/*/resume");
       await confirm("resume");
-      await page.getByText("applied", { exact: true }).waitFor();
+      const destination = "runs/" + encodeURIComponent(process.env.ZENCHRON_E2E_PUBLICATION_RUN);
+      await recoverAfterNavigation(destination, "Review resume", "recovered-resume");
+      await page.unroute("**/v1/runs/*/resume");
       await page.getByRole("button", { name: "Review refresh", exact: true }).click();
       await page.getByRole("dialog").waitFor();
       const prior = page.url();
-      const response = page.waitForResponse((r) => r.request().method() === "POST" && r.url().endsWith("/refresh"));
+      await loseReply("**/v1/runs/*/refresh");
       await confirm("refresh");
-      const result = await (await response).json();
-      assert.equal(result.outcome, "applied", JSON.stringify(result));
+      await recoverAfterNavigation(destination, "Review refresh", "recovered-refresh");
+      await page.unroute("**/v1/runs/*/refresh");
       await page.waitForURL((url) => url.href !== prior);
       assert.match(page.url(), /#\/runs\//);
       await page.getByRole("heading", { level: 1 }).waitFor();
+      assert.equal(
+        writes.filter((r) => r.path === `/v1/runs/${process.env.ZENCHRON_E2E_PUBLICATION_RUN}/resume`).length,
+        1,
+      );
+      assert.equal(
+        writes.filter((r) => r.path === `/v1/runs/${process.env.ZENCHRON_E2E_PUBLICATION_RUN}/refresh`).length,
+        1,
+      );
+      assert.equal(writes.filter((r) => r.path.endsWith("/revise")).length, 1);
     },
   );
+  await check("Unavailable browser recovery storage refuses before sending any command", async () => {
+    await visit("intake");
+    await page.getByLabel("Existing issue", { exact: true }).fill("43");
+    await page.getByLabel("Use deterministic planning", { exact: true }).check();
+    await page.evaluate(() => {
+      window.fixtureRecoverySetItem = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key, value) {
+        if (key.startsWith("zenchron.action-recovery."))
+          throw new DOMException("Isolated storage refusal", "QuotaExceededError");
+        return window.fixtureRecoverySetItem.call(this, key, value);
+      };
+    });
+    const count = writes.length;
+    await page.getByRole("button", { name: "Review objective proposal", exact: true }).click();
+    await page.getByRole("dialog").waitFor();
+    await confirm("plan revise");
+    await page.getByText("Recovery reference could not be saved. Nothing was sent.", { exact: true }).waitFor();
+    assert.equal(writes.length, count);
+    await page.evaluate(() => {
+      Storage.prototype.setItem = window.fixtureRecoverySetItem;
+      delete window.fixtureRecoverySetItem;
+    });
+  });
   await check("Dark/light responsive and accessible actual application compositions", async () => {
     for (const theme of ["dark", "light"])
       for (const width of [1440, 1920, 390])

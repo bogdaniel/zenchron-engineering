@@ -45,7 +45,8 @@ then POST carries the binding which the server proves on that same action reques
 Observed server DTOs, local route/filter/selection and frozen confirmation results have distinct
 owners. None of these components computes authoritative lifecycle or grants authority. Reusable
 presentation satisfies repository interface gate §6(c); transport decoding is the existing §6(b)
-external boundary. No new dependency, backend interface, persistence schema or exception was added.
+external boundary. No new dependency, backend interface, SQL migration or exception was added.
+Delivery-only journal event additions are documented in the focused recovery review.
 The integrated main carries its existing store migrations; use its documented rollback semantics.
 
 Visible observations refresh every 20 seconds, age to stale after 30 seconds, and pause while hidden
@@ -70,7 +71,9 @@ close both approve and reject until the exact durable receipt is observed.
 - GET run and SSE snapshot use the same read helper for journal-owned operator pause state.
 
 All use the existing bearer API. POST keeps Host/Origin/JSON validation and role/controller proof.
-No useful API is deleted with a former template consumer. Resume/refresh/proposal uncertainty has no
-new receipt/idempotency mechanism: the client remains closed and requires canonical inspection.
+No useful API is deleted with a former template consumer. Creation/revision/resume/refresh now retain
+original delivery references across navigation and reconcile exact correlated journal receipts; no
+receipt or mismatched read remains unknown. These observations grant no retry or authority entitlement.
+See [the focused recovery review](action-recovery-review.md) for schema/rollback and crash-gap limits.
 
 See [the current review evidence](batch-02-review.md) and [complete parity/removal inventory](frontend-inventory.md).

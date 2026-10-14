@@ -314,6 +314,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/workspace/requests", a.workspaceRequests)
 	mux.HandleFunc("GET /v1/decisions/{id}/resolution", a.decisionResolution)
 	mux.HandleFunc("GET /v1/runs/{id}/authority-receipts", a.authorityReceipts)
+	mux.HandleFunc("GET /v1/operator-action-receipts/{id}", a.operatorActionReceipt)
 	mux.HandleFunc("GET /v1/plans/{id}/preview", a.planPreview)
 	mux.HandleFunc("POST /v1/plans/{id}/approve", a.approve)
 	mux.HandleFunc("POST /v1/decisions/{id}/resolve", a.resolveDecision)
@@ -341,6 +342,13 @@ func (a *API) Handler() http.Handler {
 		if pattern == "" {
 			fail(w, 404, "not_found")
 			return
+		}
+		if r.Method == http.MethodPost {
+			var ok bool
+			r, ok = correlateAction(w, r)
+			if !ok {
+				return
+			}
 		}
 		mux.ServeHTTP(w, r)
 	})

@@ -61,13 +61,6 @@ export function RunControls({
             },
           }
         : {}),
-      after: (r) => {
-        if (command === "refresh" && r.state) {
-          const successor = ops.decodeRun(r.state);
-          if (successor.run_id === run.run_id) throw new Error("Successor was not observed");
-          location.hash = `#/runs/${encodeURIComponent(successor.run_id)}`;
-        }
-      },
     };
   };
   return (
@@ -76,6 +69,7 @@ export function RunControls({
         <GovernedAction
           key={command}
           label={`Review ${command}`}
+          recoveryKey={["resume", "refresh"].includes(command) ? `run/${run.run_id}/${command}` : undefined}
           reason={why || (terminal && command !== "refresh" ? `Run is ${run.disposition}` : "")}
           prepare={(note, signal) => prepare(command, note, signal)}
           noteAllowed={["pause", "unpause"].includes(command)}

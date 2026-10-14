@@ -54,8 +54,10 @@ No supported legacy browser operation is intentionally dropped. The following ar
 as complete replacement qualification**: manual screen-reader speech/high zoom, operator-witnessed
 acceptance, production-scale service latency, a human-approved pixel baseline and production cutover.
 Positive live testing exercises allow_deny hold resolution; selected_option/text controls consume the
-existing grammar but need a real operator walkthrough of each policy-specific request. Resume/refresh
-have no new durable idempotency key: an unknown response stays closed for manual canonical inspection.
+existing grammar but need a real operator walkthrough of each policy-specific request.
+Creation/revision/resume/refresh use exact historical delivery receipts and retain unresolved browser
+references across navigation; unknown outcomes still confer no retry entitlement. See the
+[focused recovery review](action-recovery-review.md) for the failure and rollback boundary.
 Long planning commands may outlive the listener write deadline; this is an existing boundary, not a
 new retry entitlement. Read-only display and CLI-only operations never count as browser acceptance.
 

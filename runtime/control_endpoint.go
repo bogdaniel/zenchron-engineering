@@ -196,6 +196,9 @@ type ControlRequest struct {
 	// proof and the act cannot be split across two (#398). The CLI never sets
 	// it; a request without it behaves exactly as before.
 	ExpectedController string `json:"expected_controller,omitempty"`
+	// Optional delivery correlation, never authority or a retry entitlement.
+	OperationID   string `json:"operator_operation_id,omitempty"`
+	RequestDigest string `json:"operator_request_digest,omitempty"`
 }
 
 // Control commands. Each maps to one supervisor action.

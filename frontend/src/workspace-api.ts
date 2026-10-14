@@ -72,7 +72,7 @@ export type Requests = {
   graphs_has_more: boolean;
 };
 export type Result = { action: string; outcome: string; code: string; state?: unknown };
-export type Receipt = { title: string; detail: string; at?: string };
+export type Receipt = { title: string; detail: string; at?: string; destination?: string };
 export async function preview(id: string, signal: AbortSignal): Promise<Preview> {
   const p = object((await request(`/v1/plans/${encodeURIComponent(id)}/preview`, signal)).value),
     plan = api.decodePlan(p);
@@ -203,8 +203,9 @@ export async function send(
   body: unknown,
   signal: AbortSignal,
   timeout = 75000,
+  operationID?: string,
 ): Promise<Result> {
-  const r = object((await request(path, signal, body, undefined, timeout)).value),
+  const r = object((await request(path, signal, body, undefined, timeout, operationID)).value),
     actual = object(r.target),
     outcome = str(r.outcome);
   if (

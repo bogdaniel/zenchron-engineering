@@ -47,7 +47,7 @@ asserts first-page readiness within 5 seconds and 50 visible graph nodes/events.
 and history indexes represent 2000 and 10000 records; their reads are presentation mocks, not SQL
 service load qualification. New receipt tests use an actual journal exceeding 500 events.
 
-All 38 schemas compile; relevant Control Plane race checks, strict build/static/Windows checks,
+All 39 schemas compile; relevant Control Plane race checks, strict build/static/Windows checks,
 21 Python regressions and size/baseline verification pass. The old head's payload-file overage is
 resolved by the integrated main extraction, with no waiver or ceiling increase in this batch.
 Full Go suite runs in GitHub CI; only an exact-head green required check qualifies that gate.
@@ -63,3 +63,12 @@ is separately compared byte-for-byte. No new runtime baseline is self-approved.
 
 No obsolete frontend file is removed. Independent re-review and operator acceptance precede
 redirects, legacy deletion and the final single-shell production migration.
+
+## Focused lost-response recovery
+
+See [the one-finding follow-up](action-recovery-review.md). The actual-controller browser test now
+drops replies for all four affected operations, survives navigation/reload, refuses wrong/missing
+receipts and recovers exact results without a second POST. Storage failure sends nothing. Runtime
+and HTTP receipt tests validate no workflow-state mutation, durable read-only reopen and tampering.
+The old head's full/evidence CI passed; its race job exhausted the package-wide 60-minute budget.
+That failure is documented, not waived; new-head CI is reported separately on the PR.

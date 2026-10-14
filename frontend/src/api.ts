@@ -126,7 +126,7 @@ export function timestamp(v: unknown): string {
   if (!Number.isFinite(Date.parse(value))) throw new Error("invalid_response");
   return value;
 }
-function credential(): string {
+export function credential(): string {
   const cookie = document.cookie
     .split(";")
     .map((v) => v.trim())
@@ -146,12 +146,14 @@ export async function request(
   body?: unknown,
   token = credential(),
   timeoutMs = body === undefined ? 5000 : 75000,
+  operationID?: string,
 ): Promise<{ value: unknown; ok: boolean }> {
   const response = await fetch(path, {
     method: body === undefined ? "GET" : "POST",
     headers: {
       Authorization: `Bearer ${token}`,
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...(operationID ? { "X-Zenchron-Operation-ID": operationID } : {}),
     },
     credentials: "same-origin",
     cache: "no-store",
@@ -171,6 +173,7 @@ export async function request(
         "invalid_page",
         "read_failed",
         "snapshot_changed",
+        "subject_mismatch",
         "controller_unreachable",
         "runtime_refused",
         "invalid_controller_response",

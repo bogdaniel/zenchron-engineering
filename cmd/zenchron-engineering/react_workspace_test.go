@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/execution"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
@@ -115,6 +116,57 @@ func TestReactEngineeringOSGovernedWorkspace(t *testing.T) {
 	}
 	if human != 1 {
 		t.Fatalf("human evidence records %d, want one", human)
+	}
+	checkReactDeliveryReceipts(t, built, publication)
+}
+
+func checkReactDeliveryReceipts(t *testing.T, built *composition, publication string) {
+	t.Helper()
+	plans, err := built.store.Plans()
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := built.store.Events(publication)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, plan := range plans {
+		rows, err := built.store.PlanEvents(plan.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, rows...)
+	}
+	receipts := []runtime.OperatorActionReceipt{}
+	for _, event := range events {
+		if event.Type != runtime.EventPlanOperatorActionReceipt && event.Type != runtime.EventRunOperatorActionReceipt {
+			continue
+		}
+		if event.StateBefore != event.StateAfter {
+			t.Fatal("delivery observation changed workflow state")
+		}
+		var receipt runtime.OperatorActionReceipt
+		if err := json.Unmarshal(event.Payload, &receipt); err != nil {
+			t.Fatal(err)
+		}
+		receipts = append(receipts, receipt)
+	}
+	if len(receipts) != 4 {
+		t.Fatalf("want one delivery receipt per affected action, got %d", len(receipts))
+	}
+	if err := built.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := runtime.OpenReadStore(built.config.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	for _, expected := range receipts {
+		got, err := reader.OperatorActionReceipt(expected.OperationID)
+		if err != nil || got == nil || *got != expected {
+			t.Fatalf("receipt not reconstructed: %v", err)
+		}
 	}
 }
 func reactFixtureGit(t *testing.T, dir string, args ...string) string {

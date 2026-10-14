@@ -6,6 +6,9 @@ routing-safe skip focus and conflict resolution. This single reconciliation inte
 The published exact head and CI are reported on the PR to avoid a self-referential commit hash.
 **Independent re-review requested. Production cutover and merge remain unapproved.**
 
+[Follow-up for review #5516015303: exact uncertainty recovery](action-recovery-review.md) supersedes
+prior notes about navigation-local uncertainty for creation/revision/resume/refresh.
+
 ## Review findings addressed
 
 | Finding | Change and evidence |

@@ -208,6 +208,9 @@ func (a *API) actResponse(w http.ResponseWriter, r *http.Request, res ActionResu
 		return
 	}
 	request.ExpectedController = binding
+	if reference, ok := r.Context().Value(actionReferenceKey{}).(actionReference); ok {
+		request.OperationID, request.RequestDigest = reference.id, reference.digest
+	}
 	if r.Context().Err() != nil {
 		refuse(408, "request_cancelled")
 		return
@@ -225,6 +228,9 @@ func (a *API) actResponse(w http.ResponseWriter, r *http.Request, res ActionResu
 	case err != nil:
 		res.Outcome, res.Detail = OutcomeUnreachable, "the controller could not be reached; nothing was sent"
 		reply(503)
+	case !response.OK && response.Code == rt.ControlCodeOutcomeUnknown:
+		res.Outcome, res.Code = OutcomeUnknown, response.Code
+		reply(504)
 	case !response.OK:
 		code := response.Code
 		if code == "" {
