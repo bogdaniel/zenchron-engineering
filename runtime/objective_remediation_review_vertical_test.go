@@ -15,6 +15,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,19 +113,28 @@ func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRe
 
 	supervisor := fleet.supervisor()
 	ctx := context.Background()
+	var trace []objectiveConflictTick
+	t.Cleanup(func() {
+		if t.Failed() {
+			logObjectiveConflictDiagnostics(t, fleet, plan, graphID, trace)
+		}
+	})
 
 	// Stage A/B: approval -> two independent producer runs start -> a real
 	// textual Git conflict parks the integrator on its unchanged
 	// deterministic failure, exactly as the #581 fixture's own producers do.
 	var integrateRunID string
 	var parked bool
-	for range 60 {
-		plan.reconcile(t)
-		if _, err := supervisor.Tick(ctx); err != nil {
+	for iteration := range 60 {
+		planReport := plan.reconcile(t)
+		report, err := supervisor.Tick(ctx)
+		if err != nil {
 			t.Fatal(err)
 		}
 		fleet.clock.advance(61 * time.Second)
-		if unit := fleet.graph(graphID).unit(t, "integrate"); unit.RunID != "" {
+		graph := fleet.graph(graphID)
+		trace = append(trace, objectiveConflictTick{Iteration: iteration, Plan: planReport, Supervisor: report, Graph: graph})
+		if unit := graph.unit(t, "integrate"); unit.RunID != "" {
 			integrateRunID = unit.RunID
 		}
 		if integrateRunID == "" {
@@ -320,5 +330,56 @@ func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRe
 	}
 	if admission != nil {
 		t.Fatalf("an APPROVE must never be routed through remediation admission, got %+v", admission)
+	}
+}
+
+// Failure-only output preserves the admission/drive sequence without extra
+// clock reads or changing the conflict loop's success criterion or bound.
+type objectiveConflictTick struct {
+	Iteration  int
+	Plan       PlanTickReport
+	Supervisor SupervisorReport
+	Graph      WorkGraphView
+}
+
+func logObjectiveConflictDiagnostics(t *testing.T, fleet *fleetFixture, plan *planRunFixture, graphID string, trace []objectiveConflictTick) {
+	t.Helper()
+	log := func(label string, value any, err error) {
+		raw, encodeErr := json.Marshal(value)
+		t.Logf("conflict diagnostic %s: %s (read error=%v; encode error=%v)", label, raw, err, encodeErr)
+	}
+	log("graph identity", graphID, nil)
+	view, err := plan.service.ViewRevision(plan.plan.ID, plan.plan.Revision)
+	log("plan revision and approval", view, err)
+	for _, tick := range trace {
+		log("reconcile/tick", tick, nil)
+	}
+	runs, err := fleet.store.Runs()
+	log("all run identities and final dispositions", runs, err)
+	for _, run := range runs {
+		events, err := fleet.store.Events(run.ID)
+		log("events "+run.ID, events, err)
+		for _, event := range events {
+			if strings.Contains(string(event.Payload), ReasonDeterministicFailureUnchanged) {
+				log("unchanged failure event (any disposition) "+run.ID, event, nil)
+			}
+		}
+		if run.Orchestration != nil {
+			messages, err := fleet.store.ScopeMessages(run.Orchestration.BatchID)
+			log("messages "+run.ID, messages, err)
+		}
+		dir := candidateDir(fleet.stateDir, run.ID)
+		content, err := os.ReadFile(filepath.Join(dir, "shared.go"))
+		log("working shared.go "+run.ID, string(content), err)
+		for _, args := range [][]string{
+			{"log", "--oneline", "--all"},
+			{"status", "--porcelain=v1"},
+			{"diff", "--name-status", fleet.base, "HEAD"},
+			{"show", "HEAD:shared.go"},
+			{"ls-files", "--unmerged"},
+		} {
+			output, err := gitOutput(dir, args...)
+			log("git "+run.ID+" "+strings.Join(args, " "), output, err)
+		}
 	}
 }
