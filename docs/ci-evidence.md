@@ -9,7 +9,7 @@ disappearing.
 |------|------|------|-------|
 | T0 | `gofmt`, `go vet`, Windows build and vet | every PR | `ci/static.sh` |
 | T1 | every package except `runtime` whole, plus the `runtime` tests the impact registry selects | every PR | `go run ./ci/evidence` |
-| T1 race | the selected tests of high-risk (`race: true`) domains under `-race`, as a parallel job | every PR | `go run ./ci/evidence -race` |
+| T1 race | the same selected high-risk (`race: true`) test names partitioned across four isolated runners; every part must pass | every PR | `go run ./ci/evidence -race -race-shard 1/4` (and 2/4–4/4) |
 | T2 | `go test -timeout 30m ./...` | today: every PR and every push to `main` (the required `go` check) | `.github/workflows/ci.yml` |
 | T3 | `go test -race ./...` | nightly, on request | `.github/workflows/assurance.yml` |
 
@@ -160,3 +160,24 @@ The current PR also changes the shared schema registry, so it still selects the
 whole runtime and all high-risk race domains. This classification does not remove
 that cost or establish full race acceptance. Unknown/new dependency paths still
 fail safe to the whole runtime; no timeout, gate or guard is weakened.
+
+### Race workload partitioning
+
+The reviewed head exhausted its existing 60-minute package bound after selecting
+1285 race tests; the active test had run only three seconds. Exact trusted main
+also shows substantial serial cost (80.6 minutes for its successful full T3).
+T1 race now partitions the **same sorted selected names** by position across four
+isolated runners. Overlapping domains do not duplicate tests. Conformance tests
+prove the partition union equals the entire narrow or whole-fallback selection,
+with every name occurring exactly once. No selection or test assertion is cut.
+
+`-race-shard part/count` is valid only with `-race`; malformed/out-of-range values
+refuse. The original unsharded CLI remains available. Every part keeps `-race`
+and the unchanged 60-minute package bound. Matrix fail-fast is off so a failing
+part does not cancel the others. The existing `evidence-race` check identity is a
+fail-closed aggregate: failure, cancellation or skip of a part cannot pass it.
+This follows GitHub's [needs result](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#needs-context)
+and [matrix failure handling](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/run-job-variations#handling-failures)
+contracts. The strict required `go` job, exact push-to-main T2, trust policy and
+unpartitioned whole-module T3 remain unchanged. CI still must prove every part
+at the exact submitted head; a focused probe is never that qualification.

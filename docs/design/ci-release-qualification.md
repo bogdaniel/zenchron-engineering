@@ -2,7 +2,7 @@
 
 Reviewed implementation: `06b16d5af852bed874d0cb74a7c9e4c58ee771ef`.
 The follow-up changes only evidence ownership/tests, one browser synchronization
-assertion and review/runbook documents.
+assertion, CI-only race partitioning and review/runbook documents.
 The approved frontend, action-recovery implementation, runtime behavior, API,
 schemas and all legacy implementations remain unchanged from that reviewed head.
 This work is governed by ADR-0004's existing controller boundary and ADR-0007's
@@ -45,9 +45,15 @@ New unknown paths still fail safe to whole runtime.
 ## Race investigation and honest acceptance boundary
 
 Reviewed-head [CI 38567437260](https://github.com/bogdaniel/zenchron-engineering/actions/runs/38567437260)
-binds to `06b16d5`. `go` and `evidence` fail on the registry guards. Final job
-conclusions, timeout stacks and new-head results are recorded on the PR when
-available; no focused probe is counted as full race acceptance.
+binds to `06b16d5`. `go` and `evidence` fail only on the two registry guards;
+their runtime suites pass at 1204/1201 seconds. `evidence-race` hits the 60-minute
+package alarm while `TestReviewTriggerErrorIsReportedSeparatelyFromDriveFailure`
+has run only three seconds. The stack is in a runnable SQLite journal read, not
+a race-detector report or a failed test assertion. The unchanged named test passes
+under bounded race probes on exact trusted main in 9.05 seconds and the PR in
+8.67 seconds. No deterministic test regression is established by this comparison;
+it does not qualify the whole selected suite. Logs and new-head results stay on
+the PR, with the old failure retained.
 
 Trusted comparison base is `e6d90b9454ebb125cc1252eb363e7a147fec9a75`, unchanged on
 remote main at investigation time. Its exact push-event T2
@@ -67,6 +73,18 @@ race run, and retain the package failure separately. A short passing current tes
 does not explain all suite cost or qualify all selected tests. Deterministic
 failure, race-detector report and package alarm are different findings. No
 runtime optimization or test weakening is justified without such evidence.
+
+To address the observed aggregate resource bound, CI partitions the same sorted
+high-risk selection across four isolated runners. Tests prove the union contains
+all 1298 selected names exactly once, including receipt evidence, for broad
+fallback as well as narrow selection. Each part still uses race detection and
+the unchanged 60-minute package timeout; no test or assertion is omitted.
+Matrix fail-fast is disabled. The existing `evidence-race` check fails unless
+all parts succeed; failure, cancellation and skip remain failures of the gate.
+The strict required `go` check, push-event T2, trust policy and full unpartitioned
+T3 are unchanged. This CI-only execution change is explicitly reviewable under
+ADR-0007; it changes neither adoption eligibility nor runtime authority. Hosted
+results for every part and the aggregate are required before acceptance.
 
 ## Parity, authority and compatibility
 
