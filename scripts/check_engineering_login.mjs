@@ -26,7 +26,7 @@ export async function checkEngineeringLogin(browser, base, out) {
     await page.getByRole("alert").waitFor();
     assert.match(await page.getByRole("alert").innerText(), /Token not accepted/);
     assert.equal(
-      await page.evaluate(() => document.cookie.includes("zenchron_control_plane_token=")),
+      await page.evaluate(() => /zenchron_control_plane_token_\w+=/.test(document.cookie)),
       false,
       "Refused token never becomes a session",
     );

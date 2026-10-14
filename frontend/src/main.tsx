@@ -56,7 +56,30 @@ function route(): Route {
     return { page: "invalid", id: "", revision: 0, offset: 0 };
   }
 }
-function Screen({ route: r }: { route: Route }) {
+// Read failures are not one condition. An expired/invalid credential ends
+// the session (Screen hands that to onSessionInvalid instead); these cover
+// what's left - the controller, the local database and the runtime refusing
+// an otherwise-authenticated read - each with its own recovery, never the
+// same generic sentence.
+const readFailureCopy: Record<string, { title: string; detail: string }> = {
+  controller_unreachable: {
+    title: "Controller unreachable",
+    detail: "The execution controller could not be reached. Durable plans and runs may still be readable.",
+  },
+  invalid_controller_response: {
+    title: "Controller response invalid",
+    detail: "The execution controller replied, but its response could not be trusted as a snapshot.",
+  },
+  read_failed: {
+    title: "Database read failed",
+    detail: "The local durable store could not be read. No unknown fact is interpreted as success.",
+  },
+  permission_refused: {
+    title: "Action not permitted",
+    detail: "This credential does not permit this read.",
+  },
+};
+function Screen({ route: r, onSessionInvalid }: { route: Route; onSessionInvalid: () => void }) {
   const [data, setData] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(true),
     [error, setError] = useState("");
@@ -123,10 +146,18 @@ function Screen({ route: r }: { route: Route }) {
         expiry = setTimeout(() => setStale(true), 30000);
       })
       .catch((e) => {
-        if (!owner.signal.aborted) {
-          setError(e instanceof Error ? e.message : "read_failed");
-          setStale(true);
+        if (owner.signal.aborted) return;
+        const code = e instanceof Error ? e.message : "read_failed";
+        // An expired or invalid credential is not one more unreadable view
+        // among others: nothing behind this chrome is authenticated any
+        // more, so the whole session ends here rather than leaving a broken
+        // authenticated-looking shell on screen.
+        if (code === "unauthorized") {
+          onSessionInvalid();
+          return;
         }
+        setError(code);
+        setStale(true);
       })
       .finally(() => {
         if (!owner.signal.aborted) setLoading(false);
@@ -146,23 +177,14 @@ function Screen({ route: r }: { route: Route }) {
         <p role="status">Reading runtime state…</p>
       </section>
     ) : (
-      <Panel title="Engineering state unavailable">
-        <Empty title="This view could not be read">{error}. No unknown fact is interpreted as success.</Empty>
+      <Panel title={readFailureCopy[error]?.title || "Engineering state unavailable"}>
+        <Empty title="This view could not be read">
+          {readFailureCopy[error]?.detail || `${error}. No unknown fact is interpreted as success.`}
+        </Empty>
         <div className="panel-footer">
           <button className="button" onClick={refresh}>
             Retry read
           </button>
-          {error === "unauthorized" && (
-            <button
-              className="button"
-              onClick={() => {
-                api.disconnect();
-                location.reload();
-              }}
-            >
-              Sign in again
-            </button>
-          )}
         </div>
       </Panel>
     );
@@ -313,6 +335,7 @@ function Screen({ route: r }: { route: Route }) {
 }
 function App() {
   const [connected, setConnected] = useState(api.hasCredential);
+  const [sessionNote, setSessionNote] = useState("");
   const [current, setCurrent] = useState(route);
   const [theme, setTheme] = useState(() => (localStorage.getItem("zenchron-theme") === "light" ? "light" : "dark"));
   const [menu, setMenu] = useState(false);
@@ -398,7 +421,11 @@ function App() {
   if (!connected)
     return (
       <Login
-        connected={() => setConnected(true)}
+        connected={() => {
+          setSessionNote("");
+          setConnected(true);
+        }}
+        note={sessionNote}
         theme={theme}
         toggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
       />
@@ -476,7 +503,15 @@ function App() {
             </button>
           </div>
         </header>
-        <Screen key={`${current.page}/${current.id}/${current.revision}`} route={current} />
+        <Screen
+          key={`${current.page}/${current.id}/${current.revision}`}
+          route={current}
+          onSessionInvalid={() => {
+            api.disconnect();
+            setSessionNote("Your session ended. Sign in again to continue.");
+            setConnected(false);
+          }}
+        />
         <nav className="mobile-nav" aria-label="Mobile navigation">
           {navigation
             .filter(([to]) => ["overview", "objectives", "actions"].includes(to))

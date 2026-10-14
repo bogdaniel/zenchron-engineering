@@ -18,7 +18,7 @@ func getWeb(t *testing.T, w *Web, path string, cookie string, status int) []byte
 	t.Helper()
 	req := httptest.NewRequest("GET", path, nil)
 	if cookie != "" {
-		req.AddCookie(&http.Cookie{Name: webTokenCookie, Value: cookie})
+		req.AddCookie(&http.Cookie{Name: sessionCookieName(req.Host), Value: cookie})
 	}
 	out := httptest.NewRecorder()
 	w.Handler().ServeHTTP(out, req)
@@ -117,11 +117,65 @@ func TestWebRunsFilterByStatusAndHeldMaterial(t *testing.T) {
 func TestWebRejectsNonGETAndUncleanPaths(t *testing.T) {
 	w := webFrom(fixture(t, true))
 	req := httptest.NewRequest("POST", "/overview", nil)
-	req.AddCookie(&http.Cookie{Name: webTokenCookie, Value: w.Token})
+	req.AddCookie(&http.Cookie{Name: sessionCookieName(req.Host), Value: w.Token})
 	out := httptest.NewRecorder()
 	w.Handler().ServeHTTP(out, req)
 	if out.Code != 405 {
 		t.Fatalf("POST /overview: %d", out.Code)
 	}
 	getWeb(t, w, "//overview", w.Token, 404)
+}
+
+// A browser's cookie jar is scoped by host, never by port, so two loopback
+// Control Plane instances on the same hostname but different ports would
+// otherwise read and overwrite the identical fixed-name cookie: signing in
+// to one instance would silently evict or shadow the other's session. This
+// pins sessionCookieName's fix: each instance accepts only its own
+// port-scoped cookie name, a stray cookie carrying another instance's token
+// under the right name is still refused, and a bare, unscoped legacy cookie
+// name no longer authenticates anything.
+func TestWebSessionCookieIsolatedByPort(t *testing.T) {
+	instanceA := webFrom(fixture(t, true))
+	instanceA.Token = "token-a"
+	instanceB := webFrom(fixture(t, true))
+	instanceB.Token = "token-b"
+
+	ownCookie := httptest.NewRequest("GET", "/overview", nil)
+	ownCookie.Host = "127.0.0.1:8787"
+	ownCookie.AddCookie(&http.Cookie{Name: sessionCookieName(ownCookie.Host), Value: instanceA.Token})
+	out := httptest.NewRecorder()
+	instanceA.Handler().ServeHTTP(out, ownCookie)
+	if out.Code != 200 {
+		t.Fatalf("instance a: own port-scoped cookie refused: %d", out.Code)
+	}
+
+	// What a shared cookie jar would deliver to instance b's origin if both
+	// instances used the same cookie name: instance a's token, under
+	// instance b's own port-scoped name.
+	collision := httptest.NewRequest("GET", "/overview", nil)
+	collision.Host = "127.0.0.1:8879"
+	collision.AddCookie(&http.Cookie{Name: sessionCookieName(collision.Host), Value: instanceA.Token})
+	out = httptest.NewRecorder()
+	instanceB.Handler().ServeHTTP(out, collision)
+	if out.Code != 401 {
+		t.Fatalf("instance b authenticated instance a's token: %d", out.Code)
+	}
+
+	legacyName := httptest.NewRequest("GET", "/overview", nil)
+	legacyName.Host = "127.0.0.1:8879"
+	legacyName.AddCookie(&http.Cookie{Name: webTokenCookie, Value: instanceB.Token})
+	out = httptest.NewRecorder()
+	instanceB.Handler().ServeHTTP(out, legacyName)
+	if out.Code != 401 {
+		t.Fatalf("instance b authenticated an unscoped legacy cookie name: %d", out.Code)
+	}
+
+	ownCookieB := httptest.NewRequest("GET", "/overview", nil)
+	ownCookieB.Host = "127.0.0.1:8879"
+	ownCookieB.AddCookie(&http.Cookie{Name: sessionCookieName(ownCookieB.Host), Value: instanceB.Token})
+	out = httptest.NewRecorder()
+	instanceB.Handler().ServeHTTP(out, ownCookieB)
+	if out.Code != 200 {
+		t.Fatalf("instance b: own port-scoped cookie refused: %d", out.Code)
+	}
 }

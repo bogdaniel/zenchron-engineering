@@ -2,7 +2,13 @@
 (function () {
   "use strict";
 
-  var COOKIE_NAME = "zenchron_control_plane_token";
+  // Two loopback Control Plane instances on the same hostname but different
+  // ports would otherwise share one cookie name: the browser's jar is
+  // scoped by host, never by port, so signing in to one instance would
+  // silently evict the other's session. Suffixing by the exact connected
+  // port (controlplane/web.go's identical sessionCookieName) isolates them
+  // without touching the Cookie attributes available to do that.
+  var COOKIE_NAME = "zenchron_control_plane_token_" + (window.location.port || "default");
 
   function getCookie(name) {
     var match = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));

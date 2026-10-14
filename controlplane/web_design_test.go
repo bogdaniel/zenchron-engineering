@@ -18,7 +18,7 @@ func TestDesignPreviewSharesAuthenticationAndCannotMutate(t *testing.T) {
 		getWeb(t, w, route, "wrong-token", status)
 		getWeb(t, w, route, w.Token, http.StatusOK)
 		req := httptest.NewRequest(http.MethodPost, route, nil)
-		req.AddCookie(&http.Cookie{Name: webTokenCookie, Value: w.Token})
+		req.AddCookie(&http.Cookie{Name: sessionCookieName(req.Host), Value: w.Token})
 		out := httptest.NewRecorder()
 		w.Handler().ServeHTTP(out, req)
 		if out.Code != http.StatusMethodNotAllowed {
@@ -35,7 +35,7 @@ func TestDesignPreviewSharesAuthenticationAndCannotMutate(t *testing.T) {
 func TestDesignPreviewIsFixtureOnlyAndForbidsConnections(t *testing.T) {
 	w := webFrom(fixture(t, true))
 	req := httptest.NewRequest(http.MethodGet, "/design", nil)
-	req.AddCookie(&http.Cookie{Name: webTokenCookie, Value: w.Token})
+	req.AddCookie(&http.Cookie{Name: sessionCookieName(req.Host), Value: w.Token})
 	out := httptest.NewRecorder()
 	w.Handler().ServeHTTP(out, req)
 	if out.Code != http.StatusOK {
@@ -63,7 +63,7 @@ func TestDesignPreviewIsFixtureOnlyAndForbidsConnections(t *testing.T) {
 func TestEngineeringApplicationSharesShellAndKeepsBearerAPI(t *testing.T) {
 	w := webFrom(fixture(t, true))
 	req := httptest.NewRequest(http.MethodGet, "/app", nil)
-	req.AddCookie(&http.Cookie{Name: webTokenCookie, Value: w.Token})
+	req.AddCookie(&http.Cookie{Name: sessionCookieName(req.Host), Value: w.Token})
 	out := httptest.NewRecorder()
 	w.Handler().ServeHTTP(out, req)
 	if out.Code != http.StatusOK || !strings.Contains(out.Header().Get("Content-Security-Policy"), "connect-src 'self'") {
