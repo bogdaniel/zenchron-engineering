@@ -17,6 +17,8 @@ import {
   Panel,
   SearchInput,
 } from "./components";
+import { NumberField } from "./form";
+import { PlanDependencyGraph } from "./dependency-graph";
 import { Facts } from "./runs";
 import { JournalHistory } from "./history";
 import type { Fleet } from "./operations-api";
@@ -311,18 +313,14 @@ export function Workspace({
           location.hash = `#/objectives/${encodeURIComponent(p.plan_id)}/${revision}`;
         }}
       >
-        <label>
-          Plan revision{" "}
-          <input
-            type="number"
-            value={revision}
-            min={1}
-            max={2147483647}
-            required
-            aria-label="Plan revision"
-            onChange={(e) => setRevision(Number(e.target.value))}
-          />
-        </label>
+        <NumberField
+          label="Plan revision"
+          value={revision}
+          min={1}
+          max={2147483647}
+          required
+          onChange={(e) => setRevision(Number(e.target.value))}
+        />
         <button className="button">Inspect revision</button>
         <Link to={`objectives/${encodeURIComponent(p.plan_id)}`}>Latest revision</Link>
         {p.governing_revision > 0 && (
@@ -369,25 +367,18 @@ export function Workspace({
             title="Plan dependency inspection"
             extra={<span className="muted small">Plan stages · separate from WorkGraph</span>}
           >
-            <div className="plan-dependency-grid">
-              {p.stages.map((s) => (
-                <button
-                  key={s.stage_id}
-                  className={`graph-node ${s.stage_id === selected ? "selected" : ""}`}
-                  aria-pressed={s.stage_id === selected}
-                  onClick={() => setSelected(s.stage_id)}
-                >
-                  <span className="eyebrow">{s.kind}</span>
-                  <strong>{s.stage_id}</strong>
-                  <span className="small muted">{s.state || "State not recorded"}</span>
-                  <span className="small">After: {s.depends_on.join(", ") || "No stage dependency"}</span>
-                </button>
-              ))}
-            </div>
+            <PlanDependencyGraph stages={p.stages} selected={selected} onSelect={setSelected} />
             {stage && (
               <div className="product-body" role="region" aria-label="Selected stage">
                 <h3>{stage.stage_id}</h3>
                 <dl className="binding-list">
+                  <dt>Prerequisite stages</dt>
+                  <dd>{stage.depends_on.join(", ") || "No prerequisite stages"}</dd>
+                  <dt>Dependent stages</dt>
+                  <dd>
+                    {p.stages.filter((s) => s.depends_on.includes(stage.stage_id)).map((s) => s.stage_id).join(", ") ||
+                      "No dependent stages"}
+                  </dd>
                   <dt>Required role</dt>
                   <dd>{stage.role || "Not recorded"}</dd>
                   <dt>Bound profile</dt>

@@ -3,6 +3,7 @@ import type { Controller } from "./api";
 import { useMemo, useState } from "react";
 import type { GraphDetail, GraphRow, Graphs, ProductDetail, Products, Unit } from "./operations-api";
 import { Badge, Disclosure, Empty, FilterBar, Head, Link, Pagination, Panel } from "./components";
+import { COLUMN_GAP, MARGIN, ROW_GAP, dependencyEdgePath, layoutDependencies, useDependencyArrow } from "./dependency-graph";
 import { Facts } from "./runs";
 
 export function GraphTable({ rows }: { rows: GraphRow[] }) {
@@ -59,24 +60,6 @@ export function GraphPortfolio({ graphs, onPage }: { graphs: Graphs; onPage: (v:
     </>
   );
 }
-// One pass over actual dependencies. A cycle is a malformed observation,
-// never a invented edge or inferred ordering of independent units.
-function positions(units: Unit[]) {
-  const nodes = new Map(
-    units.map((u) => [u.unit_id, { unit: u, depth: 0, remaining: u.depends_on.length, children: [] as string[] }]),
-  );
-  for (const u of units) for (const parent of u.depends_on) nodes.get(parent)!.children.push(u.unit_id);
-  const queue = units.filter((u) => !u.depends_on.length).map((u) => u.unit_id);
-  for (let i = 0; i < queue.length; i++) {
-    const node = nodes.get(queue[i])!;
-    for (const child of node.children) {
-      const next = nodes.get(child)!;
-      next.depth = Math.max(next.depth, node.depth + 1);
-      if (--next.remaining === 0) queue.push(child);
-    }
-  }
-  return queue.length === units.length ? nodes : null;
-}
 function DependencyMap({
   graph,
   rows,
@@ -88,7 +71,13 @@ function DependencyMap({
   selected: string;
   select: (v: string) => void;
 }) {
-  const layout = useMemo(() => positions(graph.units), [graph]);
+  // Depth comes from the full graph's topology (a unit's position in the
+  // overall dependency order); row packing is recomputed from just this
+  // page's window so off-screen units never leave blank rows in the display.
+  const layout = useMemo(
+    () => layoutDependencies(graph.units.map((u) => ({ id: u.unit_id, depends_on: u.depends_on }))),
+    [graph],
+  );
   const depths = [...new Set(rows.map((u) => layout?.get(u.unit_id)?.depth || 0))].sort((a, b) => a - b);
   const heights = new Map<number, number>();
   const points = new Map(
@@ -96,9 +85,10 @@ function DependencyMap({
       const depth = layout?.get(u.unit_id)?.depth || 0,
         row = heights.get(depth) || 0;
       heights.set(depth, row + 1);
-      return [u.unit_id, { x: depths.indexOf(depth) * 260 + 20, y: row * 115 + 20 }];
+      return [u.unit_id, { x: depths.indexOf(depth) * COLUMN_GAP + MARGIN, y: row * ROW_GAP + MARGIN }];
     }),
   );
+  const { markerId, defs } = useDependencyArrow();
   const node = (u: Unit) => (
     <>
       <span className="eyebrow">
@@ -126,11 +116,12 @@ function DependencyMap({
       {layout ? (
         <div className="dependency-map" tabIndex={0} role="region" aria-label="Dependency map; scroll to inspect">
           <svg
-            width={Math.max(560, depths.length * 260)}
-            height={Math.max(160, ...[...heights.values()].map((v) => v * 115 + 20))}
+            width={Math.max(560, depths.length * COLUMN_GAP)}
+            height={Math.max(160, ...[...heights.values()].map((v) => v * ROW_GAP + MARGIN))}
             role="group"
             aria-label="WorkUnit dependency edges"
           >
+            <defs>{defs}</defs>
             {rows.flatMap((u) =>
               u.depends_on
                 .filter((p) => points.has(p))
@@ -141,7 +132,8 @@ function DependencyMap({
                     <path
                       className="dependency-edge"
                       key={`${p}/${u.unit_id}`}
-                      d={`M${from.x + 220},${from.y + 43} C${from.x + 245},${from.y + 43} ${to.x - 25},${to.y + 43} ${to.x},${to.y + 43}`}
+                      d={dependencyEdgePath(from, to)}
+                      markerEnd={`url(#${markerId})`}
                     />
                   );
                 }),
