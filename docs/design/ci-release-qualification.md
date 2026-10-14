@@ -1,12 +1,21 @@
 # PR #594 — CI recovery and release qualification
 
 Reviewed implementation: `06b16d5af852bed874d0cb74a7c9e4c58ee771ef`.
-The follow-up changes only evidence ownership/tests and review/runbook documents.
+The follow-up changes only evidence ownership/tests, one browser synchronization
+assertion and review/runbook documents.
 The approved frontend, action-recovery implementation, runtime behavior, API,
 schemas and all legacy implementations remain unchanged from that reviewed head.
 This work is governed by ADR-0004's existing controller boundary and ADR-0007's
 exact-revision evidence/trust rules. No CI guard, timeout, workflow or gate is
 relaxed, and no new dependency, abstraction or file-size exception is introduced.
+
+The exact-head isolated browser run exposed an assertion racing the workspace's
+post-approval refresh: it observed the durable approval receipt while the main
+read still explicitly said refreshing/unapproved. The driver now waits for the
+same exact `Plan approved · r1` rendered receipt before its original assertion.
+No arbitrary sleep, timeout increase or dropped assertion is used; failure to
+refresh still fails the existing bounded wait. Application closure while reads
+refresh and the reviewed action-recovery implementation are unchanged.
 
 ## Classification defect and correction
 

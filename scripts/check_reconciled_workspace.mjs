@@ -172,6 +172,10 @@ try {
       await page.getByRole("dialog").waitFor();
       await confirm("plan approve");
       await page.getByRole("heading", { name: "Historical plan approval receipt", exact: true }).waitFor();
+      await page
+        .locator("main")
+        .getByText(/^Plan approved · r1$/)
+        .waitFor();
       assert.match(await page.locator("main").innerText(), /Plan approved/);
     },
   );
