@@ -45,6 +45,104 @@ func TestTrivialChangeCompilesWithoutCeremony(t *testing.T) {
 	}
 }
 
+func TestPreferredProfileFillsOnlyUnspecifiedAgentStages(t *testing.T) {
+	input := planInput(t, "trivial.engineering-fact.json", nil)
+	input.PreferredProfile = "browser-implementer"
+	plan := compilePlan(t, input)
+	stage, found := plan.Stage("implementation")
+	if !found || stage.Profile != input.PreferredProfile {
+		t.Fatalf("default profile preference = %q, want %q", stage.Profile, input.PreferredProfile)
+	}
+	for _, stage := range plan.Stages {
+		if stage.Kind != domain.StageAgent && stage.Profile != "" {
+			t.Fatalf("gate %q received an execution profile %q", stage.ID, stage.Profile)
+		}
+	}
+
+	template := domain.EngineeringPlanTemplate{
+		SchemaVersion: domain.SchemaVersion, ID: "pinned-profile", Version: 1,
+		Stages: []domain.TemplateStage{{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer, Profile: "template-profile"}},
+		Source: domain.ArtifactSource{Type: domain.SourceOperatorFile, Location: "/operator/templates/pinned-profile.json"},
+	}
+	var err error
+	template.Digest, err = template.ContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Template = &template
+	plan = compilePlan(t, input)
+	stage, found = plan.Stage("implementation")
+	if !found || stage.Profile != "template-profile" {
+		t.Fatalf("template preference = %q, want its explicit profile", stage.Profile)
+	}
+
+	input.Template = nil
+	input.Proposed = []domain.PlanStage{{ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer, Profile: "reasoned-profile"}}
+	plan = compilePlan(t, input)
+	stage, found = plan.Stage("implementation")
+	if !found || stage.Profile != "reasoned-profile" {
+		t.Fatalf("reasoning preference = %q, want its explicit profile", stage.Profile)
+	}
+}
+
+func TestPublicationDecisionGateRequiresAuthorityKernelHumanClaim(t *testing.T) {
+	action := domain.Action{Type: "git.pull_request.create", Target: "main"}
+	contract := domain.EngineeringWorkContract{
+		ID: "contract", Revision: "1", Subject: domain.Subject{Repository: "acme/repo", Revision: "abc"},
+		RequiredClaims: map[string]domain.RequiredClaim{
+			"validation": {EvidenceClass: "automated_test"},
+			"approval":   {EvidenceClass: "human_approval"},
+		},
+		AuthorityConditions: []domain.AuthorityCondition{{Action: action, RequiredClaims: []string{"validation", "approval"}}},
+	}
+	plan := domain.EngineeringPlan{
+		ID: "plan", Revision: 1, Objective: "publish candidate",
+		Subject:    contract.Subject,
+		Provenance: domain.PlanProvenance{Contract: domain.ObjectRevision{ID: "contract", Revision: "1"}},
+		Stages:     []domain.PlanStage{{ID: "publish-approval", Kind: domain.StageHumanDecisionGate, Action: &action, RequiredClaims: []string{"validation"}}},
+	}
+	if err := planning.Validate(plan, planning.ValidationInput{Contract: contract}); err == nil || !strings.Contains(err.Error(), "evidence class human_approval") {
+		t.Fatalf("automated validation incorrectly backed a publication decision: %v", err)
+	}
+	plan.Stages[0].RequiredClaims = []string{"approval"}
+	if err := planning.Validate(plan, planning.ValidationInput{Contract: contract}); err != nil {
+		t.Fatalf("contract-backed human publication decision was refused: %v", err)
+	}
+	plan.Stages[0].Action = nil
+	if err := planning.Validate(plan, planning.ValidationInput{Contract: contract}); err == nil || !strings.Contains(err.Error(), "must name its contract-authorized action") {
+		t.Fatalf("publication decision without its exact action was accepted: %v", err)
+	}
+	plan.Stages[0].Action = &action
+	plan.Stages = append(plan.Stages, domain.PlanStage{
+		ID: "automated-verification", Kind: domain.StageAssuranceGate, RequiredClaims: []string{"approval"},
+	})
+	if err := planning.Validate(plan, planning.ValidationInput{Contract: contract}); err == nil || !strings.Contains(err.Error(), "cannot claim human_approval evidence") {
+		t.Fatalf("automated assurance was allowed to satisfy a human claim: %v", err)
+	}
+	plan.Stages = plan.Stages[:1]
+	contract.AuthorityConditions[0].RequiredClaims = []string{"validation"}
+	if err := planning.Validate(plan, planning.ValidationInput{Contract: contract}); err == nil || !strings.Contains(err.Error(), "not required by the work contract") {
+		t.Fatalf("human gate absent from action authority condition was accepted: %v", err)
+	}
+}
+
+func TestDefaultAssuranceGateExcludesHumanApprovalClaims(t *testing.T) {
+	input := planInput(t, "trivial.engineering-fact.json", nil)
+	input.Contract.RequiredClaims["claim-publication-approval"] = domain.RequiredClaim{
+		EvidenceClass: "human_approval", IndependentFromChangeProducer: true,
+	}
+	plan := compilePlan(t, input)
+	gate, ok := stageOfKind(plan, domain.StageAssuranceGate)
+	if !ok || len(gate.RequiredClaims) != 2 {
+		t.Fatalf("default assurance claims = %#v, want the two automated claims", gate.RequiredClaims)
+	}
+	for _, claim := range gate.RequiredClaims {
+		if claim == "claim-publication-approval" {
+			t.Fatalf("default assurance gate included a human approval claim: %#v", gate.RequiredClaims)
+		}
+	}
+}
+
 // A security-sensitive change gains the obligations POLICY states, not
 // obligations the planner invented.
 func TestSecuritySensitiveChangeGainsPolicyObligations(t *testing.T) {

@@ -65,7 +65,9 @@ upstream WorkUnit B -> admitted handoff B
   authorizes the composed output - `integration.IntegratedCandidate` carries
   no evidence, review or acceptance field, and a regression test
   (`TestIntegratedCandidateCarriesNoInheritedEvidence`) guards that it stays
-  that way.
+  that way. Automatic PR review waits for a downstream composed candidate
+  when a producer's handoff feeds `integration_compose`; a unit that explicitly
+  requires its own review keeps that gate.
 - **Budgets, waits and authority.** Because this is an ordinary run, its
   attempt/provider-invocation budgets, external waits and merge/release
   authority are the existing scheduler's and the existing authority owner's.

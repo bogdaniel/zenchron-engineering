@@ -1,5 +1,63 @@
 # Local Control Plane read API and console
 
+## Persistent objective workspace
+
+`/objectives` lists durable plans alongside issue-backed intake. Selecting an
+objective opens `/objectives/{plan-id}`, a bookmarkable read-side composition
+with Summary, Plan, Execution, Decisions, Evidence, and Changes and PR sections.
+Objective, plan and inbox plan pages are database-bounded before lifecycle replay.
+The inbox pages through all plans, showing only pending approvals and unobservable
+records on each page; an empty page is not proof that no later approval exists.
+Planning identities with revision zero remain visible after reload, explicitly
+without a stored proposal or approval controls. A positive revision whose document
+is missing fails closed. Repository and issue identities label the objective list;
+private objective prose is not copied into the durable list projection.
+Summary uses the runtime's existing governing-plan lifecycle and WorkGraph counts,
+preserving concurrent dimensions. It does not derive an objective authority state.
+WorkGraph detail JSON adds optional `objective_plan_id`, `objective_plan_revision`
+and `objective_plan_digest` together, from the same graph revision that produced
+its unit projection. Native WorkGraph status also includes the existing
+`objective_plan` reference. Strict schema consumers need the updated schema;
+persisted formats and controller commands are unchanged. A conflicting displayed
+revision or an unverifiable graph binding offers no objective decision/publication
+action; navigation opens the graph's exact plan context instead.
+It reconstructs context after reload from the existing plan and the WorkGraph's
+explicit `objective_plan` binding; it creates no lifecycle record or execution
+authority. Product-associated graph summaries expose optional `objective_plan_id`
+links to this workspace. Graphs without that binding remain diagnostic graphs.
+The composed page reads these owner projections separately, so concurrent writes
+can make sections reflect adjacent durable observations rather than one atomic
+cross-domain snapshot. It remains informational: plan approval binds the exact
+revision and digest, decision resolution names the durable request, and
+publication authorization binds the exact request ID and digest; the controller
+revalidates each action. After a refusal, reload before acting again.
+
+A missing graph is shown as unrecorded execution. Multiple matching graphs fail
+closed; a graph bound to a different plan revision is explicitly marked. Run,
+handoff, review and publication facts retain their independent identities.
+Publication is not objective completion. The objective Plan section consumes the
+existing controller preview and offers exact-bound approval, rejection and
+revision through the same governed routes as the plan diagnostic page. A preview
+whose revision or digest differs from the rendered page is refused locally
+before actions are offered; the controller still validates every submitted
+binding. Intake links return to the continuing objective workspace. Decision and
+run diagnostics remain available. Typed WorkUnit decisions appear in the
+objective Decisions section using the same cards and guarded resolution routes
+as Action Required. Inbox cards link back to their explicitly bound objective.
+Resolved holds disappear from durable reads after reconnect; resolution never
+starts a bypass run. Recorded review findings and current review eligibility
+are shown separately, alongside assurance and classified runtime failures.
+The Changes and PR section consumes outstanding publication requests through the
+existing authority preview and authorization path. It names candidate commit,
+tree and publication target before confirmation, preserves exact request binding,
+and links recorded PR numbers to GitHub. A missing request offers no publication
+action. A changed candidate or controller binding reloads the read preview;
+responses for superseded preview identities are ignored. Authority reads refresh
+on the bounded page cadence, replacing controls when request identity, digest,
+contract, action or candidate changes. No mutation is retried.
+This workflow composition does not
+establish completion of the browser objective-to-PR experience or #448 acceptance.
+
 Start the separate process against an existing runtime state directory:
 
 ```
@@ -10,13 +68,20 @@ The default listener is `127.0.0.1:8787`. `--listen` accepts only literal
 loopback IP addresses (including `::1`). `--controller-root` overrides the
 standard adopted-controller root when necessary.
 
+For an isolated supervisor and Control Plane, set `ZENCHRON_CONTROLLER_ROOT`
+to one absolute, owner-controlled directory for both processes. The variable
+overrides the usual `~/.zenchron-adopted-controller` root for controller
+commands as well; an unset value preserves the standard path. This separates
+development adoption state from the operator's normal controller installation.
+
 Every request requires `Authorization: Bearer <token>`. The process generates
 32 random bytes, hex-encoded in `control-plane.token`, inside the owner-only
 state directory. The file must be a regular file with mode 0600. Tokens never
 appear in responses or startup output. To rotate, stop the Control Plane,
 remove this file, and restart; existing clients must read the new token.
 
-The read routes are GET (the two governed POST routes are in "Governed actions" below):
+The read routes are GET. Browser mutations use the governed controller actions
+described below; they never write SQLite directly.
 
 | Route | Projection |
 | --- | --- |
@@ -42,16 +107,12 @@ Product (#476), WorkGraph (#472), EngineeringRun (#470/#392) and the typed
 communication protocol (#473) - never a second truth store. A WorkGraph with
 no product association yet simply has none; nothing is fabricated.
 
-Every open decision - a `#473 decision_request` message, or a Plan
-`human_decision_gate`'s `Decision` ref shown at `/v1/plans/{id}/detail` - is
-shown exactly as durably recorded, with **no resolve action**: #508
-(`DecisionResolution`) exists and has a real governed path
-(`Supervisor.ResolveDecision`, reached today only from the CLI's `autonomy
-workgraph resolve <request-id> <outcome>`), but #398's `governedControl`
-allowlist is still frozen at exactly `stop`/`plan-reject` (see "Governed
-actions" below) and does not reach it. Resolving a decision from this console
-would require expanding that frozen allowlist, which is its own review, not
-an implementation detail of this one - see #398.
+Open WorkUnit decisions show their durable request, frozen answer grammar and
+exact subject. Browser resolution delegates to `Supervisor.ResolveDecision`
+(#508), preserving actor admission, liveness, subject binding and immutable
+resolution history. Plan human-decision gates remain distinct: they reference
+the evidence and authority that satisfy them; resolving a WorkUnit question
+does not manufacture plan-gate evidence.
 
 Limits are 1–500. Event pages return `next_after` and `has_more`; pass
 `next_after` as the next exclusive `after`. SQLite fetches at most `limit+1`
@@ -168,8 +229,9 @@ The accepted React/TypeScript application is being implemented at `/app` on this
 It includes Overview, Objectives, exact plan workspaces, Action Required, Runs/history, WorkGraphs,
 Products, agent observations, controller diagnostics and React token login. Existing governed stop
 and plan rejection have real-controller integration proofs, including lost responses and process
-restart. Approval/publication/decision resolution remain on their existing CLI paths. Legacy retirement
-requires operator acceptance; old pages remain operational during migration.
+restart. The reconciliation implements browser objective intake/revision/approval, typed decisions,
+publication human evidence and run controls using the existing governed APIs below. Legacy retirement
+requires independent review and operator acceptance; old pages remain operational during migration.
 Build the embedded asset with `npm ci --ignore-scripts` and `npm run build` inside `frontend/` before
 building Go. Production uses the Go binary alone, with no independent frontend server.
 The additive read endpoints `/v1/plans?limit=50&offset=0&q=...` and
@@ -207,7 +269,78 @@ Event payloads and free-form run/plan diagnostic text (`reason`, replay
 `error`) are not rendered, for the same reason API's own response types
 exclude them: they are unbounded prose, not a stable projection.
 
-## Governed actions (S4a, #398)
+## Browser workspace actions (#479, #398, #508; parent #471)
+
+The workspace adds Objectives, Plans, Decisions, Agents and Settings beside
+Overview, Products, WorkGraphs and Runs. Light/dark presentation, responsive
+cards, keyboard focus and technical drill-down use the existing embedded Go
+templates and plain JavaScript. No frontend package manager or backend service
+has been added.
+
+An objective starts from an existing issue in a controller-enrolled repository.
+The browser selects a configured worker, optional default profile preference,
+and template; explicit template or reasoning-stage profile preferences take
+precedence, and the controller still resolves eligibility and assignments.
+The operator may choose deterministic compilation when no planning model is
+wanted. The controller owns the budget envelope. Generation grants no execution
+authority. Review the proposed revision, stage dependencies, assignments,
+blockers and budgets before approving it.
+Approval names both the plan digest and the live resolved assignment digest.
+A changed revision, worker binding or controller generation is refused.
+
+| Route | Existing controller/domain path |
+| --- | --- |
+| `GET /v1/workspace/options` | Controller-owned repositories, agents, profiles, templates and budget envelope |
+| `GET /v1/plans/{id}/preview` | Live `PlanService.View`, including exact assignment digest |
+| `POST /v1/objectives` | Bounded AI planning intake; an existing plan requires an explicit revision |
+| `POST /v1/plans/{id}/approve` | Exact revision/digest/assignments approval |
+| `POST /v1/plans/{id}/revise` | Existing proposal path, exact predecessor revision/digest |
+| `POST /v1/decisions/{id}/resolve` | `Supervisor.ResolveDecision`, configured operator provenance |
+| `GET /v1/runs/{id}/authority` | Current `PendingAuthorityRequest`, or no request |
+| `POST /v1/runs/{id}/authorize` | Existing `Authorize`, exact request id/digest and approve/reject evidence |
+| `POST /v1/runs/{id}/pause` and `/unpause` | Existing operator pause journal and scheduler admission |
+| `POST /v1/runs/{id}/resume` | Existing scheduler reconciliation request; policy and capacity remain authoritative |
+| `POST /v1/runs/{id}/refresh` | New source generation for an eligible issue run; plan/WorkGraph-bound work requires a governed revision |
+
+Stop, reject and lifecycle actions use fixed routes and existing controller
+commands. Run detail explains when an action is unavailable; it does not offer
+a manual retry that bypasses scheduler budgets. Every mutation requires
+Bearer authentication, exact Host, same Origin, strict bounded JSON and a
+same-request measured controller binding under the held controller role. No
+browser-supplied actor is accepted. Unsupported verbs remain unreachable.
+Publication evidence is recorded through the run's own engine; partial
+objective candidates with deferred publication have no authorizable request.
+Human evidence still cannot replace independent review, assurance or policy.
+
+An action is sent once. A lost reply is an unknown outcome until durable state
+settles it, never permission to retry a budget-spending planning invocation.
+Re-read Plans after uncertain intake; an existing plan is not silently replaced.
+The Action Required view pages WorkGraphs and links to all plans and runs; a
+page with no decisions does not claim that the entire fleet has none.
+
+Refreshes run at a bounded cadence without overlapping requests. Unchanged
+elements retain identity; focused edits and open confirmation dialogs defer
+updates rather than changing the target underneath an operator. Hidden tabs
+pause refresh. HTTP errors, controller disconnection and paused updates show
+stale/unavailable state. A successfully refreshed durable snapshot is never
+proof that a disconnected controller is executing work.
+
+Automated browser checks run against real isolated SQLite, controller sockets
+and HTTP, using external provider/forge boundary fixtures:
+
+```sh
+ZENCHRON_BROWSER_E2E=1 go test ./cmd/zenchron-engineering -run '^TestBrowserWorkspace$' -v
+```
+
+The dependency-free Chrome runner requires installed Chrome and Node.
+`ZENCHRON_E2E_CHROME` selects the browser binary and
+`ZENCHRON_E2E_ARTIFACTS` selects the screenshot/result directory. It uses a
+temporary browser profile and does not connect to production state.
+Automated fixture approvals do not count as real operator approval. Final
+acceptance requires an existing live issue, genuine human plan/publication
+approval and operator confirmation of the full browser workflow.
+
+## Original governed actions (S4a, historical boundary)
 
 This section is the frozen S4a specification: the design reviewed on #398
 ("Design for review: S4 governed socket-backed operator actions") with the

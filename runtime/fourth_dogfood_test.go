@@ -173,6 +173,36 @@ func TestGoalStateIsUnreachableWhileRetryableAssuranceIsOutstanding(t *testing.T
 	}
 }
 
+func TestNoChangeRemediationDoesNotReachGoalState(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	fixture.useAssurance(&alwaysFailingVerifier{class: FailureVerification})
+	fixture.deps.Provider = &interruptedProducer{
+		completeAt: 1,
+		mutate: func(dir string, invocation int) error {
+			if invocation != 1 {
+				return nil
+			}
+			return os.WriteFile(filepath.Join(dir, "README.md"), []byte("candidate\n"), 0600)
+		},
+	}
+	fixture.runtime = fixture.newRuntime(fixture.deps)
+	runID := fixture.start()
+
+	var outcome Outcome
+	for pass := 0; pass < 12; pass++ {
+		outcome = fixture.reconcile(runID)
+		if terminalDisposition(outcome.Disposition) || outcome.Reason == ReasonGoalStateReached {
+			break
+		}
+	}
+	if outcome.Disposition != Failed || outcome.Reason != "no_progress" {
+		t.Fatalf("unchanged remediation settled as %s/%s; want failed/no_progress", outcome.Disposition, outcome.Reason)
+	}
+	if got := len(fixture.deps.Provider.(*interruptedProducer).requests); got != 2 {
+		t.Fatalf("provider calls = %d, want one implementation and one unchanged remediation", got)
+	}
+}
+
 // retryableAssuranceOutstanding reports the exact precondition of the
 // invariant: a current failed assurance observation whose class routes to a
 // retry, with budget still remaining.

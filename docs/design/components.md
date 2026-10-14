@@ -62,8 +62,8 @@ Confirmation: same request ID/objective/candidate or plan, same consequence and 
 disclosure, optional note and persistent Cancel/Confirm footer. Expanding full bindings never displaces
 the footer; the body scrolls. Protected action and target appear in confirmation by default. Changed bindings are refused;
 rejected/resolved receipts retain the subject and cannot be submitted again. No local confirmation
-authorizes a material runtime outcome. Real approval needs complete governed assignment/evidence bindings and remains disabled. The first
-live workflow is governed plan rejection, with server-side exact-subject verification and durable receipts.
+authorizes a material runtime outcome. Runtime approval now consumes the existing governed assignment preview and exact action path. Shared
+confirmation and durable receipts cover plan approval, typed decisions and publication human evidence.
 
 The browser check verifies first-screen mobile buttons, exact confirmation context, closed/expanded
 bindings, disabled scenarios, keyboard focus and local filter preservation. Rendered screenshots and
@@ -81,3 +81,12 @@ and existing bearer/cookie session, with focused errors and no old CSS/JS import
 Visible observations refresh every 20 seconds, suspend while hidden/confirming, and age to stale at
 30 seconds. Read DTOs, local selections and server action results remain separate; neither a graph
 selection nor an agent's execution trust authorizes an engineering outcome.
+
+## Reconciliation foundation
+
+`governed-action.tsx` owns one frozen review/POST/receipt flow for plan actions, typed decisions,
+publication and run controls. Publication alternatives share the uncertainty owner. `planning.tsx`,
+`human-requests.tsx`, `run-controls.tsx` and `installed-agents.tsx` reuse these controls and tokens.
+The transport remains `api.ts`; `workspace-api.ts` decodes main's existing governed contracts.
+The complete current scope is [runtime integration](runtime-integration.md); older fixture tables
+above describe simulation only, never production eligibility.

@@ -477,6 +477,12 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 // after the controller binding was proven on this request.
 func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.Supervisor, shutdown func(), request runtime.ControlRequest, governed bool) runtime.ControlResponse {
 	switch request.Command {
+	case runtime.ControlPlanView, runtime.ControlWorkspaceOptions, runtime.ControlAuthorityView:
+		return c.workspaceRead(ctx, supervisor, request)
+	case runtime.ControlResume, runtime.ControlRefresh:
+		return c.controlRunLifecycle(ctx, supervisor, request)
+	case runtime.ControlAuthorize:
+		return c.recordBrowserAuthority(ctx, supervisor, request)
 	case runtime.ControlPing:
 		return controlOK(map[string]string{"state_dir": c.config.StateDir, "agent": c.agent.ID})
 	case runtime.ControlCommandControllerSnapshot:
@@ -503,6 +509,13 @@ func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.S
 		}
 		return controlOK(view)
 	case runtime.ControlWorkGraphHold, runtime.ControlResolveDecision:
+		if governed {
+			operator, err := c.config.ResolveOperator()
+			if err != nil {
+				return controlError(err)
+			}
+			request.Operator = operator.ID
+		}
 		return dispatchDecisionControl(supervisor, request) // #508, kept out of this switch's bulk
 	case runtime.ControlStatus:
 		policy, err := c.config.SupervisorPolicy()
@@ -533,14 +546,7 @@ func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.S
 		}
 		return controlOK(outcome)
 	case runtime.ControlPause, runtime.ControlUnpause:
-		// Applied under the controller role (#86): a generation that has been
-		// superseded - or a process holding no role at all (WithAuthority is
-		// nil-safe and refuses) - cannot accept a pause or an unpause.
-		var view runtime.PauseView
-		if err := c.role.WithAuthority(func() (err error) { view, err = applyPause(c.store, request); return err }); err != nil {
-			return controlError(err)
-		}
-		return controlOK(view)
+		return c.controlPause(request, governed)
 	case runtime.ControlPlanApprove, runtime.ControlPlanReject:
 		// Under the reconciler's own lock: a decision and a plan tick both read
 		// a snapshot and then append against it, and interleaving them lets one
@@ -591,7 +597,7 @@ func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.S
 // meanwhile refuses it. Only the governed verbs are accepted; nothing else is
 // reachable this way.
 func (c *composition) governedControl(ctx context.Context, supervisor *runtime.Supervisor, shutdown func(), request runtime.ControlRequest) runtime.ControlResponse {
-	if request.Command != runtime.ControlStop && request.Command != runtime.ControlPlanReject {
+	if !browserGovernedCommand(request.Command) {
 		return runtime.ControlResponse{Code: runtime.ControlCodeUnsupported, Error: fmt.Sprintf("%q is not a governed control command", request.Command)}
 	}
 	self, err := controllerSelf()
@@ -725,73 +731,6 @@ func (c *composition) planBaseBranch(planID string) (string, error) {
 		}
 	}
 	return watchedDefaultBranch, nil
-}
-
-func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Supervisor, request runtime.ControlRequest) (runtime.PlanView, error) {
-	plans, err := c.planService()
-	if err != nil {
-		return runtime.PlanView{}, err
-	}
-	repository, issue, defaultBranch, err := c.planSubject(supervisor, request)
-	if err != nil {
-		return runtime.PlanView{}, err
-	}
-	repo, err := runtime.ParseGitHubRepo(repository)
-	if err != nil {
-		return runtime.PlanView{}, err
-	}
-	// Derived from the plan's own repository IDENTITY, exactly as the local
-	// command derives it when a repository is named explicitly.
-	//
-	// An earlier attempt at this ran `git remote get-url origin` in the STATE
-	// DIRECTORY, which is not a checkout of anything: usually it errors and the
-	// fallback silently assumed a default branch, and where the state directory
-	// happens to sit inside some unrelated git repository it succeeded and bound
-	// a governed-remote system to that repository's origin. A supervisor governs
-	// several repositories; the plan says which one, and nothing about the
-	// process's own working directory does.
-	target := runtime.RepositoryTarget{
-		Identity: repo.String(), Remote: repo.CloneURL(), DefaultBranch: defaultBranch,
-	}
-	engine, err := c.engine(target)
-	if err != nil {
-		return runtime.PlanView{}, err
-	}
-	composed := &planComposition{
-		built: c, engine: engine, service: plans, target: target, release: func() {},
-	}
-	flags := autonomyFlags{
-		Template: request.Template, Deterministic: request.Deterministic,
-		SubstituteHuman: request.SubstituteHuman, Note: request.Note,
-	}
-	// A first proposal has no id yet. It is derived exactly as the local path
-	// derives it - from the issue, deterministically - so the view returned
-	// afterwards is of the plan this call created rather than of nothing.
-	planID := request.PlanID
-	if planID == "" {
-		if planID, err = engine.PlanID(issue); err != nil {
-			return runtime.PlanView{}, err
-		}
-	}
-	serialize := supervisor.WithPlanLock
-	if flags.SubstituteHuman != "" {
-		if request.PlanID == "" {
-			return runtime.PlanView{}, errors.New("substituting a human names the plan whose stage is being substituted")
-		}
-		// The substitution compiles deterministically - no provider call - so
-		// the whole of it is short enough to serialize.
-		if err := serialize(func() error {
-			_, err := substituteHumanWithComposition(ctx, composed, flags, request.PlanID, io.Discard)
-			return err
-		}); err != nil {
-			return runtime.PlanView{}, err
-		}
-		return plans.View(request.PlanID)
-	}
-	if _, err := proposeSerialized(ctx, composed, flags, issue, planID, io.Discard, serialize); err != nil {
-		return runtime.PlanView{}, err
-	}
-	return plans.View(planID)
 }
 
 func controlOK(payload any) runtime.ControlResponse {

@@ -121,7 +121,7 @@ func (w *Web) handleWorkGraphs(rw http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]WorkGraphSummary, 0, len(graphs))
 	for _, g := range graphs {
-		out = append(out, WorkGraphSummary{ID: g.ID, Repository: g.Repository, AgentID: g.AgentID, Name: g.Name, Revision: g.Revision})
+		out = append(out, workGraphSummaryProjection(g))
 	}
 	prev, next := pageLinks("/workgraphs", "offset", offset, hasMore)
 	w.render(rw, workGraphsTemplate, workGraphsData{ObservedAt: w.now(), Graphs: out, Offset: offset, PrevLink: prev, NextLink: next})

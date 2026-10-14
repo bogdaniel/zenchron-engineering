@@ -36,6 +36,9 @@ func TestPlanIndexIsBoundedSearchableAndKeepsAttemptsNonPending(t *testing.T) {
 	if len(index.Plans) != 2 || index.HasMore || index.Plans[1].PlanID != "p" || !index.Plans[1].Pending {
 		t.Fatalf("last page: %+v", index)
 	}
+	if index.Plans[1].Lifecycle == nil || index.Plans[1].Lifecycle.State != rt.PlanStateAwaitingApproval {
+		t.Fatal("canonical plan lifecycle was lost from the portfolio")
+	}
 	decode("/v1/plans?q=example%2Frepo")
 	if len(index.Plans) != 1 || index.Plans[0].PlanID != "p" {
 		t.Fatalf("search must query persisted index, not first page: %+v", index)

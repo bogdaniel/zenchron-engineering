@@ -136,6 +136,19 @@ func plannerFixture(t *testing.T, answer string) (PlannerInput, *fakePlanningPro
 	}, provider
 }
 
+func TestPlannerProposalPreservesExactPublicationAction(t *testing.T) {
+	action := domain.Action{Type: "git.pull_request.create", Target: "main"}
+	answer := "```json\n" + `{"stages":[{"id":"approve","kind":"human_decision_gate","required_claims":["claim-publication-approval"],"action":{"type":"git.pull_request.create","target":"main"}}]}` + "\n```"
+	input, _ := plannerFixture(t, answer)
+	stages, _, err := decodePlannerProposal(answer, input)
+	if err != nil {
+		t.Fatalf("decode publication decision action: %v", err)
+	}
+	if len(stages) != 1 || stages[0].Action == nil || *stages[0].Action != action {
+		t.Fatalf("publication action = %#v, want exact contract action %#v", stages, action)
+	}
+}
+
 func writeSourceFile(t *testing.T, root, name, body string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(name))

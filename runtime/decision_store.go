@@ -339,6 +339,25 @@ func resolvedOwnDecisionRequestsTx(q sqlExecutor, runID string) ([]orchestration
 		if message.Kind != orchestration.KindDecisionRequest {
 			continue
 		}
+		// #581 Batch 3 acceptance fix: a System-sourced decision_request (the
+		// ONLY current example is remediation_eligibility.go's own
+		// epoch_authorization request) was never asked by any provider
+		// invocation ON this run - it merely shares this run's RunID for
+		// #473 scope/routing (MessageSource.System's own doc comment,
+		// communication.go). #508 P4b's whole resumption premise is "this
+		// run's OWN invocation asked a question and is waiting for the
+		// answer"; a System message never did. Without this guard, approving
+		// an epoch_authorization decision made bindExecutionInvoke's own
+		// unresumedDecisionResumeBinding fallback (reconciler.go) treat the
+		// ORIGINAL, already goal-settled producer run as having an
+		// undelivered question of its own, planning and actually dispatching
+		// a SECOND execution.invoke (and a further candidate.commit) on a run
+		// every other #581 invariant treats as historically immutable -
+		// confirmed by driving TestRemediationEpochRecoversFromARealConflictThroughGovernedReintegration's
+		// own fixture and inspecting the original run's journal directly.
+		if message.Source.System {
+			continue
+		}
 		resolution, found, err := decisionResolutionByRequestID(q, message.ID)
 		if err != nil {
 			return nil, err

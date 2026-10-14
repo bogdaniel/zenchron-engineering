@@ -43,3 +43,17 @@
 .runtime-sidebar { overflow-y: auto; }
 .runtime-sidebar > * { flex-shrink: 0; }
 @media (max-width: 760px) { .dependency-mobile { grid-template-columns: minmax(0,1fr); } }
+/* Existing governed workspace workflows share the approved controls and surfaces. */
+.intake-form { display: grid; gap: 16px; max-width: 760px; }
+.intake-form label, .field-label { display: grid; gap: 8px; margin-bottom: 12px; }
+.intake-form :is(input, select), .field-label :is(input,select,textarea) { min-width: 0; width: 100%; padding: 10px; background: var(--bg); border: 1px solid var(--control-border); border-radius: var(--radius); }
+.intake-form .checkbox-label { display: flex; align-items: center; }
+.intake-form .checkbox-label input { width: 24px; height: 24px; }
+.plan-preview-stage { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.plan-control-actions, .publication-buttons, .run-control-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.governed-feedback { flex-basis: 100%; padding: 12px; border: 1px solid var(--border); margin: 12px 0; }
+.governed-reason { flex-basis: 100%; }
+.decision-buttons .governed-reason { order: 3; }
+.request-picker { width: 100%; color: var(--text); text-align: left; }
+.request-picker strong, .request-picker span { display: block; }
+@media (max-width:760px) { .run-control-actions .button, .publication-buttons .button { flex: 1 1 40%; } .intake-form { max-width: 100%; } }

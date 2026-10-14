@@ -11,6 +11,7 @@ import (
 	"embed"
 	"html/template"
 	"io/fs"
+	"strings"
 	"time"
 )
 
@@ -43,6 +44,7 @@ var webFuncs = template.FuncMap{
 	"fmtTimePtr":  fmtWebTimePtr,
 	"fmtDuration": fmtWebDuration,
 	"runsLink":    webRunsLink,
+	"stateLabel":  func(state string) string { return strings.ReplaceAll(state, "_", " ") },
 }
 
 const webTimeLayout = "2006-01-02 15:04:05 MST"
@@ -97,11 +99,18 @@ func webRunsLink(status, source string) string {
 func parseWebTemplate(name string) *template.Template {
 	return template.Must(template.New("layout.html").Funcs(webFuncs).ParseFS(webTemplateFiles,
 		"assets/templates/layout.html",
+		"assets/templates/decision_card.html",
 		"assets/templates/"+name))
 }
 
 var (
 	overviewTemplate        = parseWebTemplate("overview.html")
+	objectivesTemplate      = parseWebTemplate("objectives.html")
+	objectiveTemplate       = parseWebTemplate("objective_detail.html")
+	plansTemplate           = parseWebTemplate("plans.html")
+	decisionsTemplate       = parseWebTemplate("decisions.html")
+	agentsTemplate          = parseWebTemplate("agents.html")
+	settingsTemplate        = parseWebTemplate("settings.html")
 	runsTemplate            = parseWebTemplate("runs.html")
 	runDetailTemplate       = parseWebTemplate("run_detail.html")
 	planDetailTemplate      = parseWebTemplate("plan_detail.html")

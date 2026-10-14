@@ -11,11 +11,20 @@ import (
 
 // WorkGraphSummary is one WorkGraph (#472) as a list sees it.
 type WorkGraphSummary struct {
-	ID         string `json:"graph_id"`
-	Repository string `json:"repository"`
-	AgentID    string `json:"agent_id"`
-	Name       string `json:"name"`
-	Revision   int    `json:"revision"`
+	ID              string `json:"graph_id"`
+	Repository      string `json:"repository"`
+	AgentID         string `json:"agent_id"`
+	Name            string `json:"name"`
+	Revision        int    `json:"revision"`
+	ObjectivePlanID string `json:"objective_plan_id,omitempty"`
+}
+
+func workGraphSummaryProjection(g orchestration.WorkGraph) WorkGraphSummary {
+	out := WorkGraphSummary{ID: g.ID, Repository: g.Repository, AgentID: g.AgentID, Name: g.Name, Revision: g.Revision}
+	if g.ObjectivePlan != nil {
+		out.ObjectivePlanID = g.ObjectivePlan.ID
+	}
+	return out
 }
 
 // WorkGraphDetail is one WorkGraph's current revision through its units -
@@ -23,15 +32,18 @@ type WorkGraphSummary struct {
 // #476 product this graph is associated with, when any; a graph adopted
 // before any association exists has none, never a fabricated one.
 type WorkGraphDetail struct {
-	ID         string                `json:"graph_id"`
-	Repository string                `json:"repository"`
-	AgentID    string                `json:"agent_id"`
-	Name       string                `json:"name"`
-	Revision   int                   `json:"revision"`
-	Frontier   []string              `json:"frontier,omitempty"`
-	Counts     map[string]int        `json:"counts"`
-	Units      []WorkGraphUnitDetail `json:"units"`
-	Product    *ProductSummary       `json:"product,omitempty"`
+	ObjectivePlanID       string                `json:"objective_plan_id,omitempty"`
+	ObjectivePlanRevision int                   `json:"objective_plan_revision,omitempty"`
+	ObjectivePlanDigest   string                `json:"objective_plan_digest,omitempty"`
+	ID                    string                `json:"graph_id"`
+	Repository            string                `json:"repository"`
+	AgentID               string                `json:"agent_id"`
+	Name                  string                `json:"name"`
+	Revision              int                   `json:"revision"`
+	Frontier              []string              `json:"frontier,omitempty"`
+	Counts                map[string]int        `json:"counts"`
+	Units                 []WorkGraphUnitDetail `json:"units"`
+	Product               *ProductSummary       `json:"product,omitempty"`
 }
 
 // WorkGraphUnitDetail is one unit, its own already-projected facts
@@ -101,16 +113,25 @@ type DecisionWaitRef struct {
 	Detail    string `json:"detail,omitempty"`
 }
 
-// DecisionRef is one open #473 DecisionRequest: a question only a human or
-// designated authority may answer. It has no resolution in this console
-// (#398's governed action allowlist does not include decision-resolve) -
-// docs/control-plane.md and the console page say where to resolve it.
+// DecisionRef shows a live request's frozen answer grammar and exact subject.
+// Only the governed controller path may record a resolution.
 type DecisionRef struct {
-	ID          string    `json:"id"`
-	Purpose     string    `json:"purpose,omitempty"`
-	Body        string    `json:"body,omitempty"`
-	RequestedBy string    `json:"requested_by,omitempty"`
-	RequestedAt time.Time `json:"requested_at"`
+	ID                  string              `json:"id"`
+	Purpose             string              `json:"purpose,omitempty"`
+	Body                string              `json:"body,omitempty"`
+	RequestedBy         string              `json:"requested_by,omitempty"`
+	RequestedAt         time.Time           `json:"requested_at"`
+	ExpectedOutcomeKind string              `json:"expected_outcome_kind,omitempty"`
+	PermittedOptions    []string            `json:"permitted_options,omitempty"`
+	Subject             *DecisionSubjectRef `json:"subject,omitempty"`
+}
+
+type DecisionSubjectRef struct {
+	Handoff           string `json:"handoff"`
+	Owner             string `json:"owner"`
+	BaseRevision      string `json:"base_revision"`
+	CandidateRevision string `json:"candidate_revision"`
+	CandidateTree     string `json:"candidate_tree"`
 }
 
 // workGraphUnitDetailProjection projects one unit. run, review and decisions
@@ -147,7 +168,14 @@ func workGraphUnitDetailProjection(unit rt.WorkGraphUnitView, run *RunDetail, la
 
 // decisionRefProjection projects one open #473 message as a DecisionRef.
 func decisionRefProjection(m orchestration.EngineeringMessage) DecisionRef {
-	return DecisionRef{ID: m.ID, Purpose: m.Purpose, Body: m.Body, RequestedBy: m.Source.Unit, RequestedAt: m.AdmittedAt}
+	out := DecisionRef{ID: m.ID, Purpose: m.Purpose, Body: m.Body, RequestedBy: m.Source.Unit, RequestedAt: m.AdmittedAt,
+		ExpectedOutcomeKind: m.ExpectedOutcomeKind, PermittedOptions: append([]string(nil), m.PermittedOptions...)}
+	if m.Subject != nil {
+		out.Subject = &DecisionSubjectRef{Handoff: m.Subject.Handoff, Owner: m.Subject.Owner,
+			BaseRevision: m.Subject.Revision.BaseRevision, CandidateRevision: m.Subject.Revision.CandidateRevision,
+			CandidateTree: m.Subject.Revision.CandidateTree}
+	}
+	return out
 }
 
 // workGraphDetailProjection assembles one graph's detail. runOf, reviewOf and
@@ -169,6 +197,11 @@ func workGraphDetailProjection(view rt.WorkGraphView, product *ProductSummary,
 			"failed":            view.Counts.Activated.Failed,
 			"stopped":           view.Counts.Activated.Stopped,
 		},
+	}
+	if view.ObjectivePlan != nil {
+		out.ObjectivePlanID = view.ObjectivePlan.ID
+		out.ObjectivePlanRevision = view.ObjectivePlan.Revision
+		out.ObjectivePlanDigest = view.ObjectivePlan.Digest
 	}
 	for _, unit := range view.Units {
 		var run *RunDetail
@@ -303,7 +336,7 @@ func (a *API) workGraphs(w http.ResponseWriter, r *http.Request) {
 	}
 	out := WorkGraphs{WorkGraphs: []WorkGraphSummary{}, Offset: int(offset), HasMore: hasMore}
 	for _, g := range graphs {
-		out.WorkGraphs = append(out.WorkGraphs, WorkGraphSummary{ID: g.ID, Repository: g.Repository, AgentID: g.AgentID, Name: g.Name, Revision: g.Revision})
+		out.WorkGraphs = append(out.WorkGraphs, workGraphSummaryProjection(g))
 	}
 	send(w, 200, out)
 }

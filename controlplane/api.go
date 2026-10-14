@@ -1,4 +1,4 @@
-// Package controlplane is the read-only local HTTP boundary. DTOs deliberately
+// Package controlplane is the local HTTP operator boundary. DTOs deliberately
 // exclude payloads, transcripts, environment, goals, paths and diagnostic prose.
 package controlplane
 
@@ -150,6 +150,7 @@ type ExecutionDiagnostic struct {
 	SuccessorUnavailable string          `json:"successor_unavailable,omitempty"`
 }
 type RunDetail struct {
+	Paused                   *bool                 `json:"paused,omitempty"`
 	ID                       string                `json:"run_id"`
 	Repository               string                `json:"repository,omitempty"`
 	Phase                    rt.Phase              `json:"phase"`
@@ -301,6 +302,21 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/products/{id}", a.product)
 	mux.HandleFunc("GET /v1/workgraphs", a.workGraphs)
 	mux.HandleFunc("GET /v1/workgraphs/{id}", a.workGraph)
+	mux.HandleFunc("POST /v1/runs/{id}/resume", a.resume)
+	mux.HandleFunc("POST /v1/runs/{id}/refresh", a.refresh)
+	mux.HandleFunc("POST /v1/runs/{id}/pause", a.pause)
+	mux.HandleFunc("POST /v1/runs/{id}/unpause", a.unpause)
+	mux.HandleFunc("GET /v1/runs/{id}/authority", a.authorityPreview)
+	mux.HandleFunc("POST /v1/runs/{id}/authorize", a.authorize)
+	mux.HandleFunc("POST /v1/objectives", a.propose)
+	mux.HandleFunc("POST /v1/plans/{id}/revise", a.propose)
+	mux.HandleFunc("GET /v1/workspace/options", a.workspaceOptions)
+	mux.HandleFunc("GET /v1/workspace/requests", a.workspaceRequests)
+	mux.HandleFunc("GET /v1/decisions/{id}/resolution", a.decisionResolution)
+	mux.HandleFunc("GET /v1/runs/{id}/authority-receipts", a.authorityReceipts)
+	mux.HandleFunc("GET /v1/plans/{id}/preview", a.planPreview)
+	mux.HandleFunc("POST /v1/plans/{id}/approve", a.approve)
+	mux.HandleFunc("POST /v1/decisions/{id}/resolve", a.resolveDecision)
 	mux.HandleFunc("POST /v1/runs/{id}/stop", a.stop)
 	mux.HandleFunc("POST /v1/plans/{id}/reject", a.reject)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -511,12 +527,12 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	if !a.exists(w, id) {
 		return
 	}
-	s, err := a.Store.Status(id, a.now())
+	detail, err := a.readRunDetail(id)
 	if err != nil {
 		fail(w, 500, "read_failed")
 		return
 	}
-	send(w, 200, runDetailProjection(s))
+	send(w, 200, detail)
 }
 
 // eventProjection is the one sanitized view of a journal event: sequence,

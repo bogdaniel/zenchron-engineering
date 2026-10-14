@@ -29,7 +29,7 @@ type ReviewInvocationInput struct {
 }
 
 // ReviewInvocationOutput is the raw outcome of one invocation: the provider's
-// ExecutionResult and whatever structured verdict it wrote, before AdmitPRReview
+// ExecutionResult and whatever structured verdict it returned, before AdmitPRReview
 // turns it into a durable review.Decision.
 type ReviewInvocationOutput struct {
 	Attempt int
@@ -91,8 +91,7 @@ func InvokeReviewer(ctx context.Context, in ReviewInvocationInput) (ReviewInvoca
 	result, execErr := in.Provider.Execute(ctx, request)
 
 	// VERIFICATION FIRST, exactly as InvokePlanner orders it: the workspace is
-	// re-measured before anything the provider wrote - the transcript or the
-	// typed result - is read.
+	// re-measured before the transcript or captured typed result is read.
 	after, digestErr := in.Workspace.Digest()
 	if digestErr != nil {
 		return ReviewInvocationOutput{Attempt: attempt, Result: result}, digestErr

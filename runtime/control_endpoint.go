@@ -66,7 +66,7 @@ func BoundedNote(note string) string { return boundedField(note) }
 // finishes and persists the revision either way - it only stops the operator
 // from being told. That is the worst of both: the effect without the answer.
 func ControlDeadline(command string) time.Duration {
-	if command == ControlPlanRevise {
+	if command == ControlPlanRevise || command == ControlResume {
 		return 20 * time.Minute
 	}
 	return 30 * time.Second
@@ -124,8 +124,12 @@ type ControlRequest struct {
 	// Agent is the named execution agent, resolved against the operator's own
 	// registry. A request naming an agent the operator did not configure is
 	// refused; it cannot introduce one.
-	Agent string `json:"agent,omitempty"`
-	RunID string `json:"run_id,omitempty"`
+	Agent              string `json:"agent,omitempty"`
+	Profile            string `json:"profile,omitempty"`
+	RunID              string `json:"run_id,omitempty"`
+	AuthorityRequestID string `json:"authority_request_id,omitempty"`
+	AuthorityDigest    string `json:"authority_digest,omitempty"`
+	AuthorityDecision  string `json:"authority_decision,omitempty"`
 	// NewGeneration asks for a fresh generation rather than continuing a live
 	// one, exactly as the command-line flag does.
 	NewGeneration bool `json:"new_generation,omitempty"`
@@ -166,9 +170,10 @@ type ControlRequest struct {
 	Operator string `json:"operator,omitempty"`
 	// Template, Deterministic and SubstituteHuman are a plan REVISION request,
 	// mirroring the flags of the command that would otherwise drive it here.
-	Template        string `json:"template,omitempty"`
-	Deterministic   bool   `json:"deterministic,omitempty"`
-	SubstituteHuman string `json:"substitute_human,omitempty"`
+	Template          string `json:"template,omitempty"`
+	Deterministic     bool   `json:"deterministic,omitempty"`
+	ObjectiveWorkflow bool   `json:"objective_workflow,omitempty"`
+	SubstituteHuman   string `json:"substitute_human,omitempty"`
 	// GraphID and UnitID name one WorkGraph unit a decision hold (#508) is
 	// placed on. Neither is a permission: UnitID selects among the units the
 	// named graph's own adopted revision already names, and the supervisor
@@ -223,9 +228,15 @@ const (
 	// exists as a command; the endpoint exists so the decision reaches the
 	// supervisor that owns the work rather than racing it from a second
 	// process.
-	ControlPlanApprove = "plan-approve"
-	ControlPlanReject  = "plan-reject"
-	ControlPlanRevise  = "plan-revise"
+	ControlAuthorityView    = "authority-view"
+	ControlAuthorize        = "authorize"
+	ControlResume           = "resume"
+	ControlRefresh          = "refresh"
+	ControlPlanView         = "plan-view"
+	ControlWorkspaceOptions = "workspace-options"
+	ControlPlanApprove      = "plan-approve"
+	ControlPlanReject       = "plan-reject"
+	ControlPlanRevise       = "plan-revise"
 	// ControlWorkGraphHold places an operator's hold on one not-yet-activated
 	// WorkGraph unit (#508): GraphID, UnitID and, in Note, the hold's purpose.
 	ControlWorkGraphHold = "workgraph-hold"

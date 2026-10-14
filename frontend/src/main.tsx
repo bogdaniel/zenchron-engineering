@@ -1,3 +1,4 @@
+import { ObjectiveIntake } from "./planning";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import * as api from "./api";
@@ -21,7 +22,7 @@ const navigation = [
   ["agents", "Agents", "∘"],
   ["controller", "Controller health", "⌁"],
 ] as const;
-type Route = { page: string; id: string; revision: number };
+type Route = { page: string; id: string; revision: number; offset: number };
 type Snapshot = {
   controller?: api.Controller;
   index?: api.PlanIndex;
@@ -36,12 +37,23 @@ type Snapshot = {
 };
 function route(): Route {
   try {
-    const parts = location.hash.replace(/^#\/?/, "").split("/");
+    const [path, search = ""] = location.hash.replace(/^#\/?/, "").split("?");
+    const query = new URLSearchParams(search),
+      offset = Number(query.get("offset") || 0);
+    if (
+      [...query.keys()].some((key) => key !== "offset") ||
+      query.getAll("offset").length > 1 ||
+      !Number.isSafeInteger(offset) ||
+      offset < 0 ||
+      offset > 2147483647
+    )
+      throw new Error();
+    const parts = path.split("/");
     const revision = parts[2] ? Number(parts[2]) : 0;
     if (!Number.isSafeInteger(revision) || revision < 0 || parts.length > 3) throw new Error();
-    return { page: parts[0] || "overview", id: decodeURIComponent(parts[1] || ""), revision };
+    return { page: parts[0] || "overview", id: decodeURIComponent(parts[1] || ""), revision, offset };
   } catch {
-    return { page: "invalid", id: "", revision: 0 };
+    return { page: "invalid", id: "", revision: 0, offset: 0 };
   }
 }
 function Screen({ route: r }: { route: Route }) {
@@ -50,7 +62,7 @@ function Screen({ route: r }: { route: Route }) {
     [error, setError] = useState("");
   const [receivedAt, setReceivedAt] = useState(""),
     [stale, setStale] = useState(false);
-  const [offset, setOffset] = useState(0),
+  const [offset, setOffset] = useState(r.offset),
     [query, setQuery] = useState(""),
     [filter, setFilter] = useState("all");
   const [refreshKey, setRefreshKey] = useState(0);
@@ -69,7 +81,10 @@ function Screen({ route: r }: { route: Route }) {
     setError("");
     setStale(true);
     Promise.all([
-      ["overview", "actions", "controller"].includes(r.page) || (r.page === "runs" && !!r.id)
+      ["overview", "actions", "controller"].includes(r.page) ||
+      (r.page === "objectives" && !!r.id) ||
+      (r.page === "workgraphs" && !!r.id) ||
+      (r.page === "runs" && !!r.id)
         ? api.controller(owner.signal)
         : Promise.resolve(undefined),
       ["overview", "actions"].includes(r.page) || (r.page === "objectives" && !r.id)
@@ -90,7 +105,18 @@ function Screen({ route: r }: { route: Route }) {
     ])
       .then(([controller, index, runs, context, run, graphs, graph, products, product, fleet]) => {
         if (owner.signal.aborted) return;
-        setData({ controller, index, runs, context, run, graphs, graph, products, product, fleet });
+        setData({
+          controller,
+          index,
+          runs,
+          context,
+          run,
+          graphs,
+          graph: context?.graph ? ops.decodeGraph(context.graph) : graph,
+          products,
+          product,
+          fleet,
+        });
         setReceivedAt(new Date().toISOString());
         setStale(false);
         // UI observation age only; no liveness or authority lease is inferred.
@@ -165,7 +191,16 @@ function Screen({ route: r }: { route: Route }) {
       />
     );
   else if (r.page === "objectives" && data.context)
-    content = <Workspace key={`${r.id}/${data.context.plan.revision}`} context={data.context} />;
+    content = (
+      <Workspace
+        key={`${r.id}/${data.context.plan.revision}`}
+        context={data.context}
+        graph={data.graph}
+        controller={data.controller}
+        stale={stale || loading}
+        refresh={refresh}
+      />
+    );
   else if (r.page === "runs" && !r.id && data.runs)
     content = (
       <RunPortfolio
@@ -187,11 +222,19 @@ function Screen({ route: r }: { route: Route }) {
     content = <RunWorkspace run={data.run} controller={data.controller} stale={stale || loading} after={r.revision} />;
   else if (r.page === "workgraphs" && data.graphs) content = <GraphPortfolio graphs={data.graphs} onPage={setOffset} />;
   else if (r.page === "workgraphs" && data.graph)
-    content = <GraphWorkspace key={`${r.id}/${data.graph.revision}`} graph={data.graph} />;
+    content = (
+      <GraphWorkspace
+        key={`${r.id}/${data.graph.revision}`}
+        graph={data.graph}
+        controller={data.controller}
+        stale={stale || loading}
+      />
+    );
   else if (r.page === "products" && data.products)
     content = <ProductPortfolio products={data.products} onPage={setOffset} />;
   else if (r.page === "products" && data.product)
     content = <ProductWorkspace product={data.product} onPage={setOffset} />;
+  else if (r.page === "intake") content = <ObjectiveIntake />;
   else if (r.page === "agents" && data.runs) content = <Agents runs={data.runs} onPage={setOffset} />;
   else if (r.page === "attempts" && r.id)
     content = (
@@ -220,6 +263,7 @@ function Screen({ route: r }: { route: Route }) {
         controller={data.controller}
         stale={stale || loading}
         refresh={refresh}
+        onPage={setOffset}
       />
     );
   else if (r.page === "controller" && data.controller)
@@ -284,6 +328,18 @@ function App() {
     };
     media.addEventListener("change", changed);
     return () => media.removeEventListener("change", changed);
+  }, []);
+  useEffect(() => {
+    const link = document.querySelector<HTMLAnchorElement>(".skip-link");
+    const skip = (event: MouseEvent) => {
+      const main = document.getElementById("main");
+      if (!main) return;
+      event.preventDefault();
+      main.focus();
+      main.scrollIntoView({ block: "start" });
+    };
+    link?.addEventListener("click", skip);
+    return () => link?.removeEventListener("click", skip);
   }, []);
   const openMenu = (opener: HTMLButtonElement) => {
     menuOpener.current = opener;

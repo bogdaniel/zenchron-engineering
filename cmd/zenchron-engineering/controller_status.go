@@ -114,6 +114,9 @@ func observeLiveController(stateDir string) func() (runtime.LiveControllerSnapsh
 
 // controllerRoot is where adopted generations and the stable entrypoint live.
 func controllerRoot() string {
+	if root := strings.TrimSpace(os.Getenv("ZENCHRON_CONTROLLER_ROOT")); root != "" {
+		return filepath.Clean(root)
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ".zenchron-adopted-controller"

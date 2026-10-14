@@ -1,3 +1,4 @@
+import { InstalledAgents } from "./installed-agents";
 import type { Controller, Runs } from "./api";
 import { Badge, ControllerFacts, Disclosure, Empty, Head, Link, Pagination, Panel } from "./components";
 import { Facts } from "./runs";
@@ -107,19 +108,7 @@ export function Agents({ runs, onPage }: { runs: Runs; onPage: (v: number) => vo
           onPage={onPage}
         />
       </Panel>
-      <Panel title="Installed-agent readiness">
-        <div className="product-body">
-          <p>
-            The read API does not expose the installed registry or its readiness. Inspect the operator configuration
-            with <span className="mono">zenchron-engineering autonomy agents --text</span>.
-          </p>
-          <p className="muted">
-            Execution trust grants no acceptance authority. Plan roles and bound profiles are inspected in their plan
-            workspace.
-          </p>
-          <Link to="objectives">Inspect plan assignments</Link>
-        </div>
-      </Panel>
+      <InstalledAgents />
     </>
   );
 }

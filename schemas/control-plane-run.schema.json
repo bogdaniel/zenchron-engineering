@@ -378,6 +378,9 @@
     },
     "candidate_discard_refused": {
       "type": "string"
+    },
+    "paused": {
+      "type": "boolean"
     }
   }
 }

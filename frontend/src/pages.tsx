@@ -1,3 +1,6 @@
+import { PlanControls } from "./planning";
+import { GraphWorkspace } from "./workgraphs";
+import type { GraphDetail } from "./operations-api";
 import { useState } from "react";
 import type { Context, Controller, PlanIndex, Runs } from "./api";
 import { blocker } from "./api";
@@ -31,6 +34,9 @@ export function PlanTable({ index }: { index: PlanIndex }) {
               </td>
               <td data-label="Revision state">
                 <Badge>{p.shown}</Badge>
+                <small className="row-meta">
+                  Controller: {p.lifecycle && !p.lifecycle.unavailable ? p.lifecycle.state : "Unavailable"}
+                </small>
               </td>
               <td data-label="Human request">
                 {p.pending ? "Pending · eligibility checked separately" : "None pending on this revision"}
@@ -77,7 +83,11 @@ export function Overview({
       `Executing runs loaded${unavailable ? ` · ${unavailable} unknown` : ""}`,
     ],
     ["Assure", "Unavailable", "No aggregate evidence projection"],
-    ["Authorize", stale || blocker(controller) ? "0" : pending.length.toString(), "Rejections available at read time"],
+    [
+      "Authorize",
+      stale || blocker(controller) ? "0" : pending.length.toString(),
+      "Plan rejections available at read time",
+    ],
     ["Publish", "Unavailable", "No accepted-change series"],
   ];
   return (
@@ -110,7 +120,9 @@ export function Overview({
         <Panel title="Human authority" extra={<Badge tone="orange">{pending.length} pending</Badge>}>
           <div className="product-body">
             <p>{blocker(controller) || "Plan rejection may be offered; the server verifies every submission."}</p>
-            <p>Approval and publication remain unavailable in this migration batch.</p>
+            <p>
+              Approve exact plan assignments or inspect graph-owned decision/publication requests in Action Required.
+            </p>
             <Link to="actions" className="button">
               Inspect requests
             </Link>
@@ -206,7 +218,15 @@ export function Portfolio({
   };
   return (
     <>
-      <Head eyebrow="OPERATIONS / PORTFOLIO" title="Objectives">
+      <Head
+        eyebrow="OPERATIONS / PORTFOLIO"
+        title="Objectives"
+        extra={
+          <Link to="intake" className="button primary">
+            Create objective
+          </Link>
+        }
+      >
         Plan-governed source contexts. Private objective prose and product association are not exposed by this read API.
       </Head>
       <form
@@ -251,7 +271,19 @@ export function Portfolio({
   );
 }
 
-export function Workspace({ context }: { context: Context }) {
+export function Workspace({
+  context,
+  graph,
+  controller,
+  stale,
+  refresh,
+}: {
+  context: Context;
+  graph?: GraphDetail;
+  controller?: Controller;
+  stale: boolean;
+  refresh: () => void;
+}) {
   const p = context.plan;
   const [selected, setSelected] = useState(p.stages[0]?.stage_id || "");
   const [revision, setRevision] = useState(p.revision);
@@ -303,6 +335,11 @@ export function Workspace({ context }: { context: Context }) {
         <div className="workspace-main">
           <Panel title="Engineering lifecycle">
             <div className="product-body">
+              <p>
+                Current controller projection:{" "}
+                {context.lifecycle && !context.lifecycle.unavailable ? context.lifecycle.state : "Unavailable"} ·
+                approved revision {context.lifecycle ? context.lifecycle.approved_revision || "none" : "unknown"}.
+              </p>
               <p>
                 {context.pending
                   ? "Awaiting an operator decision on this exact plan revision."
@@ -408,13 +445,27 @@ export function Workspace({ context }: { context: Context }) {
             )}
           </Panel>
           <Panel title="WorkGraph">
-            <Empty title="No plan-to-WorkGraph association exposed">
-              A WorkUnit is issue-backed operational work; a PlanStage is a planning responsibility. This application
-              does not fabricate an association.
-            </Empty>
-            <div className="panel-footer">
-              <Link to="workgraphs">Inspect operational WorkGraphs</Link>
-            </div>
+            {graph ? (
+              <>
+                {context.graph_binding_mismatch ? (
+                  <p className="banner orange" role="status">
+                    This graph binds a different exact plan revision/digest. Inspect the bound context before acting.
+                  </p>
+                ) : (
+                  <p className="product-body">
+                    Explicit objective binding · {graph.objective_plan_id} · r{graph.objective_plan_revision}
+                  </p>
+                )}
+                <GraphWorkspace
+                  graph={graph}
+                  controller={controller}
+                  stale={stale || context.graph_binding_mismatch}
+                  embedded
+                />
+              </>
+            ) : (
+              <Empty title="No operational graph is bound">No association is inferred from a shared repository.</Empty>
+            )}
           </Panel>
           <Panel title="Decision receipt">
             {context.receipt ? (
@@ -467,17 +518,9 @@ export function Workspace({ context }: { context: Context }) {
               <Binding plan={p} />
             </Disclosure>
           </Panel>
-          <Panel title="Publication">
+          <Panel title="Plan approval & revision">
             <div className="product-body">
-              <p>
-                No publication or merge authority is granted by this page. Plan approval integration is pending
-                assignment-binding parity.
-              </p>
-              <p>
-                Review and approve plans through <span className="mono">autonomy plan show</span> and{" "}
-                <span className="mono">autonomy plan approve</span>, using the exact plan, revision, digest and
-                prospective assignments binding.
-              </p>
+              <PlanControls plan={p} controller={controller} stale={stale} onSettled={refresh} />
             </div>
           </Panel>
         </aside>

@@ -464,6 +464,46 @@ func TestGrantedVerificationToolPreventsProducerSettlement(t *testing.T) {
 	}
 }
 
+func TestRefusedFeedbackDoesNotUndoFinishedProducerWork(t *testing.T) {
+	for _, admitted := range []bool{false, true} {
+		name, want := "refused", orchestration.ItemHandoffPending
+		if admitted {
+			name, want = "admitted", orchestration.ItemQueued
+		}
+		t.Run(name, func(t *testing.T) {
+			dir, store := openJournal(t)
+			run, _, err := store.Run("r")
+			if err != nil {
+				t.Fatal(err)
+			}
+			lifecycleEvent(t, store, run.ID, EventRunWaiting, dispositionRecord{Reason: ReasonGoalStateReached})
+			run.Disposition, run.Reason = Waiting, ReasonGoalStateReached
+			if err := store.PutRun(run); err != nil {
+				t.Fatal(err)
+			}
+			reason := feedbackRefusedBot
+			if admitted {
+				reason = feedbackAdmittedPermitted
+			}
+			lifecycleEvent(t, store, run.ID, EventFeedbackObserved, FeedbackObservedPayload{
+				FeedbackDecision: FeedbackDecision{
+					Key: "pull_request_comment:1", Class: FeedbackPullRequestComment,
+					Actor: "coderabbitai[bot]", Admitted: admitted, Applicable: true,
+					Reason: reason,
+				},
+				TextDigest: "digest",
+			})
+			view, err := OrchestrationStatus(store, dir, lifecycleBatch(t, store, run.ID), time.Unix(200, 0).UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := view.Items[0].State; got != want {
+				t.Fatalf("producer item state = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestSchedulerCapacityWaitExcludesQueueTimeButCountsResumedWork(t *testing.T) {
 	for _, reason := range []string{ReasonWorkCapacity, ReasonObservationCapacity} {
 		t.Run(reason, func(t *testing.T) {

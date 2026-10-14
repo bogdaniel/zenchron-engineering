@@ -19,6 +19,7 @@ export type PlanRow = {
   source_issue: number;
   pending: boolean;
   shown: string;
+  lifecycle?: { state: string; approved_revision: number; unavailable: boolean };
 };
 export type PlanIndex = { plans: PlanRow[]; offset: number; has_more: boolean };
 export type Stage = {
@@ -69,7 +70,14 @@ export type Plan = {
   };
 };
 export type Receipt = { status: string; revision: number; digest: string; sequence: number; occurred_at: string };
-export type Context = { plan: Plan; pending: boolean; receipt?: Receipt };
+export type Context = {
+  plan: Plan;
+  pending: boolean;
+  receipt?: Receipt;
+  graph?: unknown;
+  graph_binding_mismatch: boolean;
+  lifecycle?: { state: string; approved_revision: number; unavailable: boolean };
+};
 export type Run = {
   run_id: string;
   repository: string;
@@ -137,6 +145,7 @@ export async function request(
   signal: AbortSignal,
   body?: unknown,
   token = credential(),
+  timeoutMs = body === undefined ? 5000 : 75000,
 ): Promise<{ value: unknown; ok: boolean }> {
   const response = await fetch(path, {
     method: body === undefined ? "GET" : "POST",
@@ -147,7 +156,7 @@ export async function request(
     credentials: "same-origin",
     cache: "no-store",
     redirect: "error",
-    signal: AbortSignal.any([signal, AbortSignal.timeout(body === undefined ? 5000 : 75000)]),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   if (response.status === 401 || response.status === 403)
@@ -156,7 +165,17 @@ export async function request(
   const value: unknown = await response.json();
   if (!response.ok && body === undefined) {
     const code = str(object(value).error);
-    if (!["not_found", "invalid_page", "read_failed", "snapshot_changed"].includes(code))
+    if (
+      ![
+        "not_found",
+        "invalid_page",
+        "read_failed",
+        "snapshot_changed",
+        "controller_unreachable",
+        "runtime_refused",
+        "invalid_controller_response",
+      ].includes(code)
+    )
       throw new Error("invalid_response", { cause: { status: response.status } });
     throw new Error(code, { cause: { status: response.status } });
   }
@@ -235,14 +254,13 @@ export async function plans(signal: AbortSignal, offset = 0, query = ""): Promis
         source_issue: num(p.source_issue, 0),
         pending: bool(p.pending),
         shown: str(p.shown),
+        ...(p.lifecycle === undefined ? {} : { lifecycle: decodeLifecycle(p.lifecycle) }),
       };
     }),
   };
 }
-export async function context(id: string, signal: AbortSignal, revision = 0): Promise<Context> {
-  if (!id || !Number.isSafeInteger(revision) || revision < 0) throw new Error("invalid_subject");
-  const r = object((await request(`/v1/plans/${encodeURIComponent(id)}/context?revision=${revision}`, signal)).value);
-  const p = object(r.plan),
+export function decodePlan(value: unknown): Plan {
+  const p = object(value),
     b = object(p.budget);
   const changedBase = p.base_change === undefined ? undefined : object(p.base_change);
   const plan: Plan = {
@@ -318,6 +336,20 @@ export async function context(id: string, signal: AbortSignal, revision = 0): Pr
       ...(b.cost_micros === undefined ? {} : { cost_micros: num(b.cost_micros) }),
     },
   };
+  return plan;
+}
+function decodeLifecycle(value: unknown) {
+  const l = object(value);
+  return {
+    state: str(l.state),
+    approved_revision: num(l.approved_revision),
+    unavailable: l.unavailable === undefined ? false : bool(l.unavailable),
+  };
+}
+export async function context(id: string, signal: AbortSignal, revision = 0): Promise<Context> {
+  if (!id || !Number.isSafeInteger(revision) || revision < 0) throw new Error("invalid_subject");
+  const r = object((await request(`/v1/plans/${encodeURIComponent(id)}/context?revision=${revision}`, signal)).value);
+  const plan = decodePlan(r.plan);
   if (plan.plan_id !== id || !plan.digest || (revision > 0 && plan.revision !== revision))
     throw new Error("subject_mismatch");
   let receipt: Receipt | undefined;
@@ -340,7 +372,18 @@ export async function context(id: string, signal: AbortSignal, revision = 0): Pr
   const pending = bool(r.pending);
   if (plan.revision < 1 || !/^[a-f0-9]{64}$/.test(plan.digest)) throw new Error("invalid_response");
   if (pending && receipt) throw new Error("invalid_response");
-  return { plan, pending, receipt };
+  return {
+    plan,
+    pending,
+    receipt,
+    graph: r.graph,
+    graph_binding_mismatch: r.graph_binding_mismatch === undefined ? false : bool(r.graph_binding_mismatch),
+    ...(r.lifecycle === undefined
+      ? {}
+      : {
+          lifecycle: decodeLifecycle(r.lifecycle),
+        }),
+  };
 }
 export async function runs(signal: AbortSignal, offset = 0, status = "", source = ""): Promise<Runs> {
   if (!Number.isSafeInteger(offset) || offset < 0 || source.length > 200) throw new Error("invalid_page");

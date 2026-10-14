@@ -68,3 +68,9 @@ All four views and Run/WorkGraph/Product workspaces also have light captures at 
 in the same directory. Historical and controller restart states are retained with their validation
 records. [Mobile confirmation with expanded binding](screenshots/batch-02/confirmation-390-expanded.png)
 keeps the protected action and footer visible. [Full evidence and current limits](validation.md).
+
+## Reconciliation actual application
+
+[Latest 1440/1920/390 dark/light application renders and mobile confirmations](screenshots/reconciliation/README.md)
+use the actual isolated governed controller. Fixture checkpoint and older runtime captures above
+remain historical evidence; this gallery is the current review submission.

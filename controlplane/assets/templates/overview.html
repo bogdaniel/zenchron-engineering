@@ -2,9 +2,21 @@
 {{define "content"}}
 <div id="overview-live" data-live>
 <section class="panel">
-  <h1>overview</h1>
+  <p class="eyebrow">Engineering workspace</p><h1>Your engineering, in motion.</h1><p class="muted">Follow bounded work, review evidence, and decide what moves forward.</p>
   <p class="meta">observed {{fmtTime .ObservedAt}}</p>
+  <p class="meta" id="controller-health"
+    data-state="{{if .ControllerErr}}not_reachable{{else if not .Controller.LiveReachable}}not_reachable{{else if .Controller.ActionsDisabled}}blocked{{else}}healthy{{end}}">
+    Controller health: {{if .ControllerErr}}status unavailable{{else if not .Controller.LiveReachable}}offline{{else if .Controller.ActionsDisabled}}connected, actions unavailable{{else}}connected{{end}} · <a href="/settings">details</a>
+  </p>
 
+  {{if .ControllerErr}}
+  <p class="banner error" role="status">Objective intake is unavailable because controller status could not be read.</p>
+  {{else if .Controller.ActionsDisabled}}
+  <p class="banner error" role="status">Governed browser actions unavailable: {{.Controller.ActionsDisabled}}. <a href="/settings">Review controller status →</a></p>
+  {{end}}
+  <p class="workspace-cta"><a class="primary-link" href="/objectives">Start an objective</a><a href="/decisions">Action Required →</a></p>
+  <p class="meta" id="action-required-summary">Review plan approvals, WorkUnit decisions and publication authority requests.</p>
+  <details><summary>System diagnostics</summary>
   {{if .ControllerErr}}
   <p class="banner error">controller status unavailable</p>
   {{else}}
@@ -46,10 +58,11 @@
   {{end}}
   {{end}}
   {{end}}
+  </details>
 </section>
 
 <section class="panel">
-  <h2>fleet</h2>
+  <h2>Current activity</h2>
   <div class="grid stats counts">
     <a class="stat" href="{{runsLink "active" ""}}"><span class="label">active</span><span class="value" data-state="active">{{.Fleet.Counts.Active}}</span></a>
     <a class="stat" href="{{runsLink "waiting" ""}}"><span class="label">waiting</span><span class="value" data-state="waiting">{{.Fleet.Counts.Waiting}}</span></a>
@@ -74,7 +87,7 @@
     <tbody>
       {{range .Fleet.Plans}}
       <tr>
-        <td class="mono">{{.ID}}</td>
+        <td><a href="/plans/{{.ID}}">Inspect plan</a><details><summary>Plan ID</summary><span class="mono">{{.ID}}</span></details></td>
         <td><span data-state="{{.State}}">{{.State}}</span>{{if .Unavailable}} <span class="muted">(could not be replayed)</span>{{end}}</td>
         <td>{{.Revision}}{{if .ApprovedRevision}} <span class="muted">(approved {{.ApprovedRevision}})</span>{{end}}</td>
         <td>{{range $state, $n := .Stages}}<span class="pill">{{$state}}: {{$n}}</span> {{end}}</td>

@@ -11,9 +11,12 @@ import (
 // PlanContext reuses the canonical reducer's pending predicate. Receipt is a
 // historical journal fact, never a new workflow state or an authorization.
 type PlanContext struct {
-	Plan    PlanDetail       `json:"plan"`
-	Pending bool             `json:"pending"`
-	Receipt *DecisionReceipt `json:"receipt,omitempty"`
+	Plan                 PlanDetail       `json:"plan"`
+	Pending              bool             `json:"pending"`
+	Receipt              *DecisionReceipt `json:"receipt,omitempty"`
+	Graph                *WorkGraphDetail `json:"graph,omitempty"`
+	GraphBindingMismatch bool             `json:"graph_binding_mismatch"`
+	Lifecycle            Plan             `json:"lifecycle"`
 }
 
 type DecisionReceipt struct {
@@ -26,8 +29,9 @@ type DecisionReceipt struct {
 
 type PlanIndexRow struct {
 	rt.PlanIdentity
-	Pending bool   `json:"pending"`
-	Shown   string `json:"shown"`
+	Pending   bool   `json:"pending"`
+	Shown     string `json:"shown"`
+	Lifecycle *Plan  `json:"lifecycle,omitempty"`
 }
 
 type PlanIndex struct {
@@ -62,6 +66,13 @@ func (a *API) plans(w http.ResponseWriter, r *http.Request) {
 			}
 			row.Pending = view.Snapshot.AwaitingDecision(identity.Revision)
 			row.Shown = planDetailProjection(view).Shown
+			summary, err := a.Store.PlanSummary(identity.PlanID)
+			if err != nil {
+				fail(w, 500, "read_failed")
+				return
+			}
+			lifecycle := planProjection(summary)
+			row.Lifecycle = &lifecycle
 		}
 		index.Plans = append(index.Plans, row)
 	}
@@ -106,6 +117,27 @@ func (a *API) planContext(w http.ResponseWriter, r *http.Request) {
 			context.Receipt = &DecisionReceipt{Status: string(decision.Status), Revision: decision.Revision,
 				Digest: decision.Digest, Sequence: event.Sequence, OccurredAt: event.OccurredAt}
 		}
+	}
+
+	summary, err := a.Store.PlanSummary(view.Plan.ID)
+	if err != nil {
+		fail(w, 500, "read_failed")
+		return
+	}
+	context.Lifecycle = planProjection(summary)
+	graph, found, err := a.Store.ObjectiveGraph(view.Plan.ID)
+	if err != nil {
+		fail(w, 500, "read_failed")
+		return
+	}
+	if found {
+		detail, status, _ := readWorkGraphDetail(a.Store, a.now(), graph.ID)
+		if status != http.StatusOK {
+			fail(w, 500, "read_failed")
+			return
+		}
+		context.Graph = &detail
+		context.GraphBindingMismatch = graph.Revision != detail.Revision || graph.ObjectivePlan == nil || detail.ObjectivePlanID != view.Plan.ID || detail.ObjectivePlanRevision != view.Plan.Revision || detail.ObjectivePlanDigest != view.Plan.Digest || graph.ObjectivePlan.Revision != detail.ObjectivePlanRevision || graph.ObjectivePlan.Digest != detail.ObjectivePlanDigest
 	}
 	send(w, 200, context)
 }

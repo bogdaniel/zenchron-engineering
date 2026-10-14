@@ -106,7 +106,7 @@ func readProductDetail(store *rt.ReadStore, productID string, offset, limit int)
 		if !found {
 			return ProductDetail{}, 500, "read_failed"
 		}
-		out.Graphs = append(out.Graphs, WorkGraphSummary{ID: g.ID, Repository: g.Repository, AgentID: g.AgentID, Name: g.Name, Revision: g.Revision})
+		out.Graphs = append(out.Graphs, workGraphSummaryProjection(g))
 	}
 	return out, 200, ""
 }

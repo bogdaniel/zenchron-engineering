@@ -1,8 +1,8 @@
 package controlplane
 
-// Governed operator actions (#398 S4a): `stop` a run and `plan-reject` one
-// plan revision, and nothing else. docs/control-plane.md "Governed actions" is
-// the frozen specification; this file is its only implementation.
+// Governed operator actions share one controller-bound request path.
+// workspace_actions.go and run_operations.go extend the initial #398 verbs;
+// docs/control-plane.md defines the browser lifecycle and refusal semantics.
 //
 // The control plane never writes the store or the journal. Every action is
 // one request to the controller's own socket carrying the controller binding
@@ -32,10 +32,12 @@ const (
 )
 
 type ActionTarget struct {
-	RunID    string `json:"run_id,omitempty"`
-	PlanID   string `json:"plan_id,omitempty"`
-	Revision int    `json:"revision,omitempty"`
-	Digest   string `json:"digest,omitempty"`
+	RequestID  string `json:"request_id,omitempty"`
+	DecisionID string `json:"decision_id,omitempty"`
+	RunID      string `json:"run_id,omitempty"`
+	PlanID     string `json:"plan_id,omitempty"`
+	Revision   int    `json:"revision,omitempty"`
+	Digest     string `json:"digest,omitempty"`
 }
 
 // ActionResult is what happened, with State re-read from the durable store
@@ -147,9 +149,18 @@ func (a *API) reject(w http.ResponseWriter, r *http.Request) {
 // already exists, plus the current projection (nil when the target is absent).
 func (a *API) act(w http.ResponseWriter, r *http.Request, res ActionResult, binding string, request rt.ControlRequest,
 	effect func() (bool, any, error), precheck func(any) (int, string)) {
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(actionDeadline))
-	actionMu.Lock()
-	defer actionMu.Unlock()
+	a.actResponse(w, r, res, binding, request, effect, precheck, nil)
+}
+
+func (a *API) actResponse(w http.ResponseWriter, r *http.Request, res ActionResult, binding string, request rt.ControlRequest, effect func() (bool, any, error), precheck func(any) (int, string), applied func(rt.ControlResponse) error) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(max(actionDeadline, rt.ControlDeadline(request.Command)+10*time.Second)))
+	// Long provider invocations are admitted per plan by the serving
+	// controller. Keeping the HTTP lock through them would stall stop and
+	// human decisions; exact revision CAS remains at the controller write.
+	if request.Command != rt.ControlPlanRevise && request.Command != rt.ControlResume {
+		actionMu.Lock()
+		defer actionMu.Unlock()
+	}
 	// reply ALWAYS reports the outcome. Once anything may have been sent, a
 	// failed re-read must not hide what happened behind a bare read_failed.
 	reply := func(status int) {
@@ -197,6 +208,10 @@ func (a *API) act(w http.ResponseWriter, r *http.Request, res ActionResult, bind
 		return
 	}
 	request.ExpectedController = binding
+	if r.Context().Err() != nil {
+		refuse(408, "request_cancelled")
+		return
+	}
 	response, err := a.Send(request)
 	switch {
 	case errors.Is(err, rt.ErrControlReplyLost):
@@ -217,6 +232,13 @@ func (a *API) act(w http.ResponseWriter, r *http.Request, res ActionResult, bind
 		}
 		refuse(409, code)
 	default:
+		if applied != nil {
+			if err := applied(response); err != nil {
+				res.Outcome, res.Code = OutcomeUnknown, "invalid_controller_response"
+				reply(502)
+				return
+			}
+		}
 		res.Outcome = OutcomeApplied
 		reply(200)
 	}

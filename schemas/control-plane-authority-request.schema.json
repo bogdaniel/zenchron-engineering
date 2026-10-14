@@ -1,0 +1,231 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "type": "null"
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "id",
+        "digest",
+        "run_id",
+        "repository",
+        "action",
+        "controller",
+        "source",
+        "base",
+        "candidate",
+        "contract",
+        "decision",
+        "status",
+        "requires",
+        "missing",
+        "state_sha256",
+        "observed_at",
+        "disposition"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "state_sha256": {
+          "type": "string"
+        },
+        "disposition": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "controller": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "revision"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          }
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "revision"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          }
+        },
+        "base": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "revision"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          }
+        },
+        "contract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "revision"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          }
+        },
+        "decision": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "revision"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            }
+          }
+        },
+        "action": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "target"
+          ],
+          "properties": {
+            "type": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            }
+          }
+        },
+        "candidate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            },
+            "tree": {
+              "type": "string"
+            }
+          }
+        },
+        "requires": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "missing": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "stale": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocking": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "revision"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  ]
+}

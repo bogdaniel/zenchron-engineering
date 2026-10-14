@@ -28,7 +28,7 @@
       {{range $p.Graphs}}
       <tr>
         <td><a class="mono" href="/workgraphs/{{.ID}}">{{.ID}}</a></td>
-        <td>{{.Name}}</td>
+        <td>{{.Name}}{{if .ObjectivePlanID}} · <a href="/objectives/{{.ObjectivePlanID}}">Open objective</a>{{end}}</td>
         <td>{{.Repository}}</td>
         <td class="mono">{{.AgentID}}</td>
         <td>{{.Revision}}</td>

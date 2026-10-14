@@ -108,6 +108,9 @@ func (s *Supervisor) adoptRevision(proposed orchestration.WorkGraph) error {
 		}
 		return nil
 	case found:
+		if current.ObjectivePlan != nil {
+			return errors.New("an objective work graph is compiled through its plan, not an operator graph mutation")
+		}
 		activations, err := s.deps.Store.WorkUnitActivations(proposed.ID)
 		if err != nil {
 			return err
@@ -139,13 +142,22 @@ func (s *Supervisor) reconcileWorkGraphs() []string {
 	}
 	var problems []string
 	for _, graph := range graphs {
-		problems = append(problems, s.activateGraphFrontier(graph.ID)...)
+		// The plan owns assignments, gates and aggregate budget, so an
+		// objective-bound graph's FRONTIER units are never claimed here. #581's
+		// remediation-epoch governance is a separate, graph-level concern the
+		// plan does not own at all (PlanReconciler never touches a remediation
+		// epoch), so it still runs for every graph, objective-bound or not -
+		// otherwise an approved epoch_authorization decision could never
+		// materialize its epoch's run for a plan-bound producer.
+		problems = append(problems, s.activateGraph(graph.ID, graph.ObjectivePlan == nil)...)
 	}
 	return problems
 }
 
-// activateGraphFrontier projects one graph and activates what it says is
-// runnable, holding the orchestration lock across BOTH.
+// activateGraph projects one graph and, when activateFrontierUnits is true,
+// activates what its frontier says is runnable; #581's remediation-epoch
+// governance below always runs, holding the orchestration lock across all of
+// it.
 //
 // The lock spans them deliberately. Adopting a revision validates a proposal
 // against the units already activated, so a frontier computed under revision N
@@ -154,7 +166,7 @@ func (s *Supervisor) reconcileWorkGraphs() []string {
 // inside the lock for the same reason, so every unit activated here comes from
 // the revision the frontier was computed from. Taken per graph, so one graph's
 // pass does not hold up adoption for another.
-func (s *Supervisor) activateGraphFrontier(graphID string) []string {
+func (s *Supervisor) activateGraph(graphID string, activateFrontierUnits bool) []string {
 	s.orchestrationMu.Lock()
 	defer s.orchestrationMu.Unlock()
 	// FAILS CLOSED. A hold source that cannot answer is not "no holds": the
@@ -172,12 +184,155 @@ func (s *Supervisor) activateGraphFrontier(graphID string) []string {
 		units[unit.UnitID] = unit
 	}
 	var problems []string
-	for _, unitID := range view.Frontier {
-		if err := s.activateWorkUnit(view, units[unitID]); err != nil {
-			problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s: %v", view.GraphID, unitID, err)))
+	if activateFrontierUnits {
+		for _, unitID := range view.Frontier {
+			if err := s.activateWorkUnit(view, units[unitID]); err != nil {
+				problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s: %v", view.GraphID, unitID, err)))
+			}
+		}
+	}
+	// #581: an invalidated integration_compose unit whose invalidation was
+	// caused by a DEPENDENCY's own legitimate remediation (never an
+	// arbitrary external replacement - TestWorkGraphIntegrationUnitInvalidatedWhenUpstreamOutputReplaced,
+	// runtime/workgraph_integration_test.go, proves #472's own external-
+	// replacement case must stay terminal, unchanged) is automatically,
+	// deterministically re-authorized for its own next epoch - no human
+	// judgment call needed, exactly like an ordinary first
+	// integration_compose attempt already needs none.
+	//
+	// Independent review finding (PR #585): "a dependency has EVER
+	// remediated" is not the same fact as "the CURRENT input change was
+	// CAUSED by that exact remediation" - a dependency that remediated
+	// once and is LATER externally replaced again (#472's existing
+	// replaceAdmittedOutput path: a second admitted handoff on the SAME
+	// run, after the run's own single legitimate admission) would satisfy
+	// the old, looser check just as well as the first, genuine
+	// remediation did, and auto-reintegrate against content #581 never
+	// authorized at all.
+	//
+	// isExactRemediationOutput (remediation_eligibility.go) requires that (a)
+	// the run WHICH a dependency's own latest remediation epoch registers has
+	// admitted EXACTLY ONCE - true for a governed remediation's own,
+	// untouched result and false the instant anything external adds a
+	// second admission to that same run, by the same "a settled run never
+	// produces another handoff on its own" fact goalSettled
+	// (remediation_activation.go) already relies on.
+	//
+	// Independent review follow-up (PR #585): that alone still is not
+	// causation. A SECOND, unrelated dependency can satisfy it forever once
+	// it has ever remediated, even on a pass where THAT dependency did not
+	// change at all and a DIFFERENT, unremediated dependency's unrelated
+	// external replacement is the real cause of THIS invalidation. The fix
+	// is consumed-vs-current: unit.BatchID's own stored BatchOrigin.Inputs
+	// (consumedInputsFor) is the exact set this unit's CURRENT epoch was
+	// actually activated against - recorded once, unconditionally, by both
+	// activateWorkUnit and activateRemediationEpoch, never re-derived - and
+	// only a dependency whose CURRENT output (unit.Inputs, freshly
+	// re-projected every pass) differs from THAT is even a candidate cause.
+	// A dependency that still looks exactly as it did when this epoch was
+	// activated cannot be why this epoch no longer satisfies.
+	//
+	// unit.InputsDigest non-empty remains required too: true precisely in
+	// the ActivationInputsDigest-mismatch case
+	// (orchestration/workgraph_projection.go), and empty while a
+	// dependency is merely, temporarily unsatisfied (its own remediation
+	// still in flight) - TestReplacedUpstreamSubjectInvalidatesDownstream
+	// (orchestration package) proves an upstream that is merely
+	// unsatisfied invalidates its dependent immediately, and this check is
+	// what stops that transient moment from being mistaken for "ready to
+	// recompose".
+	//
+	// Every other invalidated unit, and every other execution kind, is
+	// UNCHANGED: still terminal, exactly as #472 has always made it.
+	for _, unit := range view.Units {
+		if unit.State != orchestration.UnitInvalidated || unit.ExecutionKind != orchestration.ExecutionKindIntegrationCompose || unit.InputsDigest == "" {
+			continue
+		}
+		consumed, err := consumedInputsFor(s.deps.Store, unit.BatchID)
+		if err != nil {
+			problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s: %v", view.GraphID, unit.UnitID, err)))
+			continue
+		}
+		remediatedDependency := false
+		for _, dependency := range unit.DependsOn {
+			currentInput, found := currentInputFor(unit.Inputs, dependency)
+			if !found {
+				continue // no admitted output from this dependency to compare against
+			}
+			if previous, wasConsumed := currentInputFor(consumed, dependency); wasConsumed &&
+				previous.RunID == currentInput.RunID && previous.HandoffID == currentInput.HandoffID {
+				continue // unchanged since this unit's own current epoch - not what caused THIS invalidation
+			}
+			exact, err := isExactRemediationOutput(s.deps.Store, view.GraphID, dependency, currentInput)
+			if err != nil {
+				problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s: %v", view.GraphID, unit.UnitID, err)))
+				continue
+			}
+			if exact {
+				remediatedDependency = true
+				break
+			}
+		}
+		if !remediatedDependency {
+			continue
+		}
+		if err := admitAutomaticReintegrationAuthorization(s.deps.Store, view.GraphID, unit.UnitID, s.deps.Clock.Now()); err != nil {
+			problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s automatic reintegration: %v", view.GraphID, unit.UnitID, err)))
+		}
+	}
+	// #581: a unit's own next remediation epoch is never part of the
+	// frontier (it is not "unactivated" - it already has epoch 1 or later).
+	// Eligibility is a separate fact entirely: an authorized epoch exists
+	// for it that no epoch row yet claims. Checked for every unit, not only
+	// frontier ones, under the SAME lock for the SAME reason activateWorkUnit
+	// documents: deciding a new epoch's run identity must not race another
+	// writer deciding the same one.
+	for _, unit := range view.Units {
+		authorization, pending, err := pendingRemediationEpoch(s.deps.Store, view.GraphID, unit.UnitID)
+		if err != nil {
+			problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s: %v", view.GraphID, unit.UnitID, err)))
+			continue
+		}
+		if !pending {
+			continue
+		}
+		if err := s.activateRemediationEpoch(view, unit, authorization); err != nil {
+			problems = append(problems, boundedDetail(fmt.Sprintf("%s unit %s epoch %d: %v", view.GraphID, unit.UnitID, authorization.ProposedEpoch, err)))
 		}
 	}
 	return problems
+}
+
+// currentInputFor finds dependencyUnitID's own entry in a unit's current
+// input set - the exact output this unit is about to consume for that ONE
+// dependency, never any other. ok is false while the dependency has no
+// admitted output to compare against at all.
+func currentInputFor(inputs orchestration.WorkUnitInputs, dependencyUnitID string) (orchestration.WorkUnitInput, bool) {
+	for _, input := range inputs {
+		if input.UnitID == dependencyUnitID {
+			return input, true
+		}
+	}
+	return orchestration.WorkUnitInput{}, false
+}
+
+// consumedInputsFor reads the exact input set a unit's CURRENT epoch -
+// named by batchID - was actually activated against: BatchOrigin.Inputs,
+// recorded unconditionally by both activateWorkUnit and
+// activateRemediationEpoch at the moment of activation, never re-derived
+// afterward. Paired with a unit's freshly re-projected current Inputs
+// (currentInputFor above), this is what tells "a dependency's output moved
+// since this epoch last ran" apart from "a dependency has always looked
+// exactly the way it looks now".
+func consumedInputsFor(store *SQLiteOperationStore, batchID string) (orchestration.WorkUnitInputs, error) {
+	batch, found, err := store.OrchestrationBatch(batchID)
+	if err != nil {
+		return nil, err
+	}
+	if !found || batch.Origin == nil {
+		return nil, fmt.Errorf("batch %s names no origin to read its consumed inputs from", batchID)
+	}
+	return batch.Origin.Inputs, nil
 }
 
 // workUnitHolds asks the readiness owner outside the graph what it is holding.

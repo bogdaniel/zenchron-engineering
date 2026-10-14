@@ -135,6 +135,24 @@ func TestImplementerAndIndependentReviewerReceiveDifferentPacks(t *testing.T) {
 	}
 }
 
+func TestReviewerReceivesTheApprovedPlanStructure(t *testing.T) {
+	input := contextFixture(domain.RoleReviewer)
+	input.PlanStages = []domain.PlanStage{
+		{ID: "producer-a", Kind: domain.StageAgent, Role: domain.RoleImplementer, Objective: "Create a.md."},
+		{ID: "producer-b", Kind: domain.StageAgent, Role: domain.RoleImplementer, Objective: "Create b.md."},
+		{ID: "integrate", Kind: domain.StageAgent, Role: domain.RoleIntegrator, ExecutionKind: "integration_compose", DependsOn: []string{"producer-a", "producer-b"}},
+	}
+	pack, err := planning.CompileContext(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"Approved plan stages", "producer-a", "producer-b", "integration_compose", "producer-a,producer-b"} {
+		if !strings.Contains(pack.Objective, required) {
+			t.Fatalf("review objective omitted %q: %s", required, pack.Objective)
+		}
+	}
+}
+
 // No role, and no policy, ever receives another worker's hidden reasoning.
 func TestProducerReasoningIsNeverDelivered(t *testing.T) {
 	for _, role := range domain.EngineeringRoles() {

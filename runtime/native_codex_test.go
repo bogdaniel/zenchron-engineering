@@ -24,6 +24,7 @@ const codexCapableHelp = `Options:
   -s, --sandbox <SANDBOX_MODE>  [possible values: read-only, workspace-write, danger-full-access]
   -a, --ask-for-approval <APPROVAL_POLICY>
       --ignore-user-config
+      --output-last-message <FILE>
   -C, --cd <DIR>
 `
 

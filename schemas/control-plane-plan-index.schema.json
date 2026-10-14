@@ -13,6 +13,7 @@
         "current_revision": {"type": "integer", "minimum": 0},
         "source_issue": {"type": "integer", "minimum": 1},
         "pending": {"type": "boolean"},
+        "lifecycle": {"$ref": "control-plane-plan.schema.json"},
         "shown": {"enum": ["attempt_only", "governing", "proposed", "superseded", "rejected", "unapproved"]}
       }
     }}

@@ -1,18 +1,62 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object", "additionalProperties": false,
-  "required": ["plan", "pending"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "plan",
+    "pending",
+    "graph_binding_mismatch",
+    "lifecycle"
+  ],
   "properties": {
-    "plan": {"$ref": "control-plane-plan-detail.schema.json"},
-    "pending": {"type": "boolean"},
+    "plan": {
+      "$ref": "control-plane-plan-detail.schema.json"
+    },
+    "pending": {
+      "type": "boolean"
+    },
     "receipt": {
-      "type": "object", "additionalProperties": false,
-      "required": ["status", "revision", "digest", "sequence", "occurred_at"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "revision",
+        "digest",
+        "sequence",
+        "occurred_at"
+      ],
       "properties": {
-        "status": {"enum": ["approved", "rejected"]},
-        "revision": {"type": "integer", "minimum": 1}, "digest": {"type": "string"},
-        "sequence": {"type": "integer", "minimum": 1}, "occurred_at": {"type": "string", "format": "date-time"}
+        "status": {
+          "enum": [
+            "approved",
+            "rejected"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "digest": {
+          "type": "string"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+        }
       }
+    },
+    "graph": {
+      "$ref": "control-plane-workgraph-detail.schema.json"
+    },
+    "graph_binding_mismatch": {
+      "type": "boolean"
+    },
+    "lifecycle": {
+      "$ref": "control-plane-plan.schema.json"
     }
   }
 }

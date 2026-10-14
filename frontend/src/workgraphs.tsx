@@ -1,3 +1,5 @@
+import { HumanDecision } from "./human-requests";
+import type { Controller } from "./api";
 import { useMemo, useState } from "react";
 import type { GraphDetail, GraphRow, Graphs, ProductDetail, Products, Unit } from "./operations-api";
 import { Badge, Disclosure, Empty, Head, Link, Pagination, Panel } from "./components";
@@ -201,7 +203,17 @@ function DependencyMap({
     </>
   );
 }
-function UnitInspector({ unit: u }: { unit: Unit }) {
+function UnitInspector({
+  unit: u,
+  graph,
+  controller,
+  stale,
+}: {
+  unit: Unit;
+  graph: GraphDetail;
+  controller?: Controller;
+  stale: boolean;
+}) {
   return (
     <div className="product-body" role="region" aria-label="Selected WorkUnit">
       <h3>{u.purpose}</h3>
@@ -268,49 +280,83 @@ function UnitInspector({ unit: u }: { unit: Unit }) {
           </ul>
         </Disclosure>
       )}
-      {u.open_decisions.length > 0 && (
-        <section aria-label="Human requests">
-          <h3>Pending human requests</h3>
-          <p>
-            Resolution is available through <span className="mono">autonomy workgraph resolve</span>; no HTTP resolution
-            action is authorized.
-          </p>
-          {u.open_decisions.map((d) => (
-            <Disclosure key={d.id} title={d.purpose || "Human decision"}>
-              <Facts
-                rows={[
-                  ["Exact request", d.id],
-                  ["Requested by", d.requested_by],
-                  ["Requested at", d.requested_at],
-                ]}
+      {controller && (
+        <>
+          {(u.hold
+            ? [
+                {
+                  id: u.hold.reference,
+                  purpose: "Operator readiness hold",
+                  body: u.hold.detail,
+                  requested_by: "",
+                  requested_at: "",
+                  expected_outcome_kind: "allow_deny",
+                  permitted_options: [],
+                },
+                ...u.open_decisions,
+              ]
+            : u.open_decisions
+          )
+            .filter((d) => !!d.id)
+            .map((d) => (
+              <HumanDecision
+                key={d.id}
+                row={{
+                  kind: "decision",
+                  id: d.id,
+                  graph_id: graph.graph_id,
+                  graph_name: graph.name,
+                  graph_revision: graph.revision,
+                  unit_id: u.unit_id,
+                  repository: graph.repository,
+                  objective_plan_id: graph.objective_plan_id,
+                  objective_plan_revision: graph.objective_plan_revision,
+                  objective_plan_digest: graph.objective_plan_digest,
+                  unavailable: "",
+                  decision: d,
+                }}
+                controller={controller}
+                stale={stale}
               />
-              <p>{d.body || "Request body not recorded"}</p>
-            </Disclosure>
-          ))}
-        </section>
+            ))}
+        </>
       )}
     </div>
   );
 }
-export function GraphWorkspace({ graph: g }: { graph: GraphDetail }) {
+export function GraphWorkspace({
+  graph: g,
+  controller,
+  stale = false,
+  embedded = false,
+}: {
+  graph: GraphDetail;
+  controller?: Controller;
+  stale?: boolean;
+  embedded?: boolean;
+}) {
   const [offset, setOffset] = useState(0),
     [selected, setSelected] = useState(g.units[0]?.unit_id || "");
   const rows = g.units.slice(offset, offset + 50),
     unit = g.units.find((u) => u.unit_id === selected);
   return (
     <>
-      <div className="breadcrumb">
-        <Link to="workgraphs">WorkGraphs</Link>
-        <span>/</span>
-        <span>Operational dependencies</span>
-      </div>
-      <Head
-        eyebrow="WORKGRAPH / OPERATIONAL WORKSPACE"
-        title={g.name || "Unnamed WorkGraph"}
-        extra={<Badge>Revision {g.revision}</Badge>}
-      >
-        {g.repository} · authoritative unit states and admitted dependency handoffs.
-      </Head>
+      {!embedded && (
+        <div className="breadcrumb">
+          <Link to="workgraphs">WorkGraphs</Link>
+          <span>/</span>
+          <span>Operational dependencies</span>
+        </div>
+      )}
+      {!embedded && (
+        <Head
+          eyebrow="WORKGRAPH / OPERATIONAL WORKSPACE"
+          title={g.name || "Unnamed WorkGraph"}
+          extra={<Badge>Revision {g.revision}</Badge>}
+        >
+          {g.repository} · authoritative unit states and admitted dependency handoffs.
+        </Head>
+      )}
       <div className="workspace-grid">
         <div className="workspace-main">
           <Panel
@@ -344,7 +390,7 @@ export function GraphWorkspace({ graph: g }: { graph: GraphDetail }) {
                 setSelected(g.units[v]?.unit_id || "");
               }}
             />
-            {unit && <UnitInspector key={unit.unit_id} unit={unit} />}
+            {unit && <UnitInspector key={unit.unit_id} unit={unit} graph={g} controller={controller} stale={stale} />}
           </Panel>
         </div>
         <aside className="workspace-aside">

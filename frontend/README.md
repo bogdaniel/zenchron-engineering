@@ -24,7 +24,10 @@ Visible views reobserve every 20 seconds; hidden tabs and open confirmations sus
 Stale/error snapshots disable review. Token login verifies the existing credential before setting the
 existing cookie, with no token in URL/local storage. Runtime never imports fixture measurements.
 
-The HTTP action allowlist remains plan rejection and run stop. Plan/publication approval and decision
-resolution stay in the existing CLI. Unavailable titles, associations, trends and installed capacity are
-explicit. See [runtime scope/proof](../docs/design/runtime-integration.md),
+The reconciliation consumes main's existing objective intake, plan preview/revision/approval,
+typed decision resolution, publication human evidence and run-control APIs. `workspace-api.ts`
+uses the sole transport; `governed-action.tsx` shares exact-subject confirmation and receipt handling.
+No frontend state grants authority. Publication authorization records evidence and does not publish
+or merge. Both implementations remain until parity, independent review and operator acceptance.
+See [runtime scope/proof](../docs/design/runtime-integration.md),
 [batch review](../docs/design/batch-02-review.md) and [retirement inventory](../docs/design/frontend-inventory.md).

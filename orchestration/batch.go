@@ -70,6 +70,13 @@ type BatchOrigin struct {
 	// decodes with it empty, which is exactly ExecutionKindProvider - the
 	// safe default for every batch #475 did not create.
 	ExecutionKind WorkUnitExecutionKind `json:"execution_kind,omitempty"`
+	// Epoch is this unit execution's remediation epoch (#581): 0 (omitted)
+	// is epoch 1, the unit's original, ordinary activation - every batch
+	// ever written before this field existed, byte-identical. A governed
+	// remediation attempt beyond the first sets it to 2, 3, ... so its
+	// batch/run identity is genuinely distinct from epoch 1's, never a
+	// second claim on the same WorkUnitBatchID.
+	Epoch int `json:"epoch,omitempty"`
 }
 
 // canonical is the origin with its input set in canonical order. The identity

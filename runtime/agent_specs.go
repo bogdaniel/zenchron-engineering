@@ -114,7 +114,9 @@ const claudeUnreachableEnvelope = "can't reach the api server — check your int
 // the candidate working tree's AGENTS.md as instructions.
 var codexSpec = cliAgentSpec{
 	Probes: []cliHelpProbe{
-		{Args: []string{"exec", "--help"}, Required: []string{"--sandbox", "workspace-write", "--ignore-user-config", "--cd", "--config"}},
+		{Args: []string{"exec", "--help"}, Required: []string{
+			"--sandbox", "workspace-write", "--ignore-user-config", "--cd", "--config", "--output-last-message",
+		}},
 		{Args: []string{"--help"}, Required: []string{"--ask-for-approval"}},
 	},
 	VersionArgs:                     []string{"--version"},
@@ -182,6 +184,9 @@ var codexSpec = cliAgentSpec{
 				args = append(args, "-c", "sandbox_workspace_write.writable_roots="+string(roots))
 			}
 		}
+		if i.ReviewerResultPath != "" {
+			args = append(args, "--output-last-message", i.ReviewerResultPath)
+		}
 		args = append(args, "-c", "project_doc_max_bytes=0")
 		if i.Model() != "" {
 			args = append(args, "--model", i.Model())
@@ -197,7 +202,7 @@ var codexSpec = cliAgentSpec{
 		// the help text - the same association the qwen probe needs, since this
 		// adapter is about to pass `--sandbox read-only` and rely on it.
 		Probe: cliHelpProbe{
-			Args: []string{"exec", "--help"}, Required: []string{"--sandbox"},
+			Args: []string{"exec", "--help"}, Required: []string{"--sandbox", "--output-last-message"},
 			RequiredChoices: []cliFlagChoice{{Flag: "--sandbox", Value: "read-only"}},
 		},
 		Mode:    "read-only",
@@ -205,6 +210,9 @@ var codexSpec = cliAgentSpec{
 		Args: func(i cliInvocation) []string {
 			args := []string{"--ask-for-approval", "never", "exec", "--sandbox", "read-only", "--ignore-user-config",
 				"-c", "sandbox_workspace_write.network_access=false", "-c", "project_doc_max_bytes=0"}
+			if i.ReviewerResultPath != "" {
+				args = append(args, "--output-last-message", i.ReviewerResultPath)
+			}
 			if i.Model() != "" {
 				args = append(args, "--model", i.Model())
 			}
@@ -309,16 +317,16 @@ var claudeSpec = cliAgentSpec{
 		// and still not an association: help text that quotes "plan" for any
 		// other reason satisfied it.
 		Probe: cliHelpProbe{
-			Args: []string{"--help"}, Required: []string{"--permission-mode"},
+			Args: []string{"--help"}, Required: []string{"--permission-mode", "--disallowedTools"},
 			RequiredChoices: []cliFlagChoice{{Flag: "--permission-mode", Value: "plan"}},
 		},
 		Mode: "plan",
 		Args: func(i cliInvocation) []string {
-			args := []string{"--print", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "--safe-mode"}
+			args := []string{"--print", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "--safe-mode", "--disallowedTools", "EnterPlanMode ExitPlanMode"}
 			if i.Model() != "" {
 				args = append(args, "--model", i.Model())
 			}
-			return claudePromptArg(args, i.Prompt)
+			return claudePromptArg(args, i.Prompt+"\nHeadless planning: return the requested fenced JSON object inline in your final answer. Do not write a private plan file or invoke EnterPlanMode or ExitPlanMode; the runtime owns plan storage and operator approval.")
 		},
 	},
 }

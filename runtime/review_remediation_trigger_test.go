@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 	"github.com/bogdaniel/zenchron-engineering/review"
 )
 
@@ -110,6 +112,138 @@ func TestReconcileReviewRemediationForRunSurfacesAReleaseFailure(t *testing.T) {
 	}
 }
 
+func TestReviewOfGraphProducerWaitsForItsIntegrationCandidate(t *testing.T) {
+	f := newAdmissionFixture(t)
+	graph, err := (orchestration.WorkGraphProposal{
+		Name: "review-after-integration", Revision: 1,
+		Units: []orchestration.WorkUnit{
+			{ID: "producer-a", Purpose: "produce A", Role: domain.RoleImplementer, Issue: 554},
+			{ID: "producer-b", Purpose: "produce B", Role: domain.RoleImplementer, Issue: 555},
+			{ID: "integrate", Purpose: "compose A and B", Role: domain.RoleIntegrator,
+				ExecutionKind: orchestration.ExecutionKindIntegrationCompose, Issue: 556, DependsOn: []string{"producer-a", "producer-b"}},
+		},
+	}).Compose(testRepo.String(), "codex", "test", f.clock.Now())
+	if err != nil {
+		t.Fatalf("compose graph: %v", err)
+	}
+	if _, _, err := f.store.AdoptWorkGraphRevision(graph); err != nil {
+		t.Fatalf("store graph: %v", err)
+	}
+	origin := &orchestration.BatchOrigin{GraphID: graph.ID, UnitID: "producer-b", ExecutionKind: orchestration.ExecutionKindProvider}
+	batchID, err := orchestration.WorkUnitBatchID(testRepo.String(), "codex", 555, *origin)
+	if err != nil {
+		t.Fatalf("work unit batch id: %v", err)
+	}
+	batch := orchestration.Batch{
+		SchemaVersion: orchestration.BatchSchemaVersion, ID: batchID, Repository: testRepo.String(),
+		AgentID: "codex", CreatedAt: f.clock.Now(), Origin: origin,
+		Items: []orchestration.BatchItem{{Issue: 555, RunID: f.runID}},
+	}
+	if _, _, err := f.store.CreateOrchestrationBatch(batch); err != nil {
+		t.Fatalf("store batch: %v", err)
+	}
+	run, found, err := f.store.Run(f.runID)
+	if err != nil || !found {
+		t.Fatalf("read run: found=%t err=%v", found, err)
+	}
+	run.Orchestration = &RunOrchestrationBinding{BatchID: batchID}
+	if err := f.store.PutRun(run); err != nil {
+		t.Fatalf("bind run to work unit: %v", err)
+	}
+
+	engine := f.runtime()
+	if _, _, err := engine.ReconcileReviewRemediationForRun(context.Background(), f.runID, failingNeedsReviewPort{}, "reviewer-1"); err != nil {
+		t.Fatalf("producer PR was reviewed before integration: %v", err)
+	}
+
+	approved := f.seedDecision(f.headSHA, "reviewer-approve", review.VerdictApprove)
+	outcome, admission, err := engine.ReconcileReviewRemediationForRun(context.Background(), f.runID, noNewReviewPort{ReviewPort: f.port()}, "reviewer-2")
+	if err != nil || outcome == nil || outcome.Decision.ID != approved.ID || admission != nil {
+		t.Fatalf("deferred approval outcome/admission = %+v / %+v / %v, want stored approval without remediation", outcome, admission, err)
+	}
+	f.clock.at = f.clock.at.Add(time.Minute)
+	decision := f.seedDecision(f.headSHA, "reviewer-1", review.VerdictRequestChanges, blockingFinding("fix before integration"))
+	outcome, admission, err = engine.ReconcileReviewRemediationForRun(context.Background(), f.runID, noNewReviewPort{ReviewPort: f.port()}, "reviewer-2")
+	if err != nil {
+		t.Fatalf("admit the stored blocking decision while review is deferred: %v", err)
+	}
+	if outcome == nil || outcome.Decision.ID != decision.ID || admission == nil || admission.DecisionID != decision.ID {
+		t.Fatalf("deferred outcome/admission = %+v / %+v, want the stored blocking decision %s", outcome, admission, decision.ID)
+	}
+}
+
+func TestReviewDeferralHonorsUnitAndGraphBoundaries(t *testing.T) {
+	f := newAdmissionFixture(t)
+	graph, err := (orchestration.WorkGraphProposal{
+		Name: "review-boundaries", Revision: 1,
+		Units: []orchestration.WorkUnit{
+			{ID: "producer", Purpose: "produce candidate", Role: domain.RoleImplementer, Issue: 554, RequiresReview: true},
+			{ID: "producer-b", Purpose: "produce another candidate", Role: domain.RoleImplementer, Issue: 556},
+			{ID: "integrate", Purpose: "compose candidate", Role: domain.RoleIntegrator, Issue: 555,
+				ExecutionKind: orchestration.ExecutionKindIntegrationCompose, DependsOn: []string{"producer", "producer-b"}},
+		},
+	}).Compose(testRepo.String(), "codex", "test", f.clock.Now())
+	if err != nil {
+		t.Fatalf("compose graph: %v", err)
+	}
+	if _, _, err := f.store.AdoptWorkGraphRevision(graph); err != nil {
+		t.Fatalf("store graph: %v", err)
+	}
+
+	runtime := &EngineeringRuntime{
+		deps: Dependencies{Store: f.store, Clock: f.clock, GitHub: f.fake},
+		scheduler: Scheduler{
+			Store: f.store, Clock: f.clock, Owner: "controller-review-boundary",
+			LeaseDuration: time.Minute, Liveness: neverAlive(),
+			MaxConcurrentRuns: 10, MaxConcurrentVerifications: 10,
+		},
+	}
+	bindReviewTriggerOrigin(t, f, orchestration.BatchOrigin{
+		GraphID: graph.ID, UnitID: "producer", ExecutionKind: orchestration.ExecutionKindProvider,
+	}, 554)
+	if _, _, err := runtime.ReconcileReviewRemediationForRun(context.Background(), f.runID, failingNeedsReviewPort{}, "reviewer"); err == nil || !strings.Contains(err.Error(), "simulated reviewer failure") {
+		t.Fatalf("review-required producer result = %v; want immediate review", err)
+	}
+
+	bindReviewTriggerOrigin(t, f, orchestration.BatchOrigin{
+		GraphID: graph.ID, UnitID: "integrate", ExecutionKind: orchestration.ExecutionKindIntegrationCompose,
+	}, 555)
+	if _, _, err := runtime.ReconcileReviewRemediationForRun(context.Background(), f.runID, failingNeedsReviewPort{}, "reviewer"); err == nil || !strings.Contains(err.Error(), "simulated reviewer failure") {
+		t.Fatalf("integration run result = %v; want immediate review", err)
+	}
+
+	bindReviewTriggerOrigin(t, f, orchestration.BatchOrigin{
+		GraphID: "missing-graph", UnitID: "producer", ExecutionKind: orchestration.ExecutionKindProvider,
+	}, 554)
+	if _, _, err := runtime.ReconcileReviewRemediationForRun(context.Background(), f.runID, stubReviewPort{}, "reviewer"); err == nil || !strings.Contains(err.Error(), "work graph missing-graph") {
+		t.Fatalf("missing graph result = %v; want a work graph missing-graph error", err)
+	}
+}
+
+func bindReviewTriggerOrigin(t *testing.T, f *admissionFixture, origin orchestration.BatchOrigin, issue int) {
+	t.Helper()
+	batchID, err := orchestration.WorkUnitBatchID(testRepo.String(), "codex", issue, origin)
+	if err != nil {
+		t.Fatalf("work unit batch id: %v", err)
+	}
+	batch := orchestration.Batch{
+		SchemaVersion: orchestration.BatchSchemaVersion, ID: batchID, Repository: testRepo.String(),
+		AgentID: "codex", CreatedAt: f.clock.Now(), Origin: &origin,
+		Items: []orchestration.BatchItem{{Issue: issue, RunID: f.runID}},
+	}
+	if _, _, err := f.store.CreateOrchestrationBatch(batch); err != nil {
+		t.Fatalf("store batch: %v", err)
+	}
+	run, found, err := f.store.Run(f.runID)
+	if err != nil || !found {
+		t.Fatalf("read run: found=%t err=%v", found, err)
+	}
+	run.Orchestration = &RunOrchestrationBinding{BatchID: batchID}
+	if err := f.store.PutRun(run); err != nil {
+		t.Fatalf("bind run to work unit: %v", err)
+	}
+}
+
 // failingNeedsReviewPort is stubReviewPort with NeedsReview returning a
 // distinguishable error, so ReconcileReviewRemediation itself fails before
 // any decision is read - the review's own failure, independent of
@@ -118,6 +252,16 @@ type failingNeedsReviewPort struct{ stubReviewPort }
 
 func (failingNeedsReviewPort) NeedsReview(context.Context, GitHubRepo, int) (bool, error) {
 	return false, errors.New("simulated reviewer failure")
+}
+
+type noNewReviewPort struct{ ReviewPort }
+
+func (noNewReviewPort) NeedsReview(context.Context, GitHubRepo, int) (bool, error) {
+	return false, errors.New("deferred review must not start a new review")
+}
+
+func (noNewReviewPort) RequestReview(context.Context, GitHubRepo, int, string) (ReviewOutcome, error) {
+	return ReviewOutcome{}, errors.New("deferred review must not request another review")
 }
 
 // TestReconcileReviewRemediationForRunSurfacesBothTheReviewerAndReleaseFailure

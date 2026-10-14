@@ -189,7 +189,7 @@ func ReviewerResultPath(stateDir string, attempt ExecutionAttemptRef) (string, e
 }
 
 // PrepareReviewerResult clears any leftover result and returns the path this
-// invocation must write to.
+// invocation's structured response is captured into.
 //
 // Clearing is not housekeeping. A result file surviving from an earlier attempt
 // of the same operation would be admitted as THIS attempt's verdict, which
@@ -217,7 +217,7 @@ func clearResultSlot(path string) error {
 	return nil
 }
 
-// ReadReviewerResult reads and decodes the result a reviewer wrote.
+// ReadReviewerResult reads and decodes the structured result captured for a reviewer.
 //
 // An absent file is not an error and not a verdict: it is (nil, nil), and the
 // reviewer stage stays unsettled. That is the case a reviewer producing only
@@ -340,7 +340,7 @@ func AdmitReviewerResult(
 	// 2. The stage is a VERDICT-PRODUCING stage. An implementer that writes a
 	// perfectly formed result gets nothing: the role is what carries the
 	// authority, and printing matching JSON is not a way to acquire one.
-	if stage.Kind != domain.StageAgent || stage.Role != domain.RoleReviewer {
+	if stage.Kind != domain.StageAgent || !stage.Role.ProducesReviewVerdict() {
 		return refuse("stage role %q does not produce review verdicts", stage.Role)
 	}
 	// 3-4. The frozen assignment is THIS stage's, and the worker that produced

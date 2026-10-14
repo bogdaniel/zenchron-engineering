@@ -11,6 +11,7 @@ export type Fleet = {
   classes: Record<string, number>;
 };
 export type RunDetail = {
+  paused?: boolean;
   run_id: string;
   repository: string;
   phase: string;
@@ -117,9 +118,22 @@ export type Unit = {
     reviewer: string;
     findings: { severity: string; signature: string; detail: string }[];
   };
-  open_decisions: { id: string; purpose: string; body: string; requested_by: string; requested_at: string }[];
+  open_decisions: DecisionRef[];
+};
+export type DecisionRef = {
+  id: string;
+  purpose: string;
+  body: string;
+  requested_by: string;
+  requested_at: string;
+  expected_outcome_kind: string;
+  permitted_options: string[];
+  subject?: Record<string, string>;
 };
 export type GraphDetail = GraphRow & {
+  objective_plan_id: string;
+  objective_plan_revision: number;
+  objective_plan_digest: string;
   frontier: string[];
   counts: Record<string, number>;
   units: Unit[];
@@ -172,6 +186,7 @@ export function decodeRun(v: unknown): RunDetail {
   if ([r.elapsed, r.active_elapsed, r.external_wait_elapsed, r.operation].some((v) => v === undefined))
     throw new Error("invalid_response");
   return {
+    paused: r.paused === undefined ? undefined : bool(r.paused),
     run_id: str(r.run_id),
     repository: str(r.repository, ""),
     phase: str(r.phase),
@@ -335,9 +350,13 @@ export async function graphs(offset: number, signal: AbortSignal): Promise<Graph
   return { workgraphs: rows.map(graphRow), offset, has_more: bool(r.has_more) };
 }
 export async function graph(id: string, signal: AbortSignal): Promise<GraphDetail> {
-  const g = object((await request(`/v1/workgraphs/${encodeURIComponent(id)}`, signal)).value);
+  const detail = decodeGraph((await request(`/v1/workgraphs/${encodeURIComponent(id)}`, signal)).value);
+  if (detail.graph_id !== id) throw new Error("subject_mismatch");
+  return detail;
+}
+export function decodeGraph(value: unknown): GraphDetail {
+  const g = object(value);
   const summary = graphRow(g);
-  if (summary.graph_id !== id) throw new Error("subject_mismatch");
   const units = (g.units === null ? [] : arr(g.units)).map((v) => {
     const u = object(v);
     return {
@@ -375,18 +394,7 @@ export async function graph(id: string, signal: AbortSignal): Promise<GraphDetai
               }),
       })),
       open_decisions:
-        u.open_decisions === undefined || u.open_decisions === null
-          ? []
-          : arr(u.open_decisions).map((v) => {
-              const d = object(v);
-              return {
-                id: str(d.id),
-                purpose: str(d.purpose, ""),
-                body: str(d.body, ""),
-                requested_by: str(d.requested_by, ""),
-                requested_at: timestamp(d.requested_at),
-              };
-            }),
+        u.open_decisions === undefined || u.open_decisions === null ? [] : arr(u.open_decisions).map(decodeDecision),
     };
   });
   const ids = new Set(units.map((u) => u.unit_id)),
@@ -397,7 +405,38 @@ export async function graph(id: string, signal: AbortSignal): Promise<GraphDetai
     frontier.some((id) => !ids.has(id))
   )
     throw new Error("invalid_response");
-  return { ...summary, units, frontier, counts: numbers(g.counts), product: optional(g.product, productRow) };
+  return {
+    ...summary,
+    objective_plan_id: str(g.objective_plan_id, ""),
+    objective_plan_revision: num(g.objective_plan_revision, 0),
+    objective_plan_digest: str(g.objective_plan_digest, ""),
+    units,
+    frontier,
+    counts: numbers(g.counts),
+    product: optional(g.product, productRow),
+  };
+}
+export function decodeDecision(value: unknown): DecisionRef {
+  const d = object(value);
+  return {
+    id: str(d.id),
+    purpose: str(d.purpose, ""),
+    body: str(d.body, ""),
+    requested_by: str(d.requested_by, ""),
+    requested_at: timestamp(d.requested_at),
+    expected_outcome_kind: str(d.expected_outcome_kind, ""),
+    permitted_options: strings(d.permitted_options),
+    ...(d.subject === undefined
+      ? {}
+      : {
+          subject: Object.fromEntries(
+            ["handoff", "owner", "base_revision", "candidate_revision", "candidate_tree"].map((k) => [
+              k,
+              str(object(d.subject)[k]),
+            ]),
+          ),
+        }),
+  };
 }
 export async function products(offset: number, signal: AbortSignal): Promise<Products> {
   pageNumber(offset);

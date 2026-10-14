@@ -120,3 +120,12 @@ product associations. Recorded agent bindings are available; installed readiness
 No trend, completion percentage, plan/graph association or authoritative client workflow is inferred.
 Real controller stop/rejection, lost replies and actual OS-process restart are separately proved from
 the labeled HTTP fixture presentation checks. See [runtime integration](runtime-integration.md).
+
+## Reconciliation update
+
+Earlier stop/rejection-only implementation notes are historical. Integrated main now provides
+workspace options, exact plan preview/approval/revision, typed decision resolution, publication
+human evidence and run-control APIs. React consumes those APIs and fresh controller observations.
+New request/receipt reads expose existing durable state only. Plan lifecycle and objective-bound
+WorkGraph association come from canonical readers; fixture trends/progress remain unavailable.
+See [current bindings and read sources](runtime-integration.md) and [parity](frontend-inventory.md).

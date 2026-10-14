@@ -45,7 +45,7 @@ export async function checkOperationalViews(page, base, out, captureFullPage) {
     revision: 2,
     repositories: ["example/payments"],
   };
-  const units = Array.from({ length: 120 }, (_, i) => ({
+  const units = Array.from({ length: 1200 }, (_, i) => ({
     unit_id: `unit-${i}`,
     purpose: i === 0 ? "Isolate credentials <script>" : `Independent verification ${i}`,
     role: i === 0 ? "implementer" : "reviewer",
@@ -74,6 +74,7 @@ export async function checkOperationalViews(page, base, out, captureFullPage) {
             {
               id: "request-1",
               purpose: "Confirm deployment scope",
+              expected_outcome_kind: "allow_deny",
               body: "Select the reviewed environment; no escalation.",
               requested_at: "2026-10-13T14:00:00Z",
             },
@@ -89,6 +90,11 @@ export async function checkOperationalViews(page, base, out, captureFullPage) {
     if (mode === "permission") return route.fulfill({ status: 403, json: { error: "forbidden_origin" } });
     if (mode === "failed") return route.abort("connectionfailed");
     const offset = Number(url.searchParams.get("offset") || 0);
+    if (url.pathname.endsWith("/authority")) return route.fulfill({ json: null });
+    if (url.pathname === "/v1/workspace/requests")
+      return route.fulfill({
+        json: { requests: [], offset: 0, has_more: false, graphs_offset: 0, graphs_has_more: false },
+      });
     if (url.pathname === "/v1/controller")
       return route.fulfill({
         json: {
@@ -148,7 +154,7 @@ export async function checkOperationalViews(page, base, out, captureFullPage) {
           product,
           units: mode === "bad-dependency" ? [{ ...units[0], depends_on: ["missing"] }] : units,
           frontier: ["unit-1"],
-          counts: { total: 120, completed: 1, awaiting_decision: 1, blocked: 118 },
+          counts: { total: 1200, completed: 1, awaiting_decision: 1, blocked: 1198 },
         },
       });
     if (url.pathname === "/v1/products")
@@ -202,8 +208,11 @@ export async function checkOperationalViews(page, base, out, captureFullPage) {
         .evaluate((n) => n === document.activeElement),
       true,
     );
+    const graphStart = performance.now();
     await page.goto(base + "/app#/workgraphs/test-graph");
     await page.getByRole("heading", { name: "WorkUnit dependency graph", exact: true }).waitFor();
+    const graphReadyMs = Math.round(performance.now() - graphStart);
+    assert(graphReadyMs < 5000, `1200-unit fixture first page exceeded 5s: ${graphReadyMs}ms`);
     assert.equal(await page.locator(".dependency-map [role=button]").count(), 50);
     await page
       .getByRole("region", { name: "Selected WorkUnit" })
@@ -214,7 +223,7 @@ export async function checkOperationalViews(page, base, out, captureFullPage) {
     const second = page.locator(".dependency-map [role=button]").nth(1);
     await second.focus();
     await page.keyboard.press("Enter");
-    assert.match(await page.getByRole("region", { name: "Selected WorkUnit" }).innerText(), /Pending human requests/);
+    assert.match(await page.getByRole("region", { name: "Selected WorkUnit" }).innerText(), /Confirm deployment scope/);
     await page.getByRole("button", { name: "Next", exact: true }).click();
     await page.getByText(/50 loaded · offset 50/).waitFor();
     assert.equal(await page.locator(".dependency-map [role=button]").count(), 50);
@@ -281,10 +290,19 @@ export async function checkOperationalViews(page, base, out, captureFullPage) {
     assert.deepEqual(writes, [], "No governed actions were simulated");
     return {
       captures,
+      performance: {
+        graphUnits: 1200,
+        objectiveLogicalIndex: 2000,
+        eventLogicalHistory: 10000,
+        graphReadyMs,
+        renderedNodes: 50,
+        renderedEvents: 50,
+        boundMs: 5000,
+      },
       source: "Explicitly labeled HTTP projection fixtures; no controller acceptance claims",
       checks: [
         "Run and association paging, bounded 10000-event history cursor; changed cursor refused",
-        "120 WorkUnits, 50-node windows, actual dependency edges, mobile inspectors, escaped reports and exact evidence",
+        "1200 WorkUnits, 50-node windows, actual dependency edges, mobile inspectors, escaped reports and exact evidence",
         "Exact stop review without submission; keyboard return focus; dark/light desktop/mobile contrast and reflow",
         "Run subject mismatch and missing graph dependency fail closed",
       ],

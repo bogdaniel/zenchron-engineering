@@ -84,7 +84,11 @@ recent PRs changed for review, provider and toolchain semantics alike.
 Selection is deterministic. Each changed path is handled by the first rule that
 matches:
 
-1. **Inert** paths, such as docs and Markdown, select no behavioural evidence.
+1. **Inert** paths select no focused-runtime evidence. T1 still runs every
+   other Go package whole. Control-plane templates are covered by those package
+   tests; browser assets are covered by the isolated browser acceptance when
+   available. The product and WorkGraph schemas are compiled and validated by
+   the whole `schemas` package run.
 2. A test file outside `runtime` is covered, because its package runs whole.
 3. A **hotspot** runs the whole `runtime` package.
 4. A `runtime` test file with no tests of its own is a shared helper, so it

@@ -27,6 +27,9 @@ func TestRecordedArgvNamesRuntimePathsByRole(t *testing.T) {
 			provider.StateDir = state
 			request.ScratchDir = filepath.Join(state, "runs", "run", "scratch")
 			request.ReviewerResultPath = filepath.Join(state, "runs", "run", "result", "review.json")
+			if err := os.MkdirAll(filepath.Dir(request.ReviewerResultPath), 0700); err != nil {
+				t.Fatal(err)
+			}
 			result, err := provider.Execute(context.Background(), request)
 			if err != nil {
 				t.Fatal(err)

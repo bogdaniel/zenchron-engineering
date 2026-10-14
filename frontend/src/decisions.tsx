@@ -1,6 +1,8 @@
+import { PlanControls } from "./planning";
+import { HumanRequests } from "./human-requests";
 import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
-import { Badge, Binding, Dialog, Disclosure, Empty, Head, Link, Panel } from "./components";
+import { Badge, Binding, Dialog, Disclosure, Empty, Head, Link, Pagination, Panel } from "./components";
 
 type Confirmation = { plan: api.Plan; binding: string };
 export function Decisions({
@@ -9,15 +11,18 @@ export function Decisions({
   controller,
   stale,
   refresh,
+  onPage,
 }: {
   index: api.PlanIndex;
   context?: api.Context;
   controller: api.Controller;
   stale: boolean;
   refresh: () => void;
+  onPage: (offset: number) => void;
 }) {
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [busy, setBusy] = useState(false);
+  const [approvalBlocked, setApprovalBlocked] = useState(false);
   const [message, setMessage] = useState("");
   const [note, setNote] = useState("");
   const [uncertain, setUncertain] = useState(false);
@@ -28,13 +33,16 @@ export function Decisions({
   const focusReceipt = useRef(false);
   const current = resolved || context;
   const p = current?.plan;
+  const pageSuffix = index.offset ? `?offset=${index.offset}` : "";
   const pending = index.plans.filter((row) => row.pending);
   const previouslyPending = useRef(current?.pending === true);
   const reason = stale ? "Snapshot stale · refresh before review" : api.blocker(controller);
   const actionable = reason
     ? 0
-    : pending.filter((row) => !(uncertain && row.plan_id === p?.plan_id && row.current_revision === p?.revision))
-        .length;
+    : pending.filter(
+        (row) =>
+          !((uncertain || approvalBlocked) && row.plan_id === p?.plan_id && row.current_revision === p?.revision),
+      ).length;
   useEffect(() => {
     if ((focusReceipt.current || previouslyPending.current) && current?.receipt) {
       receiptFocus.current?.focus({ preventScroll: true });
@@ -142,11 +150,11 @@ export function Decisions({
         Human requests only. Recovery stays with the runtime.
       </Head>
       <div className="request-summary small muted">
-        {pending.length} pending · {actionable} actionable · rejection only
+        {pending.length} pending · {actionable} actionable · plan decisions
       </div>
       <div className="inbox-toolbar">
         <span className="muted small">
-          Loaded plan page{index.has_more ? " · more available" : ""} · rejection only.
+          Loaded plan page{index.has_more ? " · more available" : ""} · plan decisions.
         </span>
         <button
           className="recovery-shortcut"
@@ -165,7 +173,7 @@ export function Decisions({
           aria-label="Choose a decision"
           value={p ? `${encodeURIComponent(p.plan_id)}/${p.revision}` : ""}
           onChange={(e) => {
-            location.hash = "#/actions/" + e.target.value;
+            location.hash = "#/actions/" + e.target.value + pageSuffix;
           }}
         >
           <option value="" disabled>
@@ -189,7 +197,7 @@ export function Decisions({
             <a
               key={row.plan_id}
               className={`decision-item ${row.plan_id === p?.plan_id && row.current_revision === p?.revision ? "selected" : ""}`}
-              href={`#/actions/${encodeURIComponent(row.plan_id)}/${row.current_revision}`}
+              href={`#/actions/${encodeURIComponent(row.plan_id)}/${row.current_revision}${pageSuffix}`}
             >
               <div className="decision-item-meta">
                 <span className="eyebrow">Plan decision</span>
@@ -208,6 +216,7 @@ export function Decisions({
               </div>
             </a>
           ))}
+
           {!pending.length && (
             <Empty title="No pending requests in this page">
               Historical receipts remain accessible by exact revision.
@@ -232,8 +241,8 @@ export function Decisions({
             </div>
             <h2 className="decision-title">Review plan revision {p.revision}</h2>
             <p className="decision-description secondary">
-              Reject this proposal and retain any previously approved revision. No execution, publication, merge or
-              privilege expansion is authorized.
+              Approve bounded execution or reject this proposal while retaining the governing revision. No publication,
+              merge or privilege authority is granted.
             </p>
             <div className="decision-subject">
               <span>{p.repository}</span>
@@ -269,7 +278,7 @@ export function Decisions({
                   </strong>
                 </div>
                 <div>
-                  <span>Rejection only; ceilings unchanged</span>
+                  <span>Existing policy and budget ceilings</span>
                   <strong>Restricted</strong>
                 </div>
               </div>
@@ -291,19 +300,25 @@ export function Decisions({
                 </Link>
               ) : (
                 <>
-                  <p className="small muted">{reason || "Approval unavailable. Server re-checks rejection."}</p>
+                  <p className="small muted">{reason || "Controller rechecks exact assignments."}</p>
                   <div className="decision-buttons">
                     <button
                       ref={rejectFocus}
                       className="button"
                       onClick={review}
-                      disabled={busy || !!reason || !current?.pending || uncertain}
+                      disabled={busy || approvalBlocked || !!reason || !current?.pending || uncertain}
                     >
                       {busy ? "Checking…" : "Reject"}
                     </button>
-                    <button className="button primary" disabled title="Approval needs governed assignment bindings">
-                      Review & approve
-                    </button>
+                    <PlanControls
+                      key={`${p.plan_id}/${p.revision}/${p.shown}`}
+                      plan={p}
+                      controller={controller}
+                      stale={stale || busy || uncertain}
+                      onSettled={refresh}
+                      compact
+                      onBlocked={setApprovalBlocked}
+                    />
                   </div>
                 </>
               )}
@@ -326,6 +341,14 @@ export function Decisions({
           </Panel>
         )}
       </div>
+      <Pagination
+        label="Plan request pagination"
+        offset={index.offset}
+        count={index.plans.length}
+        more={index.has_more}
+        onPage={onPage}
+      />
+      <HumanRequests controller={controller} stale={stale} />
       <section id="runtime-recovery" className="recovery-section" tabIndex={-1}>
         <Panel title="Runtime-owned recovery">
           <Empty title="Recovery aggregate unavailable">

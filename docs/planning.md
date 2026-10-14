@@ -165,6 +165,10 @@ They carry the governance envelope, and a worker that cannot see its obligations
 is a worker nothing can hold to them. A policy that excludes one is refused when
 it is loaded, not quietly ignored when work starts.
 
+Reviewer assignments receive the full plan objective alongside their
+stage-specific review objective, so they can check the candidate against the
+operator's exact request without inheriting producer reasoning.
+
 `producer_reasoning` — the implementation worker's own reasoning transcript — is
 a named class precisely so it can be refused. A policy that asks for it is
 rejected: an independent reviewer never inherits the producer's hidden
@@ -456,7 +460,8 @@ zenchron-engineering autonomy plan status PLAN [--text]
 zenchron-engineering autonomy plan list [--text]
 ```
 
-`plan issue` compiles a proposal and stores it. It does not execute it.
+`plan issue` compiles a proposal, binds its objective WorkGraph, and stores it.
+It does not execute work before the exact plan and assignment digests are approved.
 
 By default the decomposition is REASONED by a registered execution agent in its
 own non-mutating mode: `--agent` selects which one, and an agent whose adapter

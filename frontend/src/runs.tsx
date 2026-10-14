@@ -1,3 +1,5 @@
+import { RunControls } from "./run-controls";
+import { PublicationControls } from "./human-requests";
 import { useState } from "react";
 import type { Controller, Runs } from "./api";
 import * as ops from "./operations-api";
@@ -196,6 +198,8 @@ export function RunWorkspace({
         <div className="workspace-main">
           <Panel title="Governed control">
             <StopRun run={r} controller={controller} stale={stale} />
+            <RunControls run={r} controller={controller} stale={stale} />
+            <PublicationControls runId={r.run_id} controller={controller} stale={stale} />
           </Panel>
           <Panel title="Execution observation">
             <Facts

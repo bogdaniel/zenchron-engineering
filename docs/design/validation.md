@@ -1,100 +1,65 @@
-# Design and implementation validation
+# Reconciliation validation
 
-**Visual gate accepted. Operational parity and legacy retirement pending.** Successful fixture
-simulation is not backend acceptance. Runtime proof below uses isolated deterministic test data,
-the real governed controller path and durable journal, never an operator's production state.
+See [batch review](batch-02-review.md) for results and [inventory](frontend-inventory.md) for parity
+and removal gates. Passing simulations never supplies controller or operator acceptance.
 
-## Focused evidence
-
-- React strict TypeScript check and esbuild bundle pass (`npm run build` in `frontend/`).
-  React/React DOM, compiler/types and esbuild are pinned; no extra state/router/test framework.
-- Focused race-enabled control-plane tests pass for the new plan index/context, existing private
-  wire boundary, authenticated preview/runtime delivery and relevant governed action behavior.
-- Focused race-enabled CLI/controller tests pass for real plan rejection, same-request controller
-  proof, plan-lock racing protection and stop. `TestEngineeringOSPlanRejectEndToEnd` uses actual
-  controller composition, socket, controller role and real journal. Its browser submits one rejection POST and one stop POST,
-  preserves the selected revision, focuses the historical receipt and rehydrates it after controller
-  composition/read-store/role/socket reconstruction and actual OS-process crash/restart. A discarded reply after the actual journal write and a failed reconciliation
-  read remain closed; the later receipt/cancellation read never resends either action. Changed digest/controller, unattested build,
-  released role and disconnected pending request cases refuse without a journal decision.
-- `scripts/check_design_preview.mjs` passes the frozen fixture interactions and 76 captures:
-  50 explicitly synthetic design images, two genuine isolated empty-runtime API images, six actual
-  unauthenticated login captures and 18 explicitly labeled HTTP projection fixtures.
-  Synthetic 500-objective/10,000-event checks render at most 50 records. Their timings describe
-  browser fixture interaction, not production throughput or runtime reduction cost.
-- Its React helper verifies bearer transport, 50-row paging across a 500-row HTTP contract,
-  search, escaped text, gate/run separation, pending/actionable distinction, changed-subject
-  review refusal, independent identity/reachability, stale observation handling under a controlled
-  clock, permission/malformed/mismatched/disconnected reads and historical receipts. These HTTP
-  mocks are presentation evidence only and are not captured as genuine runtime state.
-- 71 further browser captures exercise the actual isolated controller flow at 1440, 1920 and
-  390 px in both actual themes. Captures visibly say isolated test data. Fresh documents prevent
-  stale Chrome compositor images; selected theme is asserted before capture. Metadata is in
-  `screenshots/batch-02/*-validation.json`. No fixture provides the governed result.
-- Keyboard proofs cover modal containment, Escape to the exact opener, receipt focus, closed
-  mobile-sidebar inertness, drawer containment and return, and route-preserving recovery inspection.
-  First-screen mobile decision buttons and expanded-binding confirmation footer remain visible.
-- Rendered text contrast/name checks cover all four dark/light fixture views and all four
-  dark/light React compositions. Reflow/text spacing are covered in the frozen preview. These
-  focused checks do not constitute a complete WCAG or screen-reader qualification.
-- Actual screenshots were inspected and revised for mobile action placement, focus return,
-  disabled light-button contrast and closed drawer shadow. Visual regressions are checked with
-  layout/reflow/visibility contracts; an operator-approved pixel baseline is not yet established.
-- `go build ./...`, `go vet ./...`, `gofmt` and 21 Python checker regression tests pass.
-  The sandbox denied an optional module-version stat-cache write; Go build returned success.
-  Task-specific Go build cache lives under `/private/tmp`.
-
-## Exact source evidence
-
-The batch is recorded as a local commit. Its exact head is reported with the final rerun rather
-than embedding a self-referential commit hash here. Final browser output can be directed to temporary
-artifact directories without modifying reviewed captures:
+## Reproduce on the exact source/bundle
 
 ```sh
-# Existing Playwright/Chrome paths are environment-owned, not project dependencies.
-ZENCHRON_LIVE_SCREENSHOTS=/private/tmp/zenchron-head-live \
-ZENCHRON_PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs \
-ZENCHRON_CHROME_EXECUTABLE=/absolute/path/to/chrome \
-go test -race ./cmd/zenchron-engineering \
-  -run 'TestEngineeringOSPlanRejectEndToEnd|TestGovernedPlanRejectIsDecidedOnceServerSide|TestGovernedStopProvesTheControllerOnTheSameRequest|TestControlPlane' -count=1
+npm --prefix frontend ci --ignore-scripts
+npm --prefix frontend run build
+ci/static.sh
+go build ./...
+go test -race ./controlplane ./schemas -count=1
+python3 scripts/check_file_sizes.py --verify-baseline
+python3 -m unittest discover -s scripts
+```
 
-ZENCHRON_PREVIEW_SCREENSHOTS=/private/tmp/zenchron-head-preview \
-ZENCHRON_PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs \
-ZENCHRON_CHROME_EXECUTABLE=/absolute/path/to/chrome \
+Run browser checks only on isolated state with already-installed Playwright and Chrome. Supply
+`ZENCHRON_PLAYWRIGHT_MODULE`, `ZENCHRON_CHROME_EXECUTABLE`, and artifact directories under temporary
+storage. No package install or production controller is required.
+
+```sh
+ZENCHRON_REACT_BROWSER_E2E=1 go test ./cmd/zenchron-engineering \
+  -run '^TestReactEngineeringOSGovernedWorkspace$' -count=1 -v
+ZENCHRON_BROWSER_E2E=1 go test ./cmd/zenchron-engineering \
+  -run '^TestBrowserWorkspace$' -count=1 -v
+go test ./cmd/zenchron-engineering \
+  -run '^TestEngineeringOSPlanRejectEndToEnd$' -count=1 -v
+```
+
+The restart test enables Chrome when `ZENCHRON_PLAYWRIGHT_MODULE` is set. It uses a new temporary
+store and real OS-process controller, not an API action fake. Reconciled workflow tests use actual
+Go HTTP/control socket/role/journal paths. External forge/model/verifier inputs stay offline.
+They record test decisions only, never real publication or production authorization.
+
+Against an isolated Go `control-plane` binary built from the same source:
+
+```sh
 ZENCHRON_PREVIEW_TOKEN_FILE=/absolute/path/to/isolated-state/control-plane.token \
+ZENCHRON_PREVIEW_SCREENSHOTS=/private/tmp/zenchron-head-preview \
 node scripts/check_design_preview.mjs
 ```
 
-Use the existing Go Control Plane listener built from that head. No remote PR, publication,
-production approval or merge was performed. Full-suite/current-head CI has not been run locally;
-it remains the GitHub CI gate.
+This maintained entry separates frozen fixture checks, actual empty/login captures and HTTP
+projection/load fixtures. Runtime never imports fixture measurements. The 1200-unit fixture
+asserts first-page readiness within 5 seconds and 50 visible graph nodes/events. Logical objective
+and history indexes represent 2000 and 10000 records; their reads are presentation mocks, not SQL
+service load qualification. New receipt tests use an actual journal exceeding 500 events.
 
-## Existing repository completion failure
+All 38 schemas compile; relevant Control Plane race checks, strict build/static/Windows checks,
+21 Python regressions and size/baseline verification pass. The old head's payload-file overage is
+resolved by the integrated main extraction, with no waiver or ceiling increase in this batch.
+Full Go suite runs in GitHub CI; only an exact-head green required check qualifies that gate.
 
-`python3 scripts/check_file_sizes.py` fails on **unchanged** `runtime/event_payload.go`:
-1,580 lines against the frozen 1,573 ceiling. The starting HEAD also has 1,580 lines and there is
-no task diff for that file or its baseline. This was not hidden, waived or repaired by unrelated
-runtime changes. All added source files remain below 500 lines; no changed source crossed 500 and
-no size exception was introduced. `controlplane/api.go` was already in the warning zone and gained
-read routes and bounded run-filter validation. The repository completion gate remains red until the separate overage is resolved.
+## Accessibility and visual evidence limits
 
-## Review and remaining gates
+Actual rendered checks cover names/roles, contrast, keyboard skip and dialogs/drawer, focus after
+resolution, responsive reflow, collapsed mobile bindings and visible decision footers. Chromium
+accessibility trees are committed as browser evidence. They do not substitute for manual screen-reader
+speech or native browser high-zoom checks. Those and real operator acceptance remain required before
+cutover. New runtime screenshots are inspection artifacts; the frozen approved fixture checkpoint
+is separately compared byte-for-byte. No new runtime baseline is self-approved.
 
-Ponytail review traced the real read/auth/action/controller/store flows and their callers. It
-corrected confirmation opener capture, modal/drawer containment, hash navigation for in-page
-recovery, stale-state action counts, unnecessary coupled reads and light disabled-button specificity.
-The server action allowlist, same-request proof, role/plan lock, journal, private-text boundary and
-uncertain-write reconciliation remain authoritative. No backend workflow interface or state machine
-was added; presentation satisfies §6(c), HTTP integration §6(b).
-
-Runs, Products, WorkGraphs, controller findings, agent bindings, login, plan revision inspection
-and bounded plan activity now share the React shell. Product/graph association is observed directly;
-no invented objective/graph relationship is presented. Approval/publication/human-gate resolution,
-private objective prose and installed-agent registry remain established CLI boundaries.
-Production-load performance, full screen-reader/high-zoom qualification, an approved pixel baseline
-and operator acceptance remain open. Process-restart proof uses the actual controller composition
-and measured test binary with explicit isolated test attestation; it does not qualify a production build.
-The [complete legacy-removal inventory](frontend-inventory.md) is retained. No obsolete Go-template
-page, static asset, old navigation route or template test has been removed.
-
-[Batch 02 review](batch-02-review.md) records the focused fixes and current operational scope.
+No obsolete frontend file is removed. Independent re-review and operator acceptance precede
+redirects, legacy deletion and the final single-shell production migration.

@@ -126,17 +126,11 @@ type cliInvocation struct {
 	// Bypass reports that the unsafe permission mode was explicitly authorized
 	// AND explicitly requested for this invocation.
 	Bypass bool
-	// ResultDir is the runtime-owned directory holding this invocation's typed
-	// result slot, or empty when the stage emits no typed result.
-	//
-	// It exists because the slot is deliberately OUTSIDE the candidate
-	// workspace - that placement is what stops repository content pre-seeding
-	// or predicting it - and a sandboxed CLI confines writes to the directories
-	// it was given. The first live reviewer completed its review, reached a
-	// BLOCK verdict, and could not write it: "requested permissions … but you
-	// haven't granted it yet". The runtime therefore names that ONE directory
-	// to the provider, and nothing else about the sandbox changes.
+	// ResultDir is the runtime-owned output directory for mutating typed results.
 	ResultDir string
+	// ReviewerResultPath is the host-captured final response, or Codex's
+	// last-message output path, for a read-only reviewer.
+	ReviewerResultPath string
 	// ScratchDir is runtime-owned validation state outside candidate source.
 	ScratchDir string
 	// RequiredTools are the executables this invocation's contract obliges the
@@ -994,9 +988,10 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		// directory its typed result goes in, and the executables its contract
 		// obliges it to run. Both are runtime-owned facts; neither widens the
 		// sandbox beyond them.
-		ResultDir:     resultDirFor(firstNonEmpty(request.ReviewerResultPath, request.FeedbackResolutionPath, request.HandoffPath)),
-		RequiredTools: request.RequiredTools,
-		ScratchDir:    request.ScratchDir,
+		ResultDir:          resultDirFor(firstNonEmpty(request.ReviewerResultPath, request.FeedbackResolutionPath, request.HandoffPath)),
+		ReviewerResultPath: request.ReviewerResultPath,
+		RequiredTools:      request.RequiredTools,
+		ScratchDir:         request.ScratchDir,
 	}
 	// The invocation MODE decides which argument vector is built, and a
 	// non-mutating request is refused outright when this adapter has no
@@ -1358,6 +1353,16 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		result.Outcome = execution.Failed
 		result.Failure = &ProviderFailure{Classification: recognized, RawDiagnosticRef: artifacts[0].Path}
 		return result, nil
+	}
+	if request.ReviewerResultPath != "" && streamed.AnswerObserved {
+		if len(result.Answer) > maxReviewerResultBytes {
+			result.Outcome = execution.Failed
+			result.Failure = &ProviderFailure{Classification: FailureReviewerProtocolIncomplete, RawDiagnosticRef: artifacts[0].Path}
+			return result, nil
+		}
+		if err := os.WriteFile(request.ReviewerResultPath, []byte(result.Answer), 0o600); err != nil {
+			return ExecutionResult{}, fmt.Errorf("capture reviewer final response: %w", err)
+		}
 	}
 	// The typed result slots are read by the HOST, not here (#521):
 	// readTypedResultSlots, right after Execute returns.

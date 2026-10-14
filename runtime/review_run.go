@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
@@ -317,7 +318,7 @@ func RunIndependentReview(ctx context.Context, in RunIndependentReviewInput) (Ru
 	go renewReviewClaimWhile(in.Store, reviewID, token, in.Clock, renewalStop, &claimLost)
 	invocation, err := InvokeReviewer(ctx, ReviewInvocationInput{
 		ReviewID: reviewID, Packet: packet, Workspace: workspace,
-		Agent: in.Reviewer, Provider: in.Provider, Artifacts: ArtifactStore{Root: in.StateDir},
+		Agent: in.Reviewer, Provider: in.Provider, Artifacts: ArtifactStore{Root: filepath.Join(in.StateDir, "artifacts")},
 		StateDir: in.StateDir, ControllerID: in.ControllerID, Model: in.Model,
 		Instructions: in.Instructions, Budgets: in.Budgets,
 	})

@@ -77,6 +77,43 @@ func TestInertAndOtherPackageChangesSelectOnlyAlwaysEvidence(t *testing.T) {
 	}
 }
 
+func TestObjectiveWorkspaceChangesSelectFocusedEvidenceWithoutFallback(t *testing.T) {
+	reg, _ := LoadRegistry()
+	repo := Repo{
+		TestsInFile: map[string][]string{
+			"runtime/read_objective_test.go":     {"TestObjectiveGraphReadsExplicitBindingAcrossReopenAndRefusesAmbiguity"},
+			"runtime/read_plans_test.go":         {"TestPlanSummariesPageBoundsReadsAndPreservesLifecycleOwner"},
+			"runtime/read_plan_identity_test.go": {"TestPlanPageRetainsAttemptIdentityWithoutInventingARevision"},
+		},
+		DepDirs:     []string{"schemas"},
+		PackageDirs: []string{"runtime", "controlplane", "schemas"},
+	}
+	changed := []string{
+		"controlplane/assets/static/console.css",
+		"controlplane/assets/static/console.js",
+		"controlplane/assets/templates/objective_detail.html",
+		"controlplane/assets/templates/objectives.html",
+		"controlplane/assets/templates/product_detail.html",
+		"schemas/control-plane-product-detail.schema.json",
+		"schemas/control-plane-workgraph.schema.json",
+		"schemas/control-plane-workgraph-detail.schema.json",
+		"runtime/read_objective.go",
+		"runtime/read_objective_test.go",
+		"runtime/read_plans.go",
+		"runtime/read_plans_test.go",
+		"runtime/read_plan_identity_test.go",
+	}
+	got := PlanEvidence(reg, repo, changed)
+	wantRace := []string{
+		"TestObjectiveGraphReadsExplicitBindingAcrossReopenAndRefusesAmbiguity",
+		"TestPlanPageRetainsAttemptIdentityWithoutInventingARevision",
+		"TestPlanSummariesPageBoundsReadsAndPreservesLifecycleOwner",
+	}
+	if got.Whole || !slices.Equal(got.Race, wantRace) {
+		t.Fatalf("known objective changes did not select narrow focused runtime evidence: %+v", got)
+	}
+}
+
 func TestARaceDomainEscalatesOnlyItsOwnTests(t *testing.T) {
 	got := plan("runtime/controller_succession.go", "runtime/handoff_slot.go")
 	if !slices.Equal(got.Race, []string{"TestControllerCrash", "TestShutdown"}) {

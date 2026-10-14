@@ -4,6 +4,12 @@
   "inert": [
     "**/*.md",
     "docs/**",
+    "controlplane/assets/static/console.css",
+    "controlplane/assets/static/console.js",
+    "controlplane/assets/templates/**",
+    "schemas/control-plane-product-detail.schema.json",
+    "schemas/control-plane-workgraph.schema.json",
+    "schemas/control-plane-workgraph-detail.schema.json",
     ".github/**",
     ".claude/**",
     "agentkernel/**",
@@ -84,6 +90,7 @@
         "runtime/control_session.go",
         "runtime/doctor.go",
         "runtime/operator.go",
+        "runtime/operator_reconciliation.go",
         "runtime/watch*.go",
         "runtime/connectivity.go",
         "runtime/fleet.go",
@@ -95,9 +102,11 @@
         "runtime/control_*_test.go",
         "runtime/doctor_test.go",
         "runtime/operator_test.go",
+        "runtime/operator_reconciliation_test.go",
         "runtime/watch*_test.go",
         "runtime/forge_review_test_doubles_test.go",
         "runtime/connectivity_test.go",
+        "runtime/connectivity_dns_test.go",
         "runtime/fleet*_test.go",
         "runtime/gc_test.go",
         "runtime/status_live_operation_test.go"
@@ -147,6 +156,8 @@
         "runtime/journal.go",
         "runtime/state_storage.go",
         "runtime/read_store.go",
+        "runtime/read_objective.go",
+        "runtime/read_plans.go",
         "runtime/projection.go",
         "runtime/event_payload.go",
         "runtime/run_summary.go"
@@ -155,6 +166,9 @@
         "runtime/sqlite_store_test.go",
         "runtime/journal_test.go",
         "runtime/read_store_test.go",
+        "runtime/read_objective_test.go",
+        "runtime/read_plans_test.go",
+        "runtime/read_plan_identity_test.go",
         "runtime/read_scaling_test.go",
         "runtime/projection_test.go",
         "runtime/event_*_test.go",
@@ -179,6 +193,7 @@
       "tests": [
         "runtime/*handoff*_test.go",
         "runtime/communication_test.go",
+        "runtime/communication_store_delivery_test.go",
         "runtime/typed_result_*_test.go"
       ]
     },
@@ -203,11 +218,33 @@
       "sources": [
         "runtime/workgraph*.go",
         "orchestration/workgraph*.go",
-        "runtime/integration_dispatch.go"
+        "runtime/integration_dispatch.go",
+        "runtime/integration_conflict_delivery.go",
+        "runtime/objective_workgraph.go"
       ],
       "tests": [
         "runtime/workgraph*_test.go",
-        "runtime/compose_integration_recovery_test.go"
+        "runtime/compose_integration_recovery_test.go",
+        "runtime/integration_conflict_delivery_test.go",
+        "runtime/objective_workgraph_test.go",
+        "runtime/objective_remediation_review_vertical_test.go"
+      ]
+    },
+    {
+      "name": "remediation_epochs",
+      "why": "#581: governed remediation epochs for an already-admitted WorkUnit - Finding-to-RemediationRequest eligibility, durable RemediationAuthorization/RemediationEpoch, atomic epoch admission and causation-bound automatic reintegration.",
+      "race": true,
+      "sources": [
+        "runtime/remediation_activation.go",
+        "runtime/remediation_eligibility.go",
+        "runtime/remediation_facts.go",
+        "runtime/remediation_schema.go",
+        "runtime/remediation_store.go"
+      ],
+      "tests": [
+        "runtime/remediation_store_test.go",
+        "runtime/remediation_end_to_end_test.go",
+        "runtime/remediation_decision_resumption_isolation_test.go"
       ]
     },
     {
@@ -244,13 +281,15 @@
       "sources": [
         "runtime/plan_*.go",
         "runtime/planner.go",
-        "planning/*.go"
+        "planning/*.go",
+        "runtime/planner_proposal.go"
       ],
       "tests": [
         "runtime/plan_*_test.go",
         "runtime/planner*_test.go",
         "runtime/planning_*_test.go",
-        "runtime/sixth_dogfood_test.go"
+        "runtime/sixth_dogfood_test.go",
+        "runtime/objective_workgraph_test.go"
       ]
     },
     {
@@ -404,6 +443,7 @@
         "runtime/review_remediation_e2e_test.go",
         "runtime/review_remediation_supervisor_test.go",
         "runtime/review_remediation_trigger_test.go",
+        "runtime/security_reviewer_stage_test.go",
         "runtime/review_verification_claim_test.go"
       ]
     },
@@ -428,11 +468,13 @@
       "sources": [
         "runtime/tool_*.go",
         "runtime/sandbox.go",
-        "runtime/toolchain_probe.go"
+        "runtime/toolchain_probe.go",
+        "runtime/go_assurance_environment.go"
       ],
       "tests": [
         "runtime/tool_*_test.go",
-        "runtime/sandbox*_test.go"
+        "runtime/sandbox*_test.go",
+        "runtime/go_assurance_environment_test.go"
       ]
     },
     {

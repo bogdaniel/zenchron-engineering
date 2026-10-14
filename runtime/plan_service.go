@@ -110,6 +110,9 @@ type ProposeInput struct {
 	Issue int
 	// Template is the operator's chosen reusable process, or empty.
 	Template string
+	// Profile is the operator's default profile preference for agent stages.
+	// A template or reasoning proposal may state a more specific preference.
+	Profile string
 	// Reasoned is a reasoning agent's proposed stages, and Reasoning its
 	// provenance. Both are absent for a purely deterministic compilation, which
 	// is a first-class mode rather than a fallback: the deterministic skeleton
@@ -208,6 +211,9 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	if err := s.RefuseConfigurationHold(input.PlanID); err != nil {
 		return domain.EngineeringPlan{}, err
 	}
+	if err := s.refuseStartedObjectiveRevision(input.PlanID); err != nil {
+		return domain.EngineeringPlan{}, err
+	}
 	existing, found, err := s.Store.Plan(input.PlanID)
 	if err != nil {
 		return domain.EngineeringPlan{}, err
@@ -225,6 +231,11 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 			return domain.EngineeringPlan{}, err
 		}
 		template = &resolved
+	}
+	if input.Profile != "" {
+		if _, err := s.Registry.Profile(input.Profile); err != nil {
+			return domain.EngineeringPlan{}, err
+		}
 	}
 	origin := input.Origin
 	if origin == "" {
@@ -285,9 +296,12 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 		plan, compileErr = planning.Compile(planning.CompileInput{
 			PlanID: input.PlanID, Revision: revision, Objective: input.Objective,
 			Subject: input.Subject, Contract: input.Contract, Model: input.Model, Facts: input.Facts,
-			Template: template, Envelope: s.Envelope, Proposed: input.Reasoned,
+			Template: template, PreferredProfile: input.Profile, Envelope: s.Envelope, Proposed: input.Reasoned,
 			Reasoning: input.Reasoning, Previous: previous, RatchetBaseline: ratchetBaseline, Consumed: consumed,
 		})
+	}
+	if compileErr == nil && input.Issue > 0 && !hasObjectiveCandidate(plan) {
+		compileErr = errors.New("an issue objective plan requires at least one material-producing agent stage")
 	}
 	if compileErr != nil {
 		// The refusal is durable in BOTH shapes it can take.
@@ -715,44 +729,6 @@ func sameStageContent(left, right domain.PlanStage) bool {
 	return string(leftJSON) == string(rightJSON)
 }
 
-// PlanView is the operator's whole answer about one plan: the exact revision,
-// its replayed state, the assignments resolution would produce, and every stage
-// that cannot be assigned with the reason.
-type PlanView struct {
-	Plan     domain.EngineeringPlan   `json:"plan"`
-	Snapshot PlanSnapshot             `json:"state"`
-	Assigned []domain.AgentAssignment `json:"assignments,omitempty"`
-	Blocked  []planning.Blocked       `json:"blocked,omitempty"`
-	// Consumed and Envelope are shown together, and unknown cost stays unknown:
-	// an approval view that rendered "not reported" as zero would be telling an
-	// operator something nobody measured.
-	Envelope domain.PlanBudgetEnvelope `json:"budget_envelope"`
-	Consumed domain.PlanConsumption    `json:"consumed"`
-	// Preview is present when the revision shown is NOT the one governing the
-	// work. The state beside it is then prospective - what approving this
-	// revision would leave - rather than a report of what is happening.
-	Preview *PlanPreview `json:"preview,omitempty"`
-	// BaseChange is present when this revision binds a different exact base than
-	// the revision it replaces. Approving it authorizes work against a different
-	// tree, and everything performed against the old base is redone.
-	BaseChange *PlanBaseChange `json:"base_change,omitempty"`
-	// AssignmentsDigest is the digest of the assignments approving THIS view
-	// would bind: who performs each stage that has not started, under which
-	// profile, packs, context and worker.
-	//
-	// It exists so a decision can name it. The plan digest binds the document,
-	// and registry and workforce edits do not change that document - so an edit
-	// landing between reading a proposal and deciding on it would be bound as
-	// "what the operator saw". Naming this closes that the same way naming the
-	// revision digest closed deciding an unread document.
-	AssignmentsDigest string `json:"assignments_digest,omitempty"`
-	// Unbound is the stages this revision's approval bound NOTHING for, in
-	// stage order: they showed a blocker rather than an assignment, so there
-	// was no identity to hold execution to and they resolve live when they
-	// become performable.
-	Unbound []string `json:"unbound,omitempty"`
-}
-
 // PlanBaseChange states that this revision moved the plan onto a different
 // exact base of the SAME repository.
 //
@@ -953,6 +929,13 @@ func (s PlanService) previewSnapshot(plan domain.EngineeringPlan, snapshot PlanS
 
 func (s PlanService) durableViewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanView, error) {
 	view := PlanView{Plan: plan, Snapshot: snapshot, Envelope: plan.BudgetEnvelope, Consumed: snapshot.Consumed}
+	graph, err := objectiveGraphFor(s.Store, plan.ID)
+	if err != nil {
+		return PlanView{}, err
+	}
+	if graph != nil {
+		view.WorkGraphID = graph.ID
+	}
 	baseChange, err := s.baseChange(plan)
 	if err != nil {
 		return PlanView{}, err

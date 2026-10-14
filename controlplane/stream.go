@@ -151,7 +151,7 @@ func (a *API) stream(w http.ResponseWriter, r *http.Request) {
 		if a.afterCursorRead != nil {
 			a.afterCursorRead()
 		}
-		s, err := a.Store.Status(id, a.now())
+		observed, err := a.readRunDetail(id)
 		if err != nil {
 			fail(w, 500, "read_failed")
 			return
@@ -159,7 +159,7 @@ func (a *API) stream(w http.ResponseWriter, r *http.Request) {
 		if a.afterSnapshotRead != nil {
 			a.afterSnapshotRead()
 		}
-		detail = runDetailProjection(s)
+		detail = observed
 	}
 
 	// The server's WriteTimeout bounds one request's write; an SSE stream is

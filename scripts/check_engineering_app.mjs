@@ -65,6 +65,30 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
       if (mode === "unauthorized") return route.fulfill({ status: 401, json: { error: "unauthorized" } });
       if (mode === "permission") return route.fulfill({ status: 403, json: { error: "forbidden_origin" } });
       if (mode === "failed") return route.abort("connectionfailed");
+      if (url.pathname === "/v1/workspace/requests")
+        return route.fulfill({
+          json: {
+            requests: [],
+            offset: Number(url.searchParams.get("offset") || 0),
+            has_more: false,
+            graphs_offset: Number(url.searchParams.get("graphs_offset") || 0),
+            graphs_has_more: false,
+          },
+        });
+      if (url.pathname.endsWith("/preview"))
+        return route.fulfill({
+          json: {
+            ...plan,
+            plan_id: decodeURIComponent(url.pathname.split("/")[3]),
+            objective: "Bounded fixture objective",
+            stage_objectives: {},
+            stage_rationales: {},
+            stage_blockers: {},
+            assignments_digest: digest,
+            controller_binding: reachable ? binding : "",
+            unbound: ["No fixture assignment authority"],
+          },
+        });
       if (url.pathname === "/v1/fleet")
         return route.fulfill({
           json: {
@@ -113,9 +137,10 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
           : Array.from({ length: 50 }, (_, i) => ({
               ...row,
               plan_id: i === 0 && offset === 0 ? row.plan_id : `test-plan-${offset + i}`,
+              pending: mode === "paged-pending" ? offset >= 50 && i === 0 : true,
             }));
         return route.fulfill({
-          json: mode === "malformed" ? { plans: "bad" } : { plans: rows, offset, has_more: offset < 450 && !query },
+          json: mode === "malformed" ? { plans: "bad" } : { plans: rows, offset, has_more: offset < 1950 && !query },
         });
       }
       if (url.pathname.endsWith("/context")) {
@@ -221,6 +246,22 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
       true,
       "Closed mobile navigation is outside the tab order",
     );
+    mode = "paged-pending";
+    await page.goto(base + "/app#/actions");
+    await page.getByText("0 pending · 0 actionable · plan decisions", { exact: true }).waitFor();
+    await page
+      .getByRole("group", { name: "Plan request pagination", exact: true })
+      .getByRole("button", { name: "Next", exact: true })
+      .click();
+    await page.getByLabel("Choose a decision").selectOption("test-plan-50/1");
+    await page.getByRole("heading", { name: "Review plan revision 1", exact: true }).waitFor();
+    assert.match(
+      page.url(),
+      /actions\/test-plan-50\/1\?offset=50$/,
+      "Pending request after the first 50 preserves its exact route and page",
+    );
+    assert.match(await page.locator(".decision-detail").innerText(), /test-plan-50/);
+    mode = "ready";
     await page.goto(base + "/app#/actions/test-plan/1");
     await page.getByRole("heading", { name: "Review plan revision 1" }).waitFor();
     assert.match(await page.locator(".request-summary").innerText(), /50 pending · 50 actionable/);
@@ -239,7 +280,7 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
       Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" }),
     );
     await page.getByRole("button", { name: "Refresh", exact: true }).click();
-    await page.getByText("50 pending · 50 actionable · rejection only", { exact: true }).waitFor();
+    await page.getByText("50 pending · 50 actionable · plan decisions", { exact: true }).waitFor();
     const before = reads;
     await page.getByRole("button", { name: "Reject", exact: true }).click();
     await page.getByRole("dialog").waitFor();
@@ -251,7 +292,11 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
     assert.equal(await page.locator("#runtime-recovery").evaluate((n) => n === document.activeElement), true);
     reachable = false;
     await page.getByRole("button", { name: "Refresh", exact: true }).click();
-    await page.getByText("Controller endpoint unreachable or not serving", { exact: true }).waitFor();
+    await page
+      .locator(".decision-footer")
+      .getByText("Controller endpoint unreachable or not serving", { exact: true })
+      .first()
+      .waitFor();
     assert.match(await page.locator(".request-summary").innerText(), /50 pending · 0 actionable/);
     assert.equal(await page.getByRole("button", { name: "Reject", exact: true }).isDisabled(), true);
     await page.goto(base + "/app#/controller");
@@ -296,12 +341,15 @@ export async function checkEngineeringApplication(page, base, out, captureFullPa
       httpMocksOnlyAfterRealCaptures: true,
       checks: [
         "Genuine isolated empty API captures; React app never imports fixtures",
-        "500-row paged HTTP contract; full-index search; gate/run distinction; escaped text",
+        "2000-objective logical paged HTTP fixture; full-index search; gate/run distinction; escaped text",
         "Pending versus actionable; identity independent of reachability; changed request refused before confirmation",
         "Historical receipt, route-preserving recovery, refused/malformed/mismatched/disconnected reads retain stale context",
         "Eight dark/light contrast/name checks; no writes in this boundary-only suite",
       ],
     };
+  } catch (error) {
+    await page.screenshot({ path: resolve(out, "react-boundary-failure.png"), fullPage: true });
+    throw error;
   } finally {
     page.off("request", watch);
     await page.unroute("**/v1/**");

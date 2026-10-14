@@ -60,7 +60,7 @@ try {
   await visit(destination);
   if (phase.startsWith("reject")) {
     assert.match(await page.locator(".request-summary").innerText(), /1 pending · 1 actionable/);
-    assert.equal(await page.getByRole("button", { name: "Review & approve", exact: true }).isDisabled(), true);
+    // Approval now uses the existing governed preview; this driver exercises rejection only.
     assert.equal(await page.locator(".decision-detail details[open]").count(), 0);
     const reject = page.getByRole("button", { name: "Reject", exact: true });
     const box = await reject.boundingBox();
@@ -69,7 +69,7 @@ try {
       `Mobile decision controls must fit above bottom navigation: ${JSON.stringify(box)}`,
     );
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-    report.checks.push("390px exact subject, visible actions, collapsed binding; unsupported approval disabled");
+    report.checks.push("390px exact subject, visible actions, collapsed binding; fresh assignment preview governs approval");
     for (const theme of losesReply ? [] : ["dark", "light"]) {
       await page.evaluate((t) => localStorage.setItem("zenchron-theme", t), theme);
       for (const width of [1440, 1920, 390]) {

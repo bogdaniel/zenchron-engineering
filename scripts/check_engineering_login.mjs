@@ -48,6 +48,20 @@ export async function checkEngineeringLogin(browser, base, out) {
     await page.getByRole("button", { name: "Connect", exact: true }).click();
     await page.getByRole("heading", { name: "Runs & activity", exact: true }).waitFor();
     assert.match(page.url(), /app#\/runs$/, "Login preserves the requested destination");
+    for (const destination of ["runs", "objectives"]) {
+      await page.goto(base + "/app#/" + destination);
+      await page.getByRole("heading", { level: 1 }).waitFor();
+      const exact = page.url();
+      await page.getByRole("link", { name: "Skip to main content", exact: true }).focus();
+      await page.keyboard.press("Enter");
+      assert.equal(page.url(), exact, "Keyboard skip preserves the authenticated route");
+      assert.equal(
+        await page.evaluate(() => document.activeElement?.id),
+        "main",
+        "Keyboard skip focuses the main landmark",
+      );
+    }
+
     assert.equal(await page.evaluate(() => Object.keys(localStorage).some((k) => /token|credential/i.test(k))), false);
     assert.deepEqual(legacyAssets, [], "React login has no old JavaScript/CSS dependency");
     assert.deepEqual(writes, [], "Connecting only authenticates read requests");
