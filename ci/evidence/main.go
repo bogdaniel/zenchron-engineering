@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -33,14 +34,18 @@ func main() {
 	// The race escalation is about four times slower than the plain run, so CI
 	// runs it as a parallel job instead of adding it to T1's latency.
 	race := flag.Bool("race", false, "run only the -race escalation of high-risk domains")
+	shard := flag.String("race-shard", "", "partition the same race selection as part/count, e.g. 1/4")
 	flag.Parse()
-	if err := run(*base, *planOnly, *race); err != nil {
+	if err := run(*base, *planOnly, *race, *shard); err != nil {
 		fmt.Fprintln(os.Stderr, "evidence:", err)
 		os.Exit(1)
 	}
 }
 
-func run(base string, planOnly, race bool) error {
+func run(base string, planOnly, race bool, shard string) error {
+	if shard != "" && !race {
+		return fmt.Errorf("-race-shard requires -race")
+	}
 	reg, err := LoadRegistry()
 	if err != nil {
 		return err
@@ -64,16 +69,44 @@ func run(base string, planOnly, race bool) error {
 		fmt.Println("  " + reason)
 	}
 	fmt.Printf("./%s: whole=%v, %d selected test(s), %d under -race\n", reg.FocusedPackage, plan.Whole, len(plan.Run), len(plan.Race))
+	raceTests, err := shardRaceTests(plan.Race, shard)
+	if err != nil {
+		return err
+	}
+	if shard != "" {
+		fmt.Printf("race shard %s: %d of %d selected tests; coverage is the union of all shards\n", shard, len(raceTests), len(plan.Race))
+	}
 	if planOnly {
 		return nil
 	}
 	if race {
-		if len(plan.Race) == 0 {
+		if len(raceTests) == 0 {
 			return nil
 		}
-		return execute(root, [][]string{{"go", "test", "-race", "-timeout", raceTimeout, "-run", RunPattern(plan.Race), "./" + reg.FocusedPackage}})
+		return execute(root, [][]string{{"go", "test", "-race", "-timeout", raceTimeout, "-run", RunPattern(raceTests), "./" + reg.FocusedPackage}})
 	}
 	return execute(root, t1Commands(reg.FocusedPackage, repo.PackageDirs, plan))
+}
+
+// Partition names, never domains: overlapping domains still run each selected
+// test exactly once, and whole-package fallback retains every high-risk name.
+func shardRaceTests(tests []string, shard string) ([]string, error) {
+	if shard == "" {
+		return tests, nil
+	}
+	partText, countText, ok := strings.Cut(shard, "/")
+	part, partErr := strconv.Atoi(partText)
+	count, countErr := strconv.Atoi(countText)
+	if !ok || partErr != nil || countErr != nil || part < 1 || count < 1 || part > count {
+		return nil, fmt.Errorf("invalid race shard %q: want part/count with 1 <= part <= count", shard)
+	}
+	selected := []string{}
+	for i, name := range tests {
+		if i%count == part-1 {
+			selected = append(selected, name)
+		}
+	}
+	return selected, nil
 }
 
 func t1Commands(focused string, packageDirs []string, plan Plan) [][]string {

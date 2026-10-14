@@ -288,34 +288,14 @@ func (a *API) authorize(w http.ResponseWriter, r *http.Request) {
 		if err != nil || !found {
 			return false, nil, err
 		}
-		events, _, err := a.Store.EventsPage(id, 0, 500)
+		receipts, err := readAuthorityReceipts(a.Store, id, body.RequestID, body.Digest)
 		if err != nil {
 			return false, nil, err
 		}
 		done := false
-		// Page until the end: an old request's evidence can precede hundreds of
-		// subsequent observations and must not be mistaken for absent evidence.
-		after := int64(0)
-		for {
-			for _, event := range events {
-				after = event.Sequence
-				if event.Type != rt.EventHumanAuthorityRecorded {
-					continue
-				}
-				var recorded rt.HumanAuthorityRecordedPayload
-				if err := json.Unmarshal(event.Payload, &recorded); err != nil {
-					return false, nil, err
-				}
-				if recorded.Request.ID == body.RequestID && recorded.Request.Revision == body.Digest && recorded.Decision == body.Decision {
-					done = true
-				}
-			}
-			events, _, err = a.Store.EventsPage(id, after, 500)
-			if err != nil {
-				return false, nil, err
-			}
-			if len(events) == 0 {
-				break
+		for _, receipt := range receipts {
+			if receipt.Decision == body.Decision {
+				done = true
 			}
 		}
 		status, err := a.Store.Status(id, a.now())

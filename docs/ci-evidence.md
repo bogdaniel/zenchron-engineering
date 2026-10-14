@@ -9,7 +9,7 @@ disappearing.
 |------|------|------|-------|
 | T0 | `gofmt`, `go vet`, Windows build and vet | every PR | `ci/static.sh` |
 | T1 | every package except `runtime` whole, plus the `runtime` tests the impact registry selects | every PR | `go run ./ci/evidence` |
-| T1 race | the selected tests of high-risk (`race: true`) domains under `-race`, as a parallel job | every PR | `go run ./ci/evidence -race` |
+| T1 race | the same selected high-risk (`race: true`) test names partitioned across four isolated runners; every part must pass | every PR | `go run ./ci/evidence -race -race-shard 1/4` (and 2/4–4/4) |
 | T2 | `go test -timeout 30m ./...` | today: every PR and every push to `main` (the required `go` check) | `.github/workflows/ci.yml` |
 | T3 | `go test -race ./...` | nightly, on request | `.github/workflows/assurance.yml` |
 
@@ -78,8 +78,9 @@ The workflow has no path list of its own. Each domain names the source globs
 whose change selects it, and the test-file globs (or test names) that make up
 its evidence. `race: true` marks a high-risk domain, which also runs its tests
 under `-race`. `always: true` marks the source-scan guards. `whole` lists
-cross-domain hotspots. Today that is only `runtime/operations.go`, which
-recent PRs changed for review, provider and toolchain semantics alike.
+cross-domain hotspots. `runtime/operations.go` spans review, provider and toolchain
+semantics. `schemas/validate.go` registers and compiles every kernel/planning/API
+contract; changes there retain whole-runtime and every high-risk race domain.
 
 Selection is deterministic. Each changed path is handled by the first rule that
 matches:
@@ -134,3 +135,49 @@ a rule leaves its files unclassified, and the conformance tests catch that.
 A change in one domain can still break a test in another, through shared code.
 T2 exists to catch that case. How often it happens is the measure of whether
 the domains are drawn well.
+
+### Engineering OS classification
+
+`runtime/operator_action_receipt.go` and its test belong to `store` (`race: true`):
+they add closed observational journal events and exact read-only receipt lookup.
+Changing either selects the receipt test and the entire durable-store domain,
+including payload validation, journal integrity and read/reopen evidence.
+
+`operator_surface` explicitly owns active `frontend/**`, embedded
+`controlplane/assets/design/**` and Control Plane wire-schema paths. They are not
+declared inert. Its race evidence proves the bounded read contracts, original
+receipt, controller proof/role and lost-control-response distinction those
+clients consume. Every non-runtime Go package still runs whole, including the
+Control Plane, schema compiler and real controller integration tests.
+
+This is a **runtime boundary domain**, not browser acceptance. Strict TypeScript,
+reproducible bundling, actual browser/keyboard/contrast/reflow checks and human
+screen-reader/operator qualification remain explicit obligations in the
+[operator guide](design/operator-acceptance.md). Opt-in browser tests are not
+silently represented as having run on a Go-only CI host.
+
+The current PR also changes the shared schema registry, so it still selects the
+whole runtime and all high-risk race domains. This classification does not remove
+that cost or establish full race acceptance. Unknown/new dependency paths still
+fail safe to the whole runtime; no timeout, gate or guard is weakened.
+
+### Race workload partitioning
+
+The reviewed head exhausted its existing 60-minute package bound after selecting
+1285 race tests; the active test had run only three seconds. Exact trusted main
+also shows substantial serial cost (80.6 minutes for its successful full T3).
+T1 race now partitions the **same sorted selected names** by position across four
+isolated runners. Overlapping domains do not duplicate tests. Conformance tests
+prove the partition union equals the entire narrow or whole-fallback selection,
+with every name occurring exactly once. No selection or test assertion is cut.
+
+`-race-shard part/count` is valid only with `-race`; malformed/out-of-range values
+refuse. The original unsharded CLI remains available. Every part keeps `-race`
+and the unchanged 60-minute package bound. Matrix fail-fast is off so a failing
+part does not cancel the others. The existing `evidence-race` check identity is a
+fail-closed aggregate: failure, cancellation or skip of a part cannot pass it.
+This follows GitHub's [needs result](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#needs-context)
+and [matrix failure handling](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/run-job-variations#handling-failures)
+contracts. The strict required `go` job, exact push-to-main T2, trust policy and
+unpartitioned whole-module T3 remain unchanged. CI still must prove every part
+at the exact submitted head; a focused probe is never that qualification.

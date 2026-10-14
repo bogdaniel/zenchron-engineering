@@ -21,7 +21,8 @@
     "LICENSE"
   ],
   "whole": [
-    "runtime/operations.go"
+    "runtime/operations.go",
+    "schemas/validate.go"
   ],
   "domains": [
     {
@@ -160,6 +161,7 @@
         "runtime/read_plans.go",
         "runtime/projection.go",
         "runtime/event_payload.go",
+        "runtime/operator_action_receipt.go",
         "runtime/run_summary.go"
       ],
       "tests": [
@@ -172,10 +174,33 @@
         "runtime/read_scaling_test.go",
         "runtime/projection_test.go",
         "runtime/event_*_test.go",
+        "runtime/operator_action_receipt_test.go",
         "runtime/changes_since_test.go",
         "runtime/canonical_json_test.go",
         "runtime/subject_store*_test.go",
         "runtime/metadata_baseline_test.go"
+      ]
+    },
+    {
+      "name": "operator_surface",
+      "why": "Active React/preview assets and Control Plane wire schemas consume bounded runtime observations and the existing same-request controller authority boundary. These tests cover those runtime contracts; T1 also runs controlplane, schemas and cmd packages whole. Browser/build/accessibility qualification remains a separate explicit obligation, not implied by this mapping.",
+      "race": true,
+      "sources": [
+        "frontend/**",
+        "controlplane/assets/design/**",
+        "schemas/control-plane-*.schema.json"
+      ],
+      "tests": [
+        "runtime/read_store_test.go",
+        "runtime/read_objective_test.go",
+        "runtime/read_plans_test.go",
+        "runtime/read_plan_identity_test.go",
+        "runtime/read_scaling_test.go",
+        "runtime/control_session_test.go",
+        "runtime/control_reply_lost_test.go",
+        "runtime/control_endpoint_ownership_test.go",
+        "runtime/controller_status_test.go",
+        "runtime/operator_action_receipt_test.go"
       ]
     },
     {

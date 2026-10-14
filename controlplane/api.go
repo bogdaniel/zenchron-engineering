@@ -150,6 +150,7 @@ type ExecutionDiagnostic struct {
 	SuccessorUnavailable string          `json:"successor_unavailable,omitempty"`
 }
 type RunDetail struct {
+	Paused                   *bool                 `json:"paused,omitempty"`
 	ID                       string                `json:"run_id"`
 	Repository               string                `json:"repository,omitempty"`
 	Phase                    rt.Phase              `json:"phase"`
@@ -287,11 +288,15 @@ type API struct {
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/controller", a.controller)
+	mux.HandleFunc("GET /v1/fleet", a.fleet)
 	mux.HandleFunc("GET /v1/runs", a.runs)
 	mux.HandleFunc("GET /v1/runs/{id}", a.run)
 	mux.HandleFunc("GET /v1/runs/{id}/events", a.events)
 	mux.HandleFunc("GET /v1/runs/{id}/stream", a.stream)
 	mux.HandleFunc("GET /v1/plans/{id}", a.plan)
+	mux.HandleFunc("GET /v1/plans", a.plans)
+	mux.HandleFunc("GET /v1/plans/{id}/context", a.planContext)
+	mux.HandleFunc("GET /v1/plans/{id}/events", a.planEvents)
 	mux.HandleFunc("GET /v1/plans/{id}/detail", a.planDetail)
 	mux.HandleFunc("GET /v1/products", a.products)
 	mux.HandleFunc("GET /v1/products/{id}", a.product)
@@ -306,6 +311,10 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/objectives", a.propose)
 	mux.HandleFunc("POST /v1/plans/{id}/revise", a.propose)
 	mux.HandleFunc("GET /v1/workspace/options", a.workspaceOptions)
+	mux.HandleFunc("GET /v1/workspace/requests", a.workspaceRequests)
+	mux.HandleFunc("GET /v1/decisions/{id}/resolution", a.decisionResolution)
+	mux.HandleFunc("GET /v1/runs/{id}/authority-receipts", a.authorityReceipts)
+	mux.HandleFunc("GET /v1/operator-action-receipts/{id}", a.operatorActionReceipt)
 	mux.HandleFunc("GET /v1/plans/{id}/preview", a.planPreview)
 	mux.HandleFunc("POST /v1/plans/{id}/approve", a.approve)
 	mux.HandleFunc("POST /v1/decisions/{id}/resolve", a.resolveDecision)
@@ -333,6 +342,13 @@ func (a *API) Handler() http.Handler {
 		if pattern == "" {
 			fail(w, 404, "not_found")
 			return
+		}
+		if r.Method == http.MethodPost {
+			var ok bool
+			r, ok = correlateAction(w, r)
+			if !ok {
+				return
+			}
 		}
 		mux.ServeHTTP(w, r)
 	})
@@ -386,17 +402,39 @@ func (a *API) runs(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_page")
 		return
 	}
+	for _, key := range []string{"status", "source"} {
+		if v := r.URL.Query()[key]; len(v) > 1 || (len(v) == 1 && len(v[0]) > 200) {
+			fail(w, 400, "invalid_page")
+			return
+		}
+	}
+	filter := runsFilterFromQuery(r.URL.Query())
+	switch filter.Status {
+	case "", "active", "waiting", "failed", "completed", "cancelled", "held":
+	default:
+		fail(w, 400, "invalid_page")
+		return
+	}
 	f, err := a.Store.Fleet(a.now())
 	if err != nil {
 		fail(w, 500, "read_failed")
 		return
 	}
 	out := Runs{Runs: []Run{}, Offset: int(offset)}
-	end := min(int64(len(f.Runs)), offset+limit)
-	for i := offset; i < end; i++ {
-		out.Runs = append(out.Runs, runProjection(f.Runs[i]))
+	// ponytail: filter the cached fleet before paging, fine below ~10k runs;
+	// move filtering into a canonical read index if measured latency grows.
+	rows := []Run{}
+	for _, run := range f.Runs {
+		row := runProjection(run)
+		if filter.matches(row) {
+			rows = append(rows, row)
+		}
 	}
-	out.HasMore = end < int64(len(f.Runs))
+	end := min(int64(len(rows)), offset+limit)
+	for i := offset; i < end; i++ {
+		out.Runs = append(out.Runs, rows[i])
+	}
+	out.HasMore = end < int64(len(rows))
 	send(w, 200, out)
 }
 func (a *API) exists(w http.ResponseWriter, id string) bool {
@@ -497,12 +535,12 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	if !a.exists(w, id) {
 		return
 	}
-	s, err := a.Store.Status(id, a.now())
+	detail, err := a.readRunDetail(id)
 	if err != nil {
 		fail(w, 500, "read_failed")
 		return
 	}
-	send(w, 200, runDetailProjection(s))
+	send(w, 200, detail)
 }
 
 // eventProjection is the one sanitized view of a journal event: sequence,

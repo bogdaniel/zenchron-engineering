@@ -86,14 +86,16 @@ described below; they never write SQLite directly.
 | Route | Projection |
 | --- | --- |
 | `/v1/controller` | Controller consistency, serving, projection, role, admission, generation match |
-| `/v1/runs?offset=0&limit=100` | Runtime fleet run summaries |
+| `/v1/fleet` | Existing fleet aggregates without run/plan collections; zero capacity means unknown |
+| `/v1/runs?offset=0&limit=100` | Runtime run summaries; optional `status`/`source` filters apply before paging |
 | `/v1/runs/{id}` | Runtime status, lifecycle times, operation progress and its source |
 | `/v1/runs/{id}/events?after=0&limit=100` | Run-local event metadata |
 | `/v1/runs/{id}/stream` | Per-run SSE: snapshot, then events (below) |
 | `/v1/plans/{id}` | Plan summary, revisions and stage counts |
 | `/v1/plans/{id}/detail` | Plan stages, dependencies, bindings, review verdicts and budget envelope |
+| `/v1/plans/{id}/events?after=0&limit=100` | Plan-local journal metadata, including refused attempts; no payload/prose |
 | `/v1/products` | Product (#476) summaries: identity, revision, repositories |
-| `/v1/products/{id}` | One product's current configuration and every associated WorkGraph's full detail (see `/v1/workgraphs/{id}` below) - the Product Workspace's one-page entry point (#479) |
+| `/v1/products/{id}` | One product's configuration and a SQL-paged association list (`graphs_offset`/`graphs_limit`); inspect each graph separately |
 | `/v1/workgraphs` | WorkGraph (#472) summaries |
 | `/v1/workgraphs/{id}` | One WorkGraph's units, frontier, independent-review state, each unit's full run detail and its own open #473 decisions |
 
@@ -215,6 +217,29 @@ S1 bounds the SQLite event-page query as well as its response. It does not
 introduce an independently maintained projection cache.
 
 ## Console
+
+### Visual design checkpoint
+
+An authenticated, fixture-only replacement preview is available at `/design` on
+this same listener. It includes Engineering Overview, Objectives Portfolio,
+Objective Workspace and Action Required, with dark/light themes and mobile layouts.
+Its simulated decisions never call the runtime. The current console and all
+`/v1/` contracts remain supported during review; no legacy interface has been removed.
+The accepted React/TypeScript application is being implemented at `/app` on this same listener.
+It includes Overview, Objectives, exact plan workspaces, Action Required, Runs/history, WorkGraphs,
+Products, agent observations, controller diagnostics and React token login. Existing governed stop
+and plan rejection have real-controller integration proofs, including lost responses and process
+restart. The reconciliation implements browser objective intake/revision/approval, typed decisions,
+publication human evidence and run controls using the existing governed APIs below. Legacy retirement
+requires independent review and operator acceptance; old pages remain operational during migration.
+Build the embedded asset with `npm ci --ignore-scripts` and `npm run build` inside `frontend/` before
+building Go. Production uses the Go binary alone, with no independent frontend server.
+The additive read endpoints `/v1/plans?limit=50&offset=0&q=...` and
+`/v1/plans/{id}/context?revision=...` expose sanitized source identities, canonical pending state
+and exact historical decision receipts. A torn context read returns 409 `snapshot_changed`;
+it grants no authority and is never retried implicitly.
+See [the implementation batch](design/runtime-integration.md), [the design checkpoint](design/README.md) and
+[the frontend consolidation inventory](design/frontend-inventory.md).
 
 The same process also serves a server-rendered operator console on every
 other path, behind the identical bearer token, listener and store this
@@ -451,3 +476,14 @@ and the consequence in one sentence; only its confirm sends, once, with the
 Bearer header. The dialog then shows pending, and the outcome with the
 resulting durable state; it never retries, and closing it is blocked while a
 request is in flight.
+
+### Exact operator delivery recovery
+
+Creation/revision/resume/refresh may carry `X-Zenchron-Operation-ID` (a canonical UUID). After normal
+auth/CSRF checks the API hashes the exact escaped path and bounded JSON wire body and passes the
+correlation through the existing governed socket command. The controller appends successful delivery
+observations to the existing plan/run journal before replying.
+`GET /v1/operator-action-receipts/{id}?digest=SHA256` returns only a hash/subject-checked historical
+receipt under bearer authentication. Receipt-write failure is `unknown`, never proof of refusal;
+missing receipts cannot establish non-execution. Legacy callers need no header.
+[Complete semantics, privacy and paired-build rollback limits](design/action-recovery-review.md).

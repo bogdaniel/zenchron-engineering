@@ -94,11 +94,9 @@ func TestSchemasCompile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Document fixtures and the shared vocabulary are joined by seventeen
-	// Control Plane contracts (#479 adds workspace options, plan preview and
-	// authority request to the original fourteen), validated against actual HTTP/SSE bytes in
-	// controlplane.
-	if want := len(fixtureSchemas) + 1 + 17; len(files) != want {
+	// Twenty-five Control Plane contracts include the operational React reads
+	// and exact request/receipt projections, validated against actual HTTP/SSE bytes.
+	if want := len(fixtureSchemas) + 1 + 25; len(files) != want {
 		t.Fatalf("found %d schemas, want %d (documents, vocabulary and Control Plane wire contracts)", len(files), want)
 	}
 

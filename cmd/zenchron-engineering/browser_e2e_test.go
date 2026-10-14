@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,6 +111,22 @@ func TestBrowserWorkspace(t *testing.T) {
 func runBrowserFixture(t *testing.T, root string, built *composition, driver *runtime.Supervisor, environment []string) {
 	t.Helper()
 	state := built.config.StateDir
+	react := false
+	for _, value := range environment {
+		if value == "ZENCHRON_E2E_REACT=1" {
+			react = true
+		}
+	}
+	token := "browser-test-token"
+	if react {
+		token = strings.Repeat("e", 64)
+	}
+	tokenFile := filepath.Join(state, "browser-token")
+	if react {
+		if err := os.WriteFile(tokenFile, []byte(token), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	socket, err := runtime.ListenControl(state)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +149,7 @@ func runBrowserFixture(t *testing.T, root string, built *composition, driver *ru
 		t.Fatal(err)
 	}
 	observe := observeLiveController(state)
-	api := &controlplane.API{Store: reader, Token: "browser-test-token", ControllerRoot: filepath.Join(state, "controller"), Observe: observe,
+	api := &controlplane.API{Store: reader, Token: token, ControllerRoot: filepath.Join(state, "controller"), Observe: observe,
 		Send: func(r runtime.ControlRequest) (runtime.ControlResponse, error) { return runtime.SendControl(state, r) }, Listen: listener.Addr().String()}
 	web := &controlplane.Web{Store: reader, Token: api.Token, ControllerRoot: api.ControllerRoot, Observe: observe}
 	mux := http.NewServeMux()
@@ -144,8 +161,12 @@ func runBrowserFixture(t *testing.T, root string, built *composition, driver *ru
 	t.Cleanup(func() { _ = server.Close(); <-serverDone; _ = socket.Close(); <-controllerDone })
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
-	command := exec.CommandContext(ctx, "node", filepath.Join(root, "scripts", "browser_e2e.mjs"))
-	command.Env = append(os.Environ(), "ZENCHRON_E2E_URL=http://"+listener.Addr().String())
+	driverScript := "browser_e2e.mjs"
+	if react {
+		driverScript = "check_reconciled_workspace.mjs"
+	}
+	command := exec.CommandContext(ctx, "node", filepath.Join(root, "scripts", driverScript))
+	command.Env = append(os.Environ(), "ZENCHRON_E2E_URL=http://"+listener.Addr().String(), "ZENCHRON_E2E_TOKEN_FILE="+tokenFile)
 	command.Env = append(command.Env, environment...)
 	command.Stderr = os.Stderr
 	output, err := command.StdoutPipe()

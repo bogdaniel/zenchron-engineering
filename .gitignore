@@ -32,3 +32,4 @@ go.work.sum
 # .vscode/
 bin/
 .DS_Store
+frontend/node_modules/

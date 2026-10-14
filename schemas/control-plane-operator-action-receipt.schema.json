@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["operation_id", "request_digest", "action", "controller_binding"],
+  "properties": {
+    "operation_id": {"type":"string", "pattern":"^[a-f0-9-]{36}$"},
+    "request_digest": {"type":"string", "pattern":"^[a-f0-9]{64}$"},
+    "controller_binding": {"type":"string"},
+    "action": {"enum":["plan-revise", "resume", "refresh"]},
+    "plan_id": {"type":"string", "minLength":1},
+    "revision": {"type":"integer", "minimum":1},
+    "plan_digest": {"type":"string", "pattern":"^[a-f0-9]{64}$"},
+    "repository": {"type":"string", "minLength":1},
+    "source_issue": {"type":"integer", "minimum":1},
+    "run_id": {"type":"string", "minLength":1},
+    "source_run_id": {"type":"string", "minLength":1}
+  },
+  "oneOf": [
+    {"properties":{"action":{"const":"plan-revise"}}, "required":["plan_id","revision","plan_digest","repository","source_issue"], "not":{"anyOf":[{"required":["run_id"]},{"required":["source_run_id"]}]}},
+    {"properties":{"action":{"enum":["resume","refresh"]}}, "required":["run_id","source_run_id"], "not":{"anyOf":[{"required":["plan_id"]},{"required":["revision"]},{"required":["plan_digest"]},{"required":["repository"]},{"required":["source_issue"]}]}}
+  ]
+}
