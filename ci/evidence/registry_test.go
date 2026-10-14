@@ -144,9 +144,9 @@ func TestRaceShardsCoverEverySelectedTestExactlyOnce(t *testing.T) {
 		if len(seen) != len(all) || seen["TestOperatorActionReceiptIsObservationalDurableAndClosed"] != 1 {
 			t.Fatal("partition dropped selected race evidence")
 		}
-		for _, count := range seen {
-			if count != 1 {
-				t.Fatal("partition duplicated selected race evidence")
+		for _, name := range all {
+			if seen[name] != 1 {
+				t.Fatalf("partition omitted or duplicated %s", name)
 			}
 		}
 		unsharded, err := shardRaceTests(all, "")
