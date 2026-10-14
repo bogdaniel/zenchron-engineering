@@ -115,6 +115,39 @@ existing authority boundaries. An unmerged PR is not a trusted adopted controlle
 
 ## Next gate
 
+### Runtime failure investigation (diagnostic head `29c690e`)
+
+[CI 38593937196](https://github.com/bogdaniel/zenchron-engineering/actions/runs/38593937196)
+passed whole-runtime T1 (1013.307 seconds) and all four mandatory T1 race
+partitions (1298 selected names). The required `go` job failed its runtime
+package's unchanged 30-minute alarm. The named active test,
+`TestWorkGraphIntegrationUnitInvalidatedWhenUpstreamOutputReplaced`, had run only
+two seconds; its stack shows runnable reconciliation work. Its isolated trusted
+main and PR probes passed at 7.45 and 7.51 seconds. This identifies a package
+alarm, not a demonstrated deadlock or a proven cause of the package's cost.
+
+The earlier objective conflict assertion remains unexplained. Failure-only
+diagnostics now capture the approved plan, WorkGraph, reconcile/tick history,
+runs, events, candidate contents and Git conflict state without changing the
+60-iteration bound or required conflict/remediation/review assertions. Linux
+isolation, shuffled repetitions, the 345-test related cohort and unpartitioned
+runtime runs have not reproduced it. The original and diagnostic heads' complete
+non-root Linux runs passed at 878.763 and 1704.241 seconds under different loads;
+they do not establish a diagnostic-code regression or a fix. A forced failure
+validated the logger only, not the original defect.
+
+The `go` job now emits standard `go test -json` records so its downloadable log
+retains per-test timings and failure output for the next diagnostic run. The
+full unpartitioned suite, 30-minute bound, check identity and failure exit status
+remain intact. No rerun is requested merely to obtain a green result. Two older
+execution watcher goroutines in the panic stack warrant separate cleanup-path
+inspection; neither their contribution to the alarm nor a connection to the
+original conflict failure is established. Runtime behavior is unchanged.
+
+Qualification remains **blocked** until the required exact-head checks pass and
+the conflict failure has a supported explanation and regression proof. A focused
+green test or passing T1/race job does not waive the failed full-suite check.
+
 Execute the [operator acceptance runbook](operator-acceptance.md) against `/app`,
 using a legitimately provisioned compatible controller. It distinguishes
 read-only isolated checks, permitted test execution and explicit human plan,

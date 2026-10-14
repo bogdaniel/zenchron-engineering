@@ -25,17 +25,11 @@ jobs:
         run: ci/static.sh
 
       - name: Test
-        # The runtime package runs about six minutes and grows with every
-        # slice, against Go's IMPLICIT ten-minute per-package default. That
-        # default turns a slow runner into a red required check for no protocol
-        # reason - it happened once already, and the re-run passed unchanged.
-        #
-        # The bound is deliberately generous rather than tight: its job is to
-        # catch a hang, not to police how long the suite takes. A timeout set
-        # close to the current duration would be a second, silent performance
-        # budget that fails as tests are added, which is the failure being
-        # fixed here.
-        run: go test -timeout 30m ./...
+        # Keep the unpartitioned full suite and its package bound. JSON records
+        # retain every test's start, result and elapsed time in the downloadable
+        # job log, including failure-only fixture diagnostics and panic stacks.
+        # A package alarm's current test does not identify accumulated suite cost.
+        run: go test -json -timeout 30m ./...
 
   # T0 + T1 (#516): static evidence, then the behavioral evidence that
   # ci/evidence/registry.json selects for what this pull request changed. It
