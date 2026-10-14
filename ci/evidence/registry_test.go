@@ -89,3 +89,40 @@ func anyFile(files []string, pattern string) bool {
 	}
 	return false
 }
+
+func TestOperatorReceiptsSelectDurableStoreEvidenceAndRace(t *testing.T) {
+	reg, repo, _ := loadReal(t)
+	for _, file := range []string{"runtime/operator_action_receipt.go", "runtime/operator_action_receipt_test.go"} {
+		got := PlanEvidence(reg, repo, []string{file})
+		if got.Whole || !slices.Contains(got.Run, "TestOperatorActionReceiptIsObservationalDurableAndClosed") ||
+			!slices.Contains(got.Race, "TestOperatorActionReceiptIsObservationalDurableAndClosed") ||
+			!slices.Contains(got.Race, "TestJournalRefusesPayloadThatDoesNotMatchItsEventType") {
+			t.Fatalf("%s lost durable-store/receipt race coverage: %+v", file, got)
+		}
+	}
+}
+
+func TestActiveOperatorSurfacesSelectBoundaryEvidenceNotInert(t *testing.T) {
+	reg, repo, _ := loadReal(t)
+	for _, file := range []string{
+		"frontend/src/governed-action.tsx", "frontend/package-lock.json", "frontend/build.mjs",
+		"controlplane/assets/design/react.js", "controlplane/assets/design/tokens.css",
+		"controlplane/assets/design/index.html", "controlplane/assets/design/fixtures.js",
+		"schemas/control-plane-operator-action-receipt.schema.json",
+	} {
+		got := PlanEvidence(reg, repo, []string{file})
+		if matchesAny(reg.Inert, file) || got.Whole ||
+			!slices.Contains(got.Race, "TestPrivilegedControlRequiresProofIdentityAndLease") ||
+			!slices.Contains(got.Race, "TestSendControlSeparatesALostReplyFromNothingSent") ||
+			!slices.Contains(got.Race, "TestOperatorActionReceiptIsObservationalDurableAndClosed") ||
+			!slices.Contains(got.Race, "TestPlanSummariesPageBoundsReadsAndPreservesLifecycleOwner") {
+			t.Fatalf("%s did not select actual observation/authority/receipt evidence: %+v", file, got)
+		}
+	}
+	// The shared validator owns every domain's contract, not just browser DTOs.
+	// Keep its broad race escalation despite this PR adding only API registrations.
+	got := PlanEvidence(reg, repo, []string{"schemas/validate.go"})
+	if !got.Whole || !slices.Contains(got.Race, "TestReviewTriggerSurvivesSupervisorRestart") {
+		t.Fatalf("cross-domain schema registry lost whole-package race escalation: %+v", got)
+	}
+}

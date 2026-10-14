@@ -9,6 +9,9 @@ The published exact head and CI are reported on the PR to avoid a self-referenti
 [Follow-up for review #5516015303: exact uncertainty recovery](action-recovery-review.md) supersedes
 prior notes about navigation-local uncertainty for creation/revision/resume/refresh.
 
+[CI recovery and compatibility qualification](ci-release-qualification.md) documents the focused
+registry correction; [operator acceptance](operator-acceptance.md) is the executable next gate.
+
 ## Review findings addressed
 
 | Finding | Change and evidence |
