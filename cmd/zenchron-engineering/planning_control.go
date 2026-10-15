@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 
 	"github.com/bogdaniel/zenchron-engineering/planning"
@@ -13,11 +14,20 @@ import (
 // refused here too, before anything reaches disk. It does not reload the
 // held registry; a caller that wants the write to take effect without a
 // restart sends ControlPlanningReload next.
+//
+// An AgentProfile is also checked against the CURRENT configured workforce
+// here, at the write, rather than left to the whole-registry Registry.Bind
+// check planService() runs for every plan action: a profile that would
+// escalate its agent must refuse only itself, not the plan service for
+// every other profile already installed.
 func (c *composition) proposePlanningArtifact(request runtime.ControlRequest) ([]byte, error) {
 	if request.PlanningArtifact == nil {
 		return nil, errors.New("a planning artifact request carries its kind, id and document")
 	}
-	return planning.Write(c.config.PlanningDir, *request.PlanningArtifact)
+	agents := runtime.DescribeExecutionAgents(context.Background(), c.agents, func(agent runtime.ResolvedAgent) runtime.AgentProber {
+		return runtime.AgentProberFor(agent, c.artifacts, c.config.StateDir)
+	})
+	return planning.Write(c.config.PlanningDir, *request.PlanningArtifact, agents)
 }
 
 // currentPlanning returns the registry snapshot every reader uses. Copying

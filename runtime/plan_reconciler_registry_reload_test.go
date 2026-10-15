@@ -61,7 +61,7 @@ func TestPlanReconcilerResolvesTheLiveRegistryNotTheStartupSnapshot(t *testing.T
 		"execution_agent": "codex",
 		"capabilities": ["code_change"],
 		"trust_requirement": "operator_trusted"
-	}`)); err != nil {
+	}`), planAgents()); err != nil {
 		t.Fatal(err)
 	}
 	reloaded, err := planning.LoadRegistry(dir)
