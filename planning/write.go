@@ -172,10 +172,26 @@ func WriteContextPolicy(dir, id string, data []byte) (domain.ContextPolicy, erro
 
 // WriteAgentProfile validates and durably writes one AgentProfile, refusing
 // one that names an instruction pack or context policy not currently
-// installed.
-func WriteAgentProfile(dir, id string, data []byte) (domain.AgentProfile, error) {
+// installed, or that would escalate its named execution agent (ADR-0008
+// follow-up: Registry.Bind is a whole-registry check run where the
+// workforce is known, so a profile that fails it there blocks the plan
+// service for every OTHER profile too; checking it here, against the same
+// agents, refuses just this one write instead).
+//
+// agents is the operator's CURRENT configured workforce, and this is a
+// fail-closed check: a nil or empty agents matches no profile's
+// execution_agent, so a caller with no workforce to hand - rather than
+// bypassing the check - gets the same "no such agent is configured"
+// refusal an unconfigured agent would, for the same reason an authority
+// check does not get an opt-out. A caller testing something else that still
+// wants the write to succeed supplies a real, matching descriptor.
+func WriteAgentProfile(dir, id string, data []byte, agents []domain.ExecutionAgentDescriptor) (domain.AgentProfile, error) {
+	byID := agentsByID(agents)
 	return writeArtifact(dir, profilesDir, id, data, sealProfile, func(p domain.AgentProfile) error {
-		return validateProfileReferences(dir, p)
+		if err := validateProfileReferences(dir, p); err != nil {
+			return err
+		}
+		return bindProfile(p, byID)
 	})
 }
 
@@ -208,8 +224,8 @@ type ArtifactWrite struct {
 
 // Write validates and durably writes the named artifact, returning its
 // sealed form encoded as JSON (the same shape a GET of the registry already
-// projects).
-func Write(dir string, request ArtifactWrite) ([]byte, error) {
+// projects). agents is forwarded to WriteAgentProfile; see its doc comment.
+func Write(dir string, request ArtifactWrite, agents []domain.ExecutionAgentDescriptor) ([]byte, error) {
 	switch request.Kind {
 	case KindInstructionPack:
 		pack, err := WriteInstructionPack(dir, request.ID, request.Document)
@@ -224,7 +240,7 @@ func Write(dir string, request ArtifactWrite) ([]byte, error) {
 		}
 		return domain.Encode(policy)
 	case KindAgentProfile:
-		profile, err := WriteAgentProfile(dir, request.ID, request.Document)
+		profile, err := WriteAgentProfile(dir, request.ID, request.Document, agents)
 		if err != nil {
 			return nil, err
 		}
