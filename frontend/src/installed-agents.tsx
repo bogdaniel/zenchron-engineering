@@ -5,6 +5,7 @@ import { Empty, Panel } from "./components";
 import { TextField, SelectField } from "./form";
 import { GovernedAction, useReusableGovernedAction, type ActionReview } from "./governed-action";
 import { freshController } from "./planning";
+import { PlanTemplateCreate } from "./plan-template-create";
 
 const CAPABILITIES = [
   "requirements_analysis",
@@ -264,6 +265,7 @@ export function InstalledAgents() {
         </div>
       </Panel>
       {options && <AgentProfileCreate agents={options.agents} controller={controller} onSettled={refresh} />}
+      {options && <PlanTemplateCreate profiles={options.profiles} controller={controller} onSettled={refresh} />}
     </>
   );
 }
