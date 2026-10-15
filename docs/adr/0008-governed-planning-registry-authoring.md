@@ -1,6 +1,6 @@
 # ADR-0008: Governed Authoring and Reload of Planning Registry Artifacts
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-15
 - Issue: #471/#479 Phase 3 (Agent & Workflow Integration). Inputs: #64.
 - Amends: ADR-0003's `planning_dir` row (§3) and its "stays C with no
@@ -106,13 +106,28 @@ full process restart, is.
   as "hand-edited," not "not candidate-supplied." This ADR does not reopen
   #64's architecture; it adds the authoring surface #64 left for later.
 
-## Open questions
+## Questions resolved by the implementing PRs
 
-1. Should a reload be explicit (an operator-triggered verb) or automatic
-   after every successful write? Explicit is simpler to reason about and
-   matches "no hot reload" elsewhere in ADR-0003's S category; automatic
-   removes one operator step. Left to the implementing PR.
-2. Should `InstructionPack`/`ContextPolicy`'s string `Revision` and
-   `AgentProfile`/`EngineeringPlanTemplate`'s int `Version` gain a uniform
-   optimistic-concurrency rule (matching `Product`'s "next must be current
-   + 1"), or is per-type convention sufficient? Left to the implementing PR.
+1. **Reload is an explicit, operator-triggered verb** (`ControlPlanningReload`
+   / `POST /v1/planning/reload`), not automatic after every write. This
+   matches "no hot reload" elsewhere in ADR-0003's S category and keeps a
+   write's effect on in-flight plan proposals observable and intentional.
+2. **No optimistic-concurrency rule, and no retained prior version, for
+   these four artifact kinds.** `Product` and `EngineeringPlan` are
+   revision-counted state machines another object pins an exact revision
+   of, so a stale write there would silently move a reference something
+   else depends on - `AdoptProductRevision`'s "next must be current + 1" CAS
+   exists for that reason. An `InstructionPack`, `ContextPolicy`,
+   `AgentProfile` or `EngineeringPlanTemplate` is not: nothing pins "profile
+   X at version N," a plan revision pins the exact per-artifact CONTENT
+   DIGEST it was compiled against (decision point 5, above), so a later
+   write - from any source, including a second operator - only changes what
+   a FUTURE proposal may select and never moves what an approved or
+   in-flight plan already resolved. A write is therefore idempotent by
+   content (the identical document reseals to the identical digest and
+   overwrites with identical bytes) and a differing write to the same id is
+   an ordinary, intentional replacement of a reusable input - exactly as
+   consequential, and exactly as uncoordinated between two editors, as the
+   hand-edit-the-file workflow this API sits beside. Adding CAS or a
+   retained revision history here would duplicate `Product`'s machinery for
+   an object this ADR's own reasoning says does not need it.
