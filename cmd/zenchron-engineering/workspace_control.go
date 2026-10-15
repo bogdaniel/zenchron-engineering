@@ -12,7 +12,8 @@ import (
 func browserGovernedCommand(command string) bool {
 	switch command {
 	case runtime.ControlStop, runtime.ControlPlanReject, runtime.ControlPlanApprove,
-		runtime.ControlResolveDecision, runtime.ControlPause, runtime.ControlUnpause, runtime.ControlPlanRevise, runtime.ControlAuthorize, runtime.ControlPlanView, runtime.ControlWorkspaceOptions, runtime.ControlAuthorityView, runtime.ControlResume, runtime.ControlRefresh:
+		runtime.ControlResolveDecision, runtime.ControlPause, runtime.ControlUnpause, runtime.ControlPlanRevise, runtime.ControlAuthorize, runtime.ControlPlanView, runtime.ControlWorkspaceOptions, runtime.ControlAuthorityView, runtime.ControlResume, runtime.ControlRefresh,
+		runtime.ControlPlanningArtifactPropose, runtime.ControlPlanningReload:
 		return true
 	}
 	return false
@@ -40,7 +41,8 @@ func (c *composition) workspaceRead(ctx context.Context, supervisor *runtime.Sup
 		return controlOK(preview)
 	}
 	repositories := supervisor.GovernedRepositories()
-	options := controlplane.WorkspaceOptions{Repositories: []string{}, Agents: []controlplane.WorkspaceAgent{}, Profiles: c.planning.ProfileIDs(), Templates: c.planning.TemplateIDs(), Budget: c.config.PlanEnvelope()}
+	customization := c.currentPlanning()
+	options := controlplane.WorkspaceOptions{Repositories: []string{}, Agents: []controlplane.WorkspaceAgent{}, Profiles: customization.ProfileIDs(), Templates: customization.TemplateIDs(), Budget: c.config.PlanEnvelope()}
 	for _, repo := range repositories {
 		options.Repositories = append(options.Repositories, repo.String())
 	}
