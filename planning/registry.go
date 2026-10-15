@@ -179,7 +179,7 @@ func loadEach(dir, kind string, load func(path, id string, data []byte) error) e
 		// reads a file it does not control the size of is bounded. An operator
 		// who points planning_dir at something enormous gets a refusal naming
 		// the file rather than a process that stops responding.
-		data, err := readBounded(path, maxPlanningArtifactBytes)
+		data, err := readBounded(path, MaxPlanningArtifactBytes)
 		if err != nil {
 			return &RegistryError{Path: path, Detail: err.Error()}
 		}
@@ -496,10 +496,33 @@ func (r Registry) Binding(profile domain.AgentProfile) (domain.ProfileBinding, e
 	return binding, nil
 }
 
-// maxPlanningArtifactBytes bounds one operator artifact. A profile is a few
-// hundred bytes and an instruction pack a few thousand; a megabyte is generous
-// enough that the bound only ever refuses a mistake.
-const maxPlanningArtifactBytes = 1 << 20
+// MaxPlanningArtifactBytes bounds one operator artifact's own document. A
+// profile is a few hundred bytes and an instruction pack a few thousand; a
+// megabyte is generous enough that the bound only ever refuses a mistake.
+//
+// Exported because every transport layer a governed write crosses - the HTTP
+// request body, the control socket's one request line - must size its OWN
+// ceiling to carry this document plus its wrapper, never less. See
+// MaxPlanningArtifactRequestBytes.
+const MaxPlanningArtifactBytes = 1 << 20
+
+// MaxPlanningArtifactEnvelopeBytes is the documented allowance for
+// everything OUTSIDE the document itself that one governed planning-artifact
+// write request carries, at ANY transport layer: the HTTP body's
+// controller_binding/kind/id fields and JSON punctuation, and the control
+// socket's ControlRequest wrapper around the same values. It is a single
+// generous round number rather than a hand-counted one; a boundary test
+// proves it is sufficient for the largest real request shape rather than
+// relying on the arithmetic being right.
+const MaxPlanningArtifactEnvelopeBytes = 4 << 10
+
+// MaxPlanningArtifactRequestBytes is the one ceiling every transport layer
+// carrying a governed planning-artifact write agrees to allow through. A
+// layer that enforced less would become the real limit on
+// MaxPlanningArtifactBytes no matter what the registry itself allows; a
+// layer that enforced more would let an oversized request travel further
+// before being refused, never further than this.
+const MaxPlanningArtifactRequestBytes = MaxPlanningArtifactBytes + MaxPlanningArtifactEnvelopeBytes
 
 // readBounded reads a file and refuses one larger than the bound, by name.
 func readBounded(path string, limit int64) ([]byte, error) {

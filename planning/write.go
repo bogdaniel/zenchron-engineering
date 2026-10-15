@@ -53,7 +53,7 @@ func writeArtifact[T domain.Contract](dir, kind, id string, data []byte, seal fu
 	if err := validateID(id); err != nil {
 		return zero, err
 	}
-	if int64(len(data)) > maxPlanningArtifactBytes {
+	if int64(len(data)) > MaxPlanningArtifactBytes {
 		return zero, &RegistryError{Path: id, Detail: "artifact exceeds the operator artifact size bound"}
 	}
 	root := filepath.Join(dir, kind)

@@ -3,6 +3,7 @@ package planning_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -260,5 +261,36 @@ func TestWriteRejectingAnEscalatingReplacementLeavesTheOriginalProfileUnchanged(
 	}
 	if current.Digest != original.Digest {
 		t.Fatalf("a refused replacement must leave the original profile unchanged: original digest %s, now %s", original.Digest, current.Digest)
+	}
+}
+
+// TestWriteRefusesADocumentOverTheArtifactBoundAndWritesNothing proves the
+// registry's own MaxPlanningArtifactBytes bound - the one every transport
+// layer above it (HTTP, the control socket) now sizes its own ceiling
+// around - is still enforced here too, before anything reaches disk.
+func TestWriteRefusesADocumentOverTheArtifactBoundAndWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	oversized := []byte(`{"instructions": ["` + strings.Repeat("A", int(planning.MaxPlanningArtifactBytes)) + `"]}`)
+	if _, err := planning.WriteInstructionPack(dir, "huge", oversized); err == nil {
+		t.Fatal("a document over the artifact bound must be refused")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "instructions", "huge.json")); !os.IsNotExist(err) {
+		t.Fatalf("a refused write must leave no file: stat err = %v", err)
+	}
+}
+
+// TestWriteAcceptsADocumentAtTheArtifactBound is the positive edge: a
+// document AT the bound, not one byte less out of caution, must still
+// write - this is the number the rest of the contract promises to carry.
+func TestWriteAcceptsADocumentAtTheArtifactBound(t *testing.T) {
+	dir := t.TempDir()
+	prefix, suffix := []byte(`{"instructions": ["`), []byte(`"]}`)
+	padding := int(planning.MaxPlanningArtifactBytes) - len(prefix) - len(suffix)
+	document := append(append(append([]byte{}, prefix...), []byte(strings.Repeat("A", padding))...), suffix...)
+	if len(document) != int(planning.MaxPlanningArtifactBytes) {
+		t.Fatalf("constructed document is %d bytes, not exactly the %d byte bound", len(document), planning.MaxPlanningArtifactBytes)
+	}
+	if _, err := planning.WriteInstructionPack(dir, "max", document); err != nil {
+		t.Fatalf("a document exactly at the artifact bound must write: %v", err)
 	}
 }

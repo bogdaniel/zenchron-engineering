@@ -972,12 +972,10 @@ func TestControlRequestIsBoundedWhileReading(t *testing.T) {
 	}
 	defer connection.Close()
 	_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
-	// Over the ceiling, and deliberately never newline-terminated. The overage
-	// is kept modest so the write still fits the socket buffer: the server
-	// stops reading as soon as the bound is passed, and a much larger payload
-	// would fail the WRITE on a broken pipe before the refusal could be read -
-	// correct behaviour, but it would test the socket rather than the bound.
-	oversized := append([]byte(`{"command":"ping","reason":"`), bytes.Repeat([]byte("A"), maxControlRequestBytes+1024)...)
+	// Over maxControlConnectionBytes (the absolute reader ceiling; see
+	// control_endpoint_size_test.go for the per-command bound), never
+	// newline-terminated; overage kept modest to still fit the socket buffer.
+	oversized := append([]byte(`{"command":"ping","reason":"`), bytes.Repeat([]byte("A"), maxControlConnectionBytes+1024)...)
 	if _, err := connection.Write(oversized); err != nil {
 		t.Fatal(err)
 	}

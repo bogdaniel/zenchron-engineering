@@ -430,10 +430,23 @@ func (l *ControlListener) Close() error {
 	return err
 }
 
-// maxControlRequestBytes bounds one request line. The vocabulary above
-// canonicalizes to a few hundred bytes; the ceiling exists so a local process
-// cannot make the supervisor allocate without bound.
+// maxControlRequestBytes bounds one ORDINARY command's request line. The
+// vocabulary above canonicalizes to a few hundred bytes; the ceiling exists
+// so a local process cannot make the supervisor allocate without bound. It
+// is enforced per command, after the command is known - see
+// answerControlConnection - so raising the one command that legitimately
+// carries more (below) never raises this one.
 const maxControlRequestBytes = 8 << 10
+
+// maxControlConnectionBytes is the absolute transport ceiling: the most any
+// single request line is ever read into memory, regardless of command. It
+// has to be at least planning.MaxPlanningArtifactRequestBytes, because the
+// command is not known until AFTER the line is read and unmarshaled - there
+// is no way to pick a smaller reader size for commands that do not need
+// one without knowing the command first. maxControlRequestBytes remains
+// the real limit for every command except ControlPlanningArtifactPropose,
+// enforced below once the command is known.
+const maxControlConnectionBytes = planning.MaxPlanningArtifactRequestBytes
 
 // Serve answers requests until the listener is closed. Each connection carries
 // exactly one request and one response, which keeps the protocol trivially
@@ -455,15 +468,17 @@ func (l *ControlListener) Serve(handle func(ControlRequest) ControlResponse) err
 func answerControlConnection(connection net.Conn, handle func(ControlRequest) ControlResponse) {
 	defer connection.Close()
 	_ = connection.SetDeadline(time.Now().Add(ControlDeadline("")))
-	// The ceiling is enforced by the READER, not checked afterwards.
+	// The absolute ceiling is enforced by the READER, not checked afterwards.
 	// bufio.ReadBytes grows its own buffer past the size hint, so a local
 	// process sending a line with no newline could make the supervisor allocate
 	// without bound and be refused only once it already had. One byte of
-	// headroom distinguishes "exactly at the bound" from "over it".
-	bounded := io.LimitReader(connection, maxControlRequestBytes+1)
-	reader := bufio.NewReaderSize(bounded, maxControlRequestBytes)
+	// headroom distinguishes "exactly at the bound" from "over it". This
+	// catches only the absolute worst case; the per-command bound below is
+	// what actually protects every command except the one that needs more.
+	bounded := io.LimitReader(connection, maxControlConnectionBytes+1)
+	reader := bufio.NewReaderSize(bounded, maxControlConnectionBytes)
 	line, err := reader.ReadBytes('\n')
-	if len(line) > maxControlRequestBytes {
+	if len(line) > maxControlConnectionBytes {
 		writeControlResponse(connection, ControlResponse{Error: "control request exceeds the size bound"})
 		return
 	}
@@ -473,6 +488,14 @@ func answerControlConnection(connection net.Conn, handle func(ControlRequest) Co
 	var request ControlRequest
 	if err := json.Unmarshal(line, &request); err != nil {
 		writeControlResponse(connection, ControlResponse{Error: "control request is not a JSON object"})
+		return
+	}
+	// PER-COMMAND enforcement, now that the command is known: every command
+	// except the one planning-artifact writes legitimately need stays bound
+	// to the ordinary 8 KiB ceiling, never to the larger one the reader above
+	// had to allow for just in case this line was that one command.
+	if request.Command != ControlPlanningArtifactPropose && len(line) > maxControlRequestBytes {
+		writeControlResponse(connection, ControlResponse{Error: "control request exceeds the size bound"})
 		return
 	}
 	// The deadline is extended to what THIS command needs, now that the command

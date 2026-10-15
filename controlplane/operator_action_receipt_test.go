@@ -8,8 +8,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bogdaniel/zenchron-engineering/planning"
 	rt "github.com/bogdaniel/zenchron-engineering/runtime"
 )
+
+// TestCorrelateActionBodyBytesIsPathScoped is the one case this path cannot
+// know its command the way answerControlConnection does - it runs before the
+// mux dispatches at all, so it must decide its ceiling from the path alone.
+// Planning-artifact-propose gets the shared contract ceiling; every other
+// path keeps the ordinary default, unchanged.
+func TestCorrelateActionBodyBytesIsPathScoped(t *testing.T) {
+	if got := correlateActionBodyBytes("/v1/planning/artifacts"); got != planning.MaxPlanningArtifactRequestBytes {
+		t.Fatalf("planning artifacts path: got %d, want %d", got, planning.MaxPlanningArtifactRequestBytes)
+	}
+	for _, path := range []string{"/v1/runs/s/resume", "/v1/plans/p/revise", "/v1/products", ""} {
+		if got := correlateActionBodyBytes(path); got != defaultActionBodyBytes {
+			t.Fatalf("path %q: got %d, want the ordinary default %d", path, got, defaultActionBodyBytes)
+		}
+	}
+}
 
 const recoveryTestID = "01234567-89ab-4cde-8fab-0123456789ab"
 

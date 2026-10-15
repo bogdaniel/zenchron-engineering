@@ -221,3 +221,42 @@ func TestProposePlanningArtifactRefusesAProfileForNoSuchAgent(t *testing.T) {
 		t.Fatalf("a profile naming an unconfigured agent must be refused: %+v", applied)
 	}
 }
+
+// TestProposePlanningArtifactRejectsAnOversizedRequestBeforeAnyWrite proves
+// the HTTP layer's own ceiling - planning.MaxPlanningArtifactRequestBytes,
+// not the ordinary 8 KiB default every other action keeps - is enforced
+// before the request body ever reaches planning.Write.
+func TestProposePlanningArtifactRejectsAnOversizedRequestBeforeAnyWrite(t *testing.T) {
+	a := newPlanningActionFixture(t)
+	oversized := strings.Repeat("A", int(planning.MaxPlanningArtifactRequestBytes))
+	req := validRequest("/v1/planning/artifacts", planningArtifactBody("instruction_pack", "huge", `{"instructions": ["`+oversized+`"]}`))
+	refused := post(t, a, req, 400)
+	if s, _ := refused["error"].(string); s == "" {
+		t.Fatalf("an oversized request must be refused with a typed error, not merely a status: %+v", refused)
+	}
+	// A normal write afterward still succeeds: the oversized request was
+	// refused at the body boundary, decodeActionWithLimit, before
+	// proposePlanningArtifact's handler body - never a request planning.Write
+	// saw and only happened to reject - and left nothing behind to interfere.
+	applied := post(t, a, validRequest("/v1/planning/artifacts",
+		planningArtifactBody("instruction_pack", "ordinary", `{"instructions": ["fine"]}`)), 200)
+	if outcome(applied) != "applied" {
+		t.Fatalf("an ordinary write after the refused oversized one must still succeed: %+v", applied)
+	}
+}
+
+// TestProposePlanningArtifactAcceptsADocumentAboveTheOrdinaryActionCeiling
+// is the positive half: a document bigger than every OTHER action's 8 KiB
+// body limit, but within the planning-artifact contract, must actually
+// write - proving the larger ceiling this PR adds is reachable, not just
+// theoretical.
+func TestProposePlanningArtifactAcceptsADocumentAboveTheOrdinaryActionCeiling(t *testing.T) {
+	a := newPlanningActionFixture(t)
+	const ordinaryActionCeiling = 8 << 10
+	padding := strings.Repeat("A", ordinaryActionCeiling*2)
+	applied := post(t, a, validRequest("/v1/planning/artifacts",
+		planningArtifactBody("instruction_pack", "big", `{"instructions": ["`+padding+`"]}`)), 200)
+	if outcome(applied) != "applied" {
+		t.Fatalf("a document above the ordinary action ceiling, within the planning-artifact contract, must write: %+v", applied)
+	}
+}
