@@ -277,6 +277,7 @@
       "why": "The ProductEngineeringEnvironment (#476): product identity, mutable configuration, graph association and the knowledge promotion ladder - durable SQLite state with its own revision-transition and promotion-consistency invariants, proved under concurrent writers.",
       "race": true,
       "sources": [
+        "runtime/product.go",
         "runtime/product_store.go",
         "runtime/product_knowledge_store.go",
         "runtime/product_association_store.go",
@@ -284,6 +285,7 @@
         "product/*.go"
       ],
       "tests": [
+        "runtime/product_test.go",
         "runtime/product_*_test.go"
       ]
     },

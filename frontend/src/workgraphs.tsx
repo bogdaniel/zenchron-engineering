@@ -1,8 +1,12 @@
 import { HumanDecision } from "./human-requests";
+import * as api from "./api";
 import type { Controller } from "./api";
 import { useMemo, useState } from "react";
 import type { GraphDetail, GraphRow, Graphs, ProductDetail, Products, Unit } from "./operations-api";
 import { Badge, Disclosure, Empty, FilterBar, Head, Link, Pagination, Panel } from "./components";
+import { TextField } from "./form";
+import { GovernedAction, useReusableGovernedAction, type ActionReview } from "./governed-action";
+import { freshController } from "./planning";
 import {
   COLUMN_GAP,
   MARGIN,
@@ -451,12 +455,95 @@ export function GraphWorkspace({
     </>
   );
 }
-export function ProductPortfolio({ products, onPage }: { products: Products; onPage: (v: number) => void }) {
+// ProductCreate proposes a new Product's first revision (#476): operator
+// names it and its repositories, the controller composes identity and
+// adopts it through the same AdoptProductRevision invariant a later revise
+// uses, reachable from the dashboard rather than hand-edited configuration.
+function ProductCreate({
+  controller,
+  stale,
+  onSettled,
+}: {
+  controller?: Controller;
+  stale: boolean;
+  onSettled?: () => void;
+}) {
+  const [name, setName] = useState(""),
+    [repositories, setRepositories] = useState("");
+  const [instance, resetInstance] = useReusableGovernedAction();
+  const parsedRepositories = repositories
+    .split(",")
+    .map((r) => r.trim())
+    .filter(Boolean);
+  const why = stale
+    ? "Snapshot stale; refresh first"
+    : controller
+      ? api.blocker(controller)
+      : "Controller not yet observed";
+  const reason = why || (!name.trim() ? "Name the product" : !parsedRepositories.length ? "Name at least one repository" : "");
+  const prepare = async (_note: string, signal: AbortSignal): Promise<ActionReview> => {
+    const live = await freshController(signal, controller?.controller_binding);
+    return {
+      title: "Create this product?",
+      subject: name.trim(),
+      consequence:
+        "Names which repositories belong together. Grants no execution, acceptance, publication or merge authority.",
+      details: [
+        ["Name", name.trim()],
+        ["Repositories", parsedRepositories.join(", ")],
+        ["Serving controller", live.controller_binding],
+      ],
+      path: "/v1/products",
+      action: "product-propose",
+      target: {},
+      body: { controller_binding: live.controller_binding, name: name.trim(), revision: 1, repositories: parsedRepositories },
+    };
+  };
+  return (
+    <Panel title="Create a product">
+      <div className="product-body intake-form">
+        <TextField label="Name" value={name} onChange={(e) => setName(e.target.value)} />
+        <TextField
+          label="Repositories"
+          help="Comma-separated, e.g. acme/checkout, acme/checkout-worker"
+          value={repositories}
+          onChange={(e) => setRepositories(e.target.value)}
+        />
+        <GovernedAction
+          key={instance}
+          label="Review & create"
+          reason={reason}
+          prepare={prepare}
+          onSettled={() => {
+            setName("");
+            setRepositories("");
+            resetInstance();
+            onSettled?.();
+          }}
+        />
+      </div>
+    </Panel>
+  );
+}
+export function ProductPortfolio({
+  products,
+  onPage,
+  controller,
+  stale = false,
+  onSettled,
+}: {
+  products: Products;
+  onPage: (v: number) => void;
+  controller?: Controller;
+  stale?: boolean;
+  onSettled?: () => void;
+}) {
   return (
     <>
       <Head eyebrow="OPERATIONS / PRODUCT SCOPE" title="Products">
         Recorded product scope and its associated operational graphs.
       </Head>
+      <ProductCreate controller={controller} stale={stale} onSettled={onSettled} />
       <Panel title="Product inventory">
         {products.products.length ? (
           <div className="table-scroll" tabIndex={0} role="region" aria-label="Products">
