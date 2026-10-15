@@ -80,13 +80,18 @@ try {
     assert.match(await pageA.locator("main").innerText(), /instance-a-run/);
   });
   await check("An invalid token at the login form is refused without starting a session", async () => {
+    // Only this page's own port-scoped cookie: a prefix match over the whole
+    // jar also deletes instance A's cookie (one browser, one shared cookie
+    // store - see the file header), which would mask a real cross-instance
+    // leak instead of proving isolation holds through this step.
     await pageB.evaluate(() => {
-      document.cookie.split(";").forEach((c) => {
-        const name = c.split("=")[0].trim();
-        if (name.startsWith("zenchron_control_plane_token_"))
-          document.cookie = name + "=; path=/; SameSite=Strict; Max-Age=0";
-      });
+      const port = location.port || "default";
+      document.cookie = `zenchron_control_plane_token_${port}=; path=/; SameSite=Strict; Max-Age=0`;
     });
+    // Proves the fix, not just the absence of a symptom: instance A's own
+    // cookie must still hold its real token after instance B logs itself out.
+    const aCookieAfterBLogout = await pageA.evaluate(() => document.cookie);
+    assert.match(aCookieAfterBLogout, new RegExp(`zenchron_control_plane_token_\\d+=${tokenA}`));
     await pageB.reload();
     await pageB.getByRole("heading", { name: "Connect to Engineering OS", exact: true }).waitFor();
     await pageB.getByLabel("Control Plane token", { exact: true }).fill("0".repeat(64));
