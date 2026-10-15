@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/planning"
@@ -46,6 +48,36 @@ func TestProposePlanningArtifactWritesButDoesNotReload(t *testing.T) {
 	}
 	if _, err := c.currentPlanning().Profile("reviewer"); err != nil {
 		t.Fatalf("reload must swap the held snapshot every later reader sees: %v", err)
+	}
+}
+
+// TestProposePlanningArtifactRefusesAnEscalatingProfile exercises
+// composition.proposePlanningArtifact itself, not a mock of it: the
+// described, configured workforce it builds internally is what refuses an
+// escalating profile, end to end through the real control-plane dispatch
+// path an operator's dashboard write actually takes.
+func TestProposePlanningArtifactRefusesAnEscalatingProfile(t *testing.T) {
+	dir := t.TempDir()
+	agents, err := (runtime.OperatorConfig{
+		Agents:       map[string]runtime.AgentConfig{"claude": {Kind: runtime.AgentKindClaudeCode, TrustMode: string(runtime.TrustOperatorTrusted)}},
+		DefaultAgent: "claude",
+	}).AgentRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &composition{agents: agents, config: runtime.Config{OperatorConfig: runtime.OperatorConfig{PlanningDir: dir}}}
+
+	if _, err := c.proposePlanningArtifact(runtime.ControlRequest{
+		PlanningArtifact: &planning.ArtifactWrite{Kind: planning.KindAgentProfile, ID: "reviewer", Document: []byte(`{
+			"execution_agent": "does-not-exist",
+			"capabilities": ["repository_analysis"],
+			"trust_requirement": "operator_trusted"
+		}`)},
+	}); err == nil {
+		t.Fatal("a profile naming an unconfigured agent must be refused through the real composition path")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "profiles", "reviewer.json")); !os.IsNotExist(err) {
+		t.Fatalf("a refused write must leave no file: stat err = %v", err)
 	}
 }
 

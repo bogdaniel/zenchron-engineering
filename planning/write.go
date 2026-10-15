@@ -178,18 +178,18 @@ func WriteContextPolicy(dir, id string, data []byte) (domain.ContextPolicy, erro
 // service for every OTHER profile too; checking it here, against the same
 // agents, refuses just this one write instead).
 //
-// agents is the operator's current configured workforce. nil skips this one
-// check (every other validation still runs) - a caller that does not have
-// the workforce to hand, such as a test exercising something else, keeps
-// today's behavior rather than being forced to fabricate one.
+// agents is the operator's CURRENT configured workforce, and this is a
+// fail-closed check: a nil or empty agents matches no profile's
+// execution_agent, so a caller with no workforce to hand - rather than
+// bypassing the check - gets the same "no such agent is configured"
+// refusal an unconfigured agent would, for the same reason an authority
+// check does not get an opt-out. A caller testing something else that still
+// wants the write to succeed supplies a real, matching descriptor.
 func WriteAgentProfile(dir, id string, data []byte, agents []domain.ExecutionAgentDescriptor) (domain.AgentProfile, error) {
 	byID := agentsByID(agents)
 	return writeArtifact(dir, profilesDir, id, data, sealProfile, func(p domain.AgentProfile) error {
 		if err := validateProfileReferences(dir, p); err != nil {
 			return err
-		}
-		if agents == nil {
-			return nil
 		}
 		return bindProfile(p, byID)
 	})
