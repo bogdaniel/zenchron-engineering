@@ -310,6 +310,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/runs/{id}/authorize", a.authorize)
 	mux.HandleFunc("POST /v1/objectives", a.propose)
 	mux.HandleFunc("POST /v1/plans/{id}/revise", a.propose)
+	mux.HandleFunc("POST /v1/products", a.proposeProduct)
+	mux.HandleFunc("POST /v1/products/{id}/revise", a.proposeProduct)
 	mux.HandleFunc("GET /v1/workspace/options", a.workspaceOptions)
 	mux.HandleFunc("GET /v1/workspace/requests", a.workspaceRequests)
 	mux.HandleFunc("GET /v1/decisions/{id}/resolution", a.decisionResolution)

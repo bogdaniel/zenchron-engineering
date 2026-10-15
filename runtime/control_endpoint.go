@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
+	"github.com/bogdaniel/zenchron-engineering/product"
 )
 
 // ControlSocketName is the endpoint file inside the operator state directory.
@@ -121,6 +122,10 @@ type ControlRequest struct {
 	// agent and composition time come from the supervisor, so a proposer
 	// cannot state them.
 	WorkGraph *orchestration.WorkGraphProposal `json:"work_graph,omitempty"`
+	// Product is a proposed Product revision (#476). Identity, requester and
+	// composition time come from the supervisor; a proposer states only its
+	// name, revision and repository list.
+	Product *product.ProductProposal `json:"product,omitempty"`
 	// Agent is the named execution agent, resolved against the operator's own
 	// registry. A request naming an agent the operator did not configure is
 	// refused; it cannot introduce one.
@@ -220,6 +225,9 @@ const (
 	// ControlWorkGraph adopts (or finds) one WorkGraph revision: WorkGraph,
 	// Repository and Agent.
 	ControlWorkGraph = "workgraph"
+	// ControlProductPropose adopts (or finds) one Product revision (#476):
+	// Product carries the proposed name, revision and repository list.
+	ControlProductPropose = "product-propose"
 	// ControlCommandControllerSnapshot asks the running controller for ONE
 	// coherent observation of itself: which generation it is, whether it holds
 	// the controller role, and whether it is admitting work. It is read-only

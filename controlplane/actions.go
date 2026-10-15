@@ -36,6 +36,7 @@ type ActionTarget struct {
 	DecisionID string `json:"decision_id,omitempty"`
 	RunID      string `json:"run_id,omitempty"`
 	PlanID     string `json:"plan_id,omitempty"`
+	ProductID  string `json:"product_id,omitempty"`
 	Revision   int    `json:"revision,omitempty"`
 	Digest     string `json:"digest,omitempty"`
 }
