@@ -41,6 +41,15 @@ func validateID(id string) error {
 // this one. nil means the kind has no outgoing references to check.
 func writeArtifact[T domain.Contract](dir, kind, id string, data []byte, seal func(path, id string, data []byte) (T, error), validate func(T) error) (T, error) {
 	var zero T
+	// LoadRegistry treats an empty dir as "no planning_dir configured, empty
+	// registry" - a valid READ for an operator with no custom agents. A
+	// WRITE has no such safe empty case: dir becomes the root every path in
+	// this call joins against, and an empty or relative one would resolve
+	// against the server process's current working directory instead of
+	// the operator-controlled location #398/ADR-0003 require.
+	if !filepath.IsAbs(dir) {
+		return zero, &RegistryError{Detail: "planning_dir must be configured as an absolute, operator-controlled directory before an artifact can be written"}
+	}
 	if err := validateID(id); err != nil {
 		return zero, err
 	}
