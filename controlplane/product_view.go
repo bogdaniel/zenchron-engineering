@@ -1,7 +1,9 @@
 package controlplane
 
 import (
+	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/product"
@@ -160,4 +162,75 @@ func (a *API) product(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	send(w, 200, detail)
+}
+
+// proposeProduct serves both POST /v1/products (create: id is empty, Revision
+// must be 1) and POST /v1/products/{id}/revise (mutate: Revision must be the
+// successor of whatever is current). The ADD-only repository invariant is
+// enforced once, inside AdoptProductRevision, which this never duplicates.
+func (a *API) proposeProduct(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ControllerBinding string   `json:"controller_binding"`
+		Name              string   `json:"name"`
+		Revision          int      `json:"revision"`
+		Repositories      []string `json:"repositories"`
+	}
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	id := r.PathValue("id")
+	if strings.TrimSpace(body.Name) == "" || len(body.Repositories) == 0 {
+		fail(w, 400, "invalid_request")
+		return
+	}
+	if id == "" {
+		if body.Revision != 1 {
+			fail(w, 400, "invalid_request")
+			return
+		}
+	} else if body.Revision < 2 {
+		fail(w, 400, "invalid_request")
+		return
+	}
+	var result *ProductDetail
+	effect := func() (bool, any, error) {
+		if result != nil {
+			return true, result, nil
+		}
+		if id == "" {
+			return false, nil, nil
+		}
+		p, found, err := a.Store.CurrentProduct(id)
+		if err != nil {
+			return false, nil, err
+		}
+		if !found {
+			return false, nil, nil
+		}
+		return false, productDetailProjection(p, nil), nil
+	}
+	precheck := func(state any) (int, string) {
+		if id == "" {
+			return 0, ""
+		}
+		detail, ok := state.(ProductDetail)
+		if !ok {
+			return 404, "product_not_found"
+		}
+		if detail.Revision != body.Revision-1 {
+			return 409, "revision_mismatch"
+		}
+		return 0, ""
+	}
+	a.actResponse(w, r, ActionResult{Action: rt.ControlProductPropose, Target: ActionTarget{ProductID: id, Revision: body.Revision}}, body.ControllerBinding,
+		rt.ControlRequest{Command: rt.ControlProductPropose, Product: &product.ProductProposal{Name: body.Name, Revision: body.Revision, Repositories: body.Repositories}},
+		effect, precheck, func(response rt.ControlResponse) error {
+			var p product.Product
+			if err := json.Unmarshal(response.Payload, &p); err != nil {
+				return err
+			}
+			detail := productDetailProjection(p, nil)
+			result = &detail
+			return nil
+		})
 }

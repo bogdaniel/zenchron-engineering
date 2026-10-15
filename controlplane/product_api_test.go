@@ -106,6 +106,123 @@ func TestProductAndWorkGraphWireSchemasAndAssociation(t *testing.T) {
 	wire(t, a, "/v1/workgraphs/unknown", "GET", a.Token, "error", 404)
 }
 
+// productActionFixture is a writable store plus an API whose Send composes
+// and adopts a Product revision directly against it - the same "fake socket
+// runs the real runtime verb" shape actionFixture uses for run/plan actions.
+type productActionFixture struct {
+	api   *API
+	store *rt.SQLiteOperationStore
+}
+
+func newProductActionFixture(t *testing.T) *productActionFixture {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := rt.OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	at := time.Unix(300, 0).UTC()
+	build := rt.ControllerBuild{Kind: rt.ControllerAdopted, Version: "v1", SourceRevision: strings.Repeat("a", 40), SourceTree: strings.Repeat("b", 40), BinarySHA256: strings.Repeat("c", 64)}
+	if _, err := store.ReadoptController(rt.ControllerReadoption{ID: "fixture", Reason: "fixture", Binding: rt.ControllerBinding{Controller: "fixture", Build: &build}, RecordedAt: at}, nil); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := rt.OpenReadStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reader.Close() })
+	f := &productActionFixture{store: store}
+	f.api = &API{Store: reader, Token: "test-token", Listen: testListen, ControllerRoot: dir + "/controller", Now: func() time.Time { return at },
+		Observe: func() (rt.LiveControllerSnapshot, error) {
+			return rt.LiveControllerSnapshot{Identity: rt.ControllerSelfRecord{Build: build}, Role: rt.RoleHeld, WorkAdmission: rt.AdmissionOpen, ObservedAt: at}, nil
+		},
+		Send: func(request rt.ControlRequest) (rt.ControlResponse, error) {
+			if request.Command != rt.ControlProductPropose || request.Product == nil {
+				return rt.ControlResponse{Error: "unexpected request", Code: "unexpected"}, nil
+			}
+			proposed, err := request.Product.Compose(request.Operator, at)
+			if err != nil {
+				return rt.ControlResponse{Error: err.Error(), Code: rt.ControlCode(err)}, nil
+			}
+			adopted, _, err := store.AdoptProductRevision(proposed)
+			if err != nil {
+				return rt.ControlResponse{Error: err.Error(), Code: rt.ControlCode(err)}, nil
+			}
+			payload, err := json.Marshal(adopted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return rt.ControlResponse{OK: true, Payload: payload}, nil
+		}}
+	return f
+}
+
+func productBody(name string, revision int, repositories ...string) string {
+	encoded, _ := json.Marshal(repositories)
+	return fmt.Sprintf(`{"controller_binding":%q,"name":%q,"revision":%d,"repositories":%s}`, testBinding, name, revision, encoded)
+}
+
+// TestProductProposeCreatesThenRevisesAdditively pins the operator-facing
+// mutation path #480 success requires: an operator creates a product from
+// the dashboard, revises it to add a repository, and a revision that would
+// remove one is refused - the same invariant AdoptProductRevision already
+// enforces, now reachable without hand-editing configuration JSON.
+func TestProductProposeCreatesThenRevisesAdditively(t *testing.T) {
+	f := newProductActionFixture(t)
+	created := post(t, f.api, validRequest("/v1/products", productBody("checkout", 1, "acme/repo")), 200)
+	if outcome(created) != "applied" {
+		t.Fatalf("create: outcome %q, body %+v", outcome(created), created)
+	}
+	state, ok := created["state"].(map[string]any)
+	if !ok {
+		t.Fatalf("create response carries no product state: %+v", created)
+	}
+	productID, _ := state["product_id"].(string)
+	if productID == "" {
+		t.Fatalf("create response carries no product_id: %+v", created)
+	}
+
+	revised := post(t, f.api, validRequest("/v1/products/"+productID+"/revise", productBody("checkout", 2, "acme/repo", "acme/reader")), 200)
+	if outcome(revised) != "applied" {
+		t.Fatalf("revise: outcome %q, body %+v", outcome(revised), revised)
+	}
+
+	refused := post(t, f.api, validRequest("/v1/products/"+productID+"/revise", productBody("checkout", 3, "acme/repo")), 409)
+	if code(refused) == "" {
+		t.Fatalf("a revision removing a repository must be refused with a typed code: %+v", refused)
+	}
+
+	current, found, err := f.store.CurrentProduct(productID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || current.Revision != 2 || len(current.Repositories) != 2 {
+		t.Fatalf("durable state after the refused revision: found=%v current=%+v", found, current)
+	}
+}
+
+// TestProductProposeValidatesBeforeTheSocket mirrors the closed-shape
+// precondition every other mutation enforces before a request ever reaches
+// the socket.
+func TestProductProposeValidatesBeforeTheSocket(t *testing.T) {
+	f := newProductActionFixture(t)
+	for name, body := range map[string]string{
+		"no name":             productBody("", 1, "acme/repo"),
+		"no repositories":     productBody("checkout", 1),
+		"create not rev 1":    productBody("checkout", 2, "acme/repo"),
+		"revise before rev 2": productBody("checkout", 1, "acme/repo"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := "/v1/products"
+			if name == "revise before rev 2" {
+				path = "/v1/products/does-not-matter/revise"
+			}
+			post(t, f.api, validRequest(path, body), 400)
+		})
+	}
+}
+
 // nextHref extracts the href of this page's "next" pager link, the way a
 // browser actually would - by reading the rendered anchor, not by
 // recomputing what the test thinks the offset ought to be. Empty means no
