@@ -2372,3 +2372,15 @@ func (s *SQLiteOperationStore) PlanAssignment(planID string, revision, generatio
 	}
 	return assignment, true, nil
 }
+
+// planServiceForReconcile is deps.Plans with its Registry refreshed from
+// PlanRegistry when wired (ADR-0008 reload), so the background reconciler
+// never resolves a stage against a startup snapshot once an operator writes
+// and reloads the artifact it was blocked on.
+func (s *Supervisor) planServiceForReconcile() PlanService {
+	service := s.deps.Plans
+	if s.deps.PlanRegistry != nil {
+		service.Registry = s.deps.PlanRegistry()
+	}
+	return service
+}

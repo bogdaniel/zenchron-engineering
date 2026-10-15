@@ -72,14 +72,22 @@ full process restart, is.
    `EngineeringPlan` and `Product` mutations already use. It is refused,
    before anything is written, by the identical seal/schema validation
    `LoadRegistry` applies on read - an operator cannot write through the API
-   what the loader would refuse on restart.
+   what the loader would refuse on restart. An `AgentProfile` or
+   `EngineeringPlanTemplate` is additionally refused if it names an
+   instruction pack, context policy or profile not currently installed: the
+   dangling reference is caught at the write that introduced it, not
+   discovered later when `LoadRegistry.validateReferences` would refuse the
+   WHOLE registry - every other artifact's availability, not just this one's.
 4. **A new governed verb reloads the in-process registry**: re-run
    `LoadRegistry` against the unchanged `planning_dir` path and atomically
    swap the held value. This is safe without a #307 re-adopt because the
    swapped content is never digest-bearing identity under ADR-0003 - only the
    path is, and the path does not change. It is exactly as safe as the
    existing "edit the file, restart the process" workflow; it only removes
-   the restart.
+   the restart - for EVERY reader, including the background plan reconciler
+   (`SupervisorDependencies.PlanRegistry`), not only an operator's next plan
+   proposal. A reload that reached one reader and not the other would still
+   be a restart in practice, just a confusing one.
 5. **Assignment binding is unaffected.** A plan revision, once proposed,
    keeps pinning the exact profile/pack/template digest it was compiled
    against (already true today). A later write or reload changes what a

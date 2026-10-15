@@ -378,6 +378,7 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 		// predecessor that has not yet let go.
 		WorkAdmissionWithheld: withholdWork,
 		Plans:                 plans,
+		PlanRegistry:          c.currentPlanning,
 		Clock:                 runtime.RealClock{},
 		Owner:                 c.owner,
 		Liveness:              runtime.NewLockOwnerLiveness(c.config.StateDir),
