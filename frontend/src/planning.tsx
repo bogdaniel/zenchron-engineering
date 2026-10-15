@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import * as api from "./api";
+import * as ops from "./operations-api";
 import * as workspace from "./workspace-api";
 import { GovernedAction, type ActionReview } from "./governed-action";
 import { Disclosure, Empty, Head, Panel, Link } from "./components";
@@ -186,8 +187,10 @@ export function PlanControls({
 export function ObjectiveIntake() {
   const [options, setOptions] = useState<workspace.Options | null>(null),
     [controller, setController] = useState<api.Controller | null>(null),
+    [products, setProducts] = useState<ops.ProductRow[]>([]),
     [error, setError] = useState("");
-  const [repository, setRepository] = useState(""),
+  const [product, setProduct] = useState(""),
+    [repository, setRepository] = useState(""),
     [issue, setIssue] = useState(""),
     [agent, setAgent] = useState(""),
     [profile, setProfile] = useState(""),
@@ -195,10 +198,11 @@ export function ObjectiveIntake() {
     [deterministic, setDeterministic] = useState(false);
   useEffect(() => {
     const owner = new AbortController();
-    Promise.all([workspace.options(owner.signal), api.controller(owner.signal)])
-      .then(([o, c]) => {
+    Promise.all([workspace.options(owner.signal), api.controller(owner.signal), ops.products(0, owner.signal)])
+      .then(([o, c, p]) => {
         setOptions(o);
         setController(c);
+        setProducts(p.products);
         setRepository(o.repositories[0] || "");
         setAgent(o.agents.find((a) => a.default && a.eligible)?.id || o.agents.find((a) => a.eligible)?.id || "");
       })
@@ -207,6 +211,12 @@ export function ObjectiveIntake() {
       });
     return () => owner.abort();
   }, []);
+  // A product only narrows which repository this intake offers; it is not
+  // recorded on the plan - products associate with WorkGraphs, never with a
+  // Plan or Run directly (product/association.go has no AssociatePlan).
+  const chosenProduct = products.find((p) => p.product_id === product);
+  const availableRepositories =
+    chosenProduct && options ? options.repositories.filter((r) => chosenProduct.repositories.includes(r)) : options?.repositories || [];
   const number = Number(issue),
     why =
       error ||
@@ -266,8 +276,27 @@ export function ObjectiveIntake() {
       </Head>
       <Panel title="Engineering intent">
         <div className="product-body intake-form">
+          <SelectField
+            label="Product"
+            value={product}
+            onChange={(e) => {
+              const id = e.target.value;
+              setProduct(id);
+              const scoped = products.find((p) => p.product_id === id);
+              const scopedRepositories =
+                scoped && options ? options.repositories.filter((r) => scoped.repositories.includes(r)) : options?.repositories || [];
+              if (!scopedRepositories.includes(repository)) setRepository(scopedRepositories[0] || "");
+            }}
+          >
+            <option value="">Any governed repository</option>
+            {products.map((p) => (
+              <option key={p.product_id} value={p.product_id}>
+                {p.name}
+              </option>
+            ))}
+          </SelectField>
           <SelectField label="Repository" value={repository} onChange={(e) => setRepository(e.target.value)}>
-            {options?.repositories.map((r) => (
+            {availableRepositories.map((r) => (
               <option key={r}>{r}</option>
             ))}
           </SelectField>
