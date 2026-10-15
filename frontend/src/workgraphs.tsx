@@ -3,7 +3,16 @@ import type { Controller } from "./api";
 import { useMemo, useState } from "react";
 import type { GraphDetail, GraphRow, Graphs, ProductDetail, Products, Unit } from "./operations-api";
 import { Badge, Disclosure, Empty, FilterBar, Head, Link, Pagination, Panel } from "./components";
-import { COLUMN_GAP, MARGIN, ROW_GAP, dependencyEdgePath, layoutDependencies, useDependencyArrow } from "./dependency-graph";
+import {
+  COLUMN_GAP,
+  MARGIN,
+  ROW_GAP,
+  dependencyEdgePath,
+  layoutDependencies,
+  resolvedDependencies,
+  unresolvedDependencies,
+  useDependencyArrow,
+} from "./dependency-graph";
 import { Facts } from "./runs";
 
 export function GraphTable({ rows }: { rows: GraphRow[] }) {
@@ -123,32 +132,35 @@ function DependencyMap({
           >
             <defs>{defs}</defs>
             {rows.flatMap((u) =>
-              u.depends_on
-                .filter((p) => points.has(p))
-                .map((p) => {
-                  const from = points.get(p)!,
-                    to = points.get(u.unit_id)!;
-                  return (
-                    <path
-                      className="dependency-edge"
-                      key={`${p}/${u.unit_id}`}
-                      d={dependencyEdgePath(from, to)}
-                      markerEnd={`url(#${markerId})`}
-                    />
-                  );
-                }),
+              resolvedDependencies(u.unit_id, u.depends_on, (p) => points.has(p)).map((p) => {
+                const from = points.get(p)!,
+                  to = points.get(u.unit_id)!;
+                return (
+                  <path
+                    className="dependency-edge"
+                    key={`${p}/${u.unit_id}`}
+                    d={dependencyEdgePath(from, to)}
+                    markerEnd={`url(#${markerId})`}
+                  />
+                );
+              }),
             )}
             {rows.map((u) => {
               const p = points.get(u.unit_id)!;
+              // Full-graph scoped, not window-scoped: a dependency outside this
+              // page's 50-unit window is expected (see the caption above) and
+              // not flagged; only a reference layout itself could not resolve
+              // anywhere in the graph is malformed data.
+              const unresolved = unresolvedDependencies(u.unit_id, u.depends_on, (id) => layout?.has(id) ?? false);
               return (
                 <g
                   key={u.unit_id}
-                  className={`dependency-node ${selected === u.unit_id ? "selected" : ""}`}
+                  className={`dependency-node ${selected === u.unit_id ? "selected" : ""} ${unresolved.length ? "unresolved" : ""}`}
                   transform={`translate(${p.x},${p.y})`}
                   role="button"
                   tabIndex={0}
                   aria-pressed={selected === u.unit_id}
-                  aria-label={`${u.purpose} · ${u.state} · after ${u.depends_on.join(", ") || "no dependency"}`}
+                  aria-label={`${u.purpose} · ${u.state} · after ${u.depends_on.join(", ") || "no dependency"}${unresolved.length ? ` · unresolved dependency reference: ${unresolved.join(", ")}` : ""}`}
                   onClick={() => select(u.unit_id)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
@@ -165,8 +177,9 @@ function DependencyMap({
                     {u.purpose.length > 26 ? `${u.purpose.slice(0, 25)}…` : u.purpose}
                   </text>
                   <text x="12" y="67" className="dependency-meta">
-                    {u.state}
-                    {graph.frontier.includes(u.unit_id) ? " · frontier" : ""}
+                    {unresolved.length
+                      ? `Unresolved dependency: ${unresolved.join(", ")}`
+                      : `${u.state}${graph.frontier.includes(u.unit_id) ? " · frontier" : ""}`}
                   </text>
                 </g>
               );

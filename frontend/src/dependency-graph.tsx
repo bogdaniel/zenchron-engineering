@@ -1,8 +1,27 @@
 import { useId, useMemo } from "react";
 import type { Stage } from "./api";
 import { Empty, FilterBar } from "./components";
-import { NODE_HEIGHT, NODE_WIDTH, dependencyEdgePath, dependencyGraphSize, layoutDependencies } from "./dependency-layout";
-export { NODE_HEIGHT, NODE_WIDTH, COLUMN_GAP, ROW_GAP, MARGIN, dependencyEdgePath, dependencyGraphSize, layoutDependencies } from "./dependency-layout";
+import {
+  NODE_HEIGHT,
+  NODE_WIDTH,
+  dependencyEdgePath,
+  dependencyGraphSize,
+  layoutDependencies,
+  resolvedDependencies,
+  unresolvedDependencies,
+} from "./dependency-layout";
+export {
+  NODE_HEIGHT,
+  NODE_WIDTH,
+  COLUMN_GAP,
+  ROW_GAP,
+  MARGIN,
+  dependencyEdgePath,
+  dependencyGraphSize,
+  layoutDependencies,
+  resolvedDependencies,
+  unresolvedDependencies,
+} from "./dependency-layout";
 export type { DependencyNode, DependencyPosition } from "./dependency-layout";
 
 // One <marker> per rendered graph (own id via useId) - a literal shared id
@@ -61,32 +80,31 @@ export function PlanDependencyGraph({
           <svg width={size.width} height={size.height} role="group" aria-label="Plan stage dependency edges">
             <defs>{defs}</defs>
             {stages.flatMap((s) =>
-              s.depends_on
-                .filter((p) => layout.has(p))
-                .map((p) => {
-                  const from = layout.get(p)!,
-                    to = layout.get(s.stage_id)!;
-                  return (
-                    <path
-                      className="dependency-edge"
-                      key={`${p}/${s.stage_id}`}
-                      d={dependencyEdgePath(from, to)}
-                      markerEnd={`url(#${markerId})`}
-                    />
-                  );
-                }),
+              resolvedDependencies(s.stage_id, s.depends_on, (p) => layout.has(p)).map((p) => {
+                const from = layout.get(p)!,
+                  to = layout.get(s.stage_id)!;
+                return (
+                  <path
+                    className="dependency-edge"
+                    key={`${p}/${s.stage_id}`}
+                    d={dependencyEdgePath(from, to)}
+                    markerEnd={`url(#${markerId})`}
+                  />
+                );
+              }),
             )}
             {stages.map((s) => {
               const p = layout.get(s.stage_id)!;
+              const unresolved = unresolvedDependencies(s.stage_id, s.depends_on, (id) => layout.has(id));
               return (
                 <g
                   key={s.stage_id}
-                  className={`dependency-node ${selected === s.stage_id ? "selected" : ""}`}
+                  className={`dependency-node ${selected === s.stage_id ? "selected" : ""} ${unresolved.length ? "unresolved" : ""}`}
                   transform={`translate(${p.x},${p.y})`}
                   role="button"
                   tabIndex={0}
                   aria-pressed={selected === s.stage_id}
-                  aria-label={`${s.stage_id} · ${s.kind} · ${s.state || "state not recorded"} · after ${s.depends_on.join(", ") || "no stage dependency"}`}
+                  aria-label={`${s.stage_id} · ${s.kind} · ${s.state || "state not recorded"} · after ${s.depends_on.join(", ") || "no stage dependency"}${unresolved.length ? ` · unresolved dependency reference: ${unresolved.join(", ")}` : ""}`}
                   onClick={() => onSelect(s.stage_id)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
@@ -103,7 +121,9 @@ export function PlanDependencyGraph({
                     {s.stage_id.length > 26 ? `${s.stage_id.slice(0, 25)}…` : s.stage_id}
                   </text>
                   <text x="12" y="67" className="dependency-meta">
-                    {s.state || "State not recorded"}
+                    {unresolved.length
+                      ? `Unresolved dependency: ${unresolved.join(", ")}`
+                      : s.state || "State not recorded"}
                   </text>
                 </g>
               );

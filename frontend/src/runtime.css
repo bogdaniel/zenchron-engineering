@@ -31,6 +31,12 @@
 .dependency-node:hover rect { fill: var(--raised); }
 .dependency-node:focus { outline: none; }
 .dependency-node:focus-visible rect { stroke: var(--orange); stroke-width: 3; }
+/* A dependency reference to an id outside this node set, or to itself, is
+   malformed recorded data - distinguished here from a true, dependency-free
+   root rather than silently rendered as one. Red (not the .selected orange)
+   so the warning still reads when a flagged node is also selected. */
+.dependency-node.unresolved rect { stroke: var(--red); stroke-width: 2; stroke-dasharray: 4 3; }
+.dependency-node.unresolved .dependency-meta { fill: var(--red); }
 @layer components {
   .dependency-mobile {
     @apply hidden;

@@ -9,15 +9,35 @@ export const COLUMN_GAP = 260;
 export const ROW_GAP = 115;
 export const MARGIN = 20;
 
-// One pass over actual dependencies. A cycle, a duplicate id or a reference
-// to an id outside this exact node set is a malformed observation, never an
-// invented edge, a dropped node or a guessed ordering.
+function unique(ids: string[]): string[] {
+  return [...new Set(ids)];
+}
+// The subset of a node's own depends_on that resolves to a real edge: no
+// duplicates, no self-reference, and the id must be a node in this exact
+// set. One shared definition so the layout pass and edge rendering can
+// never compute a different answer to "is this a real dependency" - a
+// prior version of edge rendering skipped the dedup, rendering two
+// overlapping edges for one repeated dependency id.
+export function resolvedDependencies(id: string, depends_on: string[], has: (p: string) => boolean): string[] {
+  return unique(depends_on).filter((p) => p !== id && has(p));
+}
+// Everything else: a reference to an id outside this node set, or a
+// self-reference. Both are malformed data, not "no dependency" - a caller
+// renders this explicitly rather than letting the node look like a true,
+// dependency-free root.
+export function unresolvedDependencies(id: string, depends_on: string[], has: (p: string) => boolean): string[] {
+  const resolved = new Set(resolvedDependencies(id, depends_on, has));
+  return unique(depends_on).filter((p) => !resolved.has(p));
+}
+// One pass over actual dependencies. A cycle or a duplicate id makes the
+// whole graph unlayoutable; an unresolved individual reference (see above)
+// does not - it is reported per node instead.
 export function layoutDependencies<T extends DependencyNode>(nodes: T[]): Map<string, DependencyPosition> | null {
   const byId = new Map(nodes.map((n) => [n.id, { remaining: 0, children: [] as string[] }]));
   if (byId.size !== nodes.length) return null; // duplicate id
   const depth = new Map(nodes.map((n) => [n.id, 0]));
   for (const n of nodes) {
-    const known = [...new Set(n.depends_on)].filter((p) => byId.has(p) && p !== n.id);
+    const known = resolvedDependencies(n.id, n.depends_on, (p) => byId.has(p));
     byId.get(n.id)!.remaining = known.length;
     for (const parent of known) byId.get(parent)!.children.push(n.id);
   }
