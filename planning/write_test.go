@@ -153,7 +153,7 @@ func TestWriteRejectsAnUnsafeID(t *testing.T) {
 // an operator-controlled location, and must never reach the filesystem.
 func TestWriteRefusesAnUnconfiguredOrRelativePlanningDir(t *testing.T) {
 	for _, dir := range []string{"", "relative/planning", "."} {
-		if _, err := planning.WriteAgentProfile(dir, "reviewer", []byte(validProfileDocument)); err == nil {
+		if _, err := planning.WriteAgentProfile(dir, "reviewer", []byte(validProfileDocument), nil); err == nil {
 			t.Fatalf("dir %q must be refused before anything is written", dir)
 		}
 	}
