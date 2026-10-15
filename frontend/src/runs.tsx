@@ -3,7 +3,7 @@ import { PublicationControls } from "./human-requests";
 import { useState } from "react";
 import type { Controller, Runs } from "./api";
 import * as ops from "./operations-api";
-import { Badge, Disclosure, Empty, Head, Link, Pagination, Panel } from "./components";
+import { Badge, Disclosure, Empty, FilterBar, Head, Link, Pagination, Panel, SearchInput } from "./components";
 import { JournalHistory } from "./history";
 import { StopRun } from "./stop-run";
 
@@ -60,16 +60,8 @@ export function RunPortfolio({
         page.
       </Head>
       <Panel title="Run inventory" extra={<Badge>{runs.runs.length} loaded</Badge>}>
-        <div className="filter-bar">
-          <label className="search-input">
-            <span className="sr-only">Filter loaded runs</span>
-            <input
-              type="search"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Repository, run or agent"
-            />
-          </label>
+        <FilterBar>
+          <SearchInput label="Filter loaded runs" value={query} onChange={setQuery} placeholder="Repository, run or agent" />
           <select aria-label="Run disposition" value={status} onChange={(e) => onStatus(e.target.value)}>
             {["all", "active", "waiting", "completed", "failed", "cancelled", "held"].map((s) => (
               <option value={s} key={s}>
@@ -77,26 +69,23 @@ export function RunPortfolio({
               </option>
             ))}
           </select>
-        </div>
-        <form
-          className="filter-bar"
+        </FilterBar>
+        <FilterBar
+          as="form"
           onSubmit={(e) => {
             e.preventDefault();
             onSource(draft);
           }}
         >
-          <label className="search-input">
-            <span className="sr-only">Source issue</span>
-            <input
-              type="search"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              maxLength={200}
-              placeholder="owner/repo#123 or 123"
-            />
-          </label>
+          <SearchInput
+            label="Source issue"
+            value={draft}
+            onChange={setDraft}
+            maxLength={200}
+            placeholder="owner/repo#123 or 123"
+          />
           <button className="button">Filter source</button>
-        </form>
+        </FilterBar>
         {rows.length ? (
           <div className="table-scroll" tabIndex={0} role="region" aria-label="Run inventory">
             <table className="data-table">

@@ -2,7 +2,7 @@ import { HumanDecision } from "./human-requests";
 import type { Controller } from "./api";
 import { useMemo, useState } from "react";
 import type { GraphDetail, GraphRow, Graphs, ProductDetail, Products, Unit } from "./operations-api";
-import { Badge, Disclosure, Empty, Head, Link, Pagination, Panel } from "./components";
+import { Badge, Disclosure, Empty, FilterBar, Head, Link, Pagination, Panel } from "./components";
 import { Facts } from "./runs";
 
 export function GraphTable({ rows }: { rows: GraphRow[] }) {
@@ -113,7 +113,7 @@ function DependencyMap({
   );
   return (
     <>
-      <div className="filter-bar">
+      <FilterBar>
         <label htmlFor="workunit-picker">Inspect unit</label>
         <select id="workunit-picker" value={selected} onChange={(e) => select(e.target.value)}>
           {rows.map((u) => (
@@ -122,7 +122,7 @@ function DependencyMap({
             </option>
           ))}
         </select>
-      </div>
+      </FilterBar>
       {layout ? (
         <div className="dependency-map" tabIndex={0} role="region" aria-label="Dependency map; scroll to inspect">
           <svg

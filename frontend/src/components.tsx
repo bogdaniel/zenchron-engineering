@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, type FormEventHandler, type ReactNode } from "react";
 import type { Controller, Plan } from "./api";
 
 export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: string }) {
@@ -33,6 +33,57 @@ export function Panel({ title, children, extra }: { title: string; children: Rea
       </header>
       {children}
     </section>
+  );
+}
+// Every list page's filter row shares this exact markup. Before this existed,
+// each page hand-wrote its own copy; one page (Objectives) silently drifted -
+// a dead class name and a toolbar placed outside its Panel - with nothing to
+// catch it. One shared component removes the drift, not a CSS technique.
+export function FilterBar({
+  as = "div",
+  className = "",
+  onSubmit,
+  children,
+}: {
+  as?: "div" | "form";
+  className?: string;
+  onSubmit?: FormEventHandler<HTMLFormElement>;
+  children: ReactNode;
+}) {
+  const classes = className ? `filter-bar ${className}` : "filter-bar";
+  if (as === "form") {
+    return (
+      <form className={classes} onSubmit={onSubmit}>
+        {children}
+      </form>
+    );
+  }
+  return <div className={classes}>{children}</div>;
+}
+export function SearchInput({
+  label,
+  value,
+  onChange,
+  placeholder,
+  maxLength,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  maxLength?: number;
+}) {
+  return (
+    <label className="search-input">
+      <span className="sr-only">{label}</span>
+      <input
+        type="search"
+        value={value}
+        maxLength={maxLength}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+      />
+    </label>
   );
 }
 export function Head({

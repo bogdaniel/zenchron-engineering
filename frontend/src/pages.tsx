@@ -4,7 +4,19 @@ import type { GraphDetail } from "./operations-api";
 import { useState } from "react";
 import type { Context, Controller, PlanIndex, Runs } from "./api";
 import { blocker } from "./api";
-import { Badge, Binding, ControllerFacts, Disclosure, Empty, Head, Link, Pagination, Panel } from "./components";
+import {
+  Badge,
+  Binding,
+  ControllerFacts,
+  Disclosure,
+  Empty,
+  FilterBar,
+  Head,
+  Link,
+  Pagination,
+  Panel,
+  SearchInput,
+} from "./components";
 import { Facts } from "./runs";
 import { JournalHistory } from "./history";
 import type { Fleet } from "./operations-api";
@@ -229,37 +241,24 @@ export function Portfolio({
       >
         Plan-governed source contexts. Private objective prose and product association are not exposed by this read API.
       </Head>
-      <form
-        className="portfolio-toolbar"
-        onSubmit={(e) => {
-          e.preventDefault();
-          onQuery(draft);
-        }}
-      >
-        <label className="search-field">
-          Search source contexts
-          <input
-            type="search"
-            aria-label="Search objectives"
-            value={draft}
-            maxLength={200}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="Repository, issue, plan ID"
-          />
-        </label>
-        <button className="button" type="submit">
-          Search
-        </button>
-        <label>
-          Request filter{" "}
+      <Panel title="Objective source contexts" extra={<span className="muted small">50-row page bound</span>}>
+        <FilterBar
+          as="form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            onQuery(draft);
+          }}
+        >
+          <SearchInput label="Search objectives" value={draft} maxLength={200} onChange={setDraft} placeholder="Repository, issue, plan ID" />
+          <button className="button" type="submit">
+            Search
+          </button>
           <select aria-label="Request filter" value={filter} onChange={(e) => onFilter(e.target.value)}>
             <option value="all">All in loaded page</option>
             <option value="pending">Pending human requests</option>
             <option value="other">No pending request</option>
           </select>
-        </label>
-      </form>
-      <Panel title="Objective source contexts" extra={<span className="muted small">50-row page bound</span>}>
+        </FilterBar>
         <PlanTable index={visible} />
         <Pagination offset={index.offset} more={index.has_more} count={index.plans.length} onPage={onPage} />
       </Panel>
@@ -304,8 +303,9 @@ export function Workspace({
         {p.repository} · shown r{p.revision} {p.shown} · governing{" "}
         {p.governing_revision ? `r${p.governing_revision}` : "none"}
       </Head>
-      <form
-        className="portfolio-toolbar revision-picker"
+      <FilterBar
+        as="form"
+        className="revision-picker"
         onSubmit={(e) => {
           e.preventDefault();
           location.hash = `#/objectives/${encodeURIComponent(p.plan_id)}/${revision}`;
@@ -330,7 +330,7 @@ export function Workspace({
             Governing r{p.governing_revision}
           </Link>
         )}
-      </form>
+      </FilterBar>
       <div className="workspace-grid">
         <div className="workspace-main">
           <Panel title="Engineering lifecycle">

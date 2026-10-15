@@ -126,11 +126,22 @@ export function timestamp(v: unknown): string {
   if (!Number.isFinite(Date.parse(value))) throw new Error("invalid_response");
   return value;
 }
+// cookieName is scoped to the exact port this page loaded from. A browser's
+// cookie jar is scoped by host, never by port, so two loopback Control Plane
+// instances sharing one hostname would otherwise read and overwrite the
+// identical cookie: signing in to one would silently evict the other's
+// session. controlplane/web.go's sessionCookieName and console.js derive the
+// identical name, so a single instance's console and this app still share
+// one session; only cross-instance collisions are removed.
+function cookieName(): string {
+  return `zenchron_control_plane_token_${location.port || "default"}`;
+}
 export function credential(): string {
+  const name = cookieName() + "=";
   const cookie = document.cookie
     .split(";")
     .map((v) => v.trim())
-    .find((v) => v.startsWith("zenchron_control_plane_token="));
+    .find((v) => v.startsWith(name));
   let token = "";
   try {
     token = cookie ? decodeURIComponent(cookie.slice(cookie.indexOf("=") + 1)) : "";
@@ -230,14 +241,14 @@ export function hasCredential(): boolean {
   }
 }
 export function disconnect() {
-  document.cookie = "zenchron_control_plane_token=; path=/; SameSite=Strict; Max-Age=0";
+  document.cookie = `${cookieName()}=; path=/; SameSite=Strict; Max-Age=0`;
 }
 export async function connect(value: string, signal: AbortSignal): Promise<void> {
   const token = value.trim();
   if (!/^[a-f0-9]{64}$/.test(token)) throw new Error("invalid_token");
   decodeController((await request("/v1/controller", signal, undefined, token)).value);
   // This is the existing credential, set only after the bearer API accepts it.
-  document.cookie = `zenchron_control_plane_token=${token}; path=/; SameSite=Strict`;
+  document.cookie = `${cookieName()}=${token}; path=/; SameSite=Strict`;
   if (!hasCredential() || credential() !== token) throw new Error("session_unavailable");
 }
 export async function plans(signal: AbortSignal, offset = 0, query = ""): Promise<PlanIndex> {

@@ -26,9 +26,11 @@ const failures = [];
 try {
   await mkdir(out, { recursive: true });
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, reducedMotion: "reduce" });
+  // The cookie name is scoped to the exact connected port (controlplane/web.go's
+  // sessionCookieName; frontend/src/api.ts derives it identically from location.port).
   await context.addCookies([
     {
-      name: "zenchron_control_plane_token",
+      name: "zenchron_control_plane_token_" + (new URL(base).port || "default"),
       value: (await readFile(process.env.ZENCHRON_LIVE_TOKEN_FILE, "utf8")).trim(),
       url: base,
     },

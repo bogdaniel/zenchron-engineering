@@ -3,10 +3,12 @@ import * as api from "./api";
 
 export function Login({
   connected,
+  note,
   theme,
   toggleTheme,
 }: {
   connected: () => void;
+  note?: string;
   theme: string;
   toggleTheme: () => void;
 }) {
@@ -62,6 +64,11 @@ export function Login({
             Use the token from your local <span className="mono">control-plane.token</span> file. This connects to the
             existing Go listener.
           </p>
+          {note && (
+            <p className="banner orange" role="status">
+              {note}
+            </p>
+          )}
           <form
             onSubmit={(e) => {
               e.preventDefault();

@@ -18,7 +18,10 @@
 // parameter or a form GET, so the token never appears in a URL, a server
 // log, or a template response - only in the Cookie and Authorization headers
 // a request carries, exactly where the existing bearer credential already
-// travels for every other client.
+// travels for every other client. The cookie's name is scoped to the exact
+// port the browser connected to (sessionCookieName): a browser's cookie jar
+// never partitions by port, so two loopback instances on the same hostname
+// would otherwise share - and silently overwrite - one cookie.
 //
 // Templates render ONLY controlplane's own sanitized DTOs - Fleet, Run,
 // RunDetail, Controller, Plan, Event - never runtime.RunSummary,
@@ -36,6 +39,7 @@ package controlplane
 import (
 	"crypto/subtle"
 	"html/template"
+	"net"
 	"net/http"
 	"path"
 	"strconv"
@@ -68,6 +72,29 @@ func (w *Web) now() time.Time {
 // from control-plane.token itself.
 const webTokenCookie = "zenchron_control_plane_token"
 
+// sessionCookieName suffixes webTokenCookie with the exact port a browser
+// connected to. A browser's cookie jar is scoped by host, never by port, so
+// two loopback Control Plane instances sharing one hostname on different
+// ports would otherwise read and overwrite the identical cookie: signing in
+// to one silently evicts the other's session instead of refusing one token
+// for the other's store. frontend/src/api.ts and assets/static/console.js
+// derive the identical name from location.port, so a single instance's own
+// console and React app still share one session; only cross-instance
+// collisions are removed.
+func sessionCookieName(host string) string {
+	_, port, err := net.SplitHostPort(host)
+	if err != nil || port == "" {
+		port = "default"
+	}
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			port = "default"
+			break
+		}
+	}
+	return webTokenCookie + "_" + port
+}
+
 // authenticated reports whether this request already presented the token via
 // the console's cookie. The comparison is constant-time for the same reason
 // API's is: a local, unprivileged process on the same host must not be able
@@ -76,7 +103,7 @@ func (w *Web) authenticated(r *http.Request) bool {
 	if w.Token == "" {
 		return false
 	}
-	cookie, err := r.Cookie(webTokenCookie)
+	cookie, err := r.Cookie(sessionCookieName(r.Host))
 	if err != nil || cookie.Value == "" {
 		return false
 	}
