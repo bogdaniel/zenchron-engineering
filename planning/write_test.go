@@ -53,6 +53,73 @@ func TestWriteRefusesWhatLoadWouldRefuseAndWritesNothing(t *testing.T) {
 	}
 }
 
+// TestWriteRefusesAProfileNamingAnUninstalledPackOrContextPolicy proves a
+// dangling reference is refused at the write itself - before anything is
+// durable - rather than succeeding and only breaking a later
+// LoadRegistry.validateReferences for every OTHER artifact too.
+func TestWriteRefusesAProfileNamingAnUninstalledPackOrContextPolicy(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := planning.WriteAgentProfile(dir, "reviewer", []byte(`{
+	  "execution_agent": "claude",
+	  "capabilities": ["repository_analysis"],
+	  "instructions": ["does-not-exist"],
+	  "trust_requirement": "operator_trusted"
+	}`)); err == nil {
+		t.Fatal("a profile naming an uninstalled instruction pack must be refused")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "profiles", "reviewer.json")); !os.IsNotExist(err) {
+		t.Fatalf("a refused write must leave no file: stat err = %v", err)
+	}
+	if _, err := planning.WriteAgentProfile(dir, "reviewer", []byte(`{
+	  "execution_agent": "claude",
+	  "capabilities": ["repository_analysis"],
+	  "context_policy": "does-not-exist",
+	  "trust_requirement": "operator_trusted"
+	}`)); err == nil {
+		t.Fatal("a profile naming an uninstalled context policy must be refused")
+	}
+}
+
+// TestWriteAcceptsAProfileNamingAnInstalledPackAndContextPolicy proves the
+// new check refuses a MISSING reference and nothing else: an already
+// installed pack and context policy still write and reload cleanly.
+func TestWriteAcceptsAProfileNamingAnInstalledPackAndContextPolicy(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := planning.WriteInstructionPack(dir, "review-core", []byte(`{"instructions": ["Review the diff."]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planning.WriteContextPolicy(dir, "reviewer-context", []byte(`{"exclude": ["producer_reasoning"]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planning.WriteAgentProfile(dir, "reviewer", []byte(`{
+	  "execution_agent": "claude",
+	  "capabilities": ["repository_analysis"],
+	  "instructions": ["review-core"],
+	  "context_policy": "reviewer-context",
+	  "trust_requirement": "operator_trusted"
+	}`)); err != nil {
+		t.Fatalf("a profile naming already-installed artifacts must write: %v", err)
+	}
+	if _, err := planning.LoadRegistry(dir); err != nil {
+		t.Fatalf("reload must stay clean: %v", err)
+	}
+}
+
+// TestWriteRefusesATemplateStagePreferringAnUninstalledProfile mirrors the
+// profile check for EngineeringPlanTemplate, the other artifact kind that
+// names other artifacts.
+func TestWriteRefusesATemplateStagePreferringAnUninstalledProfile(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := planning.WriteEngineeringPlanTemplate(dir, "two-stage", []byte(`{
+	  "stages": [{"id": "a", "kind": "agent", "role": "implementer", "profile": "does-not-exist"}]
+	}`)); err == nil {
+		t.Fatal("a stage preferring an uninstalled profile must be refused")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "templates", "two-stage.json")); !os.IsNotExist(err) {
+		t.Fatalf("a refused write must leave no file: stat err = %v", err)
+	}
+}
+
 // TestWriteRejectsAnUnsafeID is the filename trust boundary: an id becomes a
 // path, so a traversal segment is refused before anything is touched.
 func TestWriteRejectsAnUnsafeID(t *testing.T) {
