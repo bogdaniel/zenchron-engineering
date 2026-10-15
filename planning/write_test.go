@@ -135,6 +135,20 @@ func TestWriteRejectsAnUnsafeID(t *testing.T) {
 	}
 }
 
+// TestWriteRefusesAnUnconfiguredOrRelativePlanningDir is the write-side half
+// of config validation's "planning_dir must be an absolute path": LoadRegistry
+// treats "" as a valid empty registry (no custom agents configured), which
+// is fine for a READ, but a WRITE has no safe empty case - "" or a relative
+// path would resolve against the server process's own working directory, not
+// an operator-controlled location, and must never reach the filesystem.
+func TestWriteRefusesAnUnconfiguredOrRelativePlanningDir(t *testing.T) {
+	for _, dir := range []string{"", "relative/planning", "."} {
+		if _, err := planning.WriteAgentProfile(dir, "reviewer", []byte(validProfileDocument)); err == nil {
+			t.Fatalf("dir %q must be refused before anything is written", dir)
+		}
+	}
+}
+
 // TestWriteDispatchesEveryKind proves planning.Write's kind dispatch reaches
 // each of the four writers, not just AgentProfile.
 func TestWriteDispatchesEveryKind(t *testing.T) {
