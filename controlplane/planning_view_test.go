@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/planning"
 	rt "github.com/bogdaniel/zenchron-engineering/runtime"
 )
@@ -16,6 +17,18 @@ const testProfileDocument = `{
   "capabilities": ["repository_analysis"],
   "trust_requirement": "operator_trusted"
 }`
+
+// testPlanningAgents is the fixture's configured workforce: one agent,
+// matching testProfileDocument, advertising exactly the capability that
+// document names - so a profile naming anything beyond it is the
+// escalation TestProposePlanningArtifactRefusesAnEscalatingProfile exercises.
+func testPlanningAgents() []domain.ExecutionAgentDescriptor {
+	return []domain.ExecutionAgentDescriptor{{
+		ID: "claude", ProviderKind: "claude_code", VendorFamily: "anthropic",
+		TrustMode:    domain.TrustRequirementOperatorTrusted,
+		Capabilities: []domain.EngineeringCapability{domain.CapabilityRepositoryAnalysis},
+	}}
+}
 
 // newPlanningActionFixture is a store with an attested controller binding and
 // an API whose Send runs the real planning.Write/LoadRegistry against a real
@@ -50,7 +63,7 @@ func newPlanningActionFixture(t *testing.T) *API {
 				if request.PlanningArtifact == nil {
 					return rt.ControlResponse{Error: "missing artifact", Code: "invalid_request"}, nil
 				}
-				payload, err := planning.Write(planningDir, *request.PlanningArtifact)
+				payload, err := planning.Write(planningDir, *request.PlanningArtifact, testPlanningAgents())
 				if err != nil {
 					return rt.ControlResponse{Error: err.Error(), Code: "runtime_refused"}, nil
 				}
@@ -167,5 +180,44 @@ func TestProfileReferencingAnUninstalledPackIsRefusedAtTheWrite(t *testing.T) {
 	reloaded := post(t, a, validRequest("/v1/planning/reload", `{"controller_binding":"`+testBinding+`"}`), 200)
 	if outcome(reloaded) != "applied" {
 		t.Fatalf("nothing was written, so reload must stay clean: %+v", reloaded)
+	}
+}
+
+// TestProposePlanningArtifactRefusesAnEscalatingProfile is the dashboard path
+// for the escalation independent review found: AgentProfileCreate's
+// "Capabilities" field is free text, so an operator can ask for a capability
+// the profile's chosen execution agent does not hold. Registry.Bind would
+// have caught this too, but only as a WHOLE-registry check the plan service
+// runs on every plan action - refusing it here, at this one write, means an
+// escalating profile never reaches disk to poison every other profile's
+// availability.
+func TestProposePlanningArtifactRefusesAnEscalatingProfile(t *testing.T) {
+	a := newPlanningActionFixture(t)
+	applied := post(t, a, validRequest("/v1/planning/artifacts", planningArtifactBody("agent_profile", "reviewer", `{
+		"execution_agent": "claude",
+		"capabilities": ["repository_analysis", "security_review"],
+		"trust_requirement": "operator_trusted"
+	}`)), 409)
+	if code(applied) == "" {
+		t.Fatalf("a profile advertising a capability its agent does not hold must be refused: %+v", applied)
+	}
+	reloaded := post(t, a, validRequest("/v1/planning/reload", `{"controller_binding":"`+testBinding+`"}`), 200)
+	if outcome(reloaded) != "applied" {
+		t.Fatalf("nothing was written, so reload must stay clean: %+v", reloaded)
+	}
+}
+
+// TestProposePlanningArtifactRefusesAProfileForNoSuchAgent is bindProfile's
+// other branch: a profile naming an execution agent that is not configured
+// at all, refused the same way as an escalating one.
+func TestProposePlanningArtifactRefusesAProfileForNoSuchAgent(t *testing.T) {
+	a := newPlanningActionFixture(t)
+	applied := post(t, a, validRequest("/v1/planning/artifacts", planningArtifactBody("agent_profile", "reviewer", `{
+		"execution_agent": "does-not-exist",
+		"capabilities": ["repository_analysis"],
+		"trust_requirement": "operator_trusted"
+	}`)), 409)
+	if code(applied) == "" {
+		t.Fatalf("a profile naming an unconfigured agent must be refused: %+v", applied)
 	}
 }

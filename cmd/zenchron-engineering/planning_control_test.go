@@ -19,7 +19,14 @@ const testProfileDocument = `{
 // reload.
 func TestProposePlanningArtifactWritesButDoesNotReload(t *testing.T) {
 	dir := t.TempDir()
-	c := &composition{config: runtime.Config{OperatorConfig: runtime.OperatorConfig{PlanningDir: dir}}}
+	agents, err := (runtime.OperatorConfig{
+		Agents:       map[string]runtime.AgentConfig{"claude": {Kind: runtime.AgentKindClaudeCode, TrustMode: string(runtime.TrustOperatorTrusted)}},
+		DefaultAgent: "claude",
+	}).AgentRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &composition{agents: agents, config: runtime.Config{OperatorConfig: runtime.OperatorConfig{PlanningDir: dir}}}
 
 	if _, err := c.proposePlanningArtifact(runtime.ControlRequest{
 		PlanningArtifact: &planning.ArtifactWrite{Kind: planning.KindAgentProfile, ID: "reviewer", Document: []byte(testProfileDocument)},

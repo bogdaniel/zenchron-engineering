@@ -19,7 +19,7 @@ const validProfileDocument = `{
 // a hand-edited file would be.
 func TestWriteSealsDurablyAndLoadRegistrySeesIt(t *testing.T) {
 	dir := t.TempDir()
-	sealed, err := planning.WriteAgentProfile(dir, "reviewer", []byte(validProfileDocument))
+	sealed, err := planning.WriteAgentProfile(dir, "reviewer", []byte(validProfileDocument), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestWriteSealsDurablyAndLoadRegistrySeesIt(t *testing.T) {
 // refusal leaves no partial file behind.
 func TestWriteRefusesWhatLoadWouldRefuseAndWritesNothing(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := planning.WriteAgentProfile(dir, "bad", []byte(`{"unknown_field": true}`)); err == nil {
+	if _, err := planning.WriteAgentProfile(dir, "bad", []byte(`{"unknown_field": true}`), nil); err == nil {
 		t.Fatal("a profile missing required fields must be refused")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "profiles", "bad.json")); !os.IsNotExist(err) {
@@ -64,7 +64,7 @@ func TestWriteRefusesAProfileNamingAnUninstalledPackOrContextPolicy(t *testing.T
 	  "capabilities": ["repository_analysis"],
 	  "instructions": ["does-not-exist"],
 	  "trust_requirement": "operator_trusted"
-	}`)); err == nil {
+	}`), nil); err == nil {
 		t.Fatal("a profile naming an uninstalled instruction pack must be refused")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "profiles", "reviewer.json")); !os.IsNotExist(err) {
@@ -75,7 +75,7 @@ func TestWriteRefusesAProfileNamingAnUninstalledPackOrContextPolicy(t *testing.T
 	  "capabilities": ["repository_analysis"],
 	  "context_policy": "does-not-exist",
 	  "trust_requirement": "operator_trusted"
-	}`)); err == nil {
+	}`), nil); err == nil {
 		t.Fatal("a profile naming an uninstalled context policy must be refused")
 	}
 }
@@ -97,7 +97,7 @@ func TestWriteAcceptsAProfileNamingAnInstalledPackAndContextPolicy(t *testing.T)
 	  "instructions": ["review-core"],
 	  "context_policy": "reviewer-context",
 	  "trust_requirement": "operator_trusted"
-	}`)); err != nil {
+	}`), nil); err != nil {
 		t.Fatalf("a profile naming already-installed artifacts must write: %v", err)
 	}
 	if _, err := planning.LoadRegistry(dir); err != nil {
@@ -125,7 +125,7 @@ func TestWriteRefusesATemplateStagePreferringAnUninstalledProfile(t *testing.T) 
 func TestWriteRejectsAnUnsafeID(t *testing.T) {
 	dir := t.TempDir()
 	for _, id := range []string{"../escape", "a/b", "", "."} {
-		if _, err := planning.WriteAgentProfile(dir, id, []byte(validProfileDocument)); err == nil {
+		if _, err := planning.WriteAgentProfile(dir, id, []byte(validProfileDocument), nil); err == nil {
 			t.Fatalf("id %q must be refused as a filename", id)
 		}
 	}
@@ -149,7 +149,7 @@ func TestWriteDispatchesEveryKind(t *testing.T) {
 		{planning.KindAgentProfile, "profile-1", validProfileDocument},
 		{planning.KindEngineeringPlanTemplate, "template-1", `{"stages": [{"id": "a", "kind": "agent", "role": "implementer"}]}`},
 	} {
-		if _, err := planning.Write(dir, planning.ArtifactWrite{Kind: tc.kind, ID: tc.id, Document: []byte(tc.document)}); err != nil {
+		if _, err := planning.Write(dir, planning.ArtifactWrite{Kind: tc.kind, ID: tc.id, Document: []byte(tc.document)}, nil); err != nil {
 			t.Fatalf("%s: %v", tc.kind, err)
 		}
 	}
