@@ -3,7 +3,7 @@ import * as api from "./api";
 import * as workspace from "./workspace-api";
 import { Empty, Panel } from "./components";
 import { TextField, SelectField } from "./form";
-import { GovernedAction, type ActionReview } from "./governed-action";
+import { GovernedAction, useReusableGovernedAction, type ActionReview } from "./governed-action";
 import { freshController } from "./planning";
 
 const CAPABILITIES = [
@@ -36,6 +36,7 @@ function AgentProfileCreate({
     [model, setModel] = useState(""),
     [capabilities, setCapabilities] = useState(""),
     [trustRequirement, setTrustRequirement] = useState("operator_trusted");
+  const [instance, resetInstance] = useReusableGovernedAction();
   const parsedCapabilities = capabilities
     .split(",")
     .map((c) => c.trim())
@@ -108,6 +109,7 @@ function AgentProfileCreate({
           <option value="protected">Protected</option>
         </SelectField>
         <GovernedAction
+          key={instance}
           label="Review & create"
           reason={why}
           prepare={prepare}
@@ -116,6 +118,7 @@ function AgentProfileCreate({
             setID("");
             setModel("");
             setCapabilities("");
+            resetInstance();
             onSettled?.();
           }}
         />
@@ -130,6 +133,7 @@ function AgentProfileCreate({
 // profile that no longer matches is refused at execution, exactly as it
 // already is across an ordinary restart.
 function ReloadPlanningRegistry({ controller, onSettled }: { controller: api.Controller | null; onSettled?: () => void }) {
+  const [instance, resetInstance] = useReusableGovernedAction();
   const prepare = async (_note: string, signal: AbortSignal): Promise<ActionReview> => {
     const live = await freshController(signal, controller?.controller_binding);
     return {
@@ -146,11 +150,15 @@ function ReloadPlanningRegistry({ controller, onSettled }: { controller: api.Con
   };
   return (
     <GovernedAction
+      key={instance}
       label="Reload registry"
       reason={controller ? api.blocker(controller) : "Controller not yet observed"}
       prepare={prepare}
       noteAllowed={false}
-      onSettled={onSettled}
+      onSettled={() => {
+        resetInstance();
+        onSettled?.();
+      }}
     />
   );
 }
@@ -162,7 +170,10 @@ export function InstalledAgents() {
     [reload, setReload] = useState(0);
   useEffect(() => {
     const owner = new AbortController();
-    setOptions(null);
+    // Stale data stays visible across a reload rather than being cleared
+    // first: the create forms below are rendered only when options is
+    // present, so clearing it here would unmount them - and the GovernedAction
+    // success message they were just showing - on every post-create refresh.
     setError("");
     Promise.all([workspace.options(owner.signal), api.controller(owner.signal)])
       .then(([o, c]) => {
