@@ -43,6 +43,7 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 	"github.com/bogdaniel/zenchron-engineering/planning"
+	"github.com/bogdaniel/zenchron-engineering/product"
 )
 
 // ControlSocketName is the endpoint file inside the operator state directory.
@@ -127,6 +128,10 @@ type ControlRequest struct {
 	// EngineeringPlanTemplate, validated by the same seal function a
 	// hand-edited file is validated with, before anything is written.
 	PlanningArtifact *planning.ArtifactWrite `json:"planning_artifact,omitempty"`
+	// Product is a proposed Product revision (#476). Identity, requester and
+	// composition time come from the supervisor; a proposer states only its
+	// name, revision and repository list.
+	Product *product.ProductProposal `json:"product,omitempty"`
 	// Agent is the named execution agent, resolved against the operator's own
 	// registry. A request naming an agent the operator did not configure is
 	// refused; it cannot introduce one.
@@ -235,6 +240,9 @@ const (
 	// value (ADR-0008). It carries no identity of its own: the path never
 	// changes, only the content a later read resolves against.
 	ControlPlanningReload = "planning-reload"
+	// ControlProductPropose adopts (or finds) one Product revision (#476):
+	// Product carries the proposed name, revision and repository list.
+	ControlProductPropose = "product-propose"
 	// ControlCommandControllerSnapshot asks the running controller for ONE
 	// coherent observation of itself: which generation it is, whether it holds
 	// the controller role, and whether it is admitting work. It is read-only
