@@ -32,13 +32,15 @@ const (
 )
 
 type ActionTarget struct {
-	RequestID  string `json:"request_id,omitempty"`
-	DecisionID string `json:"decision_id,omitempty"`
-	RunID      string `json:"run_id,omitempty"`
-	PlanID     string `json:"plan_id,omitempty"`
-	ProductID  string `json:"product_id,omitempty"`
-	Revision   int    `json:"revision,omitempty"`
-	Digest     string `json:"digest,omitempty"`
+	RequestID    string `json:"request_id,omitempty"`
+	DecisionID   string `json:"decision_id,omitempty"`
+	RunID        string `json:"run_id,omitempty"`
+	PlanID       string `json:"plan_id,omitempty"`
+	ArtifactKind string `json:"artifact_kind,omitempty"`
+	ArtifactID   string `json:"artifact_id,omitempty"`
+	ProductID    string `json:"product_id,omitempty"`
+	Revision     int    `json:"revision,omitempty"`
+	Digest       string `json:"digest,omitempty"`
 }
 
 // ActionResult is what happened, with State re-read from the durable store

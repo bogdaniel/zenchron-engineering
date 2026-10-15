@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Result of a governed Control Plane action (#398). state is the target's projection re-read from the durable store after the attempt (control-plane-run for stop, control-plane-plan-detail for reject, control-plane-product-detail for product-propose), absent when the target does not exist.",
+  "description": "Result of a governed Control Plane action (#398). state is the target's projection re-read from the durable store after the attempt (control-plane-run for stop, control-plane-plan-detail for reject, the sealed artifact for planning-artifact-propose, control-plane-product-detail for product-propose), absent when the target does not exist.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -22,6 +22,8 @@
         "unpause",
         "resume",
         "refresh",
+        "planning-artifact-propose",
+        "planning-reload",
         "product-propose"
       ]
     },
@@ -33,6 +35,12 @@
           "type": "string"
         },
         "plan_id": {
+          "type": "string"
+        },
+        "artifact_kind": {
+          "type": "string"
+        },
+        "artifact_id": {
           "type": "string"
         },
         "product_id": {
