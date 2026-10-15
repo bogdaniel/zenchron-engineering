@@ -38,6 +38,7 @@ type ActionTarget struct {
 	PlanID       string `json:"plan_id,omitempty"`
 	ArtifactKind string `json:"artifact_kind,omitempty"`
 	ArtifactID   string `json:"artifact_id,omitempty"`
+	ProductID    string `json:"product_id,omitempty"`
 	Revision     int    `json:"revision,omitempty"`
 	Digest       string `json:"digest,omitempty"`
 }
