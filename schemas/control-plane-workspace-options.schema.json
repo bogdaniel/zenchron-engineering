@@ -7,6 +7,8 @@
     "agents",
     "profiles",
     "templates",
+    "instruction_packs",
+    "context_policies",
     "budget"
   ],
   "properties": {
@@ -23,6 +25,18 @@
       }
     },
     "templates": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "instruction_packs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "context_policies": {
       "type": "array",
       "items": {
         "type": "string"
