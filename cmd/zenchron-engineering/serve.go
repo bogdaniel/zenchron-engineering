@@ -524,6 +524,19 @@ func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.S
 			"instruction_packs": registry.PackIDs(), "context_policies": registry.ContextPolicyIDs(),
 			"profiles": registry.ProfileIDs(), "templates": registry.TemplateIDs(),
 		})
+	case runtime.ControlProductPropose:
+		if governed {
+			operator, err := c.config.ResolveOperator()
+			if err != nil {
+				return controlError(err)
+			}
+			request.Operator = operator.ID
+		}
+		adopted, err := supervisor.AdoptProduct(request)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(adopted)
 	case runtime.ControlWorkGraphHold, runtime.ControlResolveDecision:
 		if governed {
 			operator, err := c.config.ResolveOperator()
