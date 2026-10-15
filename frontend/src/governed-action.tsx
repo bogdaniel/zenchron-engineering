@@ -15,6 +15,23 @@ export type ActionReview = {
   timeout?: number;
   readReceipt?: (signal: AbortSignal) => Promise<workspace.Receipt | null>;
 };
+// useReusableGovernedAction gives a repeatable CREATE action (a new product,
+// profile or template - never "approve this exact revision") back its usable
+// state after a success, by remounting GovernedAction under a fresh key.
+// GovernedAction marks itself permanently acknowledged after one success:
+// correct for an exact subject an operator never re-approves, wrong for an
+// action with no subject at all. The remount is delayed so the success
+// message a caller's onSettled leaves showing stays visible first, rather
+// than vanishing the instant the remount replaces it.
+export function useReusableGovernedAction(delayMs = 4000) {
+  const [instance, setInstance] = useState(0);
+  const pending = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(pending.current), []);
+  const reset = () => {
+    pending.current = setTimeout(() => setInstance((v) => v + 1), delayMs);
+  };
+  return [instance, reset] as const;
+}
 // One local confirmation/submission owner. Server projections and controller
 // actions remain authoritative; an unknown write is never retried.
 export function GovernedAction({

@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import type { GraphDetail, GraphRow, Graphs, ProductDetail, Products, Unit } from "./operations-api";
 import { Badge, Disclosure, Empty, FilterBar, Head, Link, Pagination, Panel } from "./components";
 import { TextField } from "./form";
-import { GovernedAction, type ActionReview } from "./governed-action";
+import { GovernedAction, useReusableGovernedAction, type ActionReview } from "./governed-action";
 import { freshController } from "./planning";
 import {
   COLUMN_GAP,
@@ -470,6 +470,7 @@ function ProductCreate({
 }) {
   const [name, setName] = useState(""),
     [repositories, setRepositories] = useState("");
+  const [instance, resetInstance] = useReusableGovernedAction();
   const parsedRepositories = repositories
     .split(",")
     .map((r) => r.trim())
@@ -509,12 +510,14 @@ function ProductCreate({
           onChange={(e) => setRepositories(e.target.value)}
         />
         <GovernedAction
+          key={instance}
           label="Review & create"
           reason={reason}
           prepare={prepare}
           onSettled={() => {
             setName("");
             setRepositories("");
+            resetInstance();
             onSettled?.();
           }}
         />
