@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
+	"github.com/bogdaniel/zenchron-engineering/planning"
 	"github.com/bogdaniel/zenchron-engineering/product"
 )
 
@@ -122,6 +123,11 @@ type ControlRequest struct {
 	// agent and composition time come from the supervisor, so a proposer
 	// cannot state them.
 	WorkGraph *orchestration.WorkGraphProposal `json:"work_graph,omitempty"`
+	// PlanningArtifact is a governed write to the planning registry (#471/#479,
+	// ADR-0008): one InstructionPack, ContextPolicy, AgentProfile or
+	// EngineeringPlanTemplate, validated by the same seal function a
+	// hand-edited file is validated with, before anything is written.
+	PlanningArtifact *planning.ArtifactWrite `json:"planning_artifact,omitempty"`
 	// Product is a proposed Product revision (#476). Identity, requester and
 	// composition time come from the supervisor; a proposer states only its
 	// name, revision and repository list.
@@ -225,6 +231,15 @@ const (
 	// ControlWorkGraph adopts (or finds) one WorkGraph revision: WorkGraph,
 	// Repository and Agent.
 	ControlWorkGraph = "workgraph"
+	// ControlPlanningArtifactPropose validates and durably writes one
+	// planning registry artifact (ADR-0008): PlanningArtifact carries its
+	// kind, id and document.
+	ControlPlanningArtifactPropose = "planning-artifact-propose"
+	// ControlPlanningReload re-reads the planning registry from its
+	// unchanged, controller-fixed directory and atomically swaps the held
+	// value (ADR-0008). It carries no identity of its own: the path never
+	// changes, only the content a later read resolves against.
+	ControlPlanningReload = "planning-reload"
 	// ControlProductPropose adopts (or finds) one Product revision (#476):
 	// Product carries the proposed name, revision and repository list.
 	ControlProductPropose = "product-propose"

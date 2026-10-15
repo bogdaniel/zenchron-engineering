@@ -31,6 +31,7 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
+	"github.com/bogdaniel/zenchron-engineering/planning"
 )
 
 // SupervisorDependencies is the complete input. Like the runtime's own
@@ -112,8 +113,10 @@ type SupervisorDependencies struct {
 	WorkUnitHolds func(graphID string) (map[string]orchestration.DecisionWait, error)
 	// Plans is the plan lifecycle service, or the zero value when no plan has
 	// ever been proposed. It is what the plan reconciler resolves assignments
-	// through, and it contacts nothing.
+	// through, and it contacts nothing. Plans.Registry is a startup snapshot.
 	Plans PlanService
+	// PlanRegistry resolves the current registry per call (ADR-0008 reload); nil keeps Plans.Registry's snapshot.
+	PlanRegistry func() planning.Registry
 	// ReviewTrigger is the OPTIONAL automatic #474 progression policy: nil
 	// disables it (Discovery/AgentProber's convention). Set, driveOne calls
 	// it once per run per pass, same cadence as ObserveFeedback, composing
@@ -1175,7 +1178,7 @@ func (s *Supervisor) reconcilePlans(ctx context.Context) []PlanTickReport {
 			continue
 		}
 		reconciler := PlanReconciler{
-			Store: s.deps.Store, Clock: s.deps.Clock, Service: s.deps.Plans,
+			Store: s.deps.Store, Clock: s.deps.Clock, Service: s.planServiceForReconcile(),
 			Repository: repository, Issue: issue, StateDir: s.deps.StateDir,
 			Engine: func(repository, agentID string) (*EngineeringRuntime, error) {
 				return s.engine(repository, agentID)
