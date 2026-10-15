@@ -42,7 +42,12 @@ func (c *composition) workspaceRead(ctx context.Context, supervisor *runtime.Sup
 	}
 	repositories := supervisor.GovernedRepositories()
 	customization := c.currentPlanning()
-	options := controlplane.WorkspaceOptions{Repositories: []string{}, Agents: []controlplane.WorkspaceAgent{}, Profiles: customization.ProfileIDs(), Templates: customization.TemplateIDs(), Budget: c.config.PlanEnvelope()}
+	options := controlplane.WorkspaceOptions{
+		Repositories: []string{}, Agents: []controlplane.WorkspaceAgent{},
+		Profiles: customization.ProfileIDs(), Templates: customization.TemplateIDs(),
+		InstructionPacks: customization.PackIDs(), ContextPolicies: customization.ContextPolicyIDs(),
+		Budget: c.config.PlanEnvelope(),
+	}
 	for _, repo := range repositories {
 		options.Repositories = append(options.Repositories, repo.String())
 	}

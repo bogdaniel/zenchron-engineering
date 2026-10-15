@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import * as api from "./api";
 import * as workspace from "./workspace-api";
 import { Empty, Panel } from "./components";
-import { TextField, SelectField } from "./form";
+import { TextField, SelectField, CheckboxField } from "./form";
 import { GovernedAction, useReusableGovernedAction, type ActionReview } from "./governed-action";
 import { freshController } from "./planning";
 
@@ -18,16 +18,20 @@ const CAPABILITIES = [
 // AgentProfileCreate proposes a new AgentProfile (ADR-0008): operator names
 // it, picks an installed execution agent and a capability set, the
 // controller validates and durably writes it. Instruction packs and context
-// policies are deliberately not offered here: a profile may reference one
-// that does not exist yet, and the registry refuses the WHOLE reload until
-// it is fixed - attaching those belongs in a form that can offer only ids
-// already installed.
+// policy are offered as pickers over ALREADY INSTALLED ids (workspace.Options,
+// not free text): a profile naming one that doesn't exist refuses the WHOLE
+// reload (planning.Registry.validateReferences), so the only safe way to
+// offer them here is to make typing a bad reference impossible.
 function AgentProfileCreate({
   agents,
+  instructionPacks,
+  contextPolicies,
   controller,
   onSettled,
 }: {
   agents: workspace.Options["agents"];
+  instructionPacks: string[];
+  contextPolicies: string[];
   controller: api.Controller | null;
   onSettled?: () => void;
 }) {
@@ -35,7 +39,9 @@ function AgentProfileCreate({
     [executionAgent, setExecutionAgent] = useState(agents[0]?.id || ""),
     [model, setModel] = useState(""),
     [capabilities, setCapabilities] = useState(""),
-    [trustRequirement, setTrustRequirement] = useState("operator_trusted");
+    [trustRequirement, setTrustRequirement] = useState("operator_trusted"),
+    [selectedPacks, setSelectedPacks] = useState<string[]>([]),
+    [contextPolicy, setContextPolicy] = useState("");
   const [instance, resetInstance] = useReusableGovernedAction();
   const parsedCapabilities = capabilities
     .split(",")
@@ -57,6 +63,8 @@ function AgentProfileCreate({
       execution_agent: executionAgent,
       ...(model.trim() ? { model: model.trim() } : {}),
       capabilities: parsedCapabilities,
+      ...(selectedPacks.length ? { instructions: selectedPacks } : {}),
+      ...(contextPolicy ? { context_policy: contextPolicy } : {}),
       trust_requirement: trustRequirement,
     };
     return {
@@ -68,6 +76,8 @@ function AgentProfileCreate({
         ["Profile id", id.trim()],
         ["Execution agent", executionAgent],
         ["Capabilities", parsedCapabilities.join(", ")],
+        ["Instruction packs", selectedPacks.join(", ") || "None"],
+        ["Context policy", contextPolicy || "None"],
         ["Trust requirement", trustRequirement],
         ["Serving controller", live.controller_binding],
       ],
@@ -108,6 +118,29 @@ function AgentProfileCreate({
           <option value="operator_trusted">Operator trusted</option>
           <option value="protected">Protected</option>
         </SelectField>
+        <fieldset className="field-label">
+          <legend>Instruction packs</legend>
+          {instructionPacks.length ? (
+            instructionPacks.map((pack) => (
+              <CheckboxField
+                key={pack}
+                label={pack}
+                checked={selectedPacks.includes(pack)}
+                onChange={(e) =>
+                  setSelectedPacks((prev) => (e.target.checked ? [...prev, pack] : prev.filter((p) => p !== pack)))
+                }
+              />
+            ))
+          ) : (
+            <p className="muted small">None installed.</p>
+          )}
+        </fieldset>
+        <SelectField label="Context policy" value={contextPolicy} onChange={(e) => setContextPolicy(e.target.value)}>
+          <option value="">None</option>
+          {contextPolicies.map((p) => (
+            <option key={p}>{p}</option>
+          ))}
+        </SelectField>
         <GovernedAction
           key={instance}
           label="Review & create"
@@ -118,6 +151,8 @@ function AgentProfileCreate({
             setID("");
             setModel("");
             setCapabilities("");
+            setSelectedPacks([]);
+            setContextPolicy("");
             resetInstance();
             onSettled?.();
           }}
@@ -263,7 +298,15 @@ export function InstalledAgents() {
           )}
         </div>
       </Panel>
-      {options && <AgentProfileCreate agents={options.agents} controller={controller} onSettled={refresh} />}
+      {options && (
+        <AgentProfileCreate
+          agents={options.agents}
+          instructionPacks={options.instruction_packs}
+          contextPolicies={options.context_policies}
+          controller={controller}
+          onSettled={refresh}
+        />
+      )}
     </>
   );
 }
