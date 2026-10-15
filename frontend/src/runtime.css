@@ -20,6 +20,9 @@
   .dependency-node {
     @apply cursor-pointer;
   }
+  .dependency-arrowhead {
+    @apply fill-muted;
+  }
 }
 .dependency-node rect { fill: var(--shell); stroke: var(--control-border); }
 .dependency-node text { fill: var(--text); font-family: var(--sans); font-size: 13px; }
@@ -28,6 +31,12 @@
 .dependency-node:hover rect { fill: var(--raised); }
 .dependency-node:focus { outline: none; }
 .dependency-node:focus-visible rect { stroke: var(--orange); stroke-width: 3; }
+/* A dependency reference to an id outside this node set, or to itself, is
+   malformed recorded data - distinguished here from a true, dependency-free
+   root rather than silently rendered as one. Red (not the .selected orange)
+   so the warning still reads when a flagged node is also selected. */
+.dependency-node.unresolved rect { stroke: var(--red); stroke-width: 2; stroke-dasharray: 4 3; }
+.dependency-node.unresolved .dependency-meta { fill: var(--red); }
 @layer components {
   .dependency-mobile {
     @apply hidden;
@@ -84,11 +93,19 @@
     @apply mt-5;
   }
 }
+/* Extra .field-label step on the selector (not just .revision-picker input)
+   outranks .field-label :is(input,...)'s equal-specificity width:100% below -
+   NumberField now wraps this input in that shared label, and equal
+   specificity would otherwise fall back to source order. */
 @layer components {
-  .revision-picker input {
+  .revision-picker .field-label input {
     @apply ml-2 w-[80px] rounded-[4px] border border-control-border bg-bg p-2 text-text;
   }
 }
+/* .field-label's stacked-form margin-bottom is meaningless on this one-row
+   filter-bar; it would otherwise skew align-items:center against the
+   single-line button/link siblings beside it. */
+.revision-picker .field-label { margin-bottom: 0; }
 @media (max-width: 760px) { .revision-picker { flex-wrap: wrap; } }
 @layer components {
   .runtime-sidebar {
@@ -109,12 +126,29 @@
     @apply w-full min-w-0 rounded-[var(--radius)] border border-control-border bg-bg p-2.5;
   }
 }
-.intake-form .checkbox-label { display: flex; align-items: center; }
+/* Unscoped: PlanControls' "Use deterministic revision" checkbox renders
+   outside .intake-form and was left with none of this layout - the same
+   drifted-copy shape the FilterBar extraction fixed for filter rows.
+   Selector is `label.checkbox-label`, not just `.checkbox-label`: equal
+   specificity to `.intake-form label` above, so source order (this rule is
+   later) decides it - a bare class selector would lose that tie and silently
+   fall back to the stacked grid layout whenever nested under .intake-form. */
+label.checkbox-label { display: flex; align-items: center; gap: 8px; }
 @layer components {
-  .intake-form .checkbox-label input {
+  .checkbox-label input {
     @apply size-6;
   }
 }
+@layer components {
+  .field-error {
+    @apply m-0 text-[12px] text-red;
+  }
+}
+/* No rule anywhere addressed disabled/invalid/read-only field appearance -
+   only :focus-visible and .button:disabled existed. */
+input:disabled, select:disabled, textarea:disabled { opacity: .55; cursor: not-allowed; }
+input[aria-invalid="true"], select[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: var(--red); }
+input[readonly], textarea[readonly] { background: var(--shell); }
 @layer components {
   .plan-preview-stage {
     @apply border-b border-border px-0 py-3;

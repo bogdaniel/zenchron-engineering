@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && node build.mjs",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node --test src/*.test.ts"
   },
   "dependencies": {
     "react": "19.3.0",

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Dialog, Disclosure, Link } from "./components";
+import { TextareaField } from "./form";
 import { useActionRecovery, readActionReceipt } from "./action-recovery";
 import * as workspace from "./workspace-api";
 export type ActionReview = {
@@ -287,18 +288,13 @@ export function GovernedAction({
               </dl>
             </Disclosure>
             {noteAllowed && (
-              <label className="field-label">
-                Decision note (optional)
-                <textarea
-                  aria-label="Decision note (optional)"
-                  maxLength={2000}
-                  value={note}
-                  onChange={(e) => setNote(e.target.value)}
-                />
-                <small className="muted">
-                  The note is bound to this single submission; it cannot change its subject.
-                </small>
-              </label>
+              <TextareaField
+                label="Decision note (optional)"
+                maxLength={2000}
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                help="The note is bound to this single submission; it cannot change its subject."
+              />
             )}
           </div>
           <div className="dialog-buttons">
