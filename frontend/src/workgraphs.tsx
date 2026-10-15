@@ -98,6 +98,11 @@ function DependencyMap({
     }),
   );
   const { markerId, defs } = useDependencyArrow();
+  // Surfaced above the graph, not only on the one affected node - see the
+  // matching comment in PlanDependencyGraph.
+  const malformed = layout
+    ? rows.filter((u) => unresolvedDependencies(u.unit_id, u.depends_on, (id) => layout.has(id)).length > 0)
+    : [];
   const node = (u: Unit) => (
     <>
       <span className="eyebrow">
@@ -112,6 +117,13 @@ function DependencyMap({
   );
   return (
     <>
+      {malformed.length > 0 && (
+        <p className="banner red" role="alert">
+          {malformed.length} unit{malformed.length > 1 ? "s" : ""} record a dependency not present in this graph
+          ({malformed.map((u) => u.unit_id).join(", ")}). This graph's dependency order is not fully recorded as
+          valid - inspect the flagged unit{malformed.length > 1 ? "s" : ""} below before treating it as runnable.
+        </p>
+      )}
       <FilterBar>
         <label htmlFor="workunit-picker">Inspect unit</label>
         <select id="workunit-picker" value={selected} onChange={(e) => select(e.target.value)}>

@@ -538,6 +538,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 }
 .banner.orange { background: var(--orange-tint); border-color: var(--orange); }
 .banner.neutral { color: var(--secondary); }
+.banner.red { background: var(--red-tint); border-color: var(--red); color: var(--red); }
 @layer components {
   .connection-banner {
     @apply mx-0 mt-0 mb-6 flex items-center gap-[14px];

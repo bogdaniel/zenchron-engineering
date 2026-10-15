@@ -55,6 +55,13 @@ export function PlanDependencyGraph({
   const { markerId, defs } = useDependencyArrow();
   if (!stages.length) return <Empty title="No stages recorded">An empty plan has no dependency structure to show.</Empty>;
   const size = layout && dependencyGraphSize(layout);
+  // Surfaced above the graph, not only on the one affected node: a stage
+  // whose recorded depends_on cannot be fully resolved means this plan's
+  // dependency order is not fully recorded as valid, which an operator
+  // scanning past one flagged box among several could otherwise miss.
+  const malformed = layout
+    ? stages.filter((s) => unresolvedDependencies(s.stage_id, s.depends_on, (p) => layout.has(p)).length > 0)
+    : [];
   const node = (s: Stage) => (
     <>
       <span className="eyebrow">{s.kind}</span>
@@ -65,6 +72,13 @@ export function PlanDependencyGraph({
   );
   return (
     <>
+      {malformed.length > 0 && (
+        <p className="banner red" role="alert">
+          {malformed.length} stage{malformed.length > 1 ? "s" : ""} record a dependency not present in this plan
+          ({malformed.map((s) => s.stage_id).join(", ")}). This plan's dependency order is not fully recorded as
+          valid - inspect the flagged stage{malformed.length > 1 ? "s" : ""} below before treating it as runnable.
+        </p>
+      )}
       <FilterBar>
         <label htmlFor="stage-picker">Inspect stage</label>
         <select id="stage-picker" value={selected} onChange={(e) => onSelect(e.target.value)}>
