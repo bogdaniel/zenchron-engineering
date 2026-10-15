@@ -21,11 +21,13 @@ type WorkspaceAgent struct {
 }
 
 type WorkspaceOptions struct {
-	Repositories []string                  `json:"repositories"`
-	Agents       []WorkspaceAgent          `json:"agents"`
-	Profiles     []string                  `json:"profiles"`
-	Templates    []string                  `json:"templates"`
-	Budget       domain.PlanBudgetEnvelope `json:"budget"`
+	Repositories     []string                  `json:"repositories"`
+	Agents           []WorkspaceAgent          `json:"agents"`
+	Profiles         []string                  `json:"profiles"`
+	Templates        []string                  `json:"templates"`
+	InstructionPacks []string                  `json:"instruction_packs"`
+	ContextPolicies  []string                  `json:"context_policies"`
+	Budget           domain.PlanBudgetEnvelope `json:"budget"`
 }
 
 type PlanPreview struct {

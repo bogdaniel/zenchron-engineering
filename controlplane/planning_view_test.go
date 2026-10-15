@@ -120,3 +120,52 @@ func TestProposePlanningArtifactValidatesBeforeTheSocket(t *testing.T) {
 		})
 	}
 }
+
+// TestProfileReferencingAnInstalledPackAndContextPolicyReloadsCleanly is the
+// positive case the dashboard picker exists for: a profile naming a pack and
+// a context policy that are ALREADY installed writes and reloads without
+// incident.
+func TestProfileReferencingAnInstalledPackAndContextPolicyReloadsCleanly(t *testing.T) {
+	a := newPlanningActionFixture(t)
+	post(t, a, validRequest("/v1/planning/artifacts",
+		planningArtifactBody("instruction_pack", "review-core", `{"instructions": ["Review the diff."]}`)), 200)
+	post(t, a, validRequest("/v1/planning/artifacts",
+		planningArtifactBody("context_policy", "reviewer-context", `{"exclude": ["producer_reasoning"]}`)), 200)
+	applied := post(t, a, validRequest("/v1/planning/artifacts", planningArtifactBody("agent_profile", "reviewer", `{
+		"execution_agent": "claude",
+		"capabilities": ["repository_analysis"],
+		"instructions": ["review-core"],
+		"context_policy": "reviewer-context",
+		"trust_requirement": "operator_trusted"
+	}`)), 200)
+	if outcome(applied) != "applied" {
+		t.Fatalf("propose: outcome %q, body %+v", outcome(applied), applied)
+	}
+	reloaded := post(t, a, validRequest("/v1/planning/reload", `{"controller_binding":"`+testBinding+`"}`), 200)
+	if outcome(reloaded) != "applied" {
+		t.Fatalf("a profile referencing already-installed artifacts must reload cleanly: %+v", reloaded)
+	}
+}
+
+// TestProfileReferencingAnUninstalledPackIsRefusedAtTheWrite is the risk the
+// AgentProfileCreate form's picker already makes unreachable from the UI,
+// closed for a caller that writes through the API directly too: a profile
+// naming an instruction pack nobody has installed is refused before
+// anything is written, rather than succeeding and only breaking the NEXT
+// reload - every other profile's availability, not just this one.
+func TestProfileReferencingAnUninstalledPackIsRefusedAtTheWrite(t *testing.T) {
+	a := newPlanningActionFixture(t)
+	applied := post(t, a, validRequest("/v1/planning/artifacts", planningArtifactBody("agent_profile", "reviewer", `{
+		"execution_agent": "claude",
+		"capabilities": ["repository_analysis"],
+		"instructions": ["does-not-exist"],
+		"trust_requirement": "operator_trusted"
+	}`)), 409)
+	if code(applied) == "" {
+		t.Fatalf("a dangling reference must refuse the write with a typed code: %+v", applied)
+	}
+	reloaded := post(t, a, validRequest("/v1/planning/reload", `{"controller_binding":"`+testBinding+`"}`), 200)
+	if outcome(reloaded) != "applied" {
+		t.Fatalf("nothing was written, so reload must stay clean: %+v", reloaded)
+	}
+}
