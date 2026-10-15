@@ -158,8 +158,11 @@ export function GovernedAction({
         setUnknown(bound);
         await read(bound, false);
       } else {
+        // refused or unreachable: nothing changed server-side, and the
+        // operator still needs to see why and correct their draft - calling
+        // onSettled here would let a caller's cleanup (clearing a create
+        // form's fields) discard that draft on a FAILED submission.
         if (saved && ["refused", "unreachable"].includes(outcome.outcome)) recovery.forget(saved);
-        onSettled?.();
       }
     } catch {
       setReview(null);
