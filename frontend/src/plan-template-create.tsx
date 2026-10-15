@@ -2,7 +2,7 @@ import { useState } from "react";
 import * as api from "./api";
 import { Panel } from "./components";
 import { TextField, SelectField, CheckboxField } from "./form";
-import { GovernedAction, type ActionReview } from "./governed-action";
+import { GovernedAction, useReusableGovernedAction, type ActionReview } from "./governed-action";
 import { freshController } from "./planning";
 import { type DraftStage, emptyStage, templateDocumentFrom } from "./plan-template-document";
 
@@ -37,6 +37,7 @@ export function PlanTemplateCreate({
   const [id, setID] = useState(""),
     [description, setDescription] = useState(""),
     [stages, setStages] = useState<DraftStage[]>([emptyStage()]);
+  const [instance, resetInstance] = useReusableGovernedAction();
   const updateStage = (index: number, patch: Partial<DraftStage>) =>
     setStages((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)));
   const addStage = () => setStages((prev) => [...prev, emptyStage()]);
@@ -148,6 +149,7 @@ export function PlanTemplateCreate({
           Add stage
         </button>
         <GovernedAction
+          key={instance}
           label="Review & create"
           reason={why}
           prepare={prepare}
@@ -156,6 +158,7 @@ export function PlanTemplateCreate({
             setID("");
             setDescription("");
             setStages([emptyStage()]);
+            resetInstance();
             onSettled?.();
           }}
         />
