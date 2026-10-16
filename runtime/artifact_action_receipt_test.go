@@ -77,9 +77,9 @@ func TestArtifactActionReceiptValidateRefusesACrossedSubject(t *testing.T) {
 }
 
 // TestArtifactActionReceiptStoreRoundTripsAndReportsUnknownForWhatWasNever
-// WrittenAtAll proves the durable store itself: a receipt written is read
-// back exactly, and an operation id that was never written reports nil,
-// never an error treated as success.
+// WrittenAtAll proves the durable store itself: a claimed-then-finalized
+// receipt is read back exactly, and an operation id that was never claimed
+// reports nil, never an error treated as success.
 func TestArtifactActionReceiptStoreRoundTripsAndReportsUnknownForWhatWasNeverWrittenAtAll(t *testing.T) {
 	dir := t.TempDir()
 	store, err := OpenSQLiteOperationStore(dir)
@@ -89,7 +89,14 @@ func TestArtifactActionReceiptStoreRoundTripsAndReportsUnknownForWhatWasNeverWri
 	defer store.Close()
 
 	r := validPlanningArtifactReceipt()
-	if err := store.PutArtifactActionReceipt(r, time.Unix(100, 0).UTC()); err != nil {
+	claimed, err := store.ClaimArtifactActionOperation(r.OperationID, time.Unix(100, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
+		t.Fatal("the first claim on an unused operation id must succeed")
+	}
+	if err := store.FinalizeArtifactActionReceipt(r, time.Unix(100, 0).UTC()); err != nil {
 		t.Fatal(err)
 	}
 	read, err := store.ArtifactActionReceipt(r.OperationID)
@@ -108,8 +115,51 @@ func TestArtifactActionReceiptStoreRoundTripsAndReportsUnknownForWhatWasNeverWri
 		t.Fatalf("an operation never written must report no receipt, got %+v", never)
 	}
 
-	// The primary key refuses a second row for the same operation outright.
-	if err := store.PutArtifactActionReceipt(r, time.Unix(200, 0).UTC()); err == nil {
-		t.Fatal("a second receipt for the same operation id must be refused")
+	// The primary key refuses a second claim on the same operation outright.
+	if reclaimed, err := store.ClaimArtifactActionOperation(r.OperationID, time.Unix(200, 0).UTC()); err != nil || reclaimed {
+		t.Fatalf("a second claim for the same operation id must be refused: claimed=%v, err=%v", reclaimed, err)
+	}
+	// Finalizing an operation id with no outstanding claim is refused, not
+	// a silent overwrite of an already-finalized receipt.
+	if err := store.FinalizeArtifactActionReceipt(r, time.Unix(300, 0).UTC()); err == nil {
+		t.Fatal("finalizing without a reserved, unfinalized claim must be refused")
+	}
+}
+
+// TestArtifactActionReceiptClaimReportsUnknownUntilFinalizedAndReleaseFreesIt
+// is the crash/concurrency contract itself: a claimed-but-not-yet-finalized
+// operation reads as genuinely unknown (never a false negative claiming it
+// never happened), a second claim attempt on it is refused (closing the
+// race two concurrent requests sharing the same reference would otherwise
+// hit), and releasing an unfinalized claim - the REFUSED-effect path - frees
+// the operation id for a legitimate retry.
+func TestArtifactActionReceiptClaimReportsUnknownUntilFinalizedAndReleaseFreesIt(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	const opID = artifactReceiptTestID
+	claimed, err := store.ClaimArtifactActionOperation(opID, time.Unix(100, 0).UTC())
+	if err != nil || !claimed {
+		t.Fatalf("claimed=%v, err=%v", claimed, err)
+	}
+	if read, err := store.ArtifactActionReceipt(opID); err != nil || read != nil {
+		t.Fatalf("a claimed-but-unfinalized operation must read as unknown, not as a receipt: %+v, %v", read, err)
+	}
+	if reclaimed, err := store.ClaimArtifactActionOperation(opID, time.Unix(150, 0).UTC()); err != nil || reclaimed {
+		t.Fatalf("a concurrent claim on the same in-flight operation must be refused: claimed=%v, err=%v", reclaimed, err)
+	}
+
+	if err := store.ReleaseArtifactActionClaim(opID); err != nil {
+		t.Fatal(err)
+	}
+	if read, err := store.ArtifactActionReceipt(opID); err != nil || read != nil {
+		t.Fatalf("a released claim must leave no trace: %+v, %v", read, err)
+	}
+	if claimed, err := store.ClaimArtifactActionOperation(opID, time.Unix(200, 0).UTC()); err != nil || !claimed {
+		t.Fatalf("a retry after release must be able to claim the same operation id again: claimed=%v, err=%v", claimed, err)
 	}
 }

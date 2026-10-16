@@ -43,6 +43,11 @@ func (c *composition) dispatchPlanOrRunWithReceipt(ctx context.Context, supervis
 	if existing != nil {
 		return runtime.ControlResponse{Code: runtime.ControlCodeOutcomeUnknown, Error: "operation reference already recorded; read the original exact receipt without resending"}
 	}
+	if crossed, err := c.store.ArtifactActionReceipt(request.OperationID); err != nil {
+		return controlError(err)
+	} else if crossed != nil {
+		return runtime.ControlResponse{Code: runtime.ControlCodeOutcomeUnknown, Error: "operation reference already recorded for a different action kind"}
+	}
 	response := c.dispatchControl(ctx, supervisor, shutdown, request, true)
 	if !response.OK {
 		return response

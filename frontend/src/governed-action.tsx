@@ -148,6 +148,7 @@ export function GovernedAction({
           setReceipt(receipt);
           setAcknowledged(true);
           announce("Exact original request receipt observed. No request was resent.");
+          onSettled?.();
           if (receipt.destination) location.hash = "#/" + receipt.destination;
           return;
         }

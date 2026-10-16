@@ -61,9 +61,14 @@ func correlateAction(w http.ResponseWriter, r *http.Request) (*http.Request, boo
 // operatorActionReceipt serves GET /v1/operator-action-receipts/{id} for
 // EITHER receipt store: the event-journal-backed one (plan-revise, resume,
 // refresh) or artifact_action_receipts (planning-artifact-propose,
-// product-propose). One operation id can only ever have been recorded in
-// one of the two, so trying the first and falling back to the second is
-// exact, not a guess.
+// product-propose). Each dispatch path refuses to write when the OTHER
+// store already holds the same operation id (cmd/zenchron-engineering's
+// dispatchPlanOrRunWithReceipt and dispatchArtifactWithReceipt), so trying
+// the first and falling back to the second is exact for any id that
+// reached only one path - the one case it is not is a genuinely concurrent
+// collision racing both dispatch paths at once, which is the same accepted
+// residual as the single-process crash window documented on
+// ClaimArtifactActionOperation.
 func (a *API) operatorActionReceipt(w http.ResponseWriter, r *http.Request) {
 	id, digest := r.PathValue("id"), r.URL.Query().Get("digest")
 	if !rt.ValidActionReference(id, digest) || len(r.URL.Query()["digest"]) != 1 {

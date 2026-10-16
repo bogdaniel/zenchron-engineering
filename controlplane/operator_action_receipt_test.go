@@ -92,7 +92,10 @@ func TestOperatorActionReceiptEndpointAlsoServesArtifactActionReceipts(t *testin
 		ControllerBinding: "binding", ArtifactKind: "agent_profile", ArtifactID: "reviewer",
 		ArtifactDigest: strings.Repeat("4", 64),
 	}
-	if err := f.store.PutArtifactActionReceipt(written, time.Unix(200, 0).UTC()); err != nil {
+	if claimed, err := f.store.ClaimArtifactActionOperation(opID, time.Unix(200, 0).UTC()); err != nil || !claimed {
+		t.Fatalf("claimed=%v, err=%v", claimed, err)
+	}
+	if err := f.store.FinalizeArtifactActionReceipt(written, time.Unix(200, 0).UTC()); err != nil {
 		t.Fatal(err)
 	}
 

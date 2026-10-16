@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/planning"
 	"github.com/bogdaniel/zenchron-engineering/product"
@@ -169,5 +171,132 @@ func TestDispatchArtifactWithReceiptRecoversAProductWrite(t *testing.T) {
 	}
 	if current.Revision != 1 {
 		t.Fatalf("exactly one revision must have been adopted, got revision %d", current.Revision)
+	}
+}
+
+// TestDispatchArtifactWithReceiptReleasesAnUnfinalizedClaimOnRefusal is the
+// claim/release half of the recovery contract: nothing durable happens when
+// the effect is REFUSED (unlike a lost response, where it already did), so
+// the operation id must not stay reserved forever - an operator who
+// corrects the mistake and resubmits under the SAME reference must succeed.
+func TestDispatchArtifactWithReceiptReleasesAnUnfinalizedClaimOnRefusal(t *testing.T) {
+	c := newArtifactReceiptComposition(t)
+	supervisor := newTestSupervisor(t, c)
+	ctx := context.Background()
+	noShutdown := func() {}
+	const opID = "01234567-89ab-4cde-8fab-0123456789ab"
+	const digest = "3333333333333333333333333333333333333333333333333333333333333333"
+
+	refused := c.dispatchArtifactWithReceipt(ctx, supervisor, noShutdown, runtime.ControlRequest{
+		Command: runtime.ControlPlanningArtifactPropose, OperationID: opID, RequestDigest: digest, ExpectedController: "test-binding",
+		PlanningArtifact: &planning.ArtifactWrite{Kind: planning.KindAgentProfile, ID: "reviewer", Document: []byte(`{
+			"execution_agent": "does-not-exist",
+			"capabilities": ["repository_analysis"],
+			"trust_requirement": "operator_trusted"
+		}`)},
+	})
+	if refused.OK {
+		t.Fatalf("a profile naming an unconfigured agent must be refused: %+v", refused)
+	}
+	if receipt, err := c.store.ArtifactActionReceipt(opID); err != nil || receipt != nil {
+		t.Fatalf("a refused attempt must leave no receipt and no stale claim: %+v, %v", receipt, err)
+	}
+
+	corrected := c.dispatchArtifactWithReceipt(ctx, supervisor, noShutdown, runtime.ControlRequest{
+		Command: runtime.ControlPlanningArtifactPropose, OperationID: opID, RequestDigest: digest, ExpectedController: "test-binding",
+		PlanningArtifact: &planning.ArtifactWrite{Kind: planning.KindAgentProfile, ID: "reviewer", Document: []byte(`{
+			"execution_agent": "claude",
+			"capabilities": ["repository_analysis"],
+			"trust_requirement": "operator_trusted"
+		}`)},
+	})
+	if !corrected.OK {
+		t.Fatalf("a corrected retry under the SAME operation reference must succeed once the prior claim was released: %+v", corrected)
+	}
+}
+
+// TestDispatchArtifactWithReceiptRefusesAnOperationIDAlreadyUsedByAPlanOrRunReceipt
+// and its sibling below close the gap the two dispatch paths would otherwise
+// leave open: operation_id is one client-chosen namespace, but each path only
+// ever checked its OWN receipt store before claiming it, so the same id
+// reused for a resume/plan-revise/refresh AND a planning-artifact/product
+// action could end up recorded in both - and the shared GET endpoint
+// (controlplane/operator_action_receipt.go) would then silently return
+// whichever store it tries first, permanently shadowing the other.
+func TestDispatchArtifactWithReceiptRefusesAnOperationIDAlreadyUsedByAPlanOrRunReceipt(t *testing.T) {
+	c := newArtifactReceiptComposition(t)
+	supervisor := newTestSupervisor(t, c)
+	ctx := context.Background()
+	noShutdown := func() {}
+	const opID = "01234567-89ab-4cde-8fab-0123456789ab"
+	const digest = "4444444444444444444444444444444444444444444444444444444444444444"
+
+	at := time.Unix(100, 0).UTC()
+	if err := c.store.PutRun(runtime.EngineeringRun{
+		SchemaVersion: runtime.SchemaVersion, ID: "s", Repository: "example/repo",
+		Phase: runtime.Execute, Disposition: runtime.Active, CreatedAt: at, UpdatedAt: at,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.store.AppendEvent(runtime.EngineeringEvent{
+		SchemaVersion: runtime.SchemaVersion, ID: "s-created", RunID: "s", Type: runtime.EventRunCreated, OccurredAt: at,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	planOrRunReceipt := runtime.OperatorActionReceipt{
+		OperationID: opID, RequestDigest: digest, Action: runtime.ControlResume,
+		ControllerBinding: "test-binding", SourceRunID: "s", RunID: "s",
+	}
+	payload, err := json.Marshal(planOrRunReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.store.AppendEvent(runtime.EngineeringEvent{
+		SchemaVersion: runtime.SchemaVersion, ID: "operator-action-" + opID, OperationID: opID, RunID: "s",
+		Type: runtime.EventRunOperatorActionReceipt, OccurredAt: time.Unix(200, 0).UTC(), Payload: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	crossed := c.dispatchArtifactWithReceipt(ctx, supervisor, noShutdown, runtime.ControlRequest{
+		Command: runtime.ControlPlanningArtifactPropose, OperationID: opID, RequestDigest: digest, ExpectedController: "test-binding",
+		PlanningArtifact: &planning.ArtifactWrite{Kind: planning.KindAgentProfile, ID: "reviewer", Document: []byte(`{
+			"execution_agent": "claude",
+			"capabilities": ["repository_analysis"],
+			"trust_requirement": "operator_trusted"
+		}`)},
+	})
+	if crossed.OK || crossed.Code != runtime.ControlCodeOutcomeUnknown {
+		t.Fatalf("an operation id already recorded for a plan/run receipt must never be claimed by an artifact action: %+v", crossed)
+	}
+	if receipt, err := c.store.ArtifactActionReceipt(opID); err != nil || receipt != nil {
+		t.Fatalf("the crossed attempt must leave no artifact claim behind: %+v, %v", receipt, err)
+	}
+}
+
+func TestDispatchPlanOrRunWithReceiptRefusesAnOperationIDAlreadyUsedByAnArtifactReceipt(t *testing.T) {
+	c := newArtifactReceiptComposition(t)
+	ctx := context.Background()
+	noShutdown := func() {}
+	const opID = "01234567-89ab-4cde-8fab-0123456789ab"
+	const digest = "5555555555555555555555555555555555555555555555555555555555555555"
+
+	if claimed, err := c.store.ClaimArtifactActionOperation(opID, time.Unix(100, 0).UTC()); err != nil || !claimed {
+		t.Fatalf("claimed=%v, err=%v", claimed, err)
+	}
+	if err := c.store.FinalizeArtifactActionReceipt(runtime.ArtifactActionReceipt{
+		OperationID: opID, RequestDigest: digest, Action: runtime.ControlPlanningArtifactPropose,
+		ControllerBinding: "test-binding", ArtifactKind: "agent_profile", ArtifactID: "reviewer",
+		ArtifactDigest: digest,
+	}, time.Unix(100, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	crossed := c.dispatchPlanOrRunWithReceipt(ctx, nil, noShutdown, runtime.ControlRequest{
+		Command: runtime.ControlResume, OperationID: opID, RequestDigest: digest, ExpectedController: "test-binding", RunID: "s",
+	})
+	if crossed.OK || crossed.Code != runtime.ControlCodeOutcomeUnknown {
+		t.Fatalf("an operation id already recorded for an artifact receipt must never be claimed by a plan/run action: %+v", crossed)
 	}
 }
