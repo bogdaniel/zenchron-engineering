@@ -3,6 +3,7 @@ import { PublicationControls } from "./human-requests";
 import { useState } from "react";
 import type { Controller, Runs } from "./api";
 import * as ops from "./operations-api";
+import type { RunDetail } from "./operations-api";
 import { Badge, Disclosure, Empty, FilterBar, Head, Link, Pagination, Panel, SearchInput } from "./components";
 import { JournalHistory } from "./history";
 import { StopRun } from "./stop-run";
@@ -24,6 +25,29 @@ export function elapsed(ns: number) {
   if (seconds < 60) return `≈ ${seconds}s`;
   if (seconds < 3600) return `≈ ${Math.floor(seconds / 60)}m ${seconds % 60}s`;
   return `≈ ${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+// BudgetFacts is the one rendering of a run's budget ceilings and consumed
+// attempts, shared by the run workspace and any other view that already has
+// a RunDetail in hand (a WorkGraph unit's run carries the same full
+// projection) rather than re-deriving or re-fetching it.
+export function BudgetFacts({ r }: { r: RunDetail }) {
+  return r.budgets ? (
+    <Facts
+      rows={[
+        ["Wall ceiling", r.budgets.wall_limit ? elapsed(r.budgets.wall_limit) : "Not recorded"],
+        ["Lifecycle bound", r.budgets.lifecycle_deadline ? elapsed(r.budgets.lifecycle_deadline) : "Not recorded"],
+        ["Execution attempts", r.budgets.max_execution_attempts],
+        ["Continuations", r.budgets.max_execution_continuations],
+        ["Remediation attempts", r.budgets.max_remediation_attempts],
+        ["Assurance attempts", r.budgets.max_assurance_attempts],
+        ...Object.entries(r.attempts).map(([key, value]): [string, number] => [`Consumed ${key}`, value]),
+      ]}
+    />
+  ) : (
+    <Empty title="Budget ceilings unavailable">
+      {r.budgets_unverifiable.join(", ") || "No verifiable run policy observed."}
+    </Empty>
+  );
 }
 function sourceLink(value: string) {
   try {
@@ -340,26 +364,7 @@ export function RunWorkspace({
             </Disclosure>
           </Panel>
           <Panel title="Budget observations">
-            {r.budgets ? (
-              <Facts
-                rows={[
-                  ["Wall ceiling", r.budgets.wall_limit ? elapsed(r.budgets.wall_limit) : "Not recorded"],
-                  [
-                    "Lifecycle bound",
-                    r.budgets.lifecycle_deadline ? elapsed(r.budgets.lifecycle_deadline) : "Not recorded",
-                  ],
-                  ["Execution attempts", r.budgets.max_execution_attempts],
-                  ["Continuations", r.budgets.max_execution_continuations],
-                  ["Remediation attempts", r.budgets.max_remediation_attempts],
-                  ["Assurance attempts", r.budgets.max_assurance_attempts],
-                  ...Object.entries(r.attempts).map(([key, value]): [string, number] => [`Consumed ${key}`, value]),
-                ]}
-              />
-            ) : (
-              <Empty title="Budget ceilings unavailable">
-                {r.budgets_unverifiable.join(", ") || "No verifiable run policy observed."}
-              </Empty>
-            )}
+            <BudgetFacts r={r} />
           </Panel>
         </aside>
       </div>
