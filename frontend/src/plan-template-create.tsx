@@ -180,6 +180,7 @@ export function PlanTemplateCreate({
         <GovernedAction
           key={instance}
           label="Review & create"
+          recoveryKey="plan-template-create"
           reason={why}
           prepare={prepare}
           noteAllowed={false}

@@ -77,3 +77,35 @@ func TestOperatorActionReferenceBindsExactPathBodyAndLeavesReadsAuthoritative(t 
 	wire(t, f.api, "/v1/operator-action-receipts/00000000-0000-0000-0000-000000000000?digest="+digest, "GET", f.api.Token, "error", 404)
 	wire(t, f.api, url+"&digest="+digest, "GET", f.api.Token, "error", 400)
 }
+
+// TestOperatorActionReceiptEndpointAlsoServesArtifactActionReceipts proves
+// the ONE endpoint serves BOTH receipt stores transparently: an operation id
+// that only exists in artifact_action_receipts (never the event journal) is
+// still found, validated against the SAME response schema (extended for the
+// two new action kinds), and returned exactly as written.
+func TestOperatorActionReceiptEndpointAlsoServesArtifactActionReceipts(t *testing.T) {
+	f := newActionFixture(t)
+	const opID = "11234567-89ab-4cde-8fab-0123456789ab"
+	digest := strings.Repeat("3", 64)
+	written := rt.ArtifactActionReceipt{
+		OperationID: opID, RequestDigest: digest, Action: rt.ControlPlanningArtifactPropose,
+		ControllerBinding: "binding", ArtifactKind: "agent_profile", ArtifactID: "reviewer",
+		ArtifactDigest: strings.Repeat("4", 64),
+	}
+	if claimed, err := f.store.ClaimArtifactActionOperation(opID, time.Unix(200, 0).UTC()); err != nil || !claimed {
+		t.Fatalf("claimed=%v, err=%v", claimed, err)
+	}
+	if err := f.store.FinalizeArtifactActionReceipt(written, time.Unix(200, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	url := "/v1/operator-action-receipts/" + opID + "?digest=" + digest
+	f.api.Observe = nil
+	var read rt.ArtifactActionReceipt
+	if err := json.Unmarshal(wire(t, f.api, url, "GET", f.api.Token, "operator-action-receipt", 200), &read); err != nil {
+		t.Fatal(err)
+	}
+	if read != written {
+		t.Fatalf("read back %+v, wrote %+v", read, written)
+	}
+}

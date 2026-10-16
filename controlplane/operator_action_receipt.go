@@ -58,6 +58,17 @@ func correlateAction(w http.ResponseWriter, r *http.Request) (*http.Request, boo
 	return r.WithContext(context.WithValue(r.Context(), actionReferenceKey{}, actionReference{id, digest})), true
 }
 
+// operatorActionReceipt serves GET /v1/operator-action-receipts/{id} for
+// EITHER receipt store: the event-journal-backed one (plan-revise, resume,
+// refresh) or artifact_action_receipts (planning-artifact-propose,
+// product-propose). Each dispatch path refuses to write when the OTHER
+// store already holds the same operation id (cmd/zenchron-engineering's
+// dispatchPlanOrRunWithReceipt and dispatchArtifactWithReceipt), so trying
+// the first and falling back to the second is exact for any id that
+// reached only one path - the one case it is not is a genuinely concurrent
+// collision racing both dispatch paths at once, which is the same accepted
+// residual as the single-process crash window documented on
+// ClaimArtifactActionOperation.
 func (a *API) operatorActionReceipt(w http.ResponseWriter, r *http.Request) {
 	id, digest := r.PathValue("id"), r.URL.Query().Get("digest")
 	if !rt.ValidActionReference(id, digest) || len(r.URL.Query()["digest"]) != 1 {
@@ -69,13 +80,26 @@ func (a *API) operatorActionReceipt(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "read_failed")
 		return
 	}
-	if receipt == nil {
+	if receipt != nil {
+		if receipt.RequestDigest != digest {
+			fail(w, 409, "subject_mismatch")
+			return
+		}
+		send(w, 200, receipt)
+		return
+	}
+	artifactReceipt, err := a.Store.ArtifactActionReceipt(id)
+	if err != nil {
+		fail(w, 500, "read_failed")
+		return
+	}
+	if artifactReceipt == nil {
 		fail(w, 404, "not_found")
 		return
 	}
-	if receipt.RequestDigest != digest {
+	if artifactReceipt.RequestDigest != digest {
 		fail(w, 409, "subject_mismatch")
 		return
 	}
-	send(w, 200, receipt)
+	send(w, 200, artifactReceipt)
 }

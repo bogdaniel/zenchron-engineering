@@ -145,6 +145,7 @@ function AgentProfileCreate({
         <GovernedAction
           key={instance}
           label="Review & create"
+          recoveryKey="agent-profile-create"
           reason={why}
           prepare={prepare}
           noteAllowed={false}
