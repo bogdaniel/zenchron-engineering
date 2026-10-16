@@ -512,6 +512,7 @@ function ProductCreate({
         <GovernedAction
           key={instance}
           label="Review & create"
+          recoveryKey="product-create"
           reason={reason}
           prepare={prepare}
           onSettled={() => {

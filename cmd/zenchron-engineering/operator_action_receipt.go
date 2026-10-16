@@ -9,14 +9,33 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
+// dispatchWithReceipt routes a recovery-capable request (one carrying an
+// operation id and request digest) to the receipt store that matches its
+// command: the event journal for plan/run lifecycle commands, or
+// artifact_action_receipts (artifact_action_receipt.go) for the two command
+// kinds that are not journaled lifecycle state. A request naming neither
+// skips recovery entirely - exactly today's behavior.
 func (c *composition) dispatchWithReceipt(ctx context.Context, supervisor *runtime.Supervisor, shutdown func(), request runtime.ControlRequest) runtime.ControlResponse {
 	if request.OperationID == "" && request.RequestDigest == "" {
 		return c.dispatchControl(ctx, supervisor, shutdown, request, true)
 	}
-	if !runtime.ValidActionReference(request.OperationID, request.RequestDigest) ||
-		(request.Command != runtime.ControlPlanRevise && request.Command != runtime.ControlResume && request.Command != runtime.ControlRefresh) {
+	if !runtime.ValidActionReference(request.OperationID, request.RequestDigest) {
 		return controlError(fmt.Errorf("invalid action recovery reference"))
 	}
+	switch request.Command {
+	case runtime.ControlPlanRevise, runtime.ControlResume, runtime.ControlRefresh:
+		return c.dispatchPlanOrRunWithReceipt(ctx, supervisor, shutdown, request)
+	case runtime.ControlPlanningArtifactPropose, runtime.ControlProductPropose:
+		return c.dispatchArtifactWithReceipt(ctx, supervisor, shutdown, request)
+	default:
+		return controlError(fmt.Errorf("invalid action recovery reference"))
+	}
+}
+
+// dispatchPlanOrRunWithReceipt is dispatchWithReceipt's original body,
+// unchanged, for the three command kinds the plan/run event journal already
+// carries.
+func (c *composition) dispatchPlanOrRunWithReceipt(ctx context.Context, supervisor *runtime.Supervisor, shutdown func(), request runtime.ControlRequest) runtime.ControlResponse {
 	existing, err := c.store.OperatorActionReceipt(request.OperationID)
 	if err != nil {
 		return controlError(err)

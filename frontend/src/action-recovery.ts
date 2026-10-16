@@ -26,7 +26,7 @@ function decode(value: unknown): PendingAction {
     r.version !== 1 ||
     !reference.test(api.str(r.operation_id)) ||
     !/^[a-f0-9]{64}$/.test(api.str(r.request_digest)) ||
-    !["plan-revise", "resume", "refresh"].includes(api.str(r.action))
+    !["plan-revise", "resume", "refresh", "planning-artifact-propose", "product-propose"].includes(api.str(r.action))
   )
     throw new Error("Invalid saved action reference");
   return {
@@ -64,7 +64,7 @@ export async function readActionReceipt(p: PendingAction, signal: AbortSignal): 
     r.controller_binding !== p.controller_binding
   )
     throw new Error("Recovered receipt does not match the original request");
-  let destination: string;
+  let destination: string | undefined;
   if (p.action === "plan-revise") {
     const id = api.str(r.plan_id),
       revision = api.num(r.revision),
@@ -76,7 +76,7 @@ export async function readActionReceipt(p: PendingAction, signal: AbortSignal): 
     )
       throw new Error("Recovered plan differs from the original exact subject");
     destination = `objectives/${encodeURIComponent(id)}/${revision}`;
-  } else {
+  } else if (p.action === "resume" || p.action === "refresh") {
     const id = api.str(r.run_id);
     if (
       !id ||
@@ -86,6 +86,23 @@ export async function readActionReceipt(p: PendingAction, signal: AbortSignal): 
     )
       throw new Error("Invalid recovered run reference");
     destination = `runs/${encodeURIComponent(id)}`;
+  } else if (p.action === "planning-artifact-propose") {
+    const kind = api.str(r.artifact_kind),
+      id = api.str(r.artifact_id),
+      artifactDigest = api.str(r.artifact_digest);
+    if (!kind || !id || !/^[a-f0-9]{64}$/.test(artifactDigest)) throw new Error("Invalid recovered artifact reference");
+    if (
+      (p.bindings.kind && kind !== p.bindings.kind) ||
+      (p.bindings.id && id !== p.bindings.id)
+    )
+      throw new Error("Recovered artifact differs from the original exact subject");
+  } else {
+    const id = api.str(r.product_id),
+      revision = api.num(r.product_revision);
+    if (!id || revision < 1) throw new Error("Invalid recovered product reference");
+    if (p.bindings.revision && revision !== Number(p.bindings.revision))
+      throw new Error("Recovered product differs from the original exact subject");
+    destination = `products/${encodeURIComponent(id)}`;
   }
   return {
     title: "Historical operator action receipt",
@@ -177,6 +194,9 @@ export function useActionRecovery(scope?: string) {
             "template",
             "deterministic",
             "controller_binding",
+            "kind",
+            "id",
+            "name",
           ].includes(k),
         ),
       ) as Record<string, string | number | boolean>,

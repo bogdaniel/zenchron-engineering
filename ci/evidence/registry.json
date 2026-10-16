@@ -162,6 +162,7 @@
         "runtime/projection.go",
         "runtime/event_payload.go",
         "runtime/operator_action_receipt.go",
+        "runtime/artifact_action_receipt.go",
         "runtime/run_summary.go"
       ],
       "tests": [
@@ -175,6 +176,7 @@
         "runtime/projection_test.go",
         "runtime/event_*_test.go",
         "runtime/operator_action_receipt_test.go",
+        "runtime/artifact_action_receipt_test.go",
         "runtime/changes_since_test.go",
         "runtime/canonical_json_test.go",
         "runtime/subject_store*_test.go",
@@ -200,7 +202,8 @@
         "runtime/control_reply_lost_test.go",
         "runtime/control_endpoint_ownership_test.go",
         "runtime/controller_status_test.go",
-        "runtime/operator_action_receipt_test.go"
+        "runtime/operator_action_receipt_test.go",
+        "runtime/artifact_action_receipt_test.go"
       ]
     },
     {
