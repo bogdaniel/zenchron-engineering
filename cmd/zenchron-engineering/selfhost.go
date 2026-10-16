@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,9 +38,11 @@ func (osCommands) OutputEnv(dir string, env []string, name string, args ...strin
 	command := exec.Command(name, args...)
 	command.Dir = dir
 	command.Env = append(os.Environ(), env...)
-	output, err := command.CombinedOutput()
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, err := command.Output()
 	if err != nil {
-		return "", commandError(name, args, output, err)
+		return "", commandError(name, args, stderr.Bytes(), err)
 	}
 	return strings.TrimSpace(string(output)), nil
 }
