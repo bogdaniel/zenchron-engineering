@@ -116,6 +116,9 @@ func (s *SQLiteOperationStore) ReleaseArtifactActionClaim(id string) error {
 // an existing, still-unfinalized placeholder - never inserts - so a caller
 // that skipped the claim step cannot finalize one that was never reserved.
 func (s *SQLiteOperationStore) FinalizeArtifactActionReceipt(r ArtifactActionReceipt, at time.Time) error {
+	if err := r.validate(); err != nil {
+		return err
+	}
 	document, err := json.Marshal(r)
 	if err != nil {
 		return err

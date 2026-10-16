@@ -76,6 +76,41 @@ func TestArtifactActionReceiptValidateRefusesACrossedSubject(t *testing.T) {
 	}
 }
 
+// TestFinalizeArtifactActionReceiptRefusesAnInvalidReceiptBeforePersisting
+// proves the store never accepts a record it would then refuse to read:
+// ArtifactActionReceipt already validates on read, so persisting without
+// the same check would let an invalid receipt get written once, finalizing
+// the claim, and become permanently stored yet unreadable - neither a
+// receipt nor releasable, because both read and release only recognize an
+// unfinalized (empty-document) claim.
+func TestFinalizeArtifactActionReceiptRefusesAnInvalidReceiptBeforePersisting(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	r := validPlanningArtifactReceipt()
+	r.ArtifactID = ""
+	claimed, err := store.ClaimArtifactActionOperation(r.OperationID, time.Unix(100, 0).UTC())
+	if err != nil || !claimed {
+		t.Fatalf("claimed=%v, err=%v", claimed, err)
+	}
+	if err := store.FinalizeArtifactActionReceipt(r, time.Unix(100, 0).UTC()); err == nil {
+		t.Fatal("finalizing an invalid receipt must be refused")
+	}
+	if read, err := store.ArtifactActionReceipt(r.OperationID); err != nil || read != nil {
+		t.Fatalf("a refused finalize must leave no receipt: %+v, %v", read, err)
+	}
+	if err := store.ReleaseArtifactActionClaim(r.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := store.ClaimArtifactActionOperation(r.OperationID, time.Unix(200, 0).UTC()); err != nil || !claimed {
+		t.Fatalf("the claim must remain unfinalized and releasable, not permanently stuck: claimed=%v, err=%v", claimed, err)
+	}
+}
+
 // TestArtifactActionReceiptStoreRoundTripsAndReportsUnknownForWhatWasNever
 // WrittenAtAll proves the durable store itself: a claimed-then-finalized
 // receipt is read back exactly, and an operation id that was never claimed
