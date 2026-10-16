@@ -90,6 +90,16 @@ test("dependentStageIDs names every stage that depends on the given one", () => 
   assert.deepEqual(dependentStageIDs(stages, 3), []);
 });
 
+test("dependentStageIDs still finds dependents while the id is cleared mid-rename, via anchorID", () => {
+  // Clearing a name (select-all + backspace) leaves id "" but anchorID "a" -
+  // dependents must still be found by anchorID, or Remove this stage would
+  // skip the drop-dependency confirmation and silently orphan the edge.
+  let stages = [stage("a"), stage("b", { dependsOn: ["a"] })];
+  stages = renameStageID(stages, 0, "");
+  assert.equal(stages[0].id, "");
+  assert.deepEqual(dependentStageIDs(stages, 0), ["b"]);
+});
+
 test("dependencyEdges reflects real edges, not list order - a later stage may skip an earlier one entirely", () => {
   // b has no dependency on a; c depends on a only, not on b. Joining ids by
   // list order ("a -> b -> c") would wrongly imply b sits between them.

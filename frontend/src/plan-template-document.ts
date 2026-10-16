@@ -28,9 +28,14 @@ export function renameStageID(stages: DraftStage[], index: number, newID: string
 }
 
 // dependentStageIDs names the stages that currently depend on stages[index],
-// by id - what removing it would silently drop a dependency edge for.
+// by id - what removing it would silently drop a dependency edge for. A
+// cleared-then-not-yet-retyped id (the empty intermediate value renameStageID
+// tracks through) still owns its dependents under its stable anchorID, so
+// this falls back to that - otherwise clearing a name right before clicking
+// remove would read as having no dependents at all.
 export function dependentStageIDs(stages: DraftStage[], index: number): string[] {
-  const id = stages[index]?.id.trim();
+  const current = stages[index];
+  const id = current?.id.trim() || current?.anchorID;
   if (!id) return [];
   return stages.filter((s, i) => i !== index && s.dependsOn.includes(id)).map((s) => s.id.trim() || "(unnamed)");
 }
