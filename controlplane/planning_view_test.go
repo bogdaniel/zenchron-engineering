@@ -260,3 +260,31 @@ func TestProposePlanningArtifactAcceptsADocumentAboveTheOrdinaryActionCeiling(t 
 		t.Fatalf("a document above the ordinary action ceiling, within the planning-artifact contract, must write: %+v", applied)
 	}
 }
+
+// TestProposePlanningArtifactAcceptsAndReloadsANearMaximalDocument is the
+// coverage gap an independent review found: the other positive tests above
+// exercise a document a few 10s of KiB over the ordinary action ceiling, not
+// one near planning.MaxPlanningArtifactBytes itself - so the documented 4 KiB
+// envelope allowance was never actually proven sufficient end to end, through
+// the real HTTP body (controller_binding/kind/id wrapper included), for the
+// size the contract exists to carry. This sends one within a few hundred
+// bytes of the 1 MiB bound and confirms it is both written and reloadable.
+func TestProposePlanningArtifactAcceptsAndReloadsANearMaximalDocument(t *testing.T) {
+	a := newPlanningActionFixture(t)
+	prefix, suffix := []byte(`{"instructions": ["`), []byte(`"]}`)
+	const sealingOverheadMargin = 512
+	padding := int(planning.MaxPlanningArtifactBytes) - len(prefix) - len(suffix) - sealingOverheadMargin
+	document := string(prefix) + strings.Repeat("A", padding) + string(suffix)
+	body := planningArtifactBody("instruction_pack", "near-max", document)
+	if int64(len(body)) >= planning.MaxPlanningArtifactRequestBytes {
+		t.Fatalf("this request is %d bytes, not comfortably under the %d byte request ceiling it is meant to fit", len(body), planning.MaxPlanningArtifactRequestBytes)
+	}
+	applied := post(t, a, validRequest("/v1/planning/artifacts", body), 200)
+	if outcome(applied) != "applied" {
+		t.Fatalf("a document near the artifact bound, through the real HTTP envelope, must write: %+v", applied)
+	}
+	reloaded := post(t, a, validRequest("/v1/planning/reload", `{"controller_binding":"`+testBinding+`"}`), 200)
+	if outcome(reloaded) != "applied" {
+		t.Fatalf("a near-maximal artifact that was just written must reload: %+v", reloaded)
+	}
+}

@@ -133,3 +133,65 @@ func TestPlanningArtifactProposeReachesTheHandlerAboveTheOrdinaryCeiling(t *test
 		t.Fatal("the request was never dispatched to the handler")
 	}
 }
+
+// TestPlanningArtifactProposeReachesTheHandlerNearTheArtifactBound is the
+// transport-layer half of the coverage gap an independent review found: the
+// test above exercises ~32 KiB, comfortably inside the ceiling but nowhere
+// near planning.MaxPlanningArtifactBytes itself. This sends a request within
+// a few hundred bytes of the 1 MiB bound - the size the contract exists to
+// carry - and confirms the control socket actually reads and dispatches it.
+func TestPlanningArtifactProposeReachesTheHandlerNearTheArtifactBound(t *testing.T) {
+	stateDir := controlStateDir(t)
+	listener, err := ListenControl(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	var dispatched atomic.Bool
+	go func() {
+		_ = listener.Serve(func(ControlRequest) ControlResponse {
+			dispatched.Store(true)
+			return ControlResponse{OK: true}
+		})
+	}()
+
+	connection, err := net.DialTimeout("unix", listener.Path(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
+	const sealingAndWireOverheadMargin = 1 << 10
+	padding := int(planning.MaxPlanningArtifactBytes) - sealingAndWireOverheadMargin
+	document, err := json.Marshal(map[string]string{"instructions": strings.Repeat("A", padding)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := json.Marshal(ControlRequest{
+		Command:          ControlPlanningArtifactPropose,
+		PlanningArtifact: &planning.ArtifactWrite{Kind: planning.KindInstructionPack, ID: "near-max", Document: document},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(line) >= maxControlConnectionBytes {
+		t.Fatalf("this request is %d bytes, not comfortably under the %d byte connection ceiling it is meant to fit", len(line), maxControlConnectionBytes)
+	}
+	if _, err := connection.Write(append(line, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := bufio.NewReader(connection).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("the endpoint did not answer: %v", err)
+	}
+	var response ControlResponse
+	if err := json.Unmarshal(reply, &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK {
+		t.Fatalf("a near-maximal planning-artifact-propose request was refused: %#v", response)
+	}
+	if !dispatched.Load() {
+		t.Fatal("the request was never dispatched to the handler")
+	}
+}

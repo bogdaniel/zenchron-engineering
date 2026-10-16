@@ -475,8 +475,14 @@ func answerControlConnection(connection net.Conn, handle func(ControlRequest) Co
 	// headroom distinguishes "exactly at the bound" from "over it". This
 	// catches only the absolute worst case; the per-command bound below is
 	// what actually protects every command except the one that needs more.
+	// The LIMIT is maxControlConnectionBytes (the absolute ceiling, raised
+	// for planning-artifact-propose), but the bufio BUFFER stays at the
+	// ordinary size: ReadBytes does not need its buffer to hold the whole
+	// line at once, only to find '\n' within it, so an oversized line costs
+	// extra read syscalls rather than an ~1 MiB allocation on every ordinary
+	// connection that will never send one.
 	bounded := io.LimitReader(connection, maxControlConnectionBytes+1)
-	reader := bufio.NewReaderSize(bounded, maxControlConnectionBytes)
+	reader := bufio.NewReaderSize(bounded, maxControlRequestBytes)
 	line, err := reader.ReadBytes('\n')
 	if len(line) > maxControlConnectionBytes {
 		writeControlResponse(connection, ControlResponse{Error: "control request exceeds the size bound"})
