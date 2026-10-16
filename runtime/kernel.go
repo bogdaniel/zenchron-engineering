@@ -33,11 +33,21 @@ func (f KernelFlow) Compile(source SourceSnapshot, model domain.ProjectModel, p 
 	if f.Analyzer.IsZero() {
 		f.Analyzer = analysis.NewAnalyzer()
 	}
-	facts, err := f.Analyzer.Predict(model, model.Subject, analysis.Intent{Objective: source.Objective, AcceptanceIntent: source.AcceptanceIntent, AffectedPaths: source.PredictedPaths, PathsKnown: source.PathsKnown})
+	normalized, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: source.PredictedPaths, PathsKnown: source.PathsKnown})
+	if err != nil {
+		return KernelState{}, fmt.Errorf("predicted paths: %w", err)
+	}
+	facts, err := f.Analyzer.Predict(model, model.Subject, analysis.Intent{Objective: source.Objective, AcceptanceIntent: source.AcceptanceIntent, AffectedPaths: normalized.Paths, PathsKnown: source.PathsKnown})
 	if err != nil {
 		return KernelState{}, err
 	}
-	contract, err := policy.Compile(policy.CompileInput{ContractID: contractID, ContractRevision: revision, Objective: source.Objective, AcceptanceIntent: source.AcceptanceIntent, Subject: model.Subject, Scope: domain.ContractScope{Stage: domain.StagePredicted, AllowedPaths: source.PredictedPaths}, ProjectModel: model, Policy: p, Facts: facts.Sorted()})
+	allowedPaths := normalized.Paths
+	if !normalized.PathsKnown && len(allowedPaths) == 0 {
+		// The contract schema requires nonempty scope. This no-match sentinel
+		// belongs only to scope, never to the predicted repository file set.
+		allowedPaths = []string{predictedScopePlaceholder}
+	}
+	contract, err := policy.Compile(policy.CompileInput{ContractID: contractID, ContractRevision: revision, Objective: source.Objective, AcceptanceIntent: source.AcceptanceIntent, Subject: model.Subject, Scope: domain.ContractScope{Stage: domain.StagePredicted, AllowedPaths: allowedPaths}, ProjectModel: model, Policy: p, Facts: facts.Sorted()})
 	if err != nil {
 		return KernelState{}, err
 	}
