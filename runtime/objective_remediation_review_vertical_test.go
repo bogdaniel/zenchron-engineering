@@ -1,15 +1,17 @@
 package runtime
 
-// #480/#581/#474 vertical acceptance - the one cross-mechanism proof the
-// baseline evidence review found missing: every mechanism below is already
-// real, merged and independently tested in isolation
+// #471/#479/#480/#581/#474 vertical acceptance - the one cross-mechanism
+// proof the baseline evidence review found missing: every mechanism below is
+// already real, merged and independently tested in isolation
 // (objective_workgraph_test.go for the #480 BindObjectivePlan bridge,
-// remediation_end_to_end_test.go for #581's governed epoch, and
-// review_remediation_e2e_test.go for #474's head-bound review remediation),
-// but nothing before this test ever drove a BindObjectivePlan-compiled
-// WorkGraph through a real conflict and then through independent review
-// remediation in one real Git/SQLite run. No new mechanism is added here:
-// this reuses integrationUnitMarker (#475's own marker convention) and
+// remediation_end_to_end_test.go for #581's governed epoch,
+// review_remediation_e2e_test.go for #474's head-bound review remediation,
+// and objective_product_association_test.go for #471/#479's
+// AssociateProductGraph), but nothing before this test ever drove a
+// product-scoped, BindObjectivePlan-compiled WorkGraph through a real
+// conflict and then through independent review remediation in one real
+// Git/SQLite run. No new mechanism is added here: this reuses
+// integrationUnitMarker (#475's own marker convention) and
 // SupervisorReviewPort/ReconcileReviewRemediation (#474's own port) exactly
 // as their own suites do.
 
@@ -107,6 +109,17 @@ func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRe
 	plan := newPlanRunFixtureOn(t, fleet.phase8Fixture, objectiveIntegrationStages(), fleet.deps.ConfigDigest)
 	graphID, err := plan.service.BindObjectivePlan(plan.plan, plan.issue, plan.service.DefaultAgent)
 	if err != nil {
+		t.Fatal(err)
+	}
+	// #471/#479: this objective was proposed under a chosen product. The
+	// association must still resolve to the SAME product after the full
+	// conflict -> epoch -> reintegration -> independent review journey
+	// below, not just at compile time.
+	product := composeProduct(t, "storefront", 1, []string{plan.plan.Subject.Repository}, fleet.clock.Now())
+	if _, _, err := fleet.store.AdoptProductRevision(product); err != nil {
+		t.Fatal(err)
+	}
+	if err := plan.service.AssociateProductGraph(product.ID, graphID); err != nil {
 		t.Fatal(err)
 	}
 	plan.approve(t)
@@ -330,6 +343,10 @@ func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRe
 	}
 	if admission != nil {
 		t.Fatalf("an APPROVE must never be routed through remediation admission, got %+v", admission)
+	}
+	owner, found, err := fleet.store.AssociatedProduct(graphID)
+	if err != nil || !found || owner != product.ID {
+		t.Fatalf("product association did not survive the conflict/epoch/review journey: owner=%q found=%t err=%v", owner, found, err)
 	}
 }
 
