@@ -255,7 +255,8 @@
         "runtime/compose_integration_recovery_test.go",
         "runtime/integration_conflict_delivery_test.go",
         "runtime/objective_workgraph_test.go",
-        "runtime/objective_remediation_review_vertical_test.go"
+        "runtime/objective_remediation_review_vertical_test.go",
+        "runtime/objective_product_association_test.go"
       ]
     },
     {
@@ -289,7 +290,8 @@
       ],
       "tests": [
         "runtime/product_test.go",
-        "runtime/product_*_test.go"
+        "runtime/product_*_test.go",
+        "runtime/objective_product_association_test.go"
       ]
     },
     {
