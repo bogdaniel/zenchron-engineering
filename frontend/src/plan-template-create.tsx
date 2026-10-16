@@ -4,7 +4,14 @@ import { Panel } from "./components";
 import { TextField, SelectField, CheckboxField } from "./form";
 import { GovernedAction, useReusableGovernedAction, type ActionReview } from "./governed-action";
 import { freshController } from "./planning";
-import { type DraftStage, emptyStage, templateDocumentFrom } from "./plan-template-document";
+import {
+  type DraftStage,
+  dependencyEdges,
+  dependentStageIDs,
+  emptyStage,
+  renameStageID,
+  templateDocumentFrom,
+} from "./plan-template-document";
 
 const KINDS = ["agent", "assurance_gate", "human_decision_gate"];
 const ROLES = [
@@ -40,8 +47,20 @@ export function PlanTemplateCreate({
   const [instance, resetInstance] = useReusableGovernedAction();
   const updateStage = (index: number, patch: Partial<DraftStage>) =>
     setStages((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)));
+  const renameStage = (index: number, newID: string) => setStages((prev) => renameStageID(prev, index, newID));
   const addStage = () => setStages((prev) => [...prev, emptyStage()]);
-  const removeStage = (index: number) => setStages((prev) => prev.filter((_, i) => i !== index));
+  const removeStage = (index: number) => {
+    const dependents = dependentStageIDs(stages, index);
+    if (
+      dependents.length &&
+      !window.confirm(
+        `Removing this stage will drop the dependency ${dependents.length > 1 ? "edges" : "edge"} ${dependents.join(", ")} ${dependents.length > 1 ? "have" : "has"} on it. Continue?`,
+      )
+    ) {
+      return;
+    }
+    setStages((prev) => prev.filter((_, i) => i !== index));
+  };
   const trimmedIDs = stages.map((s) => s.id.trim());
   const duplicateIDs = trimmedIDs.filter(Boolean).length !== new Set(trimmedIDs.filter(Boolean)).size;
   const incompleteStage = stages.some((s) => !s.id.trim());
@@ -60,6 +79,7 @@ export function PlanTemplateCreate({
   const prepare = async (_note: string, signal: AbortSignal): Promise<ActionReview> => {
     const live = await freshController(signal, controller?.controller_binding);
     const { id: templateID, document } = templateDocumentFrom(id, description, stages);
+    const edges = dependencyEdges(stages);
     return {
       title: "Create this plan template?",
       subject: templateID,
@@ -67,7 +87,16 @@ export function PlanTemplateCreate({
         "A reusable planning input an objective proposal may select. It grants no authority, removes no policy obligation and widens no budget beyond what policy already allows.",
       details: [
         ["Template id", templateID],
-        ["Stages", stages.map((s) => s.id.trim() || "(unnamed)").join(" → ") || "none"],
+        // List order is NOT execution dependency - showing it as a single
+        // arrow-joined chain would claim an edge between every adjacent pair
+        // whether or not one exists. Each stage's row names only its real
+        // depends_on, exactly what templateDocumentFrom is about to submit.
+        ...(edges.length
+          ? edges.map(({ id: stageID, dependsOn }): [string, string] => [
+              `Stage: ${stageID}`,
+              dependsOn.length ? `depends on ${dependsOn.join(", ")}` : "no dependencies",
+            ])
+          : ([["Stages", "none"]] as [string, string][])),
         ["Serving controller", live.controller_binding],
       ],
       path: "/v1/planning/artifacts",
@@ -89,7 +118,7 @@ export function PlanTemplateCreate({
         {stages.map((stage, index) => (
           <fieldset key={index} className="field-label">
             <legend>Stage {index + 1}</legend>
-            <TextField label="Stage id" value={stage.id} onChange={(e) => updateStage(index, { id: e.target.value })} />
+            <TextField label="Stage id" value={stage.id} onChange={(e) => renameStage(index, e.target.value)} />
             <SelectField label="Kind" value={stage.kind} onChange={(e) => updateStage(index, { kind: e.target.value })}>
               {KINDS.map((k) => (
                 <option key={k} value={k}>

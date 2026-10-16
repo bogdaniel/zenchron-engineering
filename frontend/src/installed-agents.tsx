@@ -176,7 +176,7 @@ function ReloadPlanningRegistry({ controller, onSettled }: { controller: api.Con
       title: "Reload the planning registry?",
       subject: "Installed instruction packs, context policies, profiles and templates",
       consequence:
-        "Re-reads the planning directory so a newly written or edited artifact is available to a new plan. Nothing already approved or executing is affected.",
+        "Re-reads the planning directory so a newly written or edited artifact is available to a new plan. Replacing an instruction pack or profile an approved plan already pinned does not change what it does: that plan keeps executing under the exact content it was approved with, and refuses rather than silently drift onto the replacement.",
       details: [["Serving controller", live.controller_binding]],
       path: "/v1/planning/reload",
       action: "planning-reload",
