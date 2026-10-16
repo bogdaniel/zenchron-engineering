@@ -54,6 +54,7 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 		Template: request.Template, Profile: request.Profile, Deterministic: request.Deterministic,
 		Agent:           request.Agent,
 		SubstituteHuman: request.SubstituteHuman, Note: request.Note,
+		ProductID: request.ProductID,
 	}
 	// A first proposal has no id yet. It is derived exactly as the local path
 	// derives it - from the issue, deterministically - so the view returned
@@ -146,8 +147,14 @@ func proposePlanAndGraph(ctx context.Context, composed *planComposition, input r
 		}
 		agentID = agent.ID
 	}
-	_, err = composed.service.BindObjectivePlan(plan, input.Issue, agentID)
-	return plan, err
+	graphID, err := composed.service.BindObjectivePlan(plan, input.Issue, agentID)
+	if err != nil {
+		return domain.EngineeringPlan{}, err
+	}
+	if err := composed.service.AssociateProductGraph(flags.ProductID, graphID); err != nil {
+		return domain.EngineeringPlan{}, err
+	}
+	return plan, nil
 }
 
 func renderObjectivePlan(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, action string) (int, error) {

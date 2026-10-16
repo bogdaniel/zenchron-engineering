@@ -135,8 +135,13 @@ type ControlRequest struct {
 	// Agent is the named execution agent, resolved against the operator's own
 	// registry. A request naming an agent the operator did not configure is
 	// refused; it cannot introduce one.
-	Agent              string `json:"agent,omitempty"`
-	Profile            string `json:"profile,omitempty"`
+	Agent   string `json:"agent,omitempty"`
+	Profile string `json:"profile,omitempty"`
+	// ProductID is the product the operator selected at objective intake
+	// (#471/#479). It names an existing Product this supervisor already
+	// adopted; it is never a new product and never recorded on the plan
+	// itself - only used to associate the compiled WorkGraph with it.
+	ProductID          string `json:"product_id,omitempty"`
 	RunID              string `json:"run_id,omitempty"`
 	AuthorityRequestID string `json:"authority_request_id,omitempty"`
 	AuthorityDigest    string `json:"authority_digest,omitempty"`

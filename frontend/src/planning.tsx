@@ -211,9 +211,10 @@ export function ObjectiveIntake() {
       });
     return () => owner.abort();
   }, []);
-  // A product only narrows which repository this intake offers; it is not
-  // recorded on the plan - products associate with WorkGraphs, never with a
-  // Plan or Run directly (product/association.go has no AssociatePlan).
+  // A product narrows which repository this intake offers, and is sent so
+  // the compiled WorkGraph can be associated with it; it is not recorded on
+  // the plan itself - products associate with WorkGraphs, never with a Plan
+  // or Run directly (product/association.go has no AssociatePlan).
   const chosenProduct = products.find((p) => p.product_id === product);
   const availableRepositories =
     chosenProduct && options ? options.repositories.filter((r) => chosenProduct.repositories.includes(r)) : options?.repositories || [];
@@ -246,6 +247,7 @@ export function ObjectiveIntake() {
       consequence:
         "Read the existing issue and generate a proposed plan once. Human plan approval is still required before execution. No publication or merge authority is granted.",
       details: [
+        ["Product", chosenProduct?.name || "None selected"],
         ["Repository / issue", `${repository}#${number}`],
         ["Execution agent", agent],
         ["Profile", profile || "Controller resolution"],
@@ -265,6 +267,7 @@ export function ObjectiveIntake() {
         template,
         deterministic,
         note,
+        product_id: product,
       },
       timeout: 1270000,
     };

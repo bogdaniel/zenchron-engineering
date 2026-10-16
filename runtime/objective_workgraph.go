@@ -10,6 +10,7 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 	"github.com/bogdaniel/zenchron-engineering/planning"
+	"github.com/bogdaniel/zenchron-engineering/product"
 )
 
 // BindObjectivePlan compiles operational units without granting execution
@@ -66,6 +67,26 @@ func (s PlanService) BindObjectivePlan(plan domain.EngineeringPlan, issue int, a
 	}
 	_, _, err = s.Store.AdoptWorkGraphRevision(graph)
 	return graph.ID, err
+}
+
+// AssociateProductGraph binds an objective's compiled WorkGraph to the
+// product the operator selected at intake (#471/#479). Empty productID is
+// "no product chosen" and associates nothing - an objective proposed without
+// a product stays exactly as unassociated as before this existed.
+//
+// It fails closed through the existing #476 store boundary: an unknown
+// product, or a graph already claimed by a DIFFERENT product, refuses rather
+// than silently leaving the graph unassociated or switching ownership.
+func (s PlanService) AssociateProductGraph(productID, graphID string) error {
+	if productID == "" {
+		return nil
+	}
+	association, err := product.NewGraphAssociation(productID, graphID, s.now())
+	if err != nil {
+		return err
+	}
+	_, err = s.Store.AssociateWorkGraph(association)
+	return err
 }
 
 // Reviewers and typed gates consume candidate units; they retain their own

@@ -208,6 +208,12 @@ type autonomyFlags struct {
 	Template string
 	// Profile is the operator's default profile preference for agent stages.
 	Profile string
+	// ProductID is the product the operator selected at objective intake. Empty
+	// means no product was chosen; the objective's compiled WorkGraph is then
+	// never associated with one. It is never recorded on the plan itself -
+	// only used to associate the compiled WorkGraph, through the existing #476
+	// store boundary.
+	ProductID string
 	// Revision and Digest name the EXACT plan revision a decision is about.
 	// They are what an operator read: without them the CLI would decide
 	// whatever the highest revision happened to be at decide time, which can
