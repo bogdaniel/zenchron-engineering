@@ -221,3 +221,70 @@ func TestProposePlanningArtifactRefusesAProfileForNoSuchAgent(t *testing.T) {
 		t.Fatalf("a profile naming an unconfigured agent must be refused: %+v", applied)
 	}
 }
+
+// TestProposePlanningArtifactRejectsAnOversizedRequestBeforeAnyWrite proves
+// the HTTP layer's own ceiling - planning.MaxPlanningArtifactRequestBytes,
+// not the ordinary 8 KiB default every other action keeps - is enforced
+// before the request body ever reaches planning.Write.
+func TestProposePlanningArtifactRejectsAnOversizedRequestBeforeAnyWrite(t *testing.T) {
+	a := newPlanningActionFixture(t)
+	oversized := strings.Repeat("A", int(planning.MaxPlanningArtifactRequestBytes))
+	req := validRequest("/v1/planning/artifacts", planningArtifactBody("instruction_pack", "huge", `{"instructions": ["`+oversized+`"]}`))
+	refused := post(t, a, req, 400)
+	if s, _ := refused["error"].(string); s == "" {
+		t.Fatalf("an oversized request must be refused with a typed error, not merely a status: %+v", refused)
+	}
+	// A normal write afterward still succeeds: the oversized request was
+	// refused at the body boundary, decodeActionWithLimit, before
+	// proposePlanningArtifact's handler body - never a request planning.Write
+	// saw and only happened to reject - and left nothing behind to interfere.
+	applied := post(t, a, validRequest("/v1/planning/artifacts",
+		planningArtifactBody("instruction_pack", "ordinary", `{"instructions": ["fine"]}`)), 200)
+	if outcome(applied) != "applied" {
+		t.Fatalf("an ordinary write after the refused oversized one must still succeed: %+v", applied)
+	}
+}
+
+// TestProposePlanningArtifactAcceptsADocumentAboveTheOrdinaryActionCeiling
+// is the positive half: a document bigger than every OTHER action's 8 KiB
+// body limit, but within the planning-artifact contract, must actually
+// write - proving the larger ceiling this PR adds is reachable, not just
+// theoretical.
+func TestProposePlanningArtifactAcceptsADocumentAboveTheOrdinaryActionCeiling(t *testing.T) {
+	a := newPlanningActionFixture(t)
+	const ordinaryActionCeiling = 8 << 10
+	padding := strings.Repeat("A", ordinaryActionCeiling*2)
+	applied := post(t, a, validRequest("/v1/planning/artifacts",
+		planningArtifactBody("instruction_pack", "big", `{"instructions": ["`+padding+`"]}`)), 200)
+	if outcome(applied) != "applied" {
+		t.Fatalf("a document above the ordinary action ceiling, within the planning-artifact contract, must write: %+v", applied)
+	}
+}
+
+// TestProposePlanningArtifactAcceptsAndReloadsANearMaximalDocument is the
+// coverage gap an independent review found: the other positive tests above
+// exercise a document a few 10s of KiB over the ordinary action ceiling, not
+// one near planning.MaxPlanningArtifactBytes itself - so the documented 4 KiB
+// envelope allowance was never actually proven sufficient end to end, through
+// the real HTTP body (controller_binding/kind/id wrapper included), for the
+// size the contract exists to carry. This sends one within a few hundred
+// bytes of the 1 MiB bound and confirms it is both written and reloadable.
+func TestProposePlanningArtifactAcceptsAndReloadsANearMaximalDocument(t *testing.T) {
+	a := newPlanningActionFixture(t)
+	prefix, suffix := []byte(`{"instructions": ["`), []byte(`"]}`)
+	const sealingOverheadMargin = 512
+	padding := int(planning.MaxPlanningArtifactBytes) - len(prefix) - len(suffix) - sealingOverheadMargin
+	document := string(prefix) + strings.Repeat("A", padding) + string(suffix)
+	body := planningArtifactBody("instruction_pack", "near-max", document)
+	if int64(len(body)) >= planning.MaxPlanningArtifactRequestBytes {
+		t.Fatalf("this request is %d bytes, not comfortably under the %d byte request ceiling it is meant to fit", len(body), planning.MaxPlanningArtifactRequestBytes)
+	}
+	applied := post(t, a, validRequest("/v1/planning/artifacts", body), 200)
+	if outcome(applied) != "applied" {
+		t.Fatalf("a document near the artifact bound, through the real HTTP envelope, must write: %+v", applied)
+	}
+	reloaded := post(t, a, validRequest("/v1/planning/reload", `{"controller_binding":"`+testBinding+`"}`), 200)
+	if outcome(reloaded) != "applied" {
+		t.Fatalf("a near-maximal artifact that was just written must reload: %+v", reloaded)
+	}
+}

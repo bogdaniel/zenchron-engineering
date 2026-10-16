@@ -28,7 +28,7 @@ func (a *API) proposePlanningArtifact(w http.ResponseWriter, r *http.Request) {
 		ID                string          `json:"id"`
 		Document          json.RawMessage `json:"document"`
 	}
-	if !decodeAction(w, r, &body) {
+	if !decodeActionWithLimit(w, r, &body, planning.MaxPlanningArtifactRequestBytes) {
 		return
 	}
 	if strings.TrimSpace(body.Kind) == "" || strings.TrimSpace(body.ID) == "" || len(body.Document) == 0 {

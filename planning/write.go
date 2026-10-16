@@ -53,7 +53,7 @@ func writeArtifact[T domain.Contract](dir, kind, id string, data []byte, seal fu
 	if err := validateID(id); err != nil {
 		return zero, err
 	}
-	if int64(len(data)) > maxPlanningArtifactBytes {
+	if int64(len(data)) > MaxPlanningArtifactBytes {
 		return zero, &RegistryError{Path: id, Detail: "artifact exceeds the operator artifact size bound"}
 	}
 	root := filepath.Join(dir, kind)
@@ -70,6 +70,16 @@ func writeArtifact[T domain.Contract](dir, kind, id string, data []byte, seal fu
 	encoded, err := domain.Encode(sealed)
 	if err != nil {
 		return zero, &RegistryError{Path: path, Detail: err.Error()}
+	}
+	// The authoritative check: sealing ADDS fields (schema version, identity,
+	// digest, source), so a raw document already at MaxPlanningArtifactBytes
+	// always encodes larger than it - the pre-seal check above is a cheap
+	// fast rejection for an obviously oversized input, never a substitute
+	// for this one. LoadRegistry bounds the file actually on disk to the
+	// same constant; a write that passed this check and failed that one
+	// would report success and then be unreloadable.
+	if int64(len(encoded)) > MaxPlanningArtifactBytes {
+		return zero, &RegistryError{Path: path, Detail: "sealed artifact exceeds the operator artifact size bound"}
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return zero, &RegistryError{Path: root, Detail: err.Error()}

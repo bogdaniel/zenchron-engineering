@@ -3,6 +3,7 @@ package planning_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -260,5 +261,84 @@ func TestWriteRejectingAnEscalatingReplacementLeavesTheOriginalProfileUnchanged(
 	}
 	if current.Digest != original.Digest {
 		t.Fatalf("a refused replacement must leave the original profile unchanged: original digest %s, now %s", original.Digest, current.Digest)
+	}
+}
+
+// TestWriteRefusesADocumentOverTheArtifactBoundAndWritesNothing proves the
+// registry's own MaxPlanningArtifactBytes bound - the one every transport
+// layer above it (HTTP, the control socket) now sizes its own ceiling
+// around - is still enforced here too, before anything reaches disk.
+func TestWriteRefusesADocumentOverTheArtifactBoundAndWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	oversized := []byte(`{"instructions": ["` + strings.Repeat("A", int(planning.MaxPlanningArtifactBytes)) + `"]}`)
+	if _, err := planning.WriteInstructionPack(dir, "huge", oversized); err == nil {
+		t.Fatal("a document over the artifact bound must be refused")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "instructions", "huge.json")); !os.IsNotExist(err) {
+		t.Fatalf("a refused write must leave no file: stat err = %v", err)
+	}
+}
+
+// TestWriteRefusesARawInputExactlyAtTheBoundBecauseSealingGrowsIt is the
+// regression for a real bug an independent review found: the pre-seal check
+// above only bounds the RAW input, but sealing ADDS fields (schema version,
+// identity, digest, source) on top of it, so a raw document already at
+// MaxPlanningArtifactBytes always encodes LARGER than the bound
+// LoadRegistry enforces against the file on disk. Without the post-seal
+// check in writeArtifact, this write would have reported success and then
+// been unreloadable - caught here before it ever reaches a real registry.
+func TestWriteRefusesARawInputExactlyAtTheBoundBecauseSealingGrowsIt(t *testing.T) {
+	dir := t.TempDir()
+	prefix, suffix := []byte(`{"instructions": ["`), []byte(`"]}`)
+	padding := int(planning.MaxPlanningArtifactBytes) - len(prefix) - len(suffix)
+	document := append(append(append([]byte{}, prefix...), []byte(strings.Repeat("A", padding))...), suffix...)
+	if len(document) != int(planning.MaxPlanningArtifactBytes) {
+		t.Fatalf("constructed document is %d bytes, not exactly the %d byte bound", len(document), planning.MaxPlanningArtifactBytes)
+	}
+	if _, err := planning.WriteInstructionPack(dir, "max", document); err == nil {
+		t.Fatal("a raw document exactly at the bound must be refused once sealing would grow it past the bound LoadRegistry enforces")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "instructions", "max.json")); !os.IsNotExist(err) {
+		t.Fatalf("a refused write must leave no file: stat err = %v", err)
+	}
+}
+
+// TestWriteAcceptsAndReloadsASealedArtifactNearTheBound is the positive
+// edge, corrected: MaxPlanningArtifactBytes bounds the SEALED representation
+// LoadRegistry actually reads, not the raw input. A margin reserves room for
+// sealing's own overhead rather than hand-counting it; domain.Encode on the
+// result proves the margin was both sufficient (under the bound) and not
+// wasteful (close to it), and a reload proves what was written is exactly
+// what comes back - the review's explicit ask, not just a successful write.
+func TestWriteAcceptsAndReloadsASealedArtifactNearTheBound(t *testing.T) {
+	dir := t.TempDir()
+	prefix, suffix := []byte(`{"instructions": ["`), []byte(`"]}`)
+	const sealingOverheadMargin = 512
+	padding := int(planning.MaxPlanningArtifactBytes) - len(prefix) - len(suffix) - sealingOverheadMargin
+	document := append(append(append([]byte{}, prefix...), []byte(strings.Repeat("A", padding))...), suffix...)
+	sealed, err := planning.WriteInstructionPack(dir, "max", document)
+	if err != nil {
+		t.Fatalf("a document within the sealing-overhead margin of the bound must write: %v", err)
+	}
+	encoded, err := domain.Encode(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(encoded)) > planning.MaxPlanningArtifactBytes {
+		t.Fatalf("the sealed artifact is %d bytes, over the %d byte bound it must never exceed", len(encoded), planning.MaxPlanningArtifactBytes)
+	}
+	if int64(len(encoded)) < planning.MaxPlanningArtifactBytes-sealingOverheadMargin {
+		t.Fatalf("the %d byte margin reserved for sealing overhead was not exercised: sealed artifact is only %d bytes", sealingOverheadMargin, len(encoded))
+	}
+	registry, err := planning.LoadRegistry(dir)
+	if err != nil {
+		t.Fatalf("a maximal artifact that was just written must reload: %v", err)
+	}
+	reloaded, err := registry.Pack("max")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Digest != sealed.Digest {
+		t.Fatalf("reload must see the exact artifact just written: wrote digest %s, reloaded %s", sealed.Digest, reloaded.Digest)
 	}
 }

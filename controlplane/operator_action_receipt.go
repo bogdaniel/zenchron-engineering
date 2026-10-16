@@ -8,14 +8,33 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/bogdaniel/zenchron-engineering/planning"
 	rt "github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
 type actionReferenceKey struct{}
 type actionReference struct{ id, digest string }
 
+// correlateActionBodyBytes is this path's body-capture ceiling, matching
+// decodeAction's own ordinary default: an operation-id-bearing request is
+// almost always a tiny identifier set. Planning-artifact-propose is the one
+// exception that needs more, by the SAME contract every other layer uses -
+// see planning.MaxPlanningArtifactRequestBytes - not a bespoke number here.
+func correlateActionBodyBytes(path string) int64 {
+	if path == "/v1/planning/artifacts" {
+		return planning.MaxPlanningArtifactRequestBytes
+	}
+	return defaultActionBodyBytes
+}
+
 // Capture the exact path and bounded wire body after auth/CSRF checks, before
 // ordinary closed-shape decoding. The API remains a read-only store consumer.
+//
+// This runs for every POST, before the mux dispatches to a specific route,
+// so it cannot yet rely on decodeActionWithLimit's per-route call to bound
+// the body: it must pick its own ceiling from the path alone, the same way
+// answerControlConnection must pick the transport ceiling before it knows
+// the command.
 func correlateAction(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 	id := r.Header.Get("X-Zenchron-Operation-ID")
 	if id == "" {
@@ -25,7 +44,7 @@ func correlateAction(w http.ResponseWriter, r *http.Request) (*http.Request, boo
 		fail(w, 400, "invalid_request")
 		return r, false
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 8<<10))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, correlateActionBodyBytes(r.URL.Path)))
 	if err != nil {
 		fail(w, 400, "invalid_request")
 		return r, false
