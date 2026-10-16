@@ -1,18 +1,30 @@
-export type DraftStage = { id: string; kind: string; role: string; profile: string; dependsOn: string[] };
+// anchorID is the stable identity renameStageID tracks a stage's
+// dependents by, separate from the live, possibly-empty text in id: an
+// operator retyping a name (select-all, backspace, type the new one) sends
+// one onChange per keystroke, including an empty intermediate value, and
+// that empty value must never become what dependents are redirected to.
+export type DraftStage = { id: string; kind: string; role: string; profile: string; dependsOn: string[]; anchorID?: string };
 
 export function emptyStage(): DraftStage {
   return { id: "", kind: "agent", role: "implementer", profile: "", dependsOn: [] };
 }
 
 // renameStageID changes one stage's id AND rewrites every OTHER stage's
-// dependsOn entries pointing at the old id to the new one, so a rename
-// preserves the dependency the operator actually set instead of letting it
-// go dangling until templateDocumentFrom silently drops it at submit.
+// dependsOn entries pointing at its stable anchorID to the new one, so a
+// rename preserves the dependency the operator actually set instead of
+// letting it go dangling until templateDocumentFrom silently drops it at
+// submit - INCLUDING across an empty intermediate value (a -> "" -> a2):
+// anchorID holds "a" across the empty step, where id itself does not.
 export function renameStageID(stages: DraftStage[], index: number, newID: string): DraftStage[] {
-  const previousID = stages[index]?.id.trim();
-  const renamed = stages.map((s, i) => (i === index ? { ...s, id: newID } : s));
-  if (!previousID || newID.trim() === previousID) return renamed;
-  return renamed.map((s, i) => (i === index ? s : { ...s, dependsOn: s.dependsOn.map((d) => (d === previousID ? newID.trim() : d)) }));
+  const current = stages[index];
+  if (!current) return stages;
+  const anchor = current.anchorID ?? current.id.trim();
+  const trimmedNewID = newID.trim();
+  const renamed = stages.map((s, i) =>
+    i === index ? { ...s, id: newID, anchorID: trimmedNewID || anchor } : s,
+  );
+  if (!anchor || !trimmedNewID || trimmedNewID === anchor) return renamed;
+  return renamed.map((s, i) => (i === index ? s : { ...s, dependsOn: s.dependsOn.map((d) => (d === anchor ? trimmedNewID : d)) }));
 }
 
 // dependentStageIDs names the stages that currently depend on stages[index],

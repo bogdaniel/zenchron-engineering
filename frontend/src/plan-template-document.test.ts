@@ -62,6 +62,28 @@ test("renaming to the same trimmed id is a no-op on dependents", () => {
   assert.deepEqual(renamed[1].dependsOn, ["a"]);
 });
 
+test("renaming through an empty intermediate value still resolves the dependency - a -> '' -> a2", () => {
+  // One onChange per keystroke: select-all + backspace fires newID="" before
+  // the replacement text is typed. The dependent's edge must survive both
+  // calls, landing on "a2" - not get silently redirected to "" along the way.
+  let stages = [stage("a"), stage("b", { dependsOn: ["a"] })];
+  stages = renameStageID(stages, 0, "");
+  assert.equal(stages[0].id, "");
+  assert.deepEqual(stages[1].dependsOn, ["a"], "the empty intermediate step must not clobber the dependent's reference");
+  stages = renameStageID(stages, 0, "a2");
+  assert.equal(stages[0].id, "a2");
+  assert.deepEqual(stages[1].dependsOn, ["a2"], "the dependency must resolve to the final id once typing finishes");
+});
+
+test("renaming through SEVERAL empty intermediate values (backspacing character by character) still resolves", () => {
+  let stages = [stage("implementation"), stage("verification", { dependsOn: ["implementation"] })];
+  for (const next of ["implementatio", "implementati", "", "impl2"]) {
+    stages = renameStageID(stages, 0, next);
+  }
+  assert.equal(stages[0].id, "impl2");
+  assert.deepEqual(stages[1].dependsOn, ["impl2"]);
+});
+
 test("dependentStageIDs names every stage that depends on the given one", () => {
   const stages = [stage("a"), stage("b", { dependsOn: ["a"] }), stage("c", { dependsOn: ["a"] }), stage("d")];
   assert.deepEqual(dependentStageIDs(stages, 0), ["b", "c"]);
