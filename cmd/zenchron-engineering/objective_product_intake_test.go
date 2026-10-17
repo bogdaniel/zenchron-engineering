@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 	"github.com/bogdaniel/zenchron-engineering/product"
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
@@ -340,6 +342,126 @@ func proposePlanOnly(t *testing.T, built *composition, supervisor *runtime.Super
 		t.Fatal(err)
 	}
 	return planID
+}
+
+// 9. Recovery is serialized with the plan reconciler under the SAME plan
+// lock a new proposal's write uses - a reconciler tick must never be able
+// to interleave with the recovery read/bind/associate sequence. Proved by
+// holding the lock in one goroutine and confirming the resend path
+// genuinely blocks on it rather than running unlocked. See
+// runtime/objective_workgraph_test.go's
+// TestBindObjectivePlanRefusesAnIdempotentReplayOnceAStageHasStarted for the
+// companion proof: why resumeObjectiveGraph must skip BindObjectivePlan
+// entirely once a matching graph already exists, rather than ever calling
+// it on a resend regardless of execution state.
+func TestObjectiveIntakeResendIsSerializedWithThePlanLock(t *testing.T) {
+	built, supervisor, _ := objectiveIntakeFixture(t, 41)
+	if _, err := built.revisePlan(context.Background(), supervisor, objectiveRequest(41, "")); err != nil {
+		t.Fatal(err)
+	}
+	productA := adoptTestProduct(t, built, "storefront", []string{"zenchron/seeded"})
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	held := make(chan error, 1)
+	go func() {
+		held <- supervisor.WithPlanLock(func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := built.revisePlan(context.Background(), supervisor, objectiveRequest(41, productA)); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("resend completed while the plan lock was held elsewhere - it is not serialized with the reconciler")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-held; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resend never completed after the plan lock was released")
+	}
+}
+
+// TestResumeObjectiveGraphReusesAnExistingGraphWithoutRebuilding is the
+// direct, low-cost proof companion to
+// TestBindObjectivePlanRefusesAnIdempotentReplayOnceAStageHasStarted
+// (runtime/objective_workgraph_test.go): resumeObjectiveGraph must return an
+// already-bound graph id directly, never calling BindObjectivePlan at all.
+// The PlanView here names a plan id that was never actually proposed -
+// BindObjectivePlan would error immediately if resumeObjectiveGraph called
+// it despite WorkGraphID already being set, which is exactly how this
+// catches a regression back to "always rebuild".
+func TestResumeObjectiveGraphReusesAnExistingGraphWithoutRebuilding(t *testing.T) {
+	built, _, _ := objectiveIntakeFixture(t, 41)
+	plans, err := built.planService()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := runtime.PlanView{WorkGraphID: "graph-already-bound", Plan: domain.EngineeringPlan{ID: "plan-never-proposed"}}
+	graphID, err := built.resumeObjectiveGraph(plans, fresh, 41, autonomyFlags{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graphID != "graph-already-bound" {
+		t.Fatalf("resumeObjectiveGraph rebuilt instead of reusing: got %s, want graph-already-bound", graphID)
+	}
+}
+
+// TestResumeObjectiveGraphRefusesAConflictingRequestedAgent proves the one
+// check preserved alongside "reuse, don't rebuild": a resend naming a
+// DIFFERENT agent than the one the existing graph was actually bound under
+// is refused, not silently ignored - the same way a resend naming a
+// different product is refused rather than silently reassigned.
+func TestResumeObjectiveGraphRefusesAConflictingRequestedAgent(t *testing.T) {
+	built, _, _ := objectiveIntakeFixture(t, 41)
+	plans, err := built.planService()
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph, err := orchestration.WorkGraphProposal{Name: "objective-plan-never-proposed", Revision: 1, Units: []orchestration.WorkUnit{
+		{ID: "a", Purpose: "do the work", Role: "implementer", Issue: 41},
+	}}.Compose("zenchron/seeded", "codex", "operator@example", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := built.store.AdoptWorkGraphRevision(graph); err != nil {
+		t.Fatal(err)
+	}
+	fresh := runtime.PlanView{WorkGraphID: graph.ID, Plan: domain.EngineeringPlan{ID: "plan-never-proposed"}}
+
+	if _, err := built.resumeObjectiveGraph(plans, fresh, 41, autonomyFlags{}, "claude"); err == nil {
+		t.Fatal("a resend naming a different agent than the graph's own should be refused")
+	}
+	graphID, err := built.resumeObjectiveGraph(plans, fresh, 41, autonomyFlags{}, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graphID != graph.ID {
+		t.Fatalf("matching agent should reuse the graph: got %s, want %s", graphID, graph.ID)
+	}
+	graphID, err = built.resumeObjectiveGraph(plans, fresh, 41, autonomyFlags{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graphID != graph.ID {
+		t.Fatalf("no requested agent should reuse the graph without checking: got %s, want %s", graphID, graph.ID)
+	}
 }
 
 func firstGraphID(t *testing.T, built *composition) string {

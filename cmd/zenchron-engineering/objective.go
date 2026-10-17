@@ -85,30 +85,30 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 		if request.PlanID == "" && err == nil {
 			// This objective was already proposed - a resend of the SAME
 			// request, exactly like any other idempotent-resend action in
-			// this product. BindObjectivePlan is the canonical, idempotent
-			// admission path for the objective's WorkGraph regardless of
-			// whether it already exists: replaying it resumes an earlier
-			// attempt that crashed between writing the plan and binding its
-			// graph, rather than reporting success while a product-scoped
-			// (or any) objective is silently left with no graph at all. Its
-			// own "already-started" guard refuses outright if the plan has
-			// since begun executing as a flat run, rather than retroactively
-			// touching work that is already live.
-			agentID, err := resolveAgentID(c, flags)
-			if err != nil {
-				return runtime.PlanView{}, err
+			// this product. Serialized with the reconciler under the SAME
+			// plan lock a new proposal's write uses (#508-style: a reconciler
+			// tick must never start legacy work between this read and the
+			// graph being adopted), and re-read fresh INSIDE the lock rather
+			// than trusting the outer `current` read before it was acquired.
+			var recovered runtime.PlanView
+			if lockErr := supervisor.WithPlanLock(func() error {
+				fresh, err := plans.View(planID)
+				if err != nil {
+					return err
+				}
+				graphID, err := c.resumeObjectiveGraph(plans, fresh, issue, flags, request.Agent)
+				if err != nil {
+					return err
+				}
+				if err := plans.AssociateProductGraph(request.ProductID, graphID); err != nil {
+					return err
+				}
+				recovered, err = plans.View(planID)
+				return err
+			}); lockErr != nil {
+				return runtime.PlanView{}, lockErr
 			}
-			graphID, err := plans.BindObjectivePlan(current.Plan, issue, agentID)
-			if err != nil {
-				return runtime.PlanView{}, err
-			}
-			if err := plans.AssociateProductGraph(request.ProductID, graphID); err != nil {
-				return runtime.PlanView{}, err
-			}
-			// current was read before BindObjectivePlan; its WorkGraphID is
-			// stale (empty) whenever this resend is the one that actually
-			// bound the graph, not merely a replay of an already-bound one.
-			return plans.View(planID)
+			return recovered, nil
 		}
 		if request.PlanID == "" && !errors.As(err, &absent) {
 			return runtime.PlanView{}, err
@@ -181,6 +181,37 @@ func resolveAgentID(c *composition, flags autonomyFlags) (string, error) {
 		return "", err
 	}
 	return agent.ID, nil
+}
+
+// resumeObjectiveGraph is a resend's graph step, called under the plan lock:
+// it reuses an already-bound WorkGraph rather than rebuilding it, and calls
+// the canonical BindObjectivePlan only when the graph is genuinely missing.
+// BindObjectivePlan's own "already-started" guard checks for a live run
+// BEFORE checking whether the graph it would bind already matches, so
+// calling it unconditionally would refuse an ordinary resend of an
+// objective that has simply begun executing - the exact case this must
+// stay idempotent for. A resend naming a DIFFERENT agent than the one the
+// existing graph was actually bound under is refused, the same way a
+// resend naming a different product is: a later request cannot silently
+// change who an admitted objective's work resolves to run as.
+func (c *composition) resumeObjectiveGraph(plans runtime.PlanService, fresh runtime.PlanView, issue int, flags autonomyFlags, requestedAgent string) (string, error) {
+	if fresh.WorkGraphID != "" {
+		if requestedAgent != "" {
+			graph, found, err := plans.Store.WorkGraph(fresh.WorkGraphID)
+			if err != nil {
+				return "", err
+			}
+			if found && graph.AgentID != requestedAgent {
+				return "", fmt.Errorf("objective %s is already bound to agent %s, not %s", fresh.Plan.ID, graph.AgentID, requestedAgent)
+			}
+		}
+		return fresh.WorkGraphID, nil
+	}
+	agentID, err := resolveAgentID(c, flags)
+	if err != nil {
+		return "", err
+	}
+	return plans.BindObjectivePlan(fresh.Plan, issue, agentID)
 }
 
 func proposePlanAndGraph(ctx context.Context, composed *planComposition, input runtime.ProposeInput, flags autonomyFlags) (domain.EngineeringPlan, error) {
