@@ -113,9 +113,6 @@ func (s *Supervisor) activateRemediationEpoch(graph WorkGraphView, unit WorkGrap
 		if err != nil {
 			return err
 		}
-		if err := s.admitEpochToPlan(graph.ObjectivePlan, graph.AgentID, unit.UnitID, planned.Items[0].RunID); err != nil {
-			return err
-		}
 		// Independent review finding (PR #585): writing this batch and
 		// claiming its epoch row as two separate calls leaves a window - a
 		// crash between them - where the batch is already visible to
@@ -133,7 +130,14 @@ func (s *Supervisor) activateRemediationEpoch(graph WorkGraphView, unit WorkGrap
 			BatchID: batchID, RunID: planned.Items[0].RunID, InputsDigest: unit.InputsDigest,
 			AuthorizationID: authorization.ID, ActivatedAt: s.deps.Clock.Now(),
 		}
-		if stored, _, err = s.deps.Store.AdmitRemediationEpochBatch(planned, epoch); err != nil {
+		if graph.ObjectivePlan != nil {
+			// A plan-bound epoch is a child run of its plan: it is authorized
+			// against the plan and charged in the same transaction that admits it.
+			stored, err = s.admitPlanBoundEpoch(*graph.ObjectivePlan, graph.AgentID, unit.UnitID, planned, epoch)
+		} else {
+			stored, _, err = s.deps.Store.AdmitRemediationEpochBatch(planned, epoch)
+		}
+		if err != nil {
 			return err
 		}
 		return validateRemediationEpochBatch(stored, graph, unit, authorization)

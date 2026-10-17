@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -268,9 +270,14 @@ func assertEpochRunsUnderTheStagesAuthority(t *testing.T, fleet *fleetFixture, s
 	}
 
 	view := fleet.graph(graphID)
+	storedBatch, found, err := fleet.store.OrchestrationBatch(epoch.BatchID)
+	if err != nil || !found {
+		t.Fatalf("epoch batch: %v", err)
+	}
 	for range 2 {
-		if err := supervisor.admitEpochToPlan(view.ObjectivePlan, view.AgentID, unitID, epoch.RunID); err != nil {
-			t.Fatalf("re-admitting an admitted epoch: %v", err)
+		if _, created, err := fleet.store.AdmitChargedRemediationEpoch(storedBatch, epoch,
+			EpochCharge{PlanID: plan.plan.ID, StageID: unitID, RunID: epoch.RunID, At: fleet.clock.Now(), MaxChildRuns: 5, EnforceCeiling: true}); err != nil || created {
+			t.Fatalf("re-admitting an admitted epoch: created=%t err=%v", created, err)
 		}
 	}
 	snapshot, err := fleet.store.ReplayPlan(plan.plan.ID)
@@ -307,10 +314,10 @@ func chargedChildRuns(t *testing.T, fleet *fleetFixture) PlanSnapshot {
 	return snapshot
 }
 
-// The epoch is charged BEFORE its batch is written, so a failure between the two
-// leaves a charge and no epoch. Retrying must reuse the charge, never add a second
-// one, and the epoch must not exist - or run - in the meantime.
-func TestACrashBetweenTheChargeAndTheEpochAdmissionRecoversExactlyOnce(t *testing.T) {
+// The charge and the epoch commit in one transaction, so a failure while admitting
+// leaves neither: no epoch, no run, and no budget consumed. Retrying after the
+// failure is cleared admits it once.
+func TestAFailedEpochAdmissionConsumesNoBudgetAndRetriesExactlyOnce(t *testing.T) {
 	runObjectiveRemediationJourney(t,
 		remediationJourney{beforeEpochs: func(t *testing.T, fleet *fleetFixture, supervisor *Supervisor, graphID, unitID string) {
 			if _, err := fleet.store.db.Exec(`CREATE TRIGGER crash_epoch BEFORE INSERT ON work_graph_remediation_epochs
@@ -330,8 +337,8 @@ func TestACrashBetweenTheChargeAndTheEpochAdmissionRecoversExactlyOnce(t *testin
 			if after := len(storedRuns(t, fleet.phase8Fixture)); after != runsBefore {
 				t.Fatalf("the crashed admission created a run: %d before, %d after", runsBefore, after)
 			}
-			if got := chargedChildRuns(t, fleet).Consumed.ChildRuns; got != 4 {
-				t.Fatalf("three retries left %d child runs charged, want the three stages plus ONE epoch", got)
+			if got := chargedChildRuns(t, fleet).Consumed.ChildRuns; got != 3 {
+				t.Fatalf("three failed admissions left %d child runs charged, want only the three stage runs: a failed admission must not consume budget", got)
 			}
 			if _, err := fleet.store.db.Exec(`DROP TRIGGER crash_epoch`); err != nil {
 				t.Fatal(err)
@@ -535,5 +542,85 @@ func assertExecutionBoundaryEnforcesTheFrozenAssignment(t *testing.T, fleet *fle
 	if _, err := fleet.store.db.Exec(`INSERT INTO plan_assignments (plan_id, revision, stage_id, generation, assignment_id, document) VALUES (?, ?, ?, ?, ?, ?)`,
 		run.Plan.PlanID, run.Plan.Revision, unitID, run.Plan.Generation, frozen.ID, document); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func approvedPlanFixture(t *testing.T, envelope domain.PlanBudgetEnvelope) (*fleetFixture, *planRunFixture) {
+	t.Helper()
+	fleet := newFleetFixture(t, 4)
+	plan := newPlanRunFixtureWith(t, fleet.phase8Fixture, objectiveIntegrationStages(), fleet.deps.ConfigDigest, envelope)
+	plan.approve(t)
+	return fleet, plan
+}
+
+// Two admissions racing for the last approved child-run slot: the ceiling is
+// judged against the events the committing transaction appends after, so exactly
+// one gets it; and the same epoch charged concurrently is charged once.
+func TestCompetingEpochChargesCannotBothTakeTheLastChildRunSlot(t *testing.T) {
+	fleet, plan := approvedPlanFixture(t, domain.PlanBudgetEnvelope{MaxChildRuns: 1, MaxConcurrency: 3, MaxProviderInvocations: 12})
+	charge := func(runID string) EpochCharge {
+		return EpochCharge{PlanID: plan.plan.ID, StageID: "backend", RunID: runID, At: fleet.clock.Now(), MaxChildRuns: 1, EnforceCeiling: true}
+	}
+	const contenders = 8
+	errs := make(chan error, contenders)
+	var wg sync.WaitGroup
+	for i := range contenders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- fleet.store.ChargeRemediationEpoch(charge(fmt.Sprintf("run-contender-%d", i)))
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	won := 0
+	for err := range errs {
+		if err == nil {
+			won++
+		}
+	}
+	if snapshot := chargedChildRuns(t, fleet); won != 1 || snapshot.Consumed.ChildRuns != 1 {
+		t.Fatalf("%d admissions took the last slot and the plan was charged %d child runs, want exactly one of each", won, snapshot.Consumed.ChildRuns)
+	}
+}
+
+func TestTheSameEpochChargedConcurrentlyIsChargedOnce(t *testing.T) {
+	fleet, plan := approvedPlanFixture(t, domain.PlanBudgetEnvelope{MaxChildRuns: 4, MaxConcurrency: 3, MaxProviderInvocations: 12})
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := fleet.store.ChargeRemediationEpoch(EpochCharge{PlanID: plan.plan.ID, StageID: "backend", RunID: "run-one-epoch",
+				At: fleet.clock.Now(), MaxChildRuns: 4, EnforceCeiling: true}); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := chargedChildRuns(t, fleet).RunConsumed["run-one-epoch"].ChildRuns; got != 1 {
+		t.Fatalf("one epoch charged by 8 concurrent admissions was charged %d times", got)
+	}
+	// The fold counts a key once, so the journal itself must hold one event too:
+	// exactly-once accounting is not allowed to lean on the reducer to hide repeats.
+	events, err := fleet.store.PlanEvents(plan.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	charges := 0
+	for _, event := range events {
+		if event.Type != EventPlanBudgetConsumed {
+			continue
+		}
+		var payload PlanBudgetConsumedPayload
+		if err := decodeJSON(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Key == "child_run:run-one-epoch" {
+			charges++
+		}
+	}
+	if charges != 1 {
+		t.Fatalf("the journal holds %d charge events for one epoch", charges)
 	}
 }

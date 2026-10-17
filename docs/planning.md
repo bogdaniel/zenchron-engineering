@@ -954,9 +954,15 @@ run it becomes carries the stage's plan binding and frozen assignment, so it
 executes the stage's objective, instruction packs, context and model preference,
 and its budget is the stage's allowance less what every run of the stage has
 spent, narrowed by what the plan has left: an epoch never resets consumed
-allowance. Each admitted epoch is charged to the plan once, keyed by its run, and
-the charge is written before the batch; a stored epoch batch with no charge is
-never materialized into a run. A graph with no objective plan is unchanged.
+allowance. The epoch's child-run charge and the epoch itself (its batch and epoch row) are
+committed in ONE transaction (`runtime/remediation_epoch_charge_store.go`), under
+the plan lock, with the ceiling re-checked against the plan journal inside that
+transaction. So a failed admission consumes no budget, two admissions cannot both
+take the last slot, and the charge is keyed by run and recorded once. An epoch
+stored by code before this rule, with no charge, is charged and materialized under
+the stage's binding before it can run; one whose run already exists is charged as
+the fact it is and never rebound. Lock order is `orchestrationMu`, then `plansMu`.
+A graph with no objective plan is unchanged.
 
 `ReplayPlan` accepts an epoch as a stage's current run only when it belongs to
 the plan's graph and unit and its run is bound to that plan and stage.

@@ -268,6 +268,7 @@
       "race": true,
       "sources": [
         "runtime/remediation_activation.go",
+        "runtime/remediation_epoch_charge_store.go",
         "runtime/remediation_plan_admission.go",
         "runtime/remediation_eligibility.go",
         "runtime/remediation_facts.go",

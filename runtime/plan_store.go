@@ -320,7 +320,14 @@ func (s *SQLiteOperationStore) AppendPlanEvent(e EngineeringEvent) (EngineeringE
 	if !planEventTypes[e.Type] {
 		return EngineeringEvent{}, fmt.Errorf("event type %q does not belong to the plan stream", e.Type)
 	}
-	return s.appendToStream(e, journalStream{
+	return s.appendToStream(e, planStream(e))
+}
+
+// planStream is the journal stream a plan event is appended to. It is a function
+// so a caller that must commit something else in the SAME transaction (a charge
+// committed with the epoch it pays for) can extend the stream it appends through.
+func planStream(e EngineeringEvent) journalStream {
+	return journalStream{
 		kind: streamPlan, id: e.PlanID,
 		// A refused planning attempt is the one plan event whose payload
 		// carries an identity derived from what the stream already holds, so it
@@ -351,7 +358,7 @@ func (s *SQLiteOperationStore) AppendPlanEvent(e EngineeringEvent) (EngineeringE
 				streamPlan, event.PlanID, globalSequence)
 			return err
 		},
-	})
+	}
 }
 
 // PlanEvents returns one plan's events in sequence order.

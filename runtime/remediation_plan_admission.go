@@ -3,6 +3,7 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
@@ -96,57 +97,62 @@ func remainingStageBudget(plan domain.EngineeringPlan, snapshot PlanSnapshot, st
 	return remainingHeadroom(plan, snapshot).tighten(budget), nil
 }
 
-// admitEpochToPlan refuses an epoch the governing plan did not grant, and
-// charges an admitted one to the plan's child-run budget exactly once.
+// authorizeEpoch refuses an epoch the governing plan did not grant, and returns
+// the grant it would run under. It writes nothing: the charge is committed with
+// the epoch itself (SQLiteOperationStore.AdmitChargedRemediationEpoch), so a
+// refusal or a failure leaves the budget as it was.
 //
 // The worker is judged by the reconciler's own refuseWorkerDrift - provider
 // kind, vendor family, trust mode and model - against the stage's frozen
 // assignment, so there is one definition of "the approved worker".
 //
-// The charge is keyed by the epoch's run, the key the reconciler uses for a
-// stage's own run, and it is recorded BEFORE the batch is written: a crash
-// between the two replays the same deterministic run id and counts it once, and
-// materialization refuses a run whose charge is absent.
-func (s *Supervisor) admitEpochToPlan(ref *domain.PlanRef, agentID, unitID, epochRunID string) error {
-	if ref == nil {
-		return nil
-	}
-	grant, err := planEpochGrant(s.deps.Store, *ref, unitID)
+// The caller holds s.plansMu. A grant is derived from the plan's journal and
+// the child-run charge is a plan-journal append, so both must be ordered
+// against the plan reconciler's own read-then-append; the ceiling is
+// additionally re-checked inside the committing transaction. Lock order is
+// orchestrationMu, then plansMu: nothing that holds plansMu takes
+// orchestrationMu.
+func (s *Supervisor) authorizeEpoch(ref domain.PlanRef, agentID, unitID string) (epochGrant, error) {
+	grant, err := planEpochGrant(s.deps.Store, ref, unitID)
 	if err != nil {
-		return err
+		return epochGrant{}, err
 	}
 	if agentID != grant.assignment.Agent.ID {
-		return fmt.Errorf("stage %s was approved for worker %s and the graph's remediation worker is %s",
+		return epochGrant{}, fmt.Errorf("stage %s was approved for worker %s and the graph's remediation worker is %s",
 			unitID, grant.assignment.Agent.ID, agentID)
 	}
 	if block := (PlanReconciler{Service: s.planServiceForReconcile()}).refuseWorkerDrift(grant.stage, grant.assignment); block != nil {
-		return fmt.Errorf("stage %s cannot start a remediation epoch: %s", unitID, block.Reason)
+		return epochGrant{}, fmt.Errorf("stage %s cannot start a remediation epoch: %s", unitID, block.Reason)
 	}
-	if grant.snapshot.RunConsumed[epochRunID].ChildRuns > 0 {
-		return nil
-	}
-	if consumed, ceiling := grant.snapshot.Consumed.ChildRuns, grant.plan.BudgetEnvelope.MaxChildRuns; consumed >= ceiling {
-		return fmt.Errorf("plan %s allows %d child runs and %d have been created, so stage %s cannot start a remediation epoch",
-			grant.plan.ID, ceiling, consumed, unitID)
-	}
-	return s.chargeEpoch(grant.plan.ID, unitID, epochRunID)
+	return grant, nil
 }
 
-func (s *Supervisor) chargeEpoch(planID, unitID, epochRunID string) error {
-	return appendPlanEvent(s.deps.Store, s.deps.Clock.Now(), planID, EventPlanBudgetConsumed, PlanBudgetConsumedPayload{
-		Key: "child_run:" + epochRunID, StageID: unitID, RunID: epochRunID, ChildRuns: 1,
-	})
+func epochChargeFor(grant epochGrant, unitID, runID string, at time.Time) EpochCharge {
+	return EpochCharge{PlanID: grant.plan.ID, StageID: unitID, RunID: runID, At: at,
+		MaxChildRuns: grant.plan.BudgetEnvelope.MaxChildRuns, EnforceCeiling: true}
 }
 
-// recoverUnchargedEpoch brings a stored epoch batch under the charge-before-batch
-// rule, whatever wrote it: a batch admitted by code that predates the charge, or
-// one whose charge a failure left behind. It runs ahead of materialization, from
-// the batch alone, because a stored epoch whose run does not exist yet cannot be
-// shown by the graph's status view.
+// admitPlanBoundEpoch is the one admission of a remediation epoch of a plan-bound
+// unit: authorized, then charged and written in a single transaction.
+func (s *Supervisor) admitPlanBoundEpoch(ref domain.PlanRef, agentID, unitID string, planned orchestration.Batch, epoch RemediationEpoch) (orchestration.Batch, error) {
+	s.plansMu.Lock()
+	defer s.plansMu.Unlock()
+	grant, err := s.authorizeEpoch(ref, agentID, unitID)
+	if err != nil {
+		return orchestration.Batch{}, err
+	}
+	stored, _, err := s.deps.Store.AdmitChargedRemediationEpoch(planned, epoch, epochChargeFor(grant, unitID, epoch.RunID, s.deps.Clock.Now()))
+	return stored, err
+}
+
+// recoverUnchargedEpoch brings a stored epoch batch under the charge rule when it
+// was written without one - by code that predates the charge. It runs ahead of
+// materialization, from the batch alone, because a stored epoch whose run does
+// not exist yet cannot be shown by the graph's status view.
 //
-//   - A run that does not exist yet is admitted exactly like a new epoch -
-//     refused if the plan cannot grant it, charged once and then materialized
-//     under the stage's binding.
+//   - A run that does not exist yet is authorized exactly like a new epoch -
+//     refused if the plan cannot grant it, charged once otherwise, and then
+//     materialized under the stage's binding.
 //   - A run that already exists was created before this rule, unbound, and has
 //     already spent a child run. It is charged as the fact it is - a ceiling
 //     cannot un-spend it - and left as it is; an immutable run is never rebound.
@@ -158,7 +164,9 @@ func (s *Supervisor) recoverUnchargedEpoch(batch orchestration.Batch) error {
 	if err != nil || !found || graph.ObjectivePlan == nil {
 		return err
 	}
-	runID := batch.Items[0].RunID
+	s.plansMu.Lock()
+	defer s.plansMu.Unlock()
+	runID, unitID := batch.Items[0].RunID, batch.Origin.UnitID
 	snapshot, err := s.deps.Store.ReplayPlan(graph.ObjectivePlan.ID)
 	if err != nil || snapshot.RunConsumed[runID].ChildRuns > 0 {
 		return err
@@ -168,9 +176,13 @@ func (s *Supervisor) recoverUnchargedEpoch(batch orchestration.Batch) error {
 		return err
 	}
 	if exists {
-		return s.chargeEpoch(graph.ObjectivePlan.ID, batch.Origin.UnitID, runID)
+		return s.deps.Store.ChargeRemediationEpoch(EpochCharge{PlanID: graph.ObjectivePlan.ID, StageID: unitID, RunID: runID, At: s.deps.Clock.Now()})
 	}
-	return s.admitEpochToPlan(graph.ObjectivePlan, batch.AgentID, batch.Origin.UnitID, runID)
+	grant, err := s.authorizeEpoch(*graph.ObjectivePlan, batch.AgentID, unitID)
+	if err != nil {
+		return err
+	}
+	return s.deps.Store.ChargeRemediationEpoch(epochChargeFor(grant, unitID, runID, s.deps.Clock.Now()))
 }
 
 // epochPlanGrant is the grant a remediation epoch's run is created under, or nil
