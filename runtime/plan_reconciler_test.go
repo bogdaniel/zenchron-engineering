@@ -58,16 +58,43 @@ func newPlanRunFixture(t *testing.T, stages []domain.PlanStage) *planRunFixture 
 	return newPlanRunFixtureOn(t, base, stages, base.deps.ConfigDigest)
 }
 
-// newPlanRunFixtureOn builds the same plan over an existing phase 8 fixture,
-// so a scenario that needs other durable state first shares its store.
-func newPlanRunFixtureOn(t *testing.T, base *phase8Fixture, stages []domain.PlanStage, config ConfigDigest) *planRunFixture {
-	t.Helper()
+// newPlanRunHarness wires a plan service and reconciler over a phase 8 fixture
+// and stores no plan: a scenario then either claims a hand-built plan or
+// proposes one through the real compiler.
+func newPlanRunHarness(base *phase8Fixture, config ConfigDigest) *planRunFixture {
 	fixture := &planRunFixture{phase8Fixture: base}
 	fixture.service = PlanService{
 		Store: base.store, Clock: base.clock, Agents: planAgents(), DefaultAgent: "codex",
 		Envelope: domain.PlanBudgetEnvelope{MaxChildRuns: 4, MaxConcurrency: 3, MaxProviderInvocations: 12},
 		Config:   config,
 	}
+	if fixture.engines == nil {
+		fixture.engines = map[string]*EngineeringRuntime{}
+	}
+	fixture.reconciler = PlanReconciler{
+		Store: base.store, Clock: base.clock, Service: fixture.service,
+		Repository: "acme/repo", Issue: base.issue, StateDir: base.stateDir,
+		Engine: func(repository, agentID string) (*EngineeringRuntime, error) {
+			fixture.engineCalls = append(fixture.engineCalls, agentID)
+			// PER-AGENT RUNTIMES, when a scenario supplies one. The plan
+			// reconciler already builds the engine from the agent id, so a
+			// reviewer stage and a producer stage genuinely run through
+			// different providers - which is what lets a test drive the real
+			// reviewer-result path instead of injecting its outcome.
+			if runtime, ok := fixture.engines[agentID]; ok {
+				return runtime, nil
+			}
+			return base.runtime, nil
+		},
+	}
+	return fixture
+}
+
+// newPlanRunFixtureOn builds the same plan over an existing phase 8 fixture,
+// so a scenario that needs other durable state first shares its store.
+func newPlanRunFixtureOn(t *testing.T, base *phase8Fixture, stages []domain.PlanStage, config ConfigDigest) *planRunFixture {
+	t.Helper()
+	fixture := newPlanRunHarness(base, config)
 	plan := domain.EngineeringPlan{
 		SchemaVersion: domain.SchemaVersion, ID: "plan-fixture", Revision: 1,
 		Objective: "Make the widget idempotent.",
@@ -107,25 +134,6 @@ func newPlanRunFixtureOn(t *testing.T, base *phase8Fixture, stages []domain.Plan
 		t.Fatal(err)
 	}
 	fixture.plan = plan
-	if fixture.engines == nil {
-		fixture.engines = map[string]*EngineeringRuntime{}
-	}
-	fixture.reconciler = PlanReconciler{
-		Store: base.store, Clock: base.clock, Service: fixture.service,
-		Repository: "acme/repo", Issue: base.issue, StateDir: base.stateDir,
-		Engine: func(repository, agentID string) (*EngineeringRuntime, error) {
-			fixture.engineCalls = append(fixture.engineCalls, agentID)
-			// PER-AGENT RUNTIMES, when a scenario supplies one. The plan
-			// reconciler already builds the engine from the agent id, so a
-			// reviewer stage and a producer stage genuinely run through
-			// different providers - which is what lets a test drive the real
-			// reviewer-result path instead of injecting its outcome.
-			if runtime, ok := fixture.engines[agentID]; ok {
-				return runtime, nil
-			}
-			return base.runtime, nil
-		},
-	}
 	return fixture
 }
 
