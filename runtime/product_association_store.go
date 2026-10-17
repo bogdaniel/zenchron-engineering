@@ -62,6 +62,21 @@ func (s *SQLiteOperationStore) AssociateWorkGraph(association product.GraphAssoc
 		return false, err
 	}
 	if inserted == 1 {
+		// A unit admitted before this association froze no product context
+		// (#480), and would have to execute without the context its graph now
+		// names or with one nothing pinned. Refuse the association instead.
+		// A batch counts even before its activation row exists (the crash
+		// window), so the check reads the batches themselves.
+		var activated int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM orchestration_batches
+			WHERE json_extract(document, '$.origin.graph_id') = ?`,
+			association.GraphID).Scan(&activated); err != nil {
+			return false, err
+		}
+		if activated > 0 {
+			return false, fmt.Errorf("work graph %s already has %d admitted unit(s); a product must be associated before any unit starts",
+				association.GraphID, activated)
+		}
 		return true, tx.Commit()
 	}
 	var existing string

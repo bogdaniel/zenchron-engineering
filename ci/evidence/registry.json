@@ -248,7 +248,8 @@
         "orchestration/workgraph*.go",
         "runtime/integration_dispatch.go",
         "runtime/integration_conflict_delivery.go",
-        "runtime/objective_workgraph.go"
+        "runtime/objective_workgraph.go",
+        "runtime/work_unit_context.go"
       ],
       "tests": [
         "runtime/workgraph*_test.go",
@@ -286,6 +287,8 @@
         "runtime/product_knowledge_store.go",
         "runtime/product_association_store.go",
         "runtime/product_schema.go",
+        "runtime/product_context.go",
+        "runtime/product_context_prompt.go",
         "product/*.go"
       ],
       "tests": [

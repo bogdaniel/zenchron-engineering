@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,7 +41,13 @@ import (
 // plan-reconciler-started first attempt's own frozen stage Objective always
 // does. The absence of a marker is therefore itself the fact that this is a
 // later, remediation-epoch attempt.
-type objectivePlanRemediationWorker struct{}
+type objectivePlanRemediationWorker struct {
+	mu sync.Mutex
+	// products is the product context each invocation was actually given (#480):
+	// first attempts run under a frozen plan assignment, remediation epochs
+	// under none, and both must carry the unit's admitted product context.
+	products []*execution.ProductContext
+}
 
 func (w *objectivePlanRemediationWorker) WritesTypedResults() bool { return true }
 
@@ -52,6 +59,9 @@ func (w *objectivePlanRemediationWorker) Isolation() ProviderIsolation {
 }
 
 func (w *objectivePlanRemediationWorker) Execute(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	w.mu.Lock()
+	w.products = append(w.products, request.Product)
+	w.mu.Unlock()
 	matched := false
 	for _, marker := range []string{"a", "b"} {
 		if !strings.Contains(request.Objective, integrationUnitMarker(marker)) {
@@ -103,7 +113,8 @@ func objectiveIntegrationStages() []domain.PlanStage {
 func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRemediation(t *testing.T) {
 	fleet := newFleetFixture(t, 4)
 	fleet.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
-	fleet.deps.Provider = &objectivePlanRemediationWorker{}
+	worker := &objectivePlanRemediationWorker{}
+	fleet.deps.Provider = worker
 	fleet.runtime = fleet.newRuntime(fleet.deps)
 
 	plan := newPlanRunFixtureOn(t, fleet.phase8Fixture, objectiveIntegrationStages(), fleet.deps.ConfigDigest)
@@ -117,6 +128,10 @@ func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRe
 	// below, not just at compile time.
 	product := composeProduct(t, "storefront", 1, []string{plan.plan.Subject.Repository}, fleet.clock.Now())
 	if _, _, err := fleet.store.AdoptProductRevision(product); err != nil {
+		t.Fatal(err)
+	}
+	configuration := baseConfigurationRevision(t, product.ID, 1, fleet.clock.Now())
+	if _, _, err := fleet.store.AdoptProductConfigurationRevision(configuration); err != nil {
 		t.Fatal(err)
 	}
 	if err := plan.service.AssociateProductGraph(product.ID, graphID); err != nil {
@@ -347,6 +362,19 @@ func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRe
 	owner, found, err := fleet.store.AssociatedProduct(graphID)
 	if err != nil || !found || owner != product.ID {
 		t.Fatalf("product association did not survive the conflict/epoch/review journey: owner=%q found=%t err=%v", owner, found, err)
+	}
+	// #480: every worker invocation of the journey - plan-bound first attempts,
+	// the integrator, and the remediation epoch that has no plan assignment - was
+	// given the product context its unit was admitted with.
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	if len(worker.products) == 0 {
+		t.Fatal("the journey invoked no worker")
+	}
+	for i, delivered := range worker.products {
+		if delivered == nil || delivered.ProductID != product.ID || delivered.ConfigurationRevision != 1 {
+			t.Fatalf("invocation %d of the product-scoped journey was given product context %+v", i, delivered)
+		}
 	}
 }
 
