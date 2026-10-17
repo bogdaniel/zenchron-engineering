@@ -658,3 +658,61 @@ func TestGraphPlanBindingMustMatchTheRunsPlan(t *testing.T) {
 		t.Fatal("a plan-bound run executing a graph that binds no plan must be refused")
 	}
 }
+
+// TestABatchCannotBeWrittenUnpinnedForAnAssociatedGraph closes the race the
+// execution-time check only catches late: the store itself refuses the write,
+// and refuses an association that a stored batch (activation row or not)
+// already predates.
+func TestABatchCannotBeWrittenUnpinnedForAnAssociatedGraph(t *testing.T) {
+	f := newProductUnitFixture(t)
+	p := f.seedProduct("storefront", nil)
+	associated := f.graphFor("associated", p.ID, unitA())
+	f.admit(associated, "a")
+	stored, _, _ := f.store.OrchestrationBatch(f.activation(t, associated, "a").BatchID)
+
+	unpinned := stored
+	unpinned.Product = nil
+	if _, _, err := f.store.CreateOrchestrationBatch(unpinned); err == nil {
+		t.Fatal("an unpinned batch for an associated graph must be refused at the write")
+	}
+	foreign := stored
+	pin := *stored.Product
+	pin.ProductID = "product-someone-else"
+	foreign.Product = &pin
+	if _, _, err := f.store.CreateOrchestrationBatch(foreign); err == nil {
+		t.Fatal("a pin for a product the graph is not associated with must be refused at the write")
+	}
+
+	// A batch written for a graph before it names a product, with NO activation
+	// row yet, still blocks a late association.
+	late := f.graphFor("late", "", unitA())
+	view := f.graph(late)
+	engine, err := f.supervisor.engine("acme/repo", "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := view.unit(t, "a")
+	origin := orchestration.BatchOrigin{GraphID: late, UnitID: "a", Inputs: unit.Inputs, ExecutionKind: unit.ExecutionKind}
+	batchID, err := orchestration.WorkUnitBatchID("acme/repo", "claude", unit.Issue, origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := reservedRunIDs(f.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := engine.planOrchestrationBatch(batchID, []int{unit.Issue}, "operator@example", reserved, &origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.store.CreateOrchestrationBatch(planned); err != nil {
+		t.Fatal(err)
+	}
+	association, err := product.NewGraphAssociation(p.ID, late, f.at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.AssociateWorkGraph(association); err == nil {
+		t.Fatal("associating a graph whose unit batch already exists must be refused")
+	}
+}

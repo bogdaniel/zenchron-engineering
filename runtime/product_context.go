@@ -17,6 +17,7 @@ package runtime
 // can neither widen nor replace the work contract the unit was approved under.
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
@@ -194,4 +195,32 @@ func executionProductContext(compiled *product.ProductContext) *execution.Produc
 			ID: entry.ID, Scope: string(entry.Scope), Provenance: string(entry.Provenance.Type), Statement: entry.Statement})
 	}
 	return out
+}
+
+// requireBatchProductBinding is the write-time half of the pin: inside the same
+// transaction that inserts a unit's batch, the graph's association must agree
+// with the batch's pin. An associated graph's batch without its pin, or a pin
+// for another product, is refused, so a batch can never be admitted unpinned
+// for an associated graph. AssociateWorkGraph's own check reads the batches
+// inside ITS transaction; SQLite serializes the two, so neither order leaves an
+// associated graph holding an unpinned admitted unit.
+func requireBatchProductBinding(q sqlExecutor, batch orchestration.Batch) error {
+	if batch.Origin == nil {
+		return nil
+	}
+	var associated string
+	err := q.QueryRow(`SELECT product_id FROM product_graph_associations WHERE graph_id = ?`, batch.Origin.GraphID).Scan(&associated)
+	if errors.Is(err, sql.ErrNoRows) {
+		associated = ""
+	} else if err != nil {
+		return err
+	}
+	pinned := ""
+	if batch.Product != nil {
+		pinned = batch.Product.ProductID
+	}
+	if pinned != associated {
+		return fmt.Errorf("batch %s pins product %q and its graph %s is associated with %q", batch.ID, pinned, batch.Origin.GraphID, associated)
+	}
+	return nil
 }

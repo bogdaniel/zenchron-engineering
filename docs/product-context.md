@@ -289,15 +289,18 @@ own digest. It never falls back to another product, a current configuration or
 an empty context. An unassociated graph is unchanged: no pin, no block.
 
 **Association ordering.** `AssociateWorkGraph` refuses a graph that already has
-an admitted unit, because that unit froze no context. Replaying the same
+a stored unit batch, because that unit froze no context. Replaying the same
 association stays idempotent. Objective intake associates before any plan stage
 starts, so it is unaffected.
 
 **Failure windows.** A crash after the pin is computed and before the batch is
 written leaves nothing; the retry computes a fresh pin. A crash after the batch
 and before its activation row replays onto the stored batch and keeps its pin.
-An association racing a concurrent first admission can leave a batch admitted
-unpinned for an associated graph; execution refuses it rather than guessing.
+The batch write and the association are each checked against the other inside
+their own SQLite transaction (`requireBatchProductBinding`; the association
+counts stored batches, activation row or not), so an associated graph can never
+hold an unpinned admitted unit and a pin can never name a product the graph is
+not associated with; execution re-checks the same facts.
 Rolling the binary back leaves pinned batches unreadable to the old binary,
 whose strict decoder rejects the unknown `product` member.
 
