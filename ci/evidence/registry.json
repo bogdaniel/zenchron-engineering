@@ -257,6 +257,7 @@
         "runtime/integration_conflict_delivery_test.go",
         "runtime/objective_workgraph_test.go",
         "runtime/objective_remediation_review_vertical_test.go",
+        "runtime/dynamic_team_acceptance_test.go",
         "runtime/objective_product_association_test.go"
       ]
     },

@@ -901,6 +901,47 @@ revision and there is no revision; it is not executable, because execution reads
 the approved revision and there is none. Proposing again is the ordinary next
 step, and it promotes the same plan identity rather than colliding with it.
 
+## A dynamic team, end to end
+
+The team an objective gets is whatever its planner proposes, bounded by what
+deterministic code admits. Nothing the model writes spawns a worker.
+
+```text
+registered planner agent  ->  InvokePlanner         non-mutating, workspace verified unchanged
+                          ->  PlanService.Propose   planning.Compile: vocabulary, budget envelope,
+                                                    dependencies, policy, independence, ratchet
+                          ->  BindObjectivePlan     the approved plan's WorkGraph projection
+                          ->  operator approval     names the plan digest and the assignments
+                          ->  plan reconciler       stages become ordinary EngineeringRuns
+                          ->  supervisor            the one scheduler
+```
+
+The smallest sufficient team is the planner's job and the compiler's check: a
+one-producer proposal compiles to a one-unit graph and one worker run, and the
+contract's required assurance gate is added by policy (a gate creates no run).
+A broad proposal - parallel producers, an `integration_compose` integrator -
+compiles to the units and edges it named; independent producers start together,
+the integrator waits for every upstream admitted handoff, and its composed
+candidate is what reaches the PR. A proposal outside the bounds (more producers
+than the plan's child-run envelope, a dependency on a stage that does not exist,
+a cycle, no material producer) is refused as a durable attempt: no plan
+revision, graph, batch or run exists afterwards.
+
+Composition happens before approval. Once any unit has started, the graph's
+plan binding is immutable (`BindObjectivePlan` refuses a started graph); a
+revision after discoveries needs the governed revision above, which preserves
+activated work and its frozen bindings. The proof is
+`runtime/dynamic_team_acceptance_test.go`.
+
+**Known limit (observed, not yet fixed).** A plan stage records the run its unit
+was first activated with. When that unit is remediated through a #581 epoch the
+work continues in the epoch's run, which the plan stage does not follow. In the
+conflict-and-remediation journey over a planner-proposed plan, the integrate
+stage stayed `running` against its original, parked run, so the compiler-added
+assurance gate below it never settled and the epoch candidate's publication
+stayed deferred. The hand-built journey fixture has no downstream gate and so
+does not show it.
+
 ## Related documents
 
 - [`spec/planning-v0.1.md`](spec/planning-v0.1.md) — the normative artifacts
