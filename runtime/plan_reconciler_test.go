@@ -62,10 +62,18 @@ func newPlanRunFixture(t *testing.T, stages []domain.PlanStage) *planRunFixture 
 // and stores no plan: a scenario then either claims a hand-built plan or
 // proposes one through the real compiler.
 func newPlanRunHarness(base *phase8Fixture, config ConfigDigest) *planRunFixture {
+	return newPlanRunHarnessWith(base, config, defaultPlanFixtureEnvelope)
+}
+
+// defaultPlanFixtureEnvelope is what every scenario that does not say otherwise
+// is approved for.
+var defaultPlanFixtureEnvelope = domain.PlanBudgetEnvelope{MaxChildRuns: 4, MaxConcurrency: 3, MaxProviderInvocations: 12}
+
+func newPlanRunHarnessWith(base *phase8Fixture, config ConfigDigest, envelope domain.PlanBudgetEnvelope) *planRunFixture {
 	fixture := &planRunFixture{phase8Fixture: base}
 	fixture.service = PlanService{
 		Store: base.store, Clock: base.clock, Agents: planAgents(), DefaultAgent: "codex",
-		Envelope: domain.PlanBudgetEnvelope{MaxChildRuns: 4, MaxConcurrency: 3, MaxProviderInvocations: 12},
+		Envelope: envelope,
 		Config:   config,
 	}
 	if fixture.engines == nil {
@@ -94,15 +102,18 @@ func newPlanRunHarness(base *phase8Fixture, config ConfigDigest) *planRunFixture
 // so a scenario that needs other durable state first shares its store.
 func newPlanRunFixtureOn(t *testing.T, base *phase8Fixture, stages []domain.PlanStage, config ConfigDigest) *planRunFixture {
 	t.Helper()
-	fixture := newPlanRunHarness(base, config)
+	return newPlanRunFixtureWith(t, base, stages, config, defaultPlanFixtureEnvelope)
+}
+
+func newPlanRunFixtureWith(t *testing.T, base *phase8Fixture, stages []domain.PlanStage, config ConfigDigest, envelope domain.PlanBudgetEnvelope) *planRunFixture {
+	t.Helper()
+	fixture := newPlanRunHarnessWith(base, config, envelope)
 	plan := domain.EngineeringPlan{
 		SchemaVersion: domain.SchemaVersion, ID: "plan-fixture", Revision: 1,
-		Objective: "Make the widget idempotent.",
-		Subject:   domain.Subject{Repository: "acme/repo", Revision: base.base},
-		BudgetEnvelope: domain.PlanBudgetEnvelope{
-			MaxChildRuns: 4, MaxConcurrency: 3, MaxProviderInvocations: 12,
-		},
-		Stages: stages,
+		Objective:      "Make the widget idempotent.",
+		Subject:        domain.Subject{Repository: "acme/repo", Revision: base.base},
+		BudgetEnvelope: envelope,
+		Stages:         stages,
 		Provenance: domain.PlanProvenance{
 			CompilerVersion: planning.CompilerVersion,
 			ProjectModel:    domain.ObjectRevision{ID: "project", Revision: "1"},

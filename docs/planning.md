@@ -933,14 +933,39 @@ revision after discoveries needs the governed revision above, which preserves
 activated work and its frozen bindings. The proof is
 `runtime/dynamic_team_acceptance_test.go`.
 
-**Known limit (observed, not yet fixed).** A plan stage records the run its unit
-was first activated with. When that unit is remediated through a #581 epoch the
-work continues in the epoch's run, which the plan stage does not follow. In the
-conflict-and-remediation journey over a planner-proposed plan, the integrate
-stage stayed `running` against its original, parked run, so the compiler-added
-assurance gate below it never settled and the epoch candidate's publication
-stayed deferred. The hand-built journey fixture has no downstream gate and so
-does not show it.
+A plan stage on an objective graph follows its unit's CURRENT run. When a unit
+is remediated through a #581 epoch the work continues in the epoch's run, so
+`ReplayPlan` reads each remediated unit's stage against its latest epoch run
+(`runtime/plan_epoch_run.go`; the epoch table is the authority, the plan journal
+is not rewritten and still records the original run). The reconciler, `plan
+show` and the fleet summary therefore agree on one current run. Without that,
+the stage would stay parked on the first run, a downstream gate would be judged
+on superseded evidence, and the final candidate's publication would stay
+deferred behind a gate that cannot open.
+
+An epoch is also a child run of the plan, so it runs under what the plan
+approved (`runtime/remediation_plan_admission.go`), not as a generic WorkGraph
+unit. Before its batch is written it is admitted against the plan: refused, with
+no run created, when the plan's child-run or provider-invocation ceiling is
+spent, when the stage has spent its own allowance, when its frozen assignment
+cannot be read back, or when the worker has drifted - judged by the reconciler's
+own `refuseWorkerDrift` (provider kind, vendor family, trust mode, model). The
+run it becomes carries the stage's plan binding and frozen assignment, so it
+executes the stage's objective, instruction packs, context and model preference,
+and its budget is the stage's allowance less what every run of the stage has
+spent, narrowed by what the plan has left: an epoch never resets consumed
+allowance. The epoch's child-run charge and the epoch itself (its batch and epoch row) are
+committed in ONE transaction (`runtime/remediation_epoch_charge_store.go`), under
+the plan lock, with the ceiling re-checked against the plan journal inside that
+transaction. So a failed admission consumes no budget, two admissions cannot both
+take the last slot, and the charge is keyed by run and recorded once. An epoch
+stored by code before this rule, with no charge, is charged and materialized under
+the stage's binding before it can run; one whose run already exists is charged as
+the fact it is and never rebound. Lock order is `orchestrationMu`, then `plansMu`.
+A graph with no objective plan is unchanged.
+
+`ReplayPlan` accepts an epoch as a stage's current run only when it belongs to
+the plan's graph and unit and its run is bound to that plan and stage.
 
 ## Related documents
 

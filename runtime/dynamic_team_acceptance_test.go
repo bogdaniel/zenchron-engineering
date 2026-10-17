@@ -34,12 +34,18 @@ import (
 // compiler's output, plus the planner's output.
 func proposeTeam(t *testing.T, base *phase8Fixture, config ConfigDigest, answer string) (*planRunFixture, PlannerOutput, error) {
 	t.Helper()
+	return proposeTeamWithin(t, base, config, answer, defaultPlanFixtureEnvelope)
+}
+
+// proposeTeamWithin is proposeTeam under an operator-configured envelope.
+func proposeTeamWithin(t *testing.T, base *phase8Fixture, config ConfigDigest, answer string, envelope domain.PlanBudgetEnvelope) (*planRunFixture, PlannerOutput, error) {
+	t.Helper()
 	input, _ := plannerFixture(t, answer)
 	output, err := InvokePlanner(context.Background(), input)
 	if err != nil {
 		t.Fatalf("planning invocation: %v", err)
 	}
-	fixture := newPlanRunHarness(base, config)
+	fixture := newPlanRunHarnessWith(base, config, envelope)
 	subject := domain.Subject{Repository: "acme/repo", Revision: base.base}
 	plan, err := fixture.service.Propose(context.Background(), ProposeInput{
 		PlanID: "plan-fixture", Objective: "Make the widget idempotent.", Subject: subject,
@@ -410,4 +416,20 @@ func TestProposalsOutsideTheGovernedBoundsSpawnNothing(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAPlannerProposedTeamSurvivesConflictAndRemediation: the same journey the
+// hand-built plan passes - a real merge conflict, a governed #581 epoch
+// authorized by a durable decision, automatic reintegration, independent review
+// - over a plan the compiler admitted, which carries a downstream assurance
+// gate. The plan stage must follow the unit into its epoch run, or the gate can
+// never open and the final candidate is never published.
+func TestAPlannerProposedTeamSurvivesConflictAndRemediation(t *testing.T) {
+	runObjectiveRemediationJourney(t, remediationJourney{}, func(t *testing.T, fleet *fleetFixture, envelope domain.PlanBudgetEnvelope) *planRunFixture {
+		fixture, _, err := proposeTeamWithin(t, fleet.phase8Fixture, fleet.deps.ConfigDigest, plannerAnswer(t, objectiveIntegrationStages()), envelope)
+		if err != nil {
+			t.Fatalf("the compiler refused the planner's team: %v", err)
+		}
+		return fixture
+	})
 }

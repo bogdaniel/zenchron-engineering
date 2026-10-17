@@ -32,24 +32,30 @@ import (
 
 // objectivePlanRemediationWorker is remediationWorker's (#581's own
 // controlled worker, remediation_end_to_end_test.go) sibling for a
-// BindObjectivePlan-compiled graph. A plan-bound producer's FIRST attempt
-// carries its frozen stage assignment, so its Objective reliably names
-// remediationWorker's marker; its remediation epoch (#581) is instead
-// materialized through the generic WorkGraph machinery with no plan
-// assignment at all (run.Plan is nil), so that attempt's Objective falls
-// back to the plan's own generic text and can never carry a marker - which a
-// plan-reconciler-started first attempt's own frozen stage Objective always
-// does. The absence of a marker is therefore itself the fact that this is a
-// later, remediation-epoch attempt.
+// BindObjectivePlan-compiled graph. A plan-bound producer's objective carries
+// its marker in EVERY run of the stage - its first attempt and its remediation
+// epoch alike, because the epoch runs under the stage's frozen assignment (#480).
+// The first run to claim a marker is therefore the original attempt, and any
+// later run with the same marker is a remediation epoch of that stage.
 type objectivePlanRemediationWorker struct {
 	mu sync.Mutex
 	// products is the product context each invocation was actually given (#480):
 	// first attempts run under a frozen plan assignment, remediation epochs
 	// under none, and both must carry the unit's admitted product context.
 	products []*execution.ProductContext
+	// firstRun is the run that first carried each marker; objectives is what every
+	// run was asked to do.
+	firstRun   map[string]string
+	objectives map[string]string
 }
 
 func (w *objectivePlanRemediationWorker) WritesTypedResults() bool { return true }
+
+func (w *objectivePlanRemediationWorker) invocations() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.products)
+}
 
 func (w *objectivePlanRemediationWorker) Isolation() ProviderIsolation {
 	return ProviderIsolation{
@@ -61,10 +67,23 @@ func (w *objectivePlanRemediationWorker) Isolation() ProviderIsolation {
 func (w *objectivePlanRemediationWorker) Execute(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	w.mu.Lock()
 	w.products = append(w.products, request.Product)
+	if w.firstRun == nil {
+		w.firstRun, w.objectives = map[string]string{}, map[string]string{}
+	}
+	w.objectives[request.RunID] = request.Objective
+	original := map[string]bool{}
+	for _, marker := range []string{"a", "b"} {
+		if strings.Contains(request.Objective, integrationUnitMarker(marker)) {
+			if _, claimed := w.firstRun[marker]; !claimed {
+				w.firstRun[marker] = request.RunID
+			}
+			original[marker] = w.firstRun[marker] == request.RunID
+		}
+	}
 	w.mu.Unlock()
 	matched := false
 	for _, marker := range []string{"a", "b"} {
-		if !strings.Contains(request.Objective, integrationUnitMarker(marker)) {
+		if !original[marker] {
 			continue
 		}
 		shared := filepath.Join(request.CandidateDir, "shared.go")
@@ -111,13 +130,30 @@ func objectiveIntegrationStages() []domain.PlanStage {
 }
 
 func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRemediation(t *testing.T) {
+	runObjectiveRemediationJourney(t, remediationJourney{}, func(t *testing.T, fleet *fleetFixture, envelope domain.PlanBudgetEnvelope) *planRunFixture {
+		return newPlanRunFixtureWith(t, fleet.phase8Fixture, objectiveIntegrationStages(), fleet.deps.ConfigDigest, envelope)
+	})
+}
+
+// runObjectiveRemediationJourney drives the conflict -> epoch -> review journey
+// over whatever plan newPlan produces: a hand-built one, or one a planner
+// proposed and the real compiler admitted (dynamic_team_acceptance_test.go).
+//
+// The plan is approved for the three stage runs and, by default, headroom for the
+// two remediation epochs this journey needs: an epoch is a child run of the plan.
+func runObjectiveRemediationJourney(t *testing.T, journey remediationJourney,
+	newPlan func(*testing.T, *fleetFixture, domain.PlanBudgetEnvelope) *planRunFixture) {
 	fleet := newFleetFixture(t, 4)
 	fleet.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
 	worker := &objectivePlanRemediationWorker{}
 	fleet.deps.Provider = worker
 	fleet.runtime = fleet.newRuntime(fleet.deps)
 
-	plan := newPlanRunFixtureOn(t, fleet.phase8Fixture, objectiveIntegrationStages(), fleet.deps.ConfigDigest)
+	envelope := journey.envelope
+	if envelope.MaxChildRuns == 0 {
+		envelope = domain.PlanBudgetEnvelope{MaxChildRuns: 6, MaxConcurrency: 3, MaxProviderInvocations: 12}
+	}
+	plan := newPlan(t, fleet, envelope)
 	graphID, err := plan.service.BindObjectivePlan(plan.plan, plan.issue, plan.service.DefaultAgent)
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +176,7 @@ func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRe
 	plan.approve(t)
 
 	supervisor := fleet.supervisor()
+	supervisor.deps.Plans = plan.service
 	ctx := context.Background()
 	var trace []objectiveConflictTick
 	t.Cleanup(func() {
@@ -268,6 +305,13 @@ func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRe
 	// Stage E: the blamed producer's new epoch, then the integrator's own
 	// automatic, policy-authorized reintegration, through the ordinary
 	// scheduler alone.
+	if journey.beforeEpochs != nil {
+		journey.beforeEpochs(t, fleet, supervisor, graphID, blamedID)
+	}
+	if journey.epochPlans != nil {
+		supervisor.deps.Plans = journey.epochPlans(plan.service)
+	}
+	runsBefore, invocationsBefore := len(storedRuns(t, fleet.phase8Fixture)), worker.invocations()
 	for range 60 {
 		plan.reconcile(t)
 		if _, err := supervisor.Tick(ctx); err != nil {
@@ -277,6 +321,17 @@ func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRe
 		if unit := fleet.graph(graphID).unit(t, "integrate"); unit.Output != nil {
 			break
 		}
+	}
+	if journey.refused {
+		assertEpochRefused(t, fleet, plan, graphID, blamedID, runsBefore)
+		if worker.invocations() != invocationsBefore {
+			t.Fatalf("a refused epoch still reached the provider: %d invocations before, %d after", invocationsBefore, worker.invocations())
+		}
+		return
+	}
+	if journey.afterEpochs != nil {
+		journey.afterEpochs(t, fleet, plan, graphID, blamedID)
+		return
 	}
 	finalGraph := fleet.graph(graphID)
 	integrateFinal := finalGraph.unit(t, "integrate")
@@ -300,6 +355,8 @@ func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRe
 	if err != nil || len(integratorAuthorizations) != 1 || integratorAuthorizations[0].AuthorizedBy != RemediationAuthorizedByPolicy {
 		t.Fatalf("integrator's own remediation authorization = %+v (%v), want exactly one policy-authorized grant", integratorAuthorizations, err)
 	}
+	assertStageFollowsEpoch(t, fleet, plan, graphID, blamedID, blamedOriginalRunID, epochs[0].RunID)
+	assertEpochRunsUnderTheStagesAuthority(t, fleet, supervisor, plan, graphID, blamedID, blamedOriginalRunID, epochs[0], worker)
 	// Real composed evidence on disk, not a status flag: the integrator's
 	// final candidate carries both the remediated producer's corrected file
 	// and the unaffected producer's original shared.go - a genuine merge.
@@ -314,7 +371,11 @@ func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRe
 	// Drive the integrator's own run to a published PR: with nothing
 	// downstream of "integrate" in this plan, objectivePublicationDeferred
 	// is false once it is complete, so the ordinary publication path runs.
+	// A plan whose compiler added a downstream gate defers that publication
+	// until the gate settles from the integrator's own assurance evidence, so
+	// the plan reconciler runs between the run's passes.
 	for range 20 {
+		plan.reconcile(t)
 		if _, err := fleet.runtime.Reconcile(ctx, integrateFinal.RunID); err != nil {
 			t.Fatal(err)
 		}
