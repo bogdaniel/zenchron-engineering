@@ -15,14 +15,17 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 	if err != nil {
 		return runtime.PlanView{}, err
 	}
-	// Refused before the repository target, the engine, the planning
-	// invocation and the plan/graph write all happen for nothing: an unknown
-	// product is certain to make AssociateProductGraph refuse later anyway.
-	if err := plans.RequireProductIfChosen(request.ProductID); err != nil {
-		return runtime.PlanView{}, err
-	}
 	repository, issue, defaultBranch, err := c.planSubject(supervisor, request)
 	if err != nil {
+		return runtime.PlanView{}, err
+	}
+	// Refused before the engine, the planning invocation and the plan/graph
+	// write all happen for nothing: an unknown product, or one that never
+	// named THIS repository, is certain to make AssociateProductGraph
+	// refuse later anyway - checked here, now that the repository the
+	// objective actually targets is resolved, rather than after paying for
+	// all of that.
+	if err := plans.RequireProductIfChosen(request.ProductID, repository); err != nil {
 		return runtime.PlanView{}, err
 	}
 	repo, err := runtime.ParseGitHubRepo(repository)
@@ -82,14 +85,30 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 		if request.PlanID == "" && err == nil {
 			// This objective was already proposed - a resend of the SAME
 			// request, exactly like any other idempotent-resend action in
-			// this product. An earlier attempt's product association can
-			// still be missing (it is written after the plan and graph, not
-			// atomically with them); recover it now rather than report
-			// success while it remains incomplete.
-			if err := plans.EnsureProductGraphAssociation(planID, request.ProductID); err != nil {
+			// this product. BindObjectivePlan is the canonical, idempotent
+			// admission path for the objective's WorkGraph regardless of
+			// whether it already exists: replaying it resumes an earlier
+			// attempt that crashed between writing the plan and binding its
+			// graph, rather than reporting success while a product-scoped
+			// (or any) objective is silently left with no graph at all. Its
+			// own "already-started" guard refuses outright if the plan has
+			// since begun executing as a flat run, rather than retroactively
+			// touching work that is already live.
+			agentID, err := resolveAgentID(c, flags)
+			if err != nil {
 				return runtime.PlanView{}, err
 			}
-			return current, nil
+			graphID, err := plans.BindObjectivePlan(current.Plan, issue, agentID)
+			if err != nil {
+				return runtime.PlanView{}, err
+			}
+			if err := plans.AssociateProductGraph(request.ProductID, graphID); err != nil {
+				return runtime.PlanView{}, err
+			}
+			// current was read before BindObjectivePlan; its WorkGraphID is
+			// stale (empty) whenever this resend is the one that actually
+			// bound the graph, not merely a replay of an already-bound one.
+			return plans.View(planID)
 		}
 		if request.PlanID == "" && !errors.As(err, &absent) {
 			return runtime.PlanView{}, err
@@ -148,19 +167,30 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 	return plans.View(planID)
 }
 
+// resolveAgentID is the one resolution of the operator's agent preference
+// for a plan-to-WorkGraph bind, reused wherever one happens: a first
+// proposal (proposePlanAndGraph) and a resumed one (revisePlan's dedup
+// path) must record the same agent a request named, not two independent
+// readings of it.
+func resolveAgentID(c *composition, flags autonomyFlags) (string, error) {
+	if flags.Agent == "" {
+		return c.agents.Default(), nil
+	}
+	agent, err := c.agents.Agent(flags.Agent)
+	if err != nil {
+		return "", err
+	}
+	return agent.ID, nil
+}
+
 func proposePlanAndGraph(ctx context.Context, composed *planComposition, input runtime.ProposeInput, flags autonomyFlags) (domain.EngineeringPlan, error) {
 	plan, err := composed.service.Propose(ctx, input)
 	if err != nil {
 		return plan, err
 	}
-	agentID := composed.built.agents.Default()
-	if flags.Agent != "" {
-		agent, resolveErr := composed.built.agents.Agent(flags.Agent)
-		err = resolveErr
-		if err != nil {
-			return domain.EngineeringPlan{}, err
-		}
-		agentID = agent.ID
+	agentID, err := resolveAgentID(composed.built, flags)
+	if err != nil {
+		return domain.EngineeringPlan{}, err
 	}
 	graphID, err := composed.service.BindObjectivePlan(plan, input.Issue, agentID)
 	if err != nil {

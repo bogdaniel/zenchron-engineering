@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -90,43 +91,35 @@ func (s PlanService) AssociateProductGraph(productID, graphID string) error {
 }
 
 // RequireProductIfChosen refuses before anything else is spent: an objective
-// proposed for a product that was never adopted names an id
-// AssociateProductGraph is guaranteed to refuse once the plan and graph are
-// already durably written, and once a provider invocation already ran.
-// Checking it first means that cost is never spent on a proposal this
-// certain to fail. Products are never deleted once adopted (no such path
-// exists), so this has no disappearing-product race to recover from.
-func (s PlanService) RequireProductIfChosen(productID string) error {
+// proposed for a product that was never adopted, or that never named this
+// OBJECTIVE'S OWN repository, names a product AssociateProductGraph is
+// guaranteed to refuse once the plan and graph are already durably written
+// and a provider invocation already ran. Checking it first - once the
+// repository is resolved, but before planning - means that cost is never
+// spent on a proposal this certain to fail.
+//
+// This is advisory, not the authority: a product's repository list can be
+// revised, so the only thing that can change between this check and the
+// later write is repositories being ADDED or REMOVED from a product, never
+// the product disappearing (no deletion path exists). AssociateWorkGraph's
+// own transactional membership check remains the authoritative final
+// defense against that race; this merely avoids paying for a proposal that
+// is overwhelmingly certain to be refused there anyway.
+func (s PlanService) RequireProductIfChosen(productID, repository string) error {
 	if productID == "" {
 		return nil
 	}
-	if _, found, err := s.Store.CurrentProduct(productID); err != nil {
-		return err
-	} else if !found {
-		return fmt.Errorf("product %s does not exist", productID)
-	}
-	return nil
-}
-
-// EnsureProductGraphAssociation recovers a product association an earlier
-// attempt could not complete. The browser's own idempotent-resend path (a
-// lost response to the SAME objective proposal) must not report success
-// while a chosen product's association from that earlier attempt is still
-// missing: this re-derives the plan's already-compiled graph id and replays
-// AssociateProductGraph against it, which is itself idempotent and fails
-// closed on a conflicting product exactly as the first attempt would have.
-func (s PlanService) EnsureProductGraphAssociation(planID, productID string) error {
-	if productID == "" {
-		return nil
-	}
-	graph, err := objectiveGraphFor(s.Store, planID)
+	owner, found, err := s.Store.CurrentProduct(productID)
 	if err != nil {
 		return err
 	}
-	if graph == nil {
-		return nil
+	if !found {
+		return fmt.Errorf("product %s does not exist", productID)
 	}
-	return s.AssociateProductGraph(productID, graph.ID)
+	if !slices.Contains(owner.Repositories, repository) {
+		return fmt.Errorf("repository %s is not a member of product %s", repository, productID)
+	}
+	return nil
 }
 
 // Reviewers and typed gates consume candidate units; they retain their own

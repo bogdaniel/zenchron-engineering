@@ -1,8 +1,10 @@
 package main
 
 // Product-scoped objective intake correctness (#471/#479/#611 hardening):
-// RequireProductIfChosen (prevalidation) and EnsureProductGraphAssociation
-// (retry recovery) driven through the REAL revisePlan dispatch - the exact
+// RequireProductIfChosen (prevalidation, including repository membership)
+// and revisePlan's resend path (which replays the canonical, idempotent
+// BindObjectivePlan/AssociateProductGraph rather than a bespoke recovery
+// function) driven through the REAL revisePlan dispatch - the exact
 // function the browser's /v1/objectives handler calls - not a unit test of
 // AssociateProductGraph in isolation. Deterministic planning means no real
 // provider is ever invoked, exactly as TestEveryPlanProposalBindsAWorkGraph's
@@ -64,6 +66,11 @@ func TestObjectiveIntakeRefusesUnknownProductBeforeWritingAnything(t *testing.T)
 	if _, err := built.revisePlan(context.Background(), supervisor, objectiveRequest(41, "product-never-adopted")); err == nil {
 		t.Fatal("an unknown product should refuse the objective")
 	}
+	assertNoPlanOrGraphWritten(t, built, "unknown product")
+}
+
+func assertNoPlanOrGraphWritten(t *testing.T, built *composition, label string) {
+	t.Helper()
 	plans, err := built.store.Plans()
 	if err != nil {
 		t.Fatal(err)
@@ -73,13 +80,15 @@ func TestObjectiveIntakeRefusesUnknownProductBeforeWritingAnything(t *testing.T)
 		t.Fatal(err)
 	}
 	if len(plans) != 0 || len(graphs) != 0 {
-		t.Fatalf("unknown product wrote state before being refused: %d plans, %d graphs", len(plans), len(graphs))
+		t.Fatalf("%s wrote state before being refused: %d plans, %d graphs", label, len(plans), len(graphs))
 	}
 }
 
-// 2. Product exists but does not contain the graph's repository: refused by
-// the authoritative AssociateWorkGraph boundary, and it stays refused on a
-// retry of the same objective (not a one-time, inconsistent failure).
+// 2. Product exists but does not contain the graph's repository: refused
+// before any plan or graph write at all (prevalidation now checks
+// repository membership, not merely product existence), and it stays
+// refused on a retry of the same objective - not a one-time, inconsistent
+// failure, and never a later success with nothing having changed.
 func TestObjectiveIntakeRefusesProductThatDoesNotOwnTheRepository(t *testing.T) {
 	built, supervisor, _ := objectiveIntakeFixture(t, 41)
 	wrongRepo := adoptTestProduct(t, built, "unrelated-product", []string{"acme/other-repo"})
@@ -87,16 +96,13 @@ func TestObjectiveIntakeRefusesProductThatDoesNotOwnTheRepository(t *testing.T) 
 	if _, err := built.revisePlan(context.Background(), supervisor, request); err == nil {
 		t.Fatal("a product that does not own the objective's repository should be refused")
 	}
-	// The plan/graph DO exist past this point (prevalidation only checked the
-	// product existed, not its repositories) - but no association does.
-	if owner, found, err := built.store.AssociatedProduct(firstGraphID(t, built)); err != nil || found {
-		t.Fatalf("a repository-mismatched product must not end up associated: owner=%q found=%t err=%v", owner, found, err)
-	}
-	// Retrying the SAME objective fails the same way, deterministically -
-	// never succeeds on a later attempt with nothing having changed.
+	assertNoPlanOrGraphWritten(t, built, "repository-mismatched product")
+	// Retrying the SAME objective fails the same way, deterministically,
+	// and still writes nothing.
 	if _, err := built.revisePlan(context.Background(), supervisor, request); err == nil {
 		t.Fatal("retrying with the same repository-mismatched product should still be refused")
 	}
+	assertNoPlanOrGraphWritten(t, built, "retried repository-mismatched product")
 }
 
 // 3. Conflicting product ownership: a graph already associated with one
@@ -155,7 +161,9 @@ func TestObjectiveIntakeAssociationSurvivesStoreReopening(t *testing.T) {
 // cause - a crash, a transient failure, or simply not having been asked for
 // yet): the plan and graph already exist with no association. A retry of
 // the SAME objective, now naming the product, must complete the missing
-// association rather than report success while it is still absent.
+// association rather than report success while it is still absent. This
+// replays BindObjectivePlan (idempotent - the graph already exists) then
+// AssociateProductGraph; see test 8 below for the graph ALSO being missing.
 func TestObjectiveIntakeRecoversAMissingAssociationOnRetry(t *testing.T) {
 	built, supervisor, _ := objectiveIntakeFixture(t, 41)
 	// First attempt: no product chosen. Plan and graph are written; nothing
@@ -244,6 +252,94 @@ func TestObjectiveIntakeWithNoProductStillWorks(t *testing.T) {
 	if _, found, err := built.store.AssociatedProduct(view.WorkGraphID); err != nil || found {
 		t.Fatalf("an unscoped objective must have no product association: found=%t err=%v", found, err)
 	}
+}
+
+// 8. A plan can exist with NO objective graph at all - a crash between
+// Propose and BindObjectivePlan, the ONE write-ordering the public propose
+// paths never expose (they always bind together). A retry must not report
+// success while silently leaving the objective ungraphed: the plan
+// reconciler's legacy fallback starts a flat, un-graphed run the moment it
+// finds no objective graph (objective_workgraph.go's startObjectiveStage),
+// which for a product-scoped objective would mean unbound work having
+// started outside the WorkGraph/product machinery entirely. Recovery must
+// actually compile and bind the missing graph, not merely report the plan.
+func TestObjectiveIntakeRecoversAPlanWithNoGraphOnRetry(t *testing.T) {
+	built, supervisor, _ := objectiveIntakeFixture(t, 41)
+	productA := adoptTestProduct(t, built, "storefront", []string{"zenchron/seeded"})
+
+	planID := proposePlanOnly(t, built, supervisor, 41)
+	plans, err := built.store.Plans()
+	if err != nil {
+		t.Fatal(err)
+	}
+	graphs, err := built.store.WorkGraphs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || len(graphs) != 0 {
+		t.Fatalf("precondition: want exactly one plan and zero graphs, got %d plans, %d graphs", len(plans), len(graphs))
+	}
+
+	view, err := built.revisePlan(context.Background(), supervisor, objectiveRequest(41, productA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Plan.ID != planID {
+		t.Fatalf("recovery produced a different plan: %s, want %s", view.Plan.ID, planID)
+	}
+	if view.WorkGraphID == "" {
+		t.Fatal("recovery must actually compile and bind the missing graph, not report success without one")
+	}
+	if graphs, err := built.store.WorkGraphs(); err != nil || len(graphs) != 1 {
+		t.Fatalf("recovery must bind exactly one graph: %d graphs, err=%v", len(graphs), err)
+	}
+	owner, found, err := built.store.AssociatedProduct(view.WorkGraphID)
+	if err != nil || !found || owner != productA {
+		t.Fatalf("recovered graph's product association = %q (found=%t err=%v), want %q", owner, found, err, productA)
+	}
+}
+
+// proposePlanOnly writes a plan through the real deterministic propose path
+// but deliberately stops BEFORE BindObjectivePlan - modeling a crash between
+// the two writes, a state the public revisePlan/CLI entry points never
+// produce on their own (they always bind together).
+func proposePlanOnly(t *testing.T, built *composition, supervisor *runtime.Supervisor, issue int) string {
+	t.Helper()
+	plans, err := built.planService()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, _, defaultBranch, err := built.planSubject(supervisor, objectiveRequest(issue, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := runtime.ParseGitHubRepo(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := runtime.RepositoryTarget{Identity: repo.String(), Remote: repo.CloneURL(), DefaultBranch: defaultBranch}
+	engine, err := built.engineFor(target, built.agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	intent, err := engine.CompilePlanIntent(ctx, issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planID, err := engine.PlanID(issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := runtime.ProposeInput{
+		PlanID: planID, Objective: intent.Objective, Subject: intent.Subject,
+		Repository: target.Identity, Contract: intent.Contract, Model: intent.Model, Facts: intent.Facts,
+		Issue: issue, ObservedBase: intent.Base.Revision,
+	}
+	if _, err := plans.Propose(ctx, input); err != nil {
+		t.Fatal(err)
+	}
+	return planID
 }
 
 func firstGraphID(t *testing.T, built *composition) string {
