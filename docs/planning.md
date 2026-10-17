@@ -933,11 +933,14 @@ revision after discoveries needs the governed revision above, which preserves
 activated work and its frozen bindings. The proof is
 `runtime/dynamic_team_acceptance_test.go`.
 
-**Known limit.** A plan stage tracks the run its unit was first activated with.
-When the unit is remediated through a #581 epoch, the work continues in the
-epoch's run, which the plan does not follow, so a compiled plan with a
-downstream gate does not settle that stage (the gate-less hand-built objective
-fixture does not show this). See the PR for the reproduction.
+**Known limit (observed, not yet fixed).** A plan stage records the run its unit
+was first activated with. When that unit is remediated through a #581 epoch the
+work continues in the epoch's run, which the plan stage does not follow. In the
+conflict-and-remediation journey over a planner-proposed plan, the integrate
+stage stayed `running` against its original, parked run, so the compiler-added
+assurance gate below it never settled and the epoch candidate's publication
+stayed deferred. The hand-built journey fixture has no downstream gate and so
+does not show it.
 
 ## Related documents
 
