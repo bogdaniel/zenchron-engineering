@@ -16,7 +16,7 @@ import (
 func TestAssociateProductGraphPersistsAcrossRestart(t *testing.T) {
 	_, first, second := openPair(t)
 	now := time.Unix(1700000000, 0).UTC()
-	productA := composeProduct(t, "storefront", 1, []string{"acme/shared-lib"}, now)
+	productA := composeProduct(t, "storefront", 1, []string{"acme/repo"}, now)
 	if _, _, err := first.AdoptProductRevision(productA); err != nil {
 		t.Fatal(err)
 	}
@@ -65,8 +65,8 @@ func TestAssociateProductGraphFailsClosedOnUnknownProduct(t *testing.T) {
 func TestAssociateProductGraphTwoProductsSharingRepositoryStayIsolated(t *testing.T) {
 	_, first, _ := openPair(t)
 	now := time.Unix(1700000000, 0).UTC()
-	productA := composeProduct(t, "storefront", 1, []string{"acme/shared-lib"}, now)
-	productB := composeProduct(t, "checkout", 1, []string{"acme/shared-lib"}, now)
+	productA := composeProduct(t, "storefront", 1, []string{"acme/repo"}, now)
+	productB := composeProduct(t, "checkout", 1, []string{"acme/repo"}, now)
 	if _, _, err := first.AdoptProductRevision(productA); err != nil {
 		t.Fatal(err)
 	}

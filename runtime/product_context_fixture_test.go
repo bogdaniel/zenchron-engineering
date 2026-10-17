@@ -27,7 +27,10 @@ type productFixture struct {
 
 func seedProductFixture(t *testing.T, store *SQLiteOperationStore, name string, issue int, repository, claim, authorizer string, at time.Time) productFixture {
 	t.Helper()
-	p := composeProduct(t, name, 1, []string{"acme/shared-platform-lib", repository}, at)
+	// adoptedGraph always compiles under "acme/repo" regardless of the
+	// thematic repository named here, so the product must actually list it
+	// too or the new repository-membership boundary refuses the association.
+	p := composeProduct(t, name, 1, []string{"acme/shared-platform-lib", repository, "acme/repo"}, at)
 	if _, _, err := store.AdoptProductRevision(p); err != nil {
 		t.Fatal(err)
 	}

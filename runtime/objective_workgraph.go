@@ -89,6 +89,46 @@ func (s PlanService) AssociateProductGraph(productID, graphID string) error {
 	return err
 }
 
+// RequireProductIfChosen refuses before anything else is spent: an objective
+// proposed for a product that was never adopted names an id
+// AssociateProductGraph is guaranteed to refuse once the plan and graph are
+// already durably written, and once a provider invocation already ran.
+// Checking it first means that cost is never spent on a proposal this
+// certain to fail. Products are never deleted once adopted (no such path
+// exists), so this has no disappearing-product race to recover from.
+func (s PlanService) RequireProductIfChosen(productID string) error {
+	if productID == "" {
+		return nil
+	}
+	if _, found, err := s.Store.CurrentProduct(productID); err != nil {
+		return err
+	} else if !found {
+		return fmt.Errorf("product %s does not exist", productID)
+	}
+	return nil
+}
+
+// EnsureProductGraphAssociation recovers a product association an earlier
+// attempt could not complete. The browser's own idempotent-resend path (a
+// lost response to the SAME objective proposal) must not report success
+// while a chosen product's association from that earlier attempt is still
+// missing: this re-derives the plan's already-compiled graph id and replays
+// AssociateProductGraph against it, which is itself idempotent and fails
+// closed on a conflicting product exactly as the first attempt would have.
+func (s PlanService) EnsureProductGraphAssociation(planID, productID string) error {
+	if productID == "" {
+		return nil
+	}
+	graph, err := objectiveGraphFor(s.Store, planID)
+	if err != nil {
+		return err
+	}
+	if graph == nil {
+		return nil
+	}
+	return s.AssociateProductGraph(productID, graph.ID)
+}
+
 // Reviewers and typed gates consume candidate units; they retain their own
 // plan semantics rather than pretending to produce a candidate handoff.
 func objectiveCandidateStage(stage domain.PlanStage) bool {

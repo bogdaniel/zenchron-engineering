@@ -15,6 +15,12 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 	if err != nil {
 		return runtime.PlanView{}, err
 	}
+	// Refused before the repository target, the engine, the planning
+	// invocation and the plan/graph write all happen for nothing: an unknown
+	// product is certain to make AssociateProductGraph refuse later anyway.
+	if err := plans.RequireProductIfChosen(request.ProductID); err != nil {
+		return runtime.PlanView{}, err
+	}
 	repository, issue, defaultBranch, err := c.planSubject(supervisor, request)
 	if err != nil {
 		return runtime.PlanView{}, err
@@ -74,6 +80,15 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 		current, err := plans.View(planID)
 		var absent *runtime.PlanRefusedError
 		if request.PlanID == "" && err == nil {
+			// This objective was already proposed - a resend of the SAME
+			// request, exactly like any other idempotent-resend action in
+			// this product. An earlier attempt's product association can
+			// still be missing (it is written after the plan and graph, not
+			// atomically with them); recover it now rather than report
+			// success while it remains incomplete.
+			if err := plans.EnsureProductGraphAssociation(planID, request.ProductID); err != nil {
+				return runtime.PlanView{}, err
+			}
 			return current, nil
 		}
 		if request.PlanID == "" && !errors.As(err, &absent) {
