@@ -788,3 +788,61 @@ func TestAPlanStageRunWithNoBatchKeepsTheProductContextItWasCreatedWith(t *testi
 		t.Fatalf("a legacy plan stage run is unchanged: %v %+v", err, got.product)
 	}
 }
+
+// TestTheReconcilerCreatesAReviewerStageRunWithTheProductPin drives the wiring
+// the seam test cannot: the real plan reconciler and supervisor run an
+// objective plan's producer to completion and then START its reviewer stage,
+// and that run's durable plan binding carries the pin startObjectiveStage wrote.
+func TestTheReconcilerCreatesAReviewerStageRunWithTheProductPin(t *testing.T) {
+	fleet := newFleetFixture(t, 4)
+	fleet.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
+	fleet.deps.Provider = &objectivePlanRemediationWorker{}
+	fleet.runtime = fleet.newRuntime(fleet.deps)
+	f := &productUnitFixture{fleetFixture: fleet, supervisor: fleet.supervisor(), at: fleet.clock.Now()}
+	plan := newPlanRunFixtureOn(t, fleet.phase8Fixture, []domain.PlanStage{
+		{ID: "backend", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective:            "Implement the backend. " + integrationUnitMarker("a"),
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange, domain.CapabilityRepositoryAnalysis},
+			InvocationMode:       domain.InvocationModeMutating},
+		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer, Objective: "Review the backend.",
+			DependsOn:            []string{"backend"},
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityRepositoryAnalysis},
+			InvocationMode:       domain.InvocationModeMutating},
+	}, fleet.deps.ConfigDigest)
+	graphID, err := plan.service.BindObjectivePlan(plan.plan, plan.issue, plan.service.DefaultAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := f.seedProduct("storefront", map[string]string{"tier": "standard"})
+	f.widelyPromote(p.ID, productWideClaim)
+	if err := plan.service.AssociateProductGraph(p.ID, graphID); err != nil {
+		t.Fatal(err)
+	}
+	plan.approve(t)
+
+	var reviewRunID string
+	for range 80 {
+		plan.reconcile(t)
+		if _, err := f.supervisor.Tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		fleet.clock.advance(61 * time.Second)
+		snapshot, err := fleet.store.ReplayPlan(plan.plan.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reviewRunID = snapshot.Stages["review"].RunID; reviewRunID != "" {
+			break
+		}
+	}
+	if reviewRunID == "" {
+		t.Fatal("the reconciler never started the reviewer stage")
+	}
+	run, found := storedRun(t, fleet.phase8Fixture, reviewRunID)
+	if !found || run.Plan == nil || run.Plan.Product == nil {
+		t.Fatalf("the reviewer stage run was created without its product pin: %+v", run.Plan)
+	}
+	if run.Orchestration != nil || run.Plan.Product.GraphID != graphID || run.Plan.Product.Pin.ConfigurationRevision != 1 {
+		t.Fatalf("the reviewer stage's pin is wrong: %+v", run.Plan.Product)
+	}
+}

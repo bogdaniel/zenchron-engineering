@@ -313,9 +313,10 @@ so the first write stands, and `workUnit` resolves it through the same
 producer's audience. Gate stages create no run and need none. A stage run
 created before its graph was associated is not pinned and runs unassociated;
 objective intake associates before approval, so none exists in practice. The
-reconciler's `startObjectiveStage` wiring is a one-line call proved only through
-the seam it feeds (`TestAPlanStageRunWithNoBatchKeepsTheProductContextItWasCreatedWith`),
-not by a full reconciler-driven reviewer run.
+reconciler wiring is proved by `TestTheReconcilerCreatesAReviewerStageRunWithTheProductPin`,
+which runs the real plan reconciler and supervisor until the reviewer stage run
+exists and reads the pin off its durable plan binding; the resolution seam is
+`TestAPlanStageRunWithNoBatchKeepsTheProductContextItWasCreatedWith`.
 
 **Not covered here.** Production adoption of the Agent Execution Kernel is
 #518's, gated on #445; this integration reaches the worker through the existing
