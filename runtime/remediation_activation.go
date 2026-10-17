@@ -209,12 +209,12 @@ func (r *EngineeringRuntime) planRemediationEpochBatch(id string, issue int, req
 	if owner, taken := reserved[runID]; taken {
 		return orchestration.Batch{}, &OrchestrationConflictError{Issue: issue, RunID: runID, Batch: owner}
 	}
-	return orchestration.Batch{
+	return r.deps.Store.pinProductContext(orchestration.Batch{
 		SchemaVersion: orchestration.BatchSchemaVersion, ID: id,
 		Repository: r.deps.Repository.Identity, AgentID: r.deps.Agent.ID,
 		RequestedBy: BoundedNote(requestedBy), CreatedAt: r.deps.Clock.Now(), Origin: &origin,
 		Items: []orchestration.BatchItem{{Issue: issue, RunID: runID}},
-	}, nil
+	})
 }
 
 // freeRemediationEpochRunID is freeIssueRunID's (runtime/orchestration.go)

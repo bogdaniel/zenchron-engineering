@@ -225,7 +225,7 @@ func (r *EngineeringRuntime) planOrchestrationBatch(id string, issues []int, req
 		}
 		batch.Items = append(batch.Items, orchestration.BatchItem{Issue: issue, RunID: runID})
 	}
-	return batch, nil
+	return r.deps.Store.pinProductContext(batch)
 }
 
 // reservedRunIDs maps every run identity a stored batch names to that batch.

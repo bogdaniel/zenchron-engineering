@@ -334,6 +334,9 @@ func (s *SQLiteOperationStore) AdmitRemediationEpochBatch(batch orchestration.Ba
 		return orchestration.Batch{}, false, err
 	}
 	defer tx.Rollback()
+	if err := requireBatchProductBinding(tx, batch); err != nil {
+		return orchestration.Batch{}, false, err
+	}
 	result, err := tx.Exec(`INSERT INTO orchestration_batches (id, repository, created_unix_nano, document)
 		VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
 		batch.ID, batch.Repository, batch.CreatedAt.UnixNano(), string(document))

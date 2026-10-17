@@ -124,6 +124,19 @@ var roleContextClasses = map[domain.EngineeringRole][]domain.ContextClass{
 	},
 }
 
+// RoleContextClasses is the ONE answer to "which context classes does this role
+// receive through this policy": the role's stated row plus the required
+// classes, narrowed by the operator's ContextPolicy. A caller that delivers
+// context outside a ContextPack - a WorkGraph unit with no assignment - asks
+// here rather than restating the table.
+func RoleContextClasses(role domain.EngineeringRole, policy *domain.ContextPolicy) (map[domain.ContextClass]bool, error) {
+	optional, known := roleContextClasses[role]
+	if !known {
+		return nil, fmt.Errorf("role %q has no stated context selection; a role nothing states context for would receive whatever happened to be in scope", role)
+	}
+	return selectClasses(optional, policy)
+}
+
 // CompileContext builds one assignment's ContextPack.
 //
 // It is deterministic: every collection is emitted in a stated canonical order,
@@ -133,12 +146,7 @@ func CompileContext(input ContextInput) (domain.ContextPack, error) {
 	refuse := func(detail string) (domain.ContextPack, error) {
 		return domain.ContextPack{}, &ContextError{Stage: input.Stage.ID, Detail: detail}
 	}
-	optional, known := roleContextClasses[input.Role]
-	if !known {
-		return refuse(fmt.Sprintf("role %q has no stated context selection; a role nothing states context for would receive whatever happened to be in scope", input.Role))
-	}
-
-	selected, err := selectClasses(optional, input.Policy)
+	selected, err := RoleContextClasses(input.Role, input.Policy)
 	if err != nil {
 		return refuse(err.Error())
 	}
