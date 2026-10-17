@@ -3,6 +3,7 @@ package runtime
 import (
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/execution"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // workUnitContext is the upstream a WorkGraph unit's child run consumes (#472).
@@ -39,7 +40,7 @@ func (w workUnitContext) apply(request ExecutionRequest) ExecutionRequest {
 // context is missing or inconsistent never spends a model invocation.
 func (r *EngineeringRuntime) workUnit(state *runState, assignment *domain.AgentAssignment) (workUnitContext, error) {
 	if state.run.Orchestration == nil || state.run.Orchestration.BatchID == "" {
-		return workUnitContext{}, nil
+		return r.planStageProductContext(state, assignment)
 	}
 	batch, found, err := r.deps.Store.OrchestrationBatch(state.run.Orchestration.BatchID)
 	if err != nil {
@@ -48,7 +49,7 @@ func (r *EngineeringRuntime) workUnit(state *runState, assignment *domain.AgentA
 	if !found || batch.Origin == nil {
 		return workUnitContext{}, nil
 	}
-	compiled, err := r.unitProductContext(state, batch, assignment)
+	compiled, err := r.unitProductContext(state, *batch.Origin, batch.Product, assignment)
 	if err != nil {
 		return workUnitContext{}, err
 	}
@@ -71,4 +72,19 @@ func (r *EngineeringRuntime) workUnit(state *runState, assignment *domain.AgentA
 		upstream = append(upstream, context)
 	}
 	return workUnitContext{upstream: upstream, product: executionProductContext(compiled)}, nil
+}
+
+// planStageProductContext is workUnit's counterpart for a plan stage run with
+// no batch: its product context was frozen on the run's own plan binding.
+func (r *EngineeringRuntime) planStageProductContext(state *runState, assignment *domain.AgentAssignment) (workUnitContext, error) {
+	binding := state.run.Plan
+	if binding == nil || binding.Product == nil {
+		return workUnitContext{}, nil
+	}
+	origin := orchestration.BatchOrigin{GraphID: binding.Product.GraphID, UnitID: binding.StageID}
+	compiled, err := r.unitProductContext(state, origin, &binding.Product.Pin, assignment)
+	if err != nil {
+		return workUnitContext{}, err
+	}
+	return workUnitContext{product: executionProductContext(compiled)}, nil
 }

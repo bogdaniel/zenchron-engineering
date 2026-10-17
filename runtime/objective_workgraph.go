@@ -267,6 +267,9 @@ func (r PlanReconciler) startObjectiveStage(ctx context.Context, engine *Enginee
 		}
 	}
 	if !objectiveCandidateStage(stage) {
+		if binding.Product, err = r.Store.planStageProduct(graph.ID, stage.ID); err != nil {
+			return StartOutcome{}, err
+		}
 		return engine.StartPlanStageRun(ctx, r.Issue, binding)
 	}
 	if binding.Generation != 0 {

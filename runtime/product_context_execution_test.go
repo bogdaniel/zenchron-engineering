@@ -492,30 +492,30 @@ func TestUnitProductContextRefusesEveryInconsistencyDirectly(t *testing.T) {
 	run := f.fleetFixture.runtime
 	state := &runState{}
 
-	if resolved, err := run.unitProductContext(state, batch, nil); err != nil || resolved == nil || resolved.ProductID != p.ID {
+	if resolved, err := run.unitProductContext(state, *batch.Origin, batch.Product, nil); err != nil || resolved == nil || resolved.ProductID != p.ID {
 		t.Fatalf("the consistent case must resolve: %v %v", resolved, err)
 	}
 	unpinned := batch
 	unpinned.Product = nil
-	if _, err := run.unitProductContext(state, unpinned, nil); err == nil {
+	if _, err := run.unitProductContext(state, *unpinned.Origin, unpinned.Product, nil); err == nil {
 		t.Fatal("an associated graph's unit admitted without a pin must be refused")
 	}
 	foreign := batch
 	pin := *batch.Product
 	pin.ProductID = "product-someone-else"
 	foreign.Product = &pin
-	if _, err := run.unitProductContext(state, foreign, nil); err == nil {
+	if _, err := run.unitProductContext(state, *foreign.Origin, foreign.Product, nil); err == nil {
 		t.Fatal("a pin for another product must be refused")
 	}
 	tampered := batch
 	pin = *batch.Product
 	pin.ContextDigest = strings.Repeat("0", len(pin.ContextDigest))
 	tampered.Product = &pin
-	if _, err := run.unitProductContext(state, tampered, nil); err == nil {
+	if _, err := run.unitProductContext(state, *tampered.Origin, tampered.Product, nil); err == nil {
 		t.Fatal("a pin whose identity was corrupted must be refused")
 	}
 	mismatched := &runState{run: EngineeringRun{Plan: &RunPlanBinding{PlanID: "plan-x", Revision: 1, PlanDigest: "d"}}}
-	if _, err := run.unitProductContext(mismatched, batch, nil); err == nil {
+	if _, err := run.unitProductContext(mismatched, *batch.Origin, batch.Product, nil); err == nil {
 		t.Fatal("a run bound to a plan the graph does not bind must be refused")
 	}
 	// A product that never named the graph's repository: the association row is
@@ -537,12 +537,12 @@ func TestUnitProductContextRefusesEveryInconsistencyDirectly(t *testing.T) {
 	}
 	outsider := batch
 	outsider.Product = &elsewherePin
-	if _, err := run.unitProductContext(state, outsider, nil); err == nil {
+	if _, err := run.unitProductContext(state, *outsider.Origin, outsider.Product, nil); err == nil {
 		t.Fatal("a product that does not list the graph's repository must be refused")
 	}
 	stray := batch
 	stray.Origin = &orchestration.BatchOrigin{GraphID: "graph-without-association", UnitID: "a"}
-	if _, err := run.unitProductContext(state, stray, nil); err == nil {
+	if _, err := run.unitProductContext(state, *stray.Origin, stray.Product, nil); err == nil {
 		t.Fatal("a pin on a unit whose graph has no association must be refused")
 	}
 }
@@ -714,5 +714,77 @@ func TestABatchCannotBeWrittenUnpinnedForAnAssociatedGraph(t *testing.T) {
 	}
 	if _, err := f.store.AssociateWorkGraph(association); err == nil {
 		t.Fatal("associating a graph whose unit batch already exists must be refused")
+	}
+}
+
+// TestAPlanStageRunWithNoBatchKeepsTheProductContextItWasCreatedWith: an
+// objective plan's reviewer stage is a plan-stage run with no work-graph batch,
+// so its pin rides on the run's own plan binding. It resolves the context it
+// was created with after newer configuration arrives, honours the frozen
+// assignment's ContextPolicy, and refuses a missing pinned revision or a plan
+// binding the graph does not hold.
+func TestAPlanStageRunWithNoBatchKeepsTheProductContextItWasCreatedWith(t *testing.T) {
+	fleet := newFleetFixture(t, 4)
+	f := &productUnitFixture{fleetFixture: fleet, supervisor: fleet.supervisor(), at: time.Unix(1700000000, 0).UTC()}
+	plan := newPlanRunFixtureOn(t, fleet.phase8Fixture, []domain.PlanStage{
+		{ID: "backend", Kind: domain.StageAgent, Role: domain.RoleImplementer, Objective: "Build it.",
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange}, InvocationMode: domain.InvocationModeMutating},
+		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer, Objective: "Review it.", DependsOn: []string{"backend"},
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityRepositoryAnalysis}, InvocationMode: domain.InvocationModeMutating},
+	}, fleet.deps.ConfigDigest)
+	graphID, err := plan.service.BindObjectivePlan(plan.plan, plan.issue, plan.service.DefaultAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := f.seedProduct("storefront", map[string]string{"tier": "standard"})
+	f.widelyPromote(p.ID, productWideClaim)
+	f.audiencedPromote(p.ID, graphID, "backend", "PRODUCER-PRIVATE-PROMOTION")
+	if err := plan.service.AssociateProductGraph(p.ID, graphID); err != nil {
+		t.Fatal(err)
+	}
+
+	pinned, err := fleet.store.planStageProduct(graphID, "review")
+	if err != nil || pinned == nil || pinned.Pin.ConfigurationRevision != 1 {
+		t.Fatalf("the reviewer stage was not pinned: %v %+v", err, pinned)
+	}
+	reviewState := func(binding *RunPlanProduct, revision int) *runState {
+		return &runState{run: EngineeringRun{Plan: &RunPlanBinding{
+			PlanID: plan.plan.ID, Revision: revision, PlanDigest: plan.plan.Digest, StageID: "review", Product: binding}}}
+	}
+	included := &domain.AgentAssignment{Context: domain.ContextPack{Included: []domain.ContextClass{domain.ContextProjectFacts}}}
+
+	f.adoptConfiguration(p.ID, 2, map[string]string{"tier": "NEWER-REVISION"})
+	delivered, err := fleet.runtime.workUnit(reviewState(pinned, plan.plan.Revision), included)
+	if err != nil || delivered.product == nil {
+		t.Fatalf("the reviewer stage received no product context: %v %+v", err, delivered.product)
+	}
+	if delivered.product.ConfigurationRevision != 1 || delivered.product.Settings["tier"] != "standard" {
+		t.Fatalf("the reviewer drifted from its created-with configuration: %+v", delivered.product)
+	}
+	prompt := providerPrompt(delivered.apply(ExecutionRequest{}))
+	if !strings.Contains(prompt, productWideClaim) {
+		t.Fatal("the reviewer should receive the product-wide claim")
+	}
+	requireAbsent(t, prompt, "PRODUCER-PRIVATE-PROMOTION", "NEWER-REVISION")
+
+	excluded := &domain.AgentAssignment{Context: domain.ContextPack{Included: []domain.ContextClass{domain.ContextObjective}}}
+	if got, err := fleet.runtime.workUnit(reviewState(pinned, plan.plan.Revision), excluded); err != nil || got.product != nil {
+		t.Fatalf("a ContextPolicy that excluded project facts must exclude product context: %v %+v", err, got.product)
+	}
+	if _, err := fleet.runtime.workUnit(reviewState(pinned, plan.plan.Revision+1), included); err == nil {
+		t.Fatal("a plan binding the graph does not hold must be refused")
+	}
+	if _, err := fleet.store.db.Exec(`DELETE FROM product_configuration_revisions WHERE product_id = ?`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fleet.runtime.workUnit(reviewState(pinned, plan.plan.Revision), included); err == nil {
+		t.Fatal("a missing pinned configuration revision must be refused")
+	}
+
+	if none, err := fleet.store.planStageProduct("graph-without-association", "review"); err != nil || none != nil {
+		t.Fatalf("an unassociated graph pins nothing: %v %+v", err, none)
+	}
+	if got, err := fleet.runtime.workUnit(reviewState(nil, plan.plan.Revision), included); err != nil || got.product != nil {
+		t.Fatalf("a legacy plan stage run is unchanged: %v %+v", err, got.product)
 	}
 }

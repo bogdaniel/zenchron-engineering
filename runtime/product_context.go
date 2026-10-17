@@ -98,19 +98,18 @@ func (s *SQLiteOperationStore) inheritProductPin(batch orchestration.Batch, prod
 // assignment is the unit's frozen plan assignment, when it has one. Its
 // ContextPack already records the operator's ContextPolicy decision; a unit
 // without one is judged by its role's stated selection.
-func (r *EngineeringRuntime) unitProductContext(state *runState, batch orchestration.Batch, assignment *domain.AgentAssignment) (*product.ProductContext, error) {
-	origin := batch.Origin
+func (r *EngineeringRuntime) unitProductContext(state *runState, origin orchestration.BatchOrigin, pin *product.ContextPin, assignment *domain.AgentAssignment) (*product.ProductContext, error) {
 	productID, associated, err := r.deps.Store.AssociatedProduct(origin.GraphID)
 	if err != nil {
 		return nil, err
 	}
 	if !associated {
-		if batch.Product != nil {
+		if pin != nil {
 			return nil, fmt.Errorf("unit %s was admitted with a product context pin and its graph %s has no product association", origin.UnitID, origin.GraphID)
 		}
 		return nil, nil
 	}
-	if batch.Product == nil {
+	if pin == nil {
 		return nil, fmt.Errorf("graph %s is associated with product %s and unit %s was admitted without a product context pin", origin.GraphID, productID, origin.UnitID)
 	}
 	graph, found, err := r.deps.Store.WorkGraph(origin.GraphID)
@@ -134,7 +133,7 @@ func (r *EngineeringRuntime) unitProductContext(state *runState, batch orchestra
 	if err != nil || !entitled {
 		return nil, err
 	}
-	resolved, err := batch.Product.Resolve(r.deps.Store, unitContextRequest(productID, *origin))
+	resolved, err := pin.Resolve(r.deps.Store, unitContextRequest(productID, origin))
 	if err != nil {
 		return nil, fmt.Errorf("resolve the product context unit %s was admitted with: %w", origin.UnitID, err)
 	}
@@ -223,4 +222,23 @@ func requireBatchProductBinding(q sqlExecutor, batch orchestration.Batch) error 
 		return fmt.Errorf("batch %s pins product %q and its graph %s is associated with %q", batch.ID, pinned, batch.Origin.GraphID, associated)
 	}
 	return nil
+}
+
+// planStageProduct freezes the product context for an objective plan's stage
+// run that has no work-graph batch (a reviewer stage), so it travels on the
+// run's own plan binding. A graph with no product returns nil.
+func (s *SQLiteOperationStore) planStageProduct(graphID, stageID string) (*RunPlanProduct, error) {
+	productID, associated, err := s.AssociatedProduct(graphID)
+	if err != nil || !associated {
+		return nil, err
+	}
+	compiled, err := product.CompileContext(s, unitContextRequest(productID, orchestration.BatchOrigin{GraphID: graphID, UnitID: stageID}))
+	if err != nil {
+		return nil, fmt.Errorf("compile product context for stage %s: %w", stageID, err)
+	}
+	pin, err := product.NewContextPin(compiled)
+	if err != nil {
+		return nil, err
+	}
+	return &RunPlanProduct{GraphID: graphID, Pin: pin}, nil
 }

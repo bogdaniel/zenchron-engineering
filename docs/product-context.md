@@ -304,11 +304,24 @@ not associated with; execution re-checks the same facts.
 Rolling the binary back leaves pinned batches unreadable to the old binary,
 whose strict decoder rejects the unknown `product` member.
 
-**Not covered here.** Plan-stage runs that are not graph units (the reviewer and
-gate stages of an objective plan) carry no `Batch` and receive no product
-context in this slice. Production adoption of the Agent Execution Kernel is
+**Plan-stage reviewer runs.** An objective plan's reviewer (non-producing) agent
+stage is a plan-stage run with no work-graph batch, so its pin rides on the run's
+own `RunPlanBinding.Product` (`GraphID` + `ContextPin`). `startObjectiveStage`
+writes it at run creation (`planStageProduct`); a replay adopts the stored run,
+so the first write stands, and `workUnit` resolves it through the same
+`unitProductContext` checks, with the stage id as its owner so it holds no
+producer's audience. Gate stages create no run and need none. A stage run
+created before its graph was associated is not pinned and runs unassociated;
+objective intake associates before approval, so none exists in practice. The
+reconciler's `startObjectiveStage` wiring is a one-line call proved only through
+the seam it feeds (`TestAPlanStageRunWithNoBatchKeepsTheProductContextItWasCreatedWith`),
+not by a full reconciler-driven reviewer run.
+
+**Not covered here.** Production adoption of the Agent Execution Kernel is
 #518's, gated on #445; this integration reaches the worker through the existing
-host-owned `execution.Request` and changes no provider.
+host-owned `execution.Request` and changes no provider. The kernel adapter
+classifies `Request.Product` as refused, so a unit admitted with product context
+fails closed there instead of running without it.
 
 ## What #476 deliberately does not build
 
