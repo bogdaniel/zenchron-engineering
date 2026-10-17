@@ -60,11 +60,14 @@ exists, applies to `ProductConfiguration` revisions below.
 `ProductConfiguration` is the MUTABLE half: an operator may adopt a new
 revision at any time. "Mutable" describes the product's current pointer, not
 any one revision - each `ProductConfiguration` revision is itself immutable
-and content-addressed, exactly like a `Product` or `WorkGraph` revision. A run
-that already resolved `Policy` or `ContextPolicy` from revision N keeps
-referencing revision N's exact values forever (via its own
-`domain.ContractProvenance`, which this package never touches); adopting
-revision N+1 here never rewrites what N said.
+and content-addressed, exactly like a `Product` or `WorkGraph` revision. A unit
+that was admitted against revision N keeps revision N forever. The freeze is
+**not** in `domain.ContractProvenance` - that records the project model and
+policy a contract compiled from, and has never carried a product-configuration
+revision. It is in the `orchestration.Batch` the unit's child run was created
+from (`Batch.Product`, a `product.ContextPin`; see "Execution integration"
+below). Adopting revision N+1 here never rewrites what N said, and never reaches
+a unit already admitted.
 
 ## The knowledge scope ladder (`scope.go`, `knowledge.go`)
 
@@ -186,9 +189,13 @@ func CompileContext(store Store, request ContextRequest) (ProductContext, error)
 ```
 
 `runtime.SQLiteOperationStore` satisfies `product.Store` directly (asserted at
-compile time in `product_store.go`), so a caller already holding the
-runtime's store - the #480 WorkGraph compiler, or the #479 Experience Plane -
-calls `product.CompileContext(store, request)` with no adapter in between.
+compile time in `product_store.go`). The runtime's own caller is
+`runtime/product_context.go`, described under "Execution integration"; nothing
+else in the runtime compiles a unit's product context.
+
+A `ConfigurationRevision` pin of `0` means "the product had no configuration
+when the caller was frozen" and yields none, so a configuration adopted later
+still cannot reach it. Revisions start at 1, so `0` is otherwise meaningless.
 
 Every `Store` method is scoped by the exact `productID` `CompileContext` was
 given, and it is passed to every one of them - there is no step in this file
@@ -199,6 +206,106 @@ has somehow disappeared, fails closed instead of silently seeing nothing or
 silently seeing a newer configuration than the one it was bound to.
 `MaxContextKnowledgeEntries` bounds each of the owned and promoted reads, so
 a product with many entries cannot hand one caller an unbounded context.
+
+## Execution integration (#480)
+
+An admitted WorkUnit of a product-associated WorkGraph executes against the
+product context it was admitted with. This is the only place the runtime
+compiles product context for a worker, and it adds no scheduler, run store,
+policy system or instruction channel.
+
+```text
+product_graph_associations (graph_id -> product_id)   runtime-owned, insert-only
+        |
+        |  ADMISSION: the instant a unit's orchestration.Batch is first written
+        |  (activateWorkUnit, startObjectiveStage, a remediation epoch)
+        v
+pinProductContext -> product.CompileContext -> product.NewContextPin
+        v
+Batch.Product (product.ContextPin)     first write wins, NOT part of the batch id
+        |
+        |  EXECUTION: EngineeringRuntime.workUnit, before the provider is reached
+        v
+unitProductContext -> ContextPin.Resolve -> product.CompileContext (pinned revision)
+        v
+execution.Request.Product -> providerPrompt / productBlock -> the worker
+```
+
+**Where each identity comes from.**
+
+| Identity | Authoritative producer | Consumer |
+| --- | --- | --- |
+| product | `product_graph_associations`, read by the batch's `Origin.GraphID` | `pinProductContext`, `unitProductContext` |
+| owner / audience | `product.WorkUnitOwnerRef(graphID, unitID)` from the batch's `Origin` | `unitContextRequest` |
+| configuration revision | the `ContextPin` written at admission | `ContextPin.Resolve` |
+| knowledge set | `ContextPin.KnowledgeIDs` written at admission | `ContextPin.Resolve` |
+| context class entitlement | the frozen assignment's `Context.Included`, else `planning.RoleContextClasses` | `receivesProductContext` |
+
+No product id, owner, feature or revision is read from model output, a provider
+argument or a request. `FeatureRef` is left empty because the runtime has no
+authoritative feature identity yet; an empty one is the safe default and means
+no feature-targeted promotions are delivered.
+
+**What is frozen, and why it is not in the batch identity.** The pin records the
+configuration revision and content digest, the ids of the knowledge entries
+(each content-addressed) the unit was admitted with, and a digest of both.
+`Batch.Product` is deliberately outside the batch's identity digest: the
+identity is what a crashed activation replays onto, and a newer configuration
+must not name a second batch and a second run for one unit. The first write
+wins and every replay reads it back, so retries, restarts, generation changes
+and repeated admission all see one context. Knowledge only grows, so a claim
+promoted after admission is excluded by omission from the pin. A remediation
+epoch inherits its unit's first pin rather than compiling a new one.
+
+**Scope.** A unit reads at `ScopeProduct` with its own `WorkUnitOwnerRef`: its
+product's configuration, widely promoted knowledge, and promotions audienced to
+exactly that unit. `CompileContext` still owns every visibility rule. A unit's
+own *unpromoted* discoveries are not delivered at this scope (request scopes are
+alternatives, not additive), so they re-enter only by promotion. Nothing in the
+runtime records raw discoveries yet.
+
+**Delivery.** `execution.Request.Product` is a plain data record
+(`execution.ProductContext`) with no field for an `EngineeringPolicy` or
+`ContextPolicy` reference, a tool, a permission, a budget or a trust level, so a
+configuration structurally cannot widen or replace the work contract. It is
+rendered by `providerPrompt` as an `UNTRUSTED-PRODUCT-CONTEXT` frame, the same
+framed-data mechanism upstream outputs use, with every value neutralized so none
+can close the frame.
+
+**ContextPolicy.** The closed `ContextClass` vocabulary has no product class.
+Product context travels as `project_model_facts`: a unit with a frozen
+assignment receives it only if that assignment's `Context.Included` has the
+class, and a unit with none is judged by `planning.RoleContextClasses`, the one
+role table. A `ContextPolicy` can therefore exclude product context and can
+never exclude the required governance classes.
+
+**Failure semantics.** Before any model invocation, `workUnit` refuses when: the
+graph is associated and the batch has no pin; the graph has no association but
+the batch is pinned; the pin is for another product; the graph's repository is
+not one of the product's; the run's plan binding differs from the graph's; the
+pinned configuration revision is missing or its content changed; a pinned
+knowledge entry is no longer readable by the unit; or the pin does not match its
+own digest. It never falls back to another product, a current configuration or
+an empty context. An unassociated graph is unchanged: no pin, no block.
+
+**Association ordering.** `AssociateWorkGraph` refuses a graph that already has
+an admitted unit, because that unit froze no context. Replaying the same
+association stays idempotent. Objective intake associates before any plan stage
+starts, so it is unaffected.
+
+**Failure windows.** A crash after the pin is computed and before the batch is
+written leaves nothing; the retry computes a fresh pin. A crash after the batch
+and before its activation row replays onto the stored batch and keeps its pin.
+An association racing a concurrent first admission can leave a batch admitted
+unpinned for an associated graph; execution refuses it rather than guessing.
+Rolling the binary back leaves pinned batches unreadable to the old binary,
+whose strict decoder rejects the unknown `product` member.
+
+**Not covered here.** Plan-stage runs that are not graph units (the reviewer and
+gate stages of an objective plan) carry no `Batch` and receive no product
+context in this slice. Production adoption of the Agent Execution Kernel is
+#518's, gated on #445; this integration reaches the worker through the existing
+host-owned `execution.Request` and changes no provider.
 
 ## What #476 deliberately does not build
 
@@ -240,13 +347,10 @@ a product with many entries cannot hand one caller an unbounded context.
   authenticated session. Closing this needs a real caller establishing
   identity, not new machinery here.
 - **`OwnerRef`, `ProductID` and `ConfigurationRevision` are selectors, not
-  proofs of authority.** `CompileContext` trusts the caller to say which
-  product, owner and configuration revision it is; it does not verify that
-  the caller is actually entitled to read as that owner or that product, or
-  that an omitted `ConfigurationRevision` wasn't supposed to be pinned. The
-  eventual #480/#479 runtime adapter must derive these from the runtime's own
-  admitted facts - the graph association a WorkUnit's invocation already
-  belongs to, and the exact revision its own `domain.ContractProvenance`
-  recorded - rather than accept them as freely chosen caller input. Until
-  that adapter exists, this package's direct interface is for trusted,
-  first-party Go code only, not an untrusted-input boundary.
+  proofs of authority.** `CompileContext` trusts its caller to say which
+  product, owner and configuration revision it is. The runtime's caller
+  (`runtime/product_context.go`, see "Execution integration") derives them from
+  the graph association, the batch's own graph and unit ids, and the pin written
+  at admission, never from caller input. Any other caller of this package's
+  direct interface is trusted first-party Go code, not an untrusted-input
+  boundary.

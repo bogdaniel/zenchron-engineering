@@ -778,7 +778,7 @@ func (r *EngineeringRuntime) invokeExecution(ctx context.Context, state *runStat
 	// A WORK GRAPH unit's child run receives the exact admitted upstream
 	// handoffs its activation was bound to (#472). An ordinary orchestrated run
 	// and a plan stage run are unchanged: neither has a unit origin.
-	unit, err := r.workUnit(state)
+	unit, err := r.workUnit(state, stage.assignment)
 	if err != nil {
 		return *r.workspaceSubjectFailure(err)
 	}
@@ -3615,57 +3615,6 @@ func (r *EngineeringRuntime) withUpstreamDiff(context UpstreamContext) (Upstream
 		context.Diff, context.Truncated = diff, truncated
 	}
 	return context, nil
-}
-
-// workUnitContext is the upstream a WorkGraph unit's child run consumes (#472).
-//
-// It is read from the run's OWN durable binding: the run names the batch that
-// created it, and that batch's origin names the unit and the exact admitted
-// handoffs the unit was activated against. So the invocation receives precisely
-// the inputs the activation recorded, and an invocation of a run bound to some
-// other batch receives none of them.
-//
-// Composing upstream CODE into this candidate is #475's; this carries the exact
-// handoff and subject into the invocation, which is what makes the activation's
-// recorded input set a fact about the execution rather than bookkeeping.
-type workUnitContext struct{ upstream []UpstreamContext }
-
-// apply gives the invocation its upstream. It widens nothing: permissions,
-// prohibitions and acceptance still come from the compiled contract.
-func (w workUnitContext) apply(request ExecutionRequest) ExecutionRequest {
-	if len(w.upstream) > 0 {
-		request.Upstream = w.upstream
-	}
-	return request
-}
-
-func (r *EngineeringRuntime) workUnit(state *runState) (workUnitContext, error) {
-	if state.run.Orchestration == nil || state.run.Orchestration.BatchID == "" {
-		return workUnitContext{}, nil
-	}
-	batch, found, err := r.deps.Store.OrchestrationBatch(state.run.Orchestration.BatchID)
-	if err != nil {
-		return workUnitContext{}, err
-	}
-	if !found || batch.Origin == nil || len(batch.Origin.Inputs) == 0 {
-		return workUnitContext{}, nil
-	}
-	upstream := make([]UpstreamContext, 0, len(batch.Origin.Inputs))
-	for _, input := range batch.Origin.Inputs {
-		context, err := r.withUpstreamDiff(UpstreamContext{
-			StageID: input.UnitID, RunID: input.RunID,
-			Commit: input.CandidateRevision, Tree: input.CandidateTree,
-			Handoff: &UpstreamHandoff{
-				ID: input.HandoffID, Outcome: input.Outcome, Summary: input.Summary,
-				Unresolved: input.Unresolved, RecommendedNext: input.RecommendedNext,
-			},
-		})
-		if err != nil {
-			return workUnitContext{}, err
-		}
-		upstream = append(upstream, context)
-	}
-	return workUnitContext{upstream: upstream}, nil
 }
 
 // readCandidateDiff reads one upstream run's change. It is best effort by

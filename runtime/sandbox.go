@@ -1106,7 +1106,7 @@ func artifact(path string, sanitized, publishable bool) (Artifact, error) {
 }
 
 func providerPrompt(r ExecutionRequest) string {
-	return providerEnvelope(r) + upstreamBlock(r.Upstream) + feedbackBlock(r.Feedback) + feedbackResolutionEnvelope(r) + handoffEnvelope(r) + messageEnvelope(r)
+	return providerEnvelope(r) + productBlock(r.Product) + upstreamBlock(r.Upstream) + feedbackBlock(r.Feedback) + feedbackResolutionEnvelope(r) + handoffEnvelope(r) + messageEnvelope(r)
 }
 
 // feedbackResolutionEnvelope states the REQUIRED OUTPUT when a producer
