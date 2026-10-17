@@ -111,13 +111,22 @@ func objectiveIntegrationStages() []domain.PlanStage {
 }
 
 func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRemediation(t *testing.T) {
+	runObjectiveRemediationJourney(t, func(t *testing.T, fleet *fleetFixture) *planRunFixture {
+		return newPlanRunFixtureOn(t, fleet.phase8Fixture, objectiveIntegrationStages(), fleet.deps.ConfigDigest)
+	})
+}
+
+// runObjectiveRemediationJourney drives the conflict -> epoch -> review journey
+// over whatever plan newPlan produces: a hand-built one, or one a planner
+// proposed and the real compiler admitted (dynamic_team_acceptance_test.go).
+func runObjectiveRemediationJourney(t *testing.T, newPlan func(*testing.T, *fleetFixture) *planRunFixture) {
 	fleet := newFleetFixture(t, 4)
 	fleet.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
 	worker := &objectivePlanRemediationWorker{}
 	fleet.deps.Provider = worker
 	fleet.runtime = fleet.newRuntime(fleet.deps)
 
-	plan := newPlanRunFixtureOn(t, fleet.phase8Fixture, objectiveIntegrationStages(), fleet.deps.ConfigDigest)
+	plan := newPlan(t, fleet)
 	graphID, err := plan.service.BindObjectivePlan(plan.plan, plan.issue, plan.service.DefaultAgent)
 	if err != nil {
 		t.Fatal(err)
@@ -314,7 +323,11 @@ func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRe
 	// Drive the integrator's own run to a published PR: with nothing
 	// downstream of "integrate" in this plan, objectivePublicationDeferred
 	// is false once it is complete, so the ordinary publication path runs.
+	// A plan whose compiler added a downstream gate defers that publication
+	// until the gate settles from the integrator's own assurance evidence, so
+	// the plan reconciler runs between the run's passes.
 	for range 20 {
+		plan.reconcile(t)
 		if _, err := fleet.runtime.Reconcile(ctx, integrateFinal.RunID); err != nil {
 			t.Fatal(err)
 		}

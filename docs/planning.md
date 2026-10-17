@@ -933,14 +933,13 @@ revision after discoveries needs the governed revision above, which preserves
 activated work and its frozen bindings. The proof is
 `runtime/dynamic_team_acceptance_test.go`.
 
-**Known limit (observed, not yet fixed).** A plan stage records the run its unit
-was first activated with. When that unit is remediated through a #581 epoch the
-work continues in the epoch's run, which the plan stage does not follow. In the
-conflict-and-remediation journey over a planner-proposed plan, the integrate
-stage stayed `running` against its original, parked run, so the compiler-added
-assurance gate below it never settled and the epoch candidate's publication
-stayed deferred. The hand-built journey fixture has no downstream gate and so
-does not show it.
+A plan stage on an objective graph follows its unit's CURRENT run. When a unit
+is remediated through a #581 epoch the work continues in the epoch's run, so the
+reconciler reads each remediated unit's stage against its latest epoch run
+(`runtime/plan_epoch_run.go`; the epoch table is the authority, the plan journal
+is not rewritten). Without that, the stage would stay parked on the first run,
+a downstream gate would be judged on superseded evidence, and the final
+candidate's publication would stay deferred behind a gate that cannot open.
 
 ## Related documents
 
