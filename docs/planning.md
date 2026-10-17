@@ -943,13 +943,23 @@ the stage would stay parked on the first run, a downstream gate would be judged
 on superseded evidence, and the final candidate's publication would stay
 deferred behind a gate that cannot open.
 
-An epoch is also a child run of the plan, so it is admitted against what the
-plan approved (`runtime/remediation_plan_admission.go`), before its batch is
-written. It is refused, and creates no run, when the plan's child-run or
-provider-invocation ceiling is spent, or when the graph's remediation worker is
-no longer the agent and provider the stage was approved against. An admitted
-epoch is charged to the plan once, keyed by its run, so a replay does not count
-it twice.
+An epoch is also a child run of the plan, so it runs under what the plan
+approved (`runtime/remediation_plan_admission.go`), not as a generic WorkGraph
+unit. Before its batch is written it is admitted against the plan: refused, with
+no run created, when the plan's child-run or provider-invocation ceiling is
+spent, when the stage has spent its own allowance, when its frozen assignment
+cannot be read back, or when the worker has drifted - judged by the reconciler's
+own `refuseWorkerDrift` (provider kind, vendor family, trust mode, model). The
+run it becomes carries the stage's plan binding and frozen assignment, so it
+executes the stage's objective, instruction packs, context and model preference,
+and its budget is the stage's allowance less what every run of the stage has
+spent, narrowed by what the plan has left: an epoch never resets consumed
+allowance. Each admitted epoch is charged to the plan once, keyed by its run, and
+the charge is written before the batch; a stored epoch batch with no charge is
+never materialized into a run. A graph with no objective plan is unchanged.
+
+`ReplayPlan` accepts an epoch as a stage's current run only when it belongs to
+the plan's graph and unit and its run is bound to that plan and stage.
 
 ## Related documents
 

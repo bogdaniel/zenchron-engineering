@@ -113,7 +113,7 @@ func (s *Supervisor) activateRemediationEpoch(graph WorkGraphView, unit WorkGrap
 		if err != nil {
 			return err
 		}
-		if err := s.admitEpochToPlan(graph, unit.UnitID, planned.Items[0].RunID); err != nil {
+		if err := s.admitEpochToPlan(graph.ObjectivePlan, graph.AgentID, unit.UnitID, planned.Items[0].RunID); err != nil {
 			return err
 		}
 		// Independent review finding (PR #585): writing this batch and
