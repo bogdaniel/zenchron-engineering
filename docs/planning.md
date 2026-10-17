@@ -934,12 +934,22 @@ activated work and its frozen bindings. The proof is
 `runtime/dynamic_team_acceptance_test.go`.
 
 A plan stage on an objective graph follows its unit's CURRENT run. When a unit
-is remediated through a #581 epoch the work continues in the epoch's run, so the
-reconciler reads each remediated unit's stage against its latest epoch run
+is remediated through a #581 epoch the work continues in the epoch's run, so
+`ReplayPlan` reads each remediated unit's stage against its latest epoch run
 (`runtime/plan_epoch_run.go`; the epoch table is the authority, the plan journal
-is not rewritten). Without that, the stage would stay parked on the first run,
-a downstream gate would be judged on superseded evidence, and the final
-candidate's publication would stay deferred behind a gate that cannot open.
+is not rewritten and still records the original run). The reconciler, `plan
+show` and the fleet summary therefore agree on one current run. Without that,
+the stage would stay parked on the first run, a downstream gate would be judged
+on superseded evidence, and the final candidate's publication would stay
+deferred behind a gate that cannot open.
+
+An epoch is also a child run of the plan, so it is admitted against what the
+plan approved (`runtime/remediation_plan_admission.go`), before its batch is
+written. It is refused, and creates no run, when the plan's child-run or
+provider-invocation ceiling is spent, or when the graph's remediation worker is
+no longer the agent and provider the stage was approved against. An admitted
+epoch is charged to the plan once, keyed by its run, so a replay does not count
+it twice.
 
 ## Related documents
 

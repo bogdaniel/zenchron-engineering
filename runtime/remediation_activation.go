@@ -113,6 +113,9 @@ func (s *Supervisor) activateRemediationEpoch(graph WorkGraphView, unit WorkGrap
 		if err != nil {
 			return err
 		}
+		if err := s.admitEpochToPlan(graph, unit.UnitID, planned.Items[0].RunID); err != nil {
+			return err
+		}
 		// Independent review finding (PR #585): writing this batch and
 		// claiming its epoch row as two separate calls leaves a window - a
 		// crash between them - where the batch is already visible to

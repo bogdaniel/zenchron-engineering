@@ -365,6 +365,10 @@ func (s *SQLiteOperationStore) PlanEvents(planID string) ([]EngineeringEvent, er
 // cache and no stored counter contributes, so a supervisor restarted mid-plan
 // reconstructs the same approval state, the same assignments, the same gate
 // satisfaction and the same consumed budget it had before.
+//
+// The one fact it reads beside the journal is which run is CURRENT for a
+// remediated stage (followRemediationEpochs), so every reader - the reconciler,
+// the operator view, the fleet summary - agrees on it.
 func (s *SQLiteOperationStore) ReplayPlan(planID string) (PlanSnapshot, error) {
 	var exists int
 	if err := s.db.QueryRow(`SELECT COUNT(1) FROM plans WHERE id = ?`, planID).Scan(&exists); err != nil {
@@ -377,7 +381,11 @@ func (s *SQLiteOperationStore) ReplayPlan(planID string) (PlanSnapshot, error) {
 	if err != nil {
 		return PlanSnapshot{}, err
 	}
-	return ReducePlan(planID, events)
+	snapshot, err := ReducePlan(planID, events)
+	if err != nil {
+		return snapshot, err
+	}
+	return s.followRemediationEpochs(snapshot)
 }
 
 func validatePlanIdentity(plan domain.EngineeringPlan) error {

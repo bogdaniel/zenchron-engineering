@@ -119,7 +119,7 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 		report.Waiting = held
 		return report, err
 	}
-	snapshot, err := r.replayPlan(planID)
+	snapshot, err := r.Store.ReplayPlan(planID)
 	if err != nil {
 		return report, err
 	}
@@ -184,7 +184,7 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 	}
 	report.Settled = settled
 	if len(settled) > 0 {
-		if snapshot, err = r.replayPlan(planID); err != nil {
+		if snapshot, err = r.Store.ReplayPlan(planID); err != nil {
 			return report, err
 		}
 	}
@@ -197,7 +197,7 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 		return report, err
 	}
 	if staleWork {
-		if snapshot, err = r.replayPlan(planID); err != nil {
+		if snapshot, err = r.Store.ReplayPlan(planID); err != nil {
 			return report, err
 		}
 		// And RE-RESOLVED. The resolution above seeded every stage that had an
@@ -219,7 +219,7 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 		return report, err
 	}
 	if reopened {
-		if snapshot, err = r.replayPlan(planID); err != nil {
+		if snapshot, err = r.Store.ReplayPlan(planID); err != nil {
 			return report, err
 		}
 	}
@@ -271,7 +271,7 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 		}
 	}
 	if attributed {
-		if snapshot, err = r.replayPlan(planID); err != nil {
+		if snapshot, err = r.Store.ReplayPlan(planID); err != nil {
 			return report, err
 		}
 	}
@@ -332,7 +332,7 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 				} else {
 					report.Settled = append(report.Settled, stage.ID)
 				}
-				if snapshot, err = r.replayPlan(planID); err != nil {
+				if snapshot, err = r.Store.ReplayPlan(planID); err != nil {
 					return report, err
 				}
 				// The rest of this pass is abandoned if the approved revision
@@ -372,7 +372,7 @@ func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickR
 				report.Started = append(report.Started, *started)
 			}
 		}
-		if snapshot, err = r.replayPlan(planID); err != nil {
+		if snapshot, err = r.Store.ReplayPlan(planID); err != nil {
 			return report, err
 		}
 	}
@@ -432,7 +432,7 @@ func (r PlanReconciler) recordMissingSupersession(planID string, plan domain.Eng
 	if !appended {
 		return snapshot, nil
 	}
-	return r.replayPlan(planID)
+	return r.Store.ReplayPlan(planID)
 }
 
 // stopRetiredRun cancels a child run whose stage a revision replaced. It is the
@@ -2159,7 +2159,7 @@ type headroom struct{ invocations, wallSeconds int }
 // enough - the pass holds a decoded plan document, and that is what its
 // remaining steps act on.
 func (r PlanReconciler) approvedRevisionMoved(plan domain.EngineeringPlan) (int, error) {
-	snapshot, err := r.replayPlan(plan.ID)
+	snapshot, err := r.Store.ReplayPlan(plan.ID)
 	if err != nil {
 		return 0, err
 	}

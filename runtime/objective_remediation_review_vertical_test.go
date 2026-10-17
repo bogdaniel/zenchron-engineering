@@ -111,22 +111,30 @@ func objectiveIntegrationStages() []domain.PlanStage {
 }
 
 func TestObjectivePlanWorkGraphRecoversFromConflictThenPassesIndependentReviewRemediation(t *testing.T) {
-	runObjectiveRemediationJourney(t, func(t *testing.T, fleet *fleetFixture) *planRunFixture {
-		return newPlanRunFixtureOn(t, fleet.phase8Fixture, objectiveIntegrationStages(), fleet.deps.ConfigDigest)
+	runObjectiveRemediationJourney(t, remediationJourney{}, func(t *testing.T, fleet *fleetFixture, envelope domain.PlanBudgetEnvelope) *planRunFixture {
+		return newPlanRunFixtureWith(t, fleet.phase8Fixture, objectiveIntegrationStages(), fleet.deps.ConfigDigest, envelope)
 	})
 }
 
 // runObjectiveRemediationJourney drives the conflict -> epoch -> review journey
 // over whatever plan newPlan produces: a hand-built one, or one a planner
 // proposed and the real compiler admitted (dynamic_team_acceptance_test.go).
-func runObjectiveRemediationJourney(t *testing.T, newPlan func(*testing.T, *fleetFixture) *planRunFixture) {
+//
+// The plan is approved for the three stage runs and, by default, headroom for the
+// two remediation epochs this journey needs: an epoch is a child run of the plan.
+func runObjectiveRemediationJourney(t *testing.T, journey remediationJourney,
+	newPlan func(*testing.T, *fleetFixture, domain.PlanBudgetEnvelope) *planRunFixture) {
 	fleet := newFleetFixture(t, 4)
 	fleet.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
 	worker := &objectivePlanRemediationWorker{}
 	fleet.deps.Provider = worker
 	fleet.runtime = fleet.newRuntime(fleet.deps)
 
-	plan := newPlan(t, fleet)
+	envelope := journey.envelope
+	if envelope.MaxChildRuns == 0 {
+		envelope = domain.PlanBudgetEnvelope{MaxChildRuns: 6, MaxConcurrency: 3, MaxProviderInvocations: 12}
+	}
+	plan := newPlan(t, fleet, envelope)
 	graphID, err := plan.service.BindObjectivePlan(plan.plan, plan.issue, plan.service.DefaultAgent)
 	if err != nil {
 		t.Fatal(err)
@@ -277,6 +285,10 @@ func runObjectiveRemediationJourney(t *testing.T, newPlan func(*testing.T, *flee
 	// Stage E: the blamed producer's new epoch, then the integrator's own
 	// automatic, policy-authorized reintegration, through the ordinary
 	// scheduler alone.
+	if journey.epochSupervisor != nil {
+		supervisor = journey.epochSupervisor(t, fleet)
+	}
+	runsBefore := len(storedRuns(t, fleet.phase8Fixture))
 	for range 60 {
 		plan.reconcile(t)
 		if _, err := supervisor.Tick(ctx); err != nil {
@@ -286,6 +298,10 @@ func runObjectiveRemediationJourney(t *testing.T, newPlan func(*testing.T, *flee
 		if unit := fleet.graph(graphID).unit(t, "integrate"); unit.Output != nil {
 			break
 		}
+	}
+	if journey.refused {
+		assertEpochRefused(t, fleet, plan, graphID, blamedID, runsBefore)
+		return
 	}
 	finalGraph := fleet.graph(graphID)
 	integrateFinal := finalGraph.unit(t, "integrate")
@@ -309,6 +325,7 @@ func runObjectiveRemediationJourney(t *testing.T, newPlan func(*testing.T, *flee
 	if err != nil || len(integratorAuthorizations) != 1 || integratorAuthorizations[0].AuthorizedBy != RemediationAuthorizedByPolicy {
 		t.Fatalf("integrator's own remediation authorization = %+v (%v), want exactly one policy-authorized grant", integratorAuthorizations, err)
 	}
+	assertStageFollowsEpoch(t, fleet, plan, graphID, blamedID, blamedOriginalRunID, epochs[0].RunID)
 	// Real composed evidence on disk, not a status flag: the integrator's
 	// final candidate carries both the remediated producer's corrected file
 	// and the unaffected producer's original shared.go - a genuine merge.
