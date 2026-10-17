@@ -296,14 +296,20 @@ func (r PlanReconciler) startObjectiveStage(ctx context.Context, engine *Enginee
 	}
 	batch := orchestration.Batch{SchemaVersion: orchestration.BatchSchemaVersion, ID: batchID, Repository: r.Repository, AgentID: engine.deps.Agent.ID,
 		RequestedBy: graph.RequestedBy, CreatedAt: r.now(), Origin: &origin, Items: []orchestration.BatchItem{{Issue: r.Issue, RunID: runID}}}
-	// Frozen at the first write: a replay finds the stored batch and its pin,
-	// whatever configuration has been adopted since.
-	if batch, err = r.Store.pinProductContext(batch); err != nil {
-		return StartOutcome{}, err
-	}
-	stored, _, err := r.Store.CreateOrchestrationBatch(batch)
+	// Frozen at the first write: a replay recovers the stored batch and its pin
+	// BEFORE compiling anything, so a configuration adopted (or broken) since
+	// admission cannot block recovery of a context that is still valid.
+	stored, replayed, err := r.Store.OrchestrationBatch(batchID)
 	if err != nil {
 		return StartOutcome{}, err
+	}
+	if !replayed {
+		if batch, err = r.Store.pinProductContext(batch); err != nil {
+			return StartOutcome{}, err
+		}
+		if stored, _, err = r.Store.CreateOrchestrationBatch(batch); err != nil {
+			return StartOutcome{}, err
+		}
 	}
 	if len(stored.Items) != 1 || stored.Items[0].RunID != runID {
 		return StartOutcome{}, errors.New("objective batch belongs to another plan run")

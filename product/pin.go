@@ -40,6 +40,10 @@ func WorkUnitOwnerRef(graphID, unitID string) string {
 // ContextPin is the frozen identity of a compiled ProductContext.
 type ContextPin struct {
 	ProductID string `json:"product_id"`
+	// Repositories is the product's repository set at admission. It is part of
+	// the context a worker sees, and the product's list can grow, so it is
+	// frozen like the configuration and knowledge.
+	Repositories []string `json:"repositories"`
 	// ConfigurationRevision is the exact revision the unit was admitted with.
 	// Zero means NO configuration was adopted at admission: it is a real pin,
 	// not "unpinned", so a configuration adopted later never reaches the unit.
@@ -56,7 +60,7 @@ type ContextPin struct {
 
 // NewContextPin freezes the identity of a compiled context.
 func NewContextPin(compiled ProductContext) (ContextPin, error) {
-	pin := ContextPin{ProductID: compiled.ProductID}
+	pin := ContextPin{ProductID: compiled.ProductID, Repositories: sortedCopy(compiled.Repositories)}
 	if compiled.Configuration != nil {
 		digest, err := compiled.Configuration.RevisionDigest()
 		if err != nil {
@@ -86,6 +90,14 @@ func (p ContextPin) identity() (string, error) {
 func (p ContextPin) Validate() error {
 	if strings.TrimSpace(p.ProductID) == "" {
 		return errors.New("a product context pin names its product")
+	}
+	if len(p.Repositories) == 0 || len(p.Repositories) > MaxProductRepositories {
+		return fmt.Errorf("product context pin names %d repositories, outside 1..%d", len(p.Repositories), MaxProductRepositories)
+	}
+	for i, repository := range p.Repositories {
+		if strings.TrimSpace(repository) == "" || (i > 0 && repository <= p.Repositories[i-1]) {
+			return errors.New("product context pin repositories are sorted, distinct and non-empty")
+		}
 	}
 	if p.ConfigurationRevision < 0 {
 		return fmt.Errorf("product context pin configuration revision %d is not a revision", p.ConfigurationRevision)
@@ -131,6 +143,14 @@ func (p ContextPin) Resolve(store Store, request ContextRequest) (ProductContext
 	if err != nil {
 		return ProductContext{}, err
 	}
+	// Repositories are append-only, so the current list must still contain
+	// every pinned one; the worker sees the pinned set, not the grown one.
+	for _, repository := range p.Repositories {
+		if !slices.Contains(compiled.Repositories, repository) {
+			return ProductContext{}, fmt.Errorf("product %q no longer contains pinned repository %q", p.ProductID, repository)
+		}
+	}
+	compiled.Repositories = slices.Clone(p.Repositories)
 	pinned := make(map[string]bool, len(p.KnowledgeIDs))
 	for _, id := range p.KnowledgeIDs {
 		pinned[id] = true

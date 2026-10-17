@@ -282,7 +282,9 @@ never exclude the required governance classes.
 **Failure semantics.** Before any model invocation, `workUnit` refuses when: the
 graph is associated and the batch has no pin; the graph has no association but
 the batch is pinned; the pin is for another product; the graph's repository is
-not one of the product's; the run's plan binding differs from the graph's; the
+not one of the repositories the unit was admitted with (the pin freezes the
+product's repository list too, so a repository added later never reaches an
+admitted unit); the run names a batch that does not exist; the run's plan binding differs from the graph's; the
 pinned configuration revision is missing or its content changed; a pinned
 knowledge entry is no longer readable by the unit; or the pin does not match its
 own digest. It never falls back to another product, a current configuration or

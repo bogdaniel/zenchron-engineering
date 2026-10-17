@@ -1,6 +1,7 @@
 package product
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -206,5 +207,30 @@ func TestPinValidateRefusesMalformedPins(t *testing.T) {
 	}
 	if err := f.pin.Validate(); err != nil {
 		t.Fatalf("the untouched pin must validate: %v", err)
+	}
+}
+
+func TestAGrownRepositoryListDoesNotReachAPinnedUnit(t *testing.T) {
+	f := newPinFixture(t)
+	grown := f.product
+	grown.Repositories = append(append([]string{}, grown.Repositories...), "example/added-later")
+	grown.Revision++
+	f.store.products[grown.ID] = grown
+
+	resolved, err := f.pin.Resolve(f.store, f.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(resolved.Repositories, sortedCopy(f.product.Repositories)) {
+		t.Fatalf("the unit must keep its admitted repositories %v, got %v", f.product.Repositories, resolved.Repositories)
+	}
+
+	shrunk := f.product
+	shrunk.Repositories = shrunk.Repositories[:1]
+	f.store.products[shrunk.ID] = shrunk
+	if len(f.product.Repositories) > 1 {
+		if _, err := f.pin.Resolve(f.store, f.request); err == nil {
+			t.Fatal("a pinned repository that left the product must be refused")
+		}
 	}
 }

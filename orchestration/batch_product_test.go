@@ -19,7 +19,7 @@ func unitBatch(t *testing.T, pin *product.ContextPin) Batch {
 }
 
 func TestAProductPinIsNotPartOfTheBatchIdentity(t *testing.T) {
-	pin, err := product.NewContextPin(product.ProductContext{ProductID: "product-1"})
+	pin, err := product.NewContextPin(product.ProductContext{ProductID: "product-1", Repositories: []string{"acme/repo"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestAProductPinIsNotPartOfTheBatchIdentity(t *testing.T) {
 }
 
 func TestABatchRefusesAMalformedOrOrphanedProductPin(t *testing.T) {
-	pin, err := product.NewContextPin(product.ProductContext{ProductID: "product-1"})
+	pin, err := product.NewContextPin(product.ProductContext{ProductID: "product-1", Repositories: []string{"acme/repo"}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -846,3 +846,78 @@ func TestTheReconcilerCreatesAReviewerStageRunWithTheProductPin(t *testing.T) {
 		t.Fatalf("the reviewer stage's pin is wrong: %+v", run.Plan.Product)
 	}
 }
+
+// TestObjectiveStageReplayRecoversItsFrozenBatchWithoutRecompiling: a replayed
+// admission finds the stored batch and its pin first. A product that can no
+// longer be compiled now (here: its revisions are gone) must not block
+// recovery of a context that was frozen while it could.
+func TestObjectiveStageReplayRecoversItsFrozenBatchWithoutRecompiling(t *testing.T) {
+	fleet := newFleetFixture(t, 4)
+	fleet.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
+	fleet.deps.Provider = &objectivePlanRemediationWorker{}
+	fleet.runtime = fleet.newRuntime(fleet.deps)
+	f := &productUnitFixture{fleetFixture: fleet, supervisor: fleet.supervisor(), at: fleet.clock.Now()}
+	plan := newPlanRunFixtureOn(t, fleet.phase8Fixture, []domain.PlanStage{
+		{ID: "backend", Kind: domain.StageAgent, Role: domain.RoleImplementer,
+			Objective:            "Implement the backend. " + integrationUnitMarker("a"),
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange, domain.CapabilityRepositoryAnalysis},
+			InvocationMode:       domain.InvocationModeMutating},
+	}, fleet.deps.ConfigDigest)
+	graphID, err := plan.service.BindObjectivePlan(plan.plan, plan.issue, plan.service.DefaultAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := f.seedProduct("storefront", map[string]string{"tier": "standard"})
+	if err := plan.service.AssociateProductGraph(p.ID, graphID); err != nil {
+		t.Fatal(err)
+	}
+	plan.approve(t)
+	var runID string
+	for range 40 {
+		plan.reconcile(t)
+		snapshot, err := fleet.store.ReplayPlan(plan.plan.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runID = snapshot.Stages["backend"].RunID; runID != "" {
+			break
+		}
+		fleet.clock.advance(61 * time.Second)
+	}
+	if runID == "" {
+		t.Fatal("the reconciler never started the backend stage")
+	}
+	run, _ := storedRun(t, fleet.phase8Fixture, runID)
+	admitted, _, err := fleet.store.OrchestrationBatch(run.Orchestration.BatchID)
+	if err != nil || admitted.Product == nil {
+		t.Fatalf("the backend unit was not admitted with a pin: %v %+v", err, admitted.Product)
+	}
+
+	for _, table := range []string{"product_configuration_revisions", "product_revisions"} {
+		if _, err := fleet.store.db.Exec("DELETE FROM " + table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stage := plan.plan.Stages[0]
+	outcome, err := plan.reconciler.startObjectiveStage(context.Background(), fleet.runtime, plan.plan, stage, *run.Plan)
+	if err != nil {
+		t.Fatalf("a replayed admission must recover its stored batch, not recompile: %v", err)
+	}
+	if outcome.RunID != runID {
+		t.Fatalf("replay produced another run: %s then %s", runID, outcome.RunID)
+	}
+}
+
+// TestARunBoundToAMissingBatchRefusesInsteadOfRunningWithoutContext: the run
+// names the batch that created it, so a batch that cannot be found is a broken
+// binding, never "no context". A stored batch with no origin stays compatible.
+func TestARunBoundToAMissingBatchRefusesInsteadOfRunningWithoutContext(t *testing.T) {
+	f := newProductUnitFixture(t)
+	state := &runState{run: EngineeringRun{ID: "run-1", Orchestration: &RunOrchestrationBinding{BatchID: "batch-that-does-not-exist"}}}
+	if _, err := f.runtime.workUnit(state, nil); err == nil {
+		t.Fatal("a run bound to a missing batch must be refused")
+	}
+	if got, err := f.runtime.workUnit(&runState{}, nil); err != nil || got.product != nil || got.upstream != nil {
+		t.Fatalf("a run with no orchestration binding keeps running without context: %v %+v", err, got)
+	}
+}

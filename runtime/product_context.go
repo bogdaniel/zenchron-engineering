@@ -122,12 +122,8 @@ func (r *EngineeringRuntime) unitProductContext(state *runState, origin orchestr
 	if err := requireGraphPlanBinding(graph, state.run.Plan); err != nil {
 		return nil, err
 	}
-	owner, found, err := r.deps.Store.CurrentProduct(productID)
-	if err != nil {
-		return nil, err
-	}
-	if !found || !slices.Contains(owner.Repositories, graph.Repository) {
-		return nil, fmt.Errorf("work graph %s's repository %s is not a member of product %s", graph.ID, graph.Repository, productID)
+	if !slices.Contains(pin.Repositories, graph.Repository) {
+		return nil, fmt.Errorf("work graph %s's repository %s is not a member of product %s as the unit was admitted", graph.ID, graph.Repository, productID)
 	}
 	entitled, err := receivesProductContext(graph, origin.UnitID, assignment)
 	if err != nil || !entitled {

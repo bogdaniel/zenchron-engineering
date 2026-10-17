@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"fmt"
+
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/execution"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
@@ -46,7 +48,10 @@ func (r *EngineeringRuntime) workUnit(state *runState, assignment *domain.AgentA
 	if err != nil {
 		return workUnitContext{}, err
 	}
-	if !found || batch.Origin == nil {
+	if !found {
+		return workUnitContext{}, fmt.Errorf("run %s is bound to orchestration batch %s, which does not exist", state.run.ID, state.run.Orchestration.BatchID)
+	}
+	if batch.Origin == nil {
 		return workUnitContext{}, nil
 	}
 	compiled, err := r.unitProductContext(state, *batch.Origin, batch.Product, assignment)
