@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 	"github.com/bogdaniel/zenchron-engineering/planning"
+	"github.com/bogdaniel/zenchron-engineering/product"
 )
 
 // BindObjectivePlan compiles operational units without granting execution
@@ -66,6 +68,58 @@ func (s PlanService) BindObjectivePlan(plan domain.EngineeringPlan, issue int, a
 	}
 	_, _, err = s.Store.AdoptWorkGraphRevision(graph)
 	return graph.ID, err
+}
+
+// AssociateProductGraph binds an objective's compiled WorkGraph to the
+// product the operator selected at intake (#471/#479). Empty productID is
+// "no product chosen" and associates nothing - an objective proposed without
+// a product stays exactly as unassociated as before this existed.
+//
+// It fails closed through the existing #476 store boundary: an unknown
+// product, or a graph already claimed by a DIFFERENT product, refuses rather
+// than silently leaving the graph unassociated or switching ownership.
+func (s PlanService) AssociateProductGraph(productID, graphID string) error {
+	if productID == "" {
+		return nil
+	}
+	association, err := product.NewGraphAssociation(productID, graphID, s.now())
+	if err != nil {
+		return err
+	}
+	_, err = s.Store.AssociateWorkGraph(association)
+	return err
+}
+
+// RequireProductIfChosen refuses before anything else is spent: an objective
+// proposed for a product that was never adopted, or that never named this
+// OBJECTIVE'S OWN repository, names a product AssociateProductGraph is
+// guaranteed to refuse once the plan and graph are already durably written
+// and a provider invocation already ran. Checking it first - once the
+// repository is resolved, but before planning - means that cost is never
+// spent on a proposal this certain to fail.
+//
+// This is advisory, not the authority: a product's repository list can be
+// revised, so the only thing that can change between this check and the
+// later write is repositories being ADDED or REMOVED from a product, never
+// the product disappearing (no deletion path exists). AssociateWorkGraph's
+// own transactional membership check remains the authoritative final
+// defense against that race; this merely avoids paying for a proposal that
+// is overwhelmingly certain to be refused there anyway.
+func (s PlanService) RequireProductIfChosen(productID, repository string) error {
+	if productID == "" {
+		return nil
+	}
+	owner, found, err := s.Store.CurrentProduct(productID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("product %s does not exist", productID)
+	}
+	if !slices.Contains(owner.Repositories, repository) {
+		return fmt.Errorf("repository %s is not a member of product %s", repository, productID)
+	}
+	return nil
 }
 
 // Reviewers and typed gates consume candidate units; they retain their own

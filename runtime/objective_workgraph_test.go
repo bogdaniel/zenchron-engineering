@@ -67,6 +67,47 @@ func TestObjectiveGraphRequiresApprovalAndRetainsFrozenStageBindings(t *testing.
 	}
 }
 
+// TestBindObjectivePlanRefusesAnIdempotentReplayOnceAStageHasStarted pins the
+// exact ordering defect cmd/zenchron-engineering/objective.go's
+// resumeObjectiveGraph (#611 hardening) must route AROUND rather than rely
+// on being fixed: BindObjectivePlan checks for a live run on every stage
+// BEFORE checking whether the graph it would (re)bind already exists and
+// matches exactly. So calling it again - even as a pure idempotent replay,
+// same plan, same digest, same already-adopted graph - is refused once any
+// stage has actually started, not merely once a DIFFERENT graph would be
+// adopted over live work. A caller that needs this to stay idempotent after
+// execution begins (an ordinary resend of an objective that has simply
+// started) must check for an existing matching graph itself and skip this
+// call entirely, which is exactly what resumeObjectiveGraph does.
+func TestBindObjectivePlanRefusesAnIdempotentReplayOnceAStageHasStarted(t *testing.T) {
+	fleet := newFleetFixture(t, 2)
+	fleet.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
+	engine, err := NewEngineeringRuntime(fleet.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fleet.runtime = engine
+	fixture := newPlanRunFixtureOn(t, fleet.phase8Fixture, parallelStages(), fleet.deps.ConfigDigest)
+	if _, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue, fixture.service.DefaultAgent); err != nil {
+		t.Fatal(err)
+	}
+	fixture.approve(t)
+	if report := fixture.reconcile(t); len(report.Started) != 2 {
+		t.Fatalf("approved independent stages did not start: %+v", report)
+	}
+	runs, err := fixture.store.Runs()
+	if err != nil || len(runs) != 2 {
+		t.Fatalf("precondition: want exactly two started runs, got %+v, %v", runs, err)
+	}
+
+	// Same plan, same revision, same digest - BindObjectivePlan would adopt
+	// the IDENTICAL graph it already adopted. It refuses anyway.
+	if _, err := fixture.service.BindObjectivePlan(fixture.plan, fixture.issue, fixture.service.DefaultAgent); err == nil ||
+		!strings.Contains(err.Error(), "already-started plan work") {
+		t.Fatalf("expected the already-started guard to refuse an idempotent replay, got: %v", err)
+	}
+}
+
 func TestObjectiveStagesDeferPublicationUntilDownstreamReviewAndGatesFinish(t *testing.T) {
 	fleet := newFleetFixture(t, 2)
 	fleet.deps.Repository.DefaultBranch = "main"

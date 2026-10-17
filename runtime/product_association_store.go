@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 	"github.com/bogdaniel/zenchron-engineering/product"
@@ -28,15 +29,26 @@ func (s *SQLiteOperationStore) AssociateWorkGraph(association product.GraphAssoc
 	}
 	defer tx.Rollback()
 
-	if _, found, err := currentProductTx(tx, association.ProductID); err != nil {
+	owner, found, err := currentProductTx(tx, association.ProductID)
+	if err != nil {
 		return false, err
 	} else if !found {
 		return false, fmt.Errorf("product %s does not exist", association.ProductID)
 	}
-	if _, found, err := currentWorkGraphTx(tx, association.GraphID); err != nil {
+	graph, found, err := currentWorkGraphTx(tx, association.GraphID)
+	if err != nil {
 		return false, err
 	} else if !found {
 		return false, fmt.Errorf("work graph %s does not exist", association.GraphID)
+	}
+	// The authoritative boundary, not objective intake's repository filter: a
+	// graph whose repository the product never named is refused rather than
+	// silently granting that graph's units the product's configuration and
+	// knowledge context. Two products may still legally share a repository -
+	// this only requires EACH to actually list it.
+	if !slices.Contains(owner.Repositories, graph.Repository) {
+		return false, fmt.Errorf("work graph %s's repository %s is not a member of product %s",
+			association.GraphID, graph.Repository, association.ProductID)
 	}
 
 	result, err := tx.Exec(`INSERT INTO product_graph_associations (graph_id, product_id, associated_unix_nano)
