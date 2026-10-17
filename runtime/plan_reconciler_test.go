@@ -107,9 +107,14 @@ func newPlanRunFixtureOn(t *testing.T, base *phase8Fixture, stages []domain.Plan
 
 func newPlanRunFixtureWith(t *testing.T, base *phase8Fixture, stages []domain.PlanStage, config ConfigDigest, envelope domain.PlanBudgetEnvelope) *planRunFixture {
 	t.Helper()
+	return newNamedPlanRunFixture(t, base, "plan-fixture", stages, config, envelope)
+}
+
+func newNamedPlanRunFixture(t *testing.T, base *phase8Fixture, planID string, stages []domain.PlanStage, config ConfigDigest, envelope domain.PlanBudgetEnvelope) *planRunFixture {
+	t.Helper()
 	fixture := newPlanRunHarnessWith(base, config, envelope)
 	plan := domain.EngineeringPlan{
-		SchemaVersion: domain.SchemaVersion, ID: "plan-fixture", Revision: 1,
+		SchemaVersion: domain.SchemaVersion, ID: planID, Revision: 1,
 		Objective:      "Make the widget idempotent.",
 		Subject:        domain.Subject{Repository: "acme/repo", Revision: base.base},
 		BudgetEnvelope: envelope,
