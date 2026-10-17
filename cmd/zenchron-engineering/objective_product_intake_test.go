@@ -40,6 +40,17 @@ func objectiveIntakeFixture(t *testing.T, issue int) (*composition, *runtime.Sup
 	return built, supervisor, forge
 }
 
+func approveTestPlan(t *testing.T, plans runtime.PlanService, planID string, revision int, digest string) {
+	t.Helper()
+	view, err := plans.ViewRevision(planID, revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plans.Approve(planID, revision, digest, view.AssignmentsDigest, "operator", "test approval"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func adoptTestProduct(t *testing.T, built *composition, name string, repositories []string) string {
 	t.Helper()
 	id, err := product.ProductID(name)
@@ -124,6 +135,62 @@ func TestObjectiveIntakeRefusesAConflictingProductOnRetry(t *testing.T) {
 	owner, found, err := built.store.AssociatedProduct(graphID)
 	if err != nil || !found || owner != productA {
 		t.Fatalf("ownership must not move: owner=%q found=%t err=%v, want %q", owner, found, err, productA)
+	}
+}
+
+// 3b. A FIRST-TIME product association is refused once the objective has
+// been approved - not merely once a stage has actually started. Product
+// association determines which product's configuration and knowledge
+// context a WorkGraph's units may read; attaching that after approval
+// would change the meaning of work that was approved without it. Nothing
+// is partially recorded by the refusal.
+func TestObjectiveIntakeRefusesFirstTimeProductAssociationAfterApproval(t *testing.T) {
+	built, supervisor, _ := objectiveIntakeFixture(t, 41)
+	plans, err := built.planService()
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := built.revisePlan(context.Background(), supervisor, objectiveRequest(41, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	approveTestPlan(t, plans, view.Plan.ID, view.Plan.Revision, view.Plan.Digest)
+
+	productA := adoptTestProduct(t, built, "storefront", []string{"zenchron/seeded"})
+	if _, err := built.revisePlan(context.Background(), supervisor, objectiveRequest(41, productA)); err == nil {
+		t.Fatal("a first-time product association after approval should be refused")
+	}
+	if _, found, err := built.store.AssociatedProduct(view.WorkGraphID); err != nil || found {
+		t.Fatalf("a refused association must not be partially recorded: found=%t err=%v", found, err)
+	}
+}
+
+// 3c. A resend naming the product a graph is ALREADY associated with stays
+// idempotent even after approval - this is ordinary resend territory, not
+// a new assignment, and must not be confused with 3b's first-time case.
+func TestObjectiveIntakeAllowsSameProductResendAfterApproval(t *testing.T) {
+	built, supervisor, _ := objectiveIntakeFixture(t, 41)
+	plans, err := built.planService()
+	if err != nil {
+		t.Fatal(err)
+	}
+	productA := adoptTestProduct(t, built, "storefront", []string{"zenchron/seeded"})
+	view, err := built.revisePlan(context.Background(), supervisor, objectiveRequest(41, productA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	approveTestPlan(t, plans, view.Plan.ID, view.Plan.Revision, view.Plan.Digest)
+
+	resent, err := built.revisePlan(context.Background(), supervisor, objectiveRequest(41, productA))
+	if err != nil {
+		t.Fatalf("a resend naming the already-associated product after approval should stay idempotent: %v", err)
+	}
+	if resent.WorkGraphID != view.WorkGraphID {
+		t.Fatalf("resend changed the graph: got %s, want %s", resent.WorkGraphID, view.WorkGraphID)
+	}
+	owner, found, err := built.store.AssociatedProduct(view.WorkGraphID)
+	if err != nil || !found || owner != productA {
+		t.Fatalf("association must remain: owner=%q found=%t err=%v, want %q", owner, found, err, productA)
 	}
 }
 
@@ -398,28 +465,53 @@ func TestObjectiveIntakeResendIsSerializedWithThePlanLock(t *testing.T) {
 	}
 }
 
+// adoptObjectiveGraphFixture adopts a real WorkGraph whose ObjectivePlan
+// reference is exactly the given plan identity - the one thing
+// orchestration.WorkGraphProposal.Compose (a flat, non-objective graph) never
+// sets, and exactly what resumeObjectiveGraph's revision/digest match checks.
+func adoptObjectiveGraphFixture(t *testing.T, built *composition, name, repository, agentID, planID string, revision int, digest string) orchestration.WorkGraph {
+	t.Helper()
+	id, err := orchestration.WorkGraphID(repository, agentID, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph := orchestration.WorkGraph{SchemaVersion: orchestration.WorkGraphSchemaVersion, ID: id, Name: name,
+		Repository: repository, AgentID: agentID, Revision: 1, CreatedAt: time.Now().UTC(),
+		ObjectivePlan: &domain.PlanRef{ID: planID, Revision: revision, Digest: digest},
+		Units:         []orchestration.WorkUnit{{ID: "a", Purpose: "do the work", Role: "implementer", Issue: 41}}}
+	if err := graph.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := built.store.AdoptWorkGraphRevision(graph); err != nil {
+		t.Fatal(err)
+	}
+	return graph
+}
+
 // TestResumeObjectiveGraphReusesAnExistingGraphWithoutRebuilding is the
 // direct, low-cost proof companion to
 // TestBindObjectivePlanRefusesAnIdempotentReplayOnceAStageHasStarted
 // (runtime/objective_workgraph_test.go): resumeObjectiveGraph must return an
-// already-bound graph id directly, never calling BindObjectivePlan at all.
-// The PlanView here names a plan id that was never actually proposed -
-// BindObjectivePlan would error immediately if resumeObjectiveGraph called
-// it despite WorkGraphID already being set, which is exactly how this
-// catches a regression back to "always rebuild".
+// already-bound, exactly-matching graph id directly, never calling
+// BindObjectivePlan at all. The PlanView here names a plan id that was never
+// actually proposed to the plan store - BindObjectivePlan would error
+// immediately if resumeObjectiveGraph called it despite the graph already
+// matching, which is exactly how this catches a regression back to "always
+// rebuild".
 func TestResumeObjectiveGraphReusesAnExistingGraphWithoutRebuilding(t *testing.T) {
 	built, _, _ := objectiveIntakeFixture(t, 41)
 	plans, err := built.planService()
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh := runtime.PlanView{WorkGraphID: "graph-already-bound", Plan: domain.EngineeringPlan{ID: "plan-never-proposed"}}
+	graph := adoptObjectiveGraphFixture(t, built, "objective-plan-never-proposed", "zenchron/seeded", "codex", "plan-never-proposed", 1, "digest-abc")
+	fresh := runtime.PlanView{WorkGraphID: graph.ID, Plan: domain.EngineeringPlan{ID: "plan-never-proposed", Revision: 1, Digest: "digest-abc"}}
 	graphID, err := built.resumeObjectiveGraph(plans, fresh, 41, autonomyFlags{}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if graphID != "graph-already-bound" {
-		t.Fatalf("resumeObjectiveGraph rebuilt instead of reusing: got %s, want graph-already-bound", graphID)
+	if graphID != graph.ID {
+		t.Fatalf("resumeObjectiveGraph rebuilt instead of reusing: got %s, want %s", graphID, graph.ID)
 	}
 }
 
@@ -434,16 +526,8 @@ func TestResumeObjectiveGraphRefusesAConflictingRequestedAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	graph, err := orchestration.WorkGraphProposal{Name: "objective-plan-never-proposed", Revision: 1, Units: []orchestration.WorkUnit{
-		{ID: "a", Purpose: "do the work", Role: "implementer", Issue: 41},
-	}}.Compose("zenchron/seeded", "codex", "operator@example", time.Now().UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := built.store.AdoptWorkGraphRevision(graph); err != nil {
-		t.Fatal(err)
-	}
-	fresh := runtime.PlanView{WorkGraphID: graph.ID, Plan: domain.EngineeringPlan{ID: "plan-never-proposed"}}
+	graph := adoptObjectiveGraphFixture(t, built, "objective-plan-never-proposed", "zenchron/seeded", "codex", "plan-never-proposed", 1, "digest-abc")
+	fresh := runtime.PlanView{WorkGraphID: graph.ID, Plan: domain.EngineeringPlan{ID: "plan-never-proposed", Revision: 1, Digest: "digest-abc"}}
 
 	if _, err := built.resumeObjectiveGraph(plans, fresh, 41, autonomyFlags{}, "claude"); err == nil {
 		t.Fatal("a resend naming a different agent than the graph's own should be refused")
@@ -461,6 +545,31 @@ func TestResumeObjectiveGraphRefusesAConflictingRequestedAgent(t *testing.T) {
 	}
 	if graphID != graph.ID {
 		t.Fatalf("no requested agent should reuse the graph without checking: got %s, want %s", graphID, graph.ID)
+	}
+}
+
+// TestResumeObjectiveGraphNeverReusesAGraphBoundToADifferentRevision proves
+// the exact-binding check: objectiveGraphFor (which computed WorkGraphID)
+// matches by plan ID alone, never revision, so a graph bound to a DIFFERENT
+// revision/digest than the one actually being represented must never be
+// silently reused as-is - it must fall through to BindObjectivePlan
+// instead, which correctly refuses a plan revision this synthetic test
+// never actually proposed. The call failing (rather than succeeding with
+// the stale id) is itself the proof that blind reuse was skipped.
+func TestResumeObjectiveGraphNeverReusesAGraphBoundToADifferentRevision(t *testing.T) {
+	built, _, _ := objectiveIntakeFixture(t, 41)
+	plans, err := built.planService()
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph := adoptObjectiveGraphFixture(t, built, "objective-plan-x", "zenchron/seeded", "codex", "plan-x", 1, "digest-rev1")
+	// fresh represents revision 2; the graph is still bound to revision 1 -
+	// the exact shape an explicit revision's bind that crashed before
+	// completing would leave behind.
+	fresh := runtime.PlanView{WorkGraphID: graph.ID, Plan: domain.EngineeringPlan{ID: "plan-x", Revision: 2, Digest: "digest-rev2"}}
+
+	if _, err := built.resumeObjectiveGraph(plans, fresh, 41, autonomyFlags{}, ""); err == nil {
+		t.Fatal("a graph bound to a stale revision must never be silently reused")
 	}
 }
 
