@@ -1399,10 +1399,15 @@ func bindIntegrationHandoffAdmit(s *runState) (string, bool) {
 	// handoff already implicitly waits for by settling goal_state_reached
 	// only once bindAssuranceSemantic itself has nothing left to plan.
 	// A contract that cannot be rebuilt is not a contract that requires no
-	// semantic evidence: only a successful empty answer waives it.
+	// semantic evidence, and it is not one that a recorded verdict can vouch
+	// for either: only a successful empty answer waives it, and only a fresh
+	// passing verdict satisfies a non-empty one.
 	if s.rt.deps.SemanticAssurance != nil {
 		claims, err := s.semanticClaims()
-		if semantic := s.projection.SemanticAssurance; (err != nil || len(claims) > 0) && (semantic == nil || semantic.Stale || !semantic.Passed) {
+		if err != nil {
+			return "", false
+		}
+		if semantic := s.projection.SemanticAssurance; len(claims) > 0 && (semantic == nil || semantic.Stale || !semantic.Passed) {
 			return "", false
 		}
 	}

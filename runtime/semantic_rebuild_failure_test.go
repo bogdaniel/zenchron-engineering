@@ -37,20 +37,32 @@ func TestAContractRebuildFailureNeverWaivesRequiredSemanticAssurance(t *testing.
 		t.Fatal("a failed rebuild was digested as an empty claim set, binding a permanent refusal to it")
 	}
 	// An integration unit's handoff must keep waiting for semantic evidence it
-	// cannot prove is unnecessary.
+	// cannot prove is unnecessary - with no verdict, and equally with a fresh
+	// passing one already recorded, which cannot vouch for a contract that
+	// can no longer be read.
 	broken.origin = &orchestration.BatchOrigin{ExecutionKind: orchestration.ExecutionKindIntegrationCompose}
-	semantic := broken.projection.SemanticAssurance
+	recorded := broken.projection.SemanticAssurance
+	if recorded == nil || recorded.Stale || !recorded.Passed {
+		t.Fatalf("this scenario needs fresh passing semantic evidence already recorded: %+v", recorded)
+	}
+	if key, wanted := bindIntegrationHandoffAdmit(broken); wanted || key != "" {
+		t.Fatal("a recorded passing verdict admitted an integration handoff past a contract that could not be rebuilt")
+	}
 	broken.projection.SemanticAssurance = nil
 	if key, wanted := bindIntegrationHandoffAdmit(broken); wanted || key != "" {
 		t.Fatal("an integration handoff was admitted past a contract that could not be rebuilt")
 	}
-	broken.projection.SemanticAssurance = semantic
 
 	if err := os.Rename(dir+".away", dir); err != nil {
 		t.Fatal(err)
 	}
-	recovered, err := fixture.state(runID).semanticClaims()
+	restored := fixture.state(runID)
+	recovered, err := restored.semanticClaims()
 	if err != nil || !reflect.DeepEqual(recovered, healthy) {
 		t.Fatalf("the claims did not recover with the workspace: %v", err)
+	}
+	restored.origin = broken.origin
+	if key, wanted := bindIntegrationHandoffAdmit(restored); !wanted || key == "" {
+		t.Fatal("the integration handoff did not recover once the contract could be rebuilt")
 	}
 }
