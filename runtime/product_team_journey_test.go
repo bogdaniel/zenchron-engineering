@@ -422,9 +422,14 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 	if err != nil {
 		t.Fatal(err)
 	}
-	head, assured, authorized, observedPR := integrate.Output.CandidateRevision, false, false, false
+	head, assured, observedPR := integrate.Output.CandidateRevision, false, false
+	publication := domain.Action{Type: PublicationActionType, Target: fleet.deps.Repository.DefaultBranch}
+	var lastHeadChange, authorizedAt int64
 	for _, event := range integrateEvents {
 		switch event.Type {
+		case EventCandidateChanged, EventCandidateCommitted, EventCandidateCheckpointed, EventCandidateBaseIntegrated, EventCandidateExternalChanged:
+			lastHeadChange = event.Sequence
+			authorizedAt = 0 // an authorization older than the head it would publish is not one
 		case EventAssuranceObserved:
 			var observed AssuranceObservedPayload
 			if err := json.Unmarshal(event.Payload, &observed); err != nil {
@@ -439,7 +444,9 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 			if err := json.Unmarshal(event.Payload, &evaluated); err != nil {
 				t.Fatal(err)
 			}
-			authorized = authorized || evaluated.Status == domain.AuthorityAuthorized
+			if evaluated.Action == publication && evaluated.Status == domain.AuthorityAuthorized {
+				authorizedAt = event.Sequence
+			}
 		case EventGitHubPRObserved:
 			var observed GitHubPRObservedPayload
 			if err := json.Unmarshal(event.Payload, &observed); err != nil {
@@ -451,8 +458,9 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 			observedPR = true
 		}
 	}
-	if !assured || !authorized || !observedPR {
-		t.Fatalf("the published head lacks passing assurance (%t), an authorized decision (%t) or a bound pull request (%t)", assured, authorized, observedPR)
+	if !assured || !observedPR || authorizedAt <= lastHeadChange {
+		t.Fatalf("the published head lacks passing assurance (%t), a bound pull request (%t), or a publication authorization (seq %d) after its last head change (seq %d)",
+			assured, observedPR, authorizedAt, lastHeadChange)
 	}
 	events, err := fleet.store.Events(backendRun)
 	if err != nil {

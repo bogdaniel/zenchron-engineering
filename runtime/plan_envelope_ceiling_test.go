@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -49,5 +51,23 @@ func TestThePlanConcurrencyCeilingStartsOneOfTwoReadyStages(t *testing.T) {
 	}
 	if !gated {
 		t.Fatalf("the second stage was not blocked on concurrency: %#v", report.Blocked)
+	}
+}
+
+// A stated monetary ceiling that no provider reports against is refused at
+// proposal: the plan must not look as if it honors a limit nothing enforces.
+func TestAProposalUnderACostCeilingNothingEnforcesIsRefused(t *testing.T) {
+	fleet := newFleetFixture(t, 4)
+	envelope := defaultPlanFixtureEnvelope
+	ceiling := int64(1000)
+	envelope.MaxCostMicros = &ceiling
+	answer := plannerAnswer(t, []domain.PlanStage{producerStage("only", "a")})
+	_, _, err := proposeTeamWithin(t, fleet.phase8Fixture, fleet.deps.ConfigDigest, answer, envelope)
+	var refused *PlanRefusedError
+	if !errors.As(err, &refused) || !strings.Contains(refused.Detail, "max_cost_micros") {
+		t.Fatalf("a proposal under an unenforceable cost ceiling was not refused: %v", err)
+	}
+	if _, found, err := fleet.store.Plan("plan-fixture"); err != nil || found {
+		t.Fatalf("a refused proposal became a plan: found=%v err=%v", found, err)
 	}
 }

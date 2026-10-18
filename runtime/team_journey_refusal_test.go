@@ -87,8 +87,10 @@ func TestABlockedReviewOfTheIntegratorsCandidateNeverReleasesPublication(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if review := snapshot.Stages["review"].Review; review != nil && review.Verdict == StageReviewAccepted {
-		t.Fatalf("a blocking reviewer produced an accepting verdict: %+v", review)
+	// The refusal is a recorded fact about the exact head, not an absence.
+	review := snapshot.Stages["review"].Review
+	if review == nil || review.Verdict != StageReviewBlocked || review.Candidate != integrate.Output.CandidateRevision {
+		t.Fatalf("no blocking verdict is bound to the integrator's admitted head %s: %+v", integrate.Output.CandidateRevision, review)
 	}
 	if final := fleet.state(integrate.RunID); !final.publicationDeferred {
 		t.Fatal("publication is not deferred for a candidate whose review blocked it")

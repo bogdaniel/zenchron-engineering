@@ -406,7 +406,9 @@ max_wall_seconds           total ACTIVE execution wall time across the plan:
 max_cost_micros            optional, and usually absent
 ```
 
-Cost is reported only where the provider or runtime actually reports it. A
+Proposing a plan under a configured `plan.max_cost_micros` is refused: no execution provider
+reports cost to a plan and no stage budget carries a cost bound, so a stated
+ceiling would be silently unenforced. Cost is reported only where the provider or runtime actually reports it. A
 subscription CLI reports none, and unknown stays **unknown** in the approval view
 and everywhere else. It is never rendered as zero, and no currency figure is
 invented.
