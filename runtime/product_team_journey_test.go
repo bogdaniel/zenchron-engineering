@@ -10,6 +10,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -414,6 +415,52 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 	final := fleet.state(integrate.RunID)
 	if final.projection.PullRequest == nil || final.projection.CandidateRevision != integrate.Output.CandidateRevision {
 		t.Fatalf("the integrator candidate %s was not published: deferred=%v reason=%v", integrate.Output.CandidateRevision, final.publicationDeferred, final.snapshot.Reason)
+	}
+	// The published head carries its own assurance evidence and an authorizing
+	// decision, all bound to the integrator's exact admitted revision.
+	integrateEvents, err := fleet.store.Events(integrate.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, assured, observedPR := integrate.Output.CandidateRevision, false, false
+	publication := domain.Action{Type: PublicationActionType, Target: fleet.deps.Repository.DefaultBranch}
+	var lastHeadChange, authorizedAt int64
+	for _, event := range integrateEvents {
+		switch event.Type {
+		case EventCandidateChanged, EventCandidateCommitted, EventCandidateCheckpointed, EventCandidateBaseIntegrated, EventCandidateExternalChanged:
+			lastHeadChange = event.Sequence
+			authorizedAt = 0 // an authorization older than the head it would publish is not one
+		case EventAssuranceObserved:
+			var observed AssuranceObservedPayload
+			if err := json.Unmarshal(event.Payload, &observed); err != nil {
+				t.Fatal(err)
+			}
+			if observed.Commit != head {
+				t.Fatalf("assurance observed %s, not the integrator's head %s", observed.Commit, head)
+			}
+			assured = assured || observed.Passed
+		case EventAuthorityEvaluated:
+			var evaluated AuthorityEvaluatedPayload
+			if err := json.Unmarshal(event.Payload, &evaluated); err != nil {
+				t.Fatal(err)
+			}
+			if evaluated.Action == publication && evaluated.Status == domain.AuthorityAuthorized {
+				authorizedAt = event.Sequence
+			}
+		case EventGitHubPRObserved:
+			var observed GitHubPRObservedPayload
+			if err := json.Unmarshal(event.Payload, &observed); err != nil {
+				t.Fatal(err)
+			}
+			if observed.HeadRevision != head {
+				t.Fatalf("the published pull request carries %s, not the integrator's head %s", observed.HeadRevision, head)
+			}
+			observedPR = true
+		}
+	}
+	if !assured || !observedPR || authorizedAt <= lastHeadChange {
+		t.Fatalf("the published head lacks passing assurance (%t), a bound pull request (%t), or a publication authorization (seq %d) after its last head change (seq %d)",
+			assured, observedPR, authorizedAt, lastHeadChange)
 	}
 	events, err := fleet.store.Events(backendRun)
 	if err != nil {
