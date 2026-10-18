@@ -10,6 +10,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -414,6 +415,44 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 	final := fleet.state(integrate.RunID)
 	if final.projection.PullRequest == nil || final.projection.CandidateRevision != integrate.Output.CandidateRevision {
 		t.Fatalf("the integrator candidate %s was not published: deferred=%v reason=%v", integrate.Output.CandidateRevision, final.publicationDeferred, final.snapshot.Reason)
+	}
+	// The published head carries its own assurance evidence and an authorizing
+	// decision, all bound to the integrator's exact admitted revision.
+	integrateEvents, err := fleet.store.Events(integrate.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, assured, authorized, observedPR := integrate.Output.CandidateRevision, false, false, false
+	for _, event := range integrateEvents {
+		switch event.Type {
+		case EventAssuranceObserved:
+			var observed AssuranceObservedPayload
+			if err := json.Unmarshal(event.Payload, &observed); err != nil {
+				t.Fatal(err)
+			}
+			if observed.Commit != head {
+				t.Fatalf("assurance observed %s, not the integrator's head %s", observed.Commit, head)
+			}
+			assured = assured || observed.Passed
+		case EventAuthorityEvaluated:
+			var evaluated AuthorityEvaluatedPayload
+			if err := json.Unmarshal(event.Payload, &evaluated); err != nil {
+				t.Fatal(err)
+			}
+			authorized = authorized || evaluated.Status == domain.AuthorityAuthorized
+		case EventGitHubPRObserved:
+			var observed GitHubPRObservedPayload
+			if err := json.Unmarshal(event.Payload, &observed); err != nil {
+				t.Fatal(err)
+			}
+			if observed.HeadRevision != head {
+				t.Fatalf("the published pull request carries %s, not the integrator's head %s", observed.HeadRevision, head)
+			}
+			observedPR = true
+		}
+	}
+	if !assured || !authorized || !observedPR {
+		t.Fatalf("the published head lacks passing assurance (%t), an authorized decision (%t) or a bound pull request (%t)", assured, authorized, observedPR)
 	}
 	events, err := fleet.store.Events(backendRun)
 	if err != nil {
