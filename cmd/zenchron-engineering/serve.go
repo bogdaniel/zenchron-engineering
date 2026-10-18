@@ -378,6 +378,7 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 		// predecessor that has not yet let go.
 		WorkAdmissionWithheld: withholdWork,
 		Plans:                 plans,
+		PlanRegistry:          c.currentPlanning,
 		Clock:                 runtime.RealClock{},
 		Owner:                 c.owner,
 		Liveness:              runtime.NewLockOwnerLiveness(c.config.StateDir),
@@ -449,7 +450,7 @@ func (c *composition) reviewTrigger() func(context.Context, *runtime.Engineering
 // decides, and a stale answer would block a plan on an agent that has since
 // become available.
 func (c *composition) planService() (runtime.PlanService, error) {
-	registry := c.planning
+	registry := c.currentPlanning()
 	agents := runtime.DescribeExecutionAgents(context.Background(), c.agents, func(agent runtime.ResolvedAgent) runtime.AgentProber {
 		return runtime.AgentProberFor(agent, c.artifacts, c.config.StateDir)
 	})
@@ -508,6 +509,34 @@ func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.S
 			return controlError(err)
 		}
 		return controlOK(view)
+	case runtime.ControlPlanningArtifactPropose:
+		payload, err := c.proposePlanningArtifact(request)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(json.RawMessage(payload))
+	case runtime.ControlPlanningReload:
+		registry, err := c.reloadPlanning()
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(map[string][]string{
+			"instruction_packs": registry.PackIDs(), "context_policies": registry.ContextPolicyIDs(),
+			"profiles": registry.ProfileIDs(), "templates": registry.TemplateIDs(),
+		})
+	case runtime.ControlProductPropose:
+		if governed {
+			operator, err := c.config.ResolveOperator()
+			if err != nil {
+				return controlError(err)
+			}
+			request.Operator = operator.ID
+		}
+		adopted, err := supervisor.AdoptProduct(request)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(adopted)
 	case runtime.ControlWorkGraphHold, runtime.ControlResolveDecision:
 		if governed {
 			operator, err := c.config.ResolveOperator()

@@ -150,6 +150,9 @@ func (s *Supervisor) reconcileOrchestration(ctx context.Context) []string {
 		// run's journal and the state directory - so an agent retired or a
 		// repository unconfigured after its worker reported still has that
 		// report settled, and no execution authority is needed or granted.
+		if err := s.recoverUnchargedEpoch(batch); err != nil {
+			problems = append(problems, boundedDetail(batch.ID+" epoch charge: "+err.Error()))
+		}
 		if engine, err := s.engine(batch.Repository, batch.AgentID); err != nil {
 			problems = append(problems, boundedDetail(batch.ID+": "+err.Error()))
 		} else {
@@ -225,7 +228,7 @@ func (r *EngineeringRuntime) planOrchestrationBatch(id string, issues []int, req
 		}
 		batch.Items = append(batch.Items, orchestration.BatchItem{Issue: issue, RunID: runID})
 	}
-	return batch, nil
+	return r.deps.Store.pinProductContext(batch)
 }
 
 // reservedRunIDs maps every run identity a stored batch names to that batch.
@@ -294,7 +297,18 @@ func (r *EngineeringRuntime) materializeOrchestratedRun(ctx context.Context, bat
 		if err := r.refuseFlatObjectiveRecovery(batchID); err != nil {
 			return err
 		}
-		if _, err := r.createRun(ctx, item.RunID, goal, nil, &RunOrchestrationBinding{BatchID: batchID}, domain.StageBudget{}, r.deps.Store.ClaimRun); err != nil {
+		// A remediation epoch of a plan-bound unit is created under the stage's
+		// own binding and remaining allowance; every other child is unchanged.
+		var plan *RunPlanBinding
+		var budget domain.StageBudget
+		grant, err := r.epochPlanGrant(batchID, item.RunID)
+		if err != nil {
+			return err
+		}
+		if grant != nil {
+			plan, budget = &grant.binding, grant.budget
+		}
+		if _, err := r.createRun(ctx, item.RunID, goal, plan, &RunOrchestrationBinding{BatchID: batchID}, budget, r.deps.Store.ClaimRun); err != nil {
 			return err
 		}
 	}

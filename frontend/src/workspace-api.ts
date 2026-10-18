@@ -20,6 +20,8 @@ export type Options = {
   agents: { id: string; kind: string; trust_mode: string; model: string; default: boolean; eligible: boolean }[];
   profiles: string[];
   templates: string[];
+  instruction_packs: string[];
+  context_policies: string[];
   budget: {
     max_child_runs: number;
     max_concurrency: number;
@@ -97,6 +99,8 @@ export async function options(signal: AbortSignal): Promise<Options> {
     repositories: strings(o.repositories),
     profiles: strings(o.profiles),
     templates: strings(o.templates),
+    instruction_packs: strings(o.instruction_packs),
+    context_policies: strings(o.context_policies),
     agents: arr(o.agents).map((v) => {
       const a = object(v);
       return {

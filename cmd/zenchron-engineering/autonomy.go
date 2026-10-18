@@ -208,6 +208,12 @@ type autonomyFlags struct {
 	Template string
 	// Profile is the operator's default profile preference for agent stages.
 	Profile string
+	// ProductID is the product the operator selected at objective intake. Empty
+	// means no product was chosen; the objective's compiled WorkGraph is then
+	// never associated with one. It is never recorded on the plan itself -
+	// only used to associate the compiled WorkGraph, through the existing #476
+	// store boundary.
+	ProductID string
 	// Revision and Digest name the EXACT plan revision a decision is about.
 	// They are what an operator read: without them the CLI would decide
 	// whatever the highest revision happened to be at decide time, which can
@@ -626,13 +632,23 @@ type composition struct {
 	agents   runtime.AgentRegistry
 	agent    runtime.ResolvedAgent
 	feedback runtime.FeedbackPolicy
-	// planning is the operator's customization registry. It is loaded ONCE
-	// here and handed to every engine, because a run executing a plan stage
-	// resolves its frozen instruction packs through it: an engine built
+	// planning is the operator's customization registry. It is loaded once at
+	// construction and handed to every engine, because a run executing a plan
+	// stage resolves its frozen instruction packs through it: an engine built
 	// without it would refuse work the operator approved, on the grounds that
 	// a pack it was never given is "no longer installed".
-	planning planning.Registry
-	storage  runtime.StateStorage
+	//
+	// planningMu guards a later governed reload (ADR-0008): LoadRegistry
+	// always builds a brand-new value with brand-new maps, so a reload swaps
+	// the whole value under the lock rather than mutating it in place. This
+	// is safe for work already approved or in flight: frozenInstructions
+	// (runtime/operations.go) resolves a pinned pack by id and refuses if its
+	// digest has moved, exactly as it already does across an ordinary
+	// restart. planning_dir itself, per ADR-0003, never changes without a
+	// cold re-adopt; only its content can be reloaded here.
+	planningMu sync.RWMutex
+	planning   planning.Registry
+	storage    runtime.StateStorage
 	// sandbox and permissionBypass are kept so an engine can be built for an
 	// agent other than the one this invocation resolved. providerInjected
 	// marks the test seam: an injected provider is used for every agent,
@@ -829,7 +845,7 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		Store:             c.store,
 		Agent:             agent,
 		Agents:            c.agents,
-		Planning:          c.planning,
+		Planning:          c.currentPlanning(),
 		Feedback:          feedback,
 		Storage:           c.storage,
 		Toolchain:         c.config.Toolchain,

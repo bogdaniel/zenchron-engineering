@@ -42,6 +42,8 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
+	"github.com/bogdaniel/zenchron-engineering/planning"
+	"github.com/bogdaniel/zenchron-engineering/product"
 )
 
 // ControlSocketName is the endpoint file inside the operator state directory.
@@ -121,11 +123,25 @@ type ControlRequest struct {
 	// agent and composition time come from the supervisor, so a proposer
 	// cannot state them.
 	WorkGraph *orchestration.WorkGraphProposal `json:"work_graph,omitempty"`
+	// PlanningArtifact is a governed write to the planning registry (#471/#479,
+	// ADR-0008): one InstructionPack, ContextPolicy, AgentProfile or
+	// EngineeringPlanTemplate, validated by the same seal function a
+	// hand-edited file is validated with, before anything is written.
+	PlanningArtifact *planning.ArtifactWrite `json:"planning_artifact,omitempty"`
+	// Product is a proposed Product revision (#476). Identity, requester and
+	// composition time come from the supervisor; a proposer states only its
+	// name, revision and repository list.
+	Product *product.ProductProposal `json:"product,omitempty"`
 	// Agent is the named execution agent, resolved against the operator's own
 	// registry. A request naming an agent the operator did not configure is
 	// refused; it cannot introduce one.
-	Agent              string `json:"agent,omitempty"`
-	Profile            string `json:"profile,omitempty"`
+	Agent   string `json:"agent,omitempty"`
+	Profile string `json:"profile,omitempty"`
+	// ProductID is the product the operator selected at objective intake
+	// (#471/#479). It names an existing Product this supervisor already
+	// adopted; it is never a new product and never recorded on the plan
+	// itself - only used to associate the compiled WorkGraph with it.
+	ProductID          string `json:"product_id,omitempty"`
 	RunID              string `json:"run_id,omitempty"`
 	AuthorityRequestID string `json:"authority_request_id,omitempty"`
 	AuthorityDigest    string `json:"authority_digest,omitempty"`
@@ -220,6 +236,18 @@ const (
 	// ControlWorkGraph adopts (or finds) one WorkGraph revision: WorkGraph,
 	// Repository and Agent.
 	ControlWorkGraph = "workgraph"
+	// ControlPlanningArtifactPropose validates and durably writes one
+	// planning registry artifact (ADR-0008): PlanningArtifact carries its
+	// kind, id and document.
+	ControlPlanningArtifactPropose = "planning-artifact-propose"
+	// ControlPlanningReload re-reads the planning registry from its
+	// unchanged, controller-fixed directory and atomically swaps the held
+	// value (ADR-0008). It carries no identity of its own: the path never
+	// changes, only the content a later read resolves against.
+	ControlPlanningReload = "planning-reload"
+	// ControlProductPropose adopts (or finds) one Product revision (#476):
+	// Product carries the proposed name, revision and repository list.
+	ControlProductPropose = "product-propose"
 	// ControlCommandControllerSnapshot asks the running controller for ONE
 	// coherent observation of itself: which generation it is, whether it holds
 	// the controller role, and whether it is admitting work. It is read-only
@@ -407,10 +435,23 @@ func (l *ControlListener) Close() error {
 	return err
 }
 
-// maxControlRequestBytes bounds one request line. The vocabulary above
-// canonicalizes to a few hundred bytes; the ceiling exists so a local process
-// cannot make the supervisor allocate without bound.
+// maxControlRequestBytes bounds one ORDINARY command's request line. The
+// vocabulary above canonicalizes to a few hundred bytes; the ceiling exists
+// so a local process cannot make the supervisor allocate without bound. It
+// is enforced per command, after the command is known - see
+// answerControlConnection - so raising the one command that legitimately
+// carries more (below) never raises this one.
 const maxControlRequestBytes = 8 << 10
+
+// maxControlConnectionBytes is the absolute transport ceiling: the most any
+// single request line is ever read into memory, regardless of command. It
+// has to be at least planning.MaxPlanningArtifactRequestBytes, because the
+// command is not known until AFTER the line is read and unmarshaled - there
+// is no way to pick a smaller reader size for commands that do not need
+// one without knowing the command first. maxControlRequestBytes remains
+// the real limit for every command except ControlPlanningArtifactPropose,
+// enforced below once the command is known.
+const maxControlConnectionBytes = planning.MaxPlanningArtifactRequestBytes
 
 // Serve answers requests until the listener is closed. Each connection carries
 // exactly one request and one response, which keeps the protocol trivially
@@ -432,15 +473,23 @@ func (l *ControlListener) Serve(handle func(ControlRequest) ControlResponse) err
 func answerControlConnection(connection net.Conn, handle func(ControlRequest) ControlResponse) {
 	defer connection.Close()
 	_ = connection.SetDeadline(time.Now().Add(ControlDeadline("")))
-	// The ceiling is enforced by the READER, not checked afterwards.
+	// The absolute ceiling is enforced by the READER, not checked afterwards.
 	// bufio.ReadBytes grows its own buffer past the size hint, so a local
 	// process sending a line with no newline could make the supervisor allocate
 	// without bound and be refused only once it already had. One byte of
-	// headroom distinguishes "exactly at the bound" from "over it".
-	bounded := io.LimitReader(connection, maxControlRequestBytes+1)
+	// headroom distinguishes "exactly at the bound" from "over it". This
+	// catches only the absolute worst case; the per-command bound below is
+	// what actually protects every command except the one that needs more.
+	// The LIMIT is maxControlConnectionBytes (the absolute ceiling, raised
+	// for planning-artifact-propose), but the bufio BUFFER stays at the
+	// ordinary size: ReadBytes does not need its buffer to hold the whole
+	// line at once, only to find '\n' within it, so an oversized line costs
+	// extra read syscalls rather than an ~1 MiB allocation on every ordinary
+	// connection that will never send one.
+	bounded := io.LimitReader(connection, maxControlConnectionBytes+1)
 	reader := bufio.NewReaderSize(bounded, maxControlRequestBytes)
 	line, err := reader.ReadBytes('\n')
-	if len(line) > maxControlRequestBytes {
+	if len(line) > maxControlConnectionBytes {
 		writeControlResponse(connection, ControlResponse{Error: "control request exceeds the size bound"})
 		return
 	}
@@ -450,6 +499,14 @@ func answerControlConnection(connection net.Conn, handle func(ControlRequest) Co
 	var request ControlRequest
 	if err := json.Unmarshal(line, &request); err != nil {
 		writeControlResponse(connection, ControlResponse{Error: "control request is not a JSON object"})
+		return
+	}
+	// PER-COMMAND enforcement, now that the command is known: every command
+	// except the one planning-artifact writes legitimately need stays bound
+	// to the ordinary 8 KiB ceiling, never to the larger one the reader above
+	// had to allow for just in case this line was that one command.
+	if request.Command != ControlPlanningArtifactPropose && len(line) > maxControlRequestBytes {
+		writeControlResponse(connection, ControlResponse{Error: "control request exceeds the size bound"})
 		return
 	}
 	// The deadline is extended to what THIS command needs, now that the command

@@ -749,3 +749,18 @@ func TestWatchConfigIsPartOfTheOperatorDigest(t *testing.T) {
 // asserted on its error alone.
 func second[A any](_ A, _ string, err error) error { return err }
 func second2[A any](_ A, err error) error          { return err }
+
+// A plan may never run more at once than the operator authorized for the whole
+// runtime, however high its own ceiling is configured.
+func TestAPlanConcurrencyCeilingIsClampedToTheGlobalRunCeiling(t *testing.T) {
+	var config Config
+	config.Plan.MaxConcurrency = 9
+	config.Supervisor.MaxConcurrentRuns = 3
+	if got := config.PlanEnvelope().MaxConcurrency; got != 3 {
+		t.Fatalf("a plan ceiling of 9 under a global ceiling of 3 resolved to %d", got)
+	}
+	config.Plan.MaxConcurrency = 2
+	if got := config.PlanEnvelope().MaxConcurrency; got != 2 {
+		t.Fatalf("a plan ceiling below the global one was widened or narrowed to %d", got)
+	}
+}

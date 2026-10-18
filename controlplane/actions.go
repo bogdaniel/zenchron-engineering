@@ -32,12 +32,15 @@ const (
 )
 
 type ActionTarget struct {
-	RequestID  string `json:"request_id,omitempty"`
-	DecisionID string `json:"decision_id,omitempty"`
-	RunID      string `json:"run_id,omitempty"`
-	PlanID     string `json:"plan_id,omitempty"`
-	Revision   int    `json:"revision,omitempty"`
-	Digest     string `json:"digest,omitempty"`
+	RequestID    string `json:"request_id,omitempty"`
+	DecisionID   string `json:"decision_id,omitempty"`
+	RunID        string `json:"run_id,omitempty"`
+	PlanID       string `json:"plan_id,omitempty"`
+	ArtifactKind string `json:"artifact_kind,omitempty"`
+	ArtifactID   string `json:"artifact_id,omitempty"`
+	ProductID    string `json:"product_id,omitempty"`
+	Revision     int    `json:"revision,omitempty"`
+	Digest       string `json:"digest,omitempty"`
 }
 
 // ActionResult is what happened, with State re-read from the durable store
@@ -250,10 +253,26 @@ func (a *API) actResponse(w http.ResponseWriter, r *http.Request, res ActionResu
 	}
 }
 
+// defaultActionBodyBytes is every ordinary governed command's body boundary.
+// A command is a few hundred bytes of identifiers and digests; this never
+// has to move for one of them to grow, because it is not the only ceiling -
+// see decodeActionWithLimit.
+const defaultActionBodyBytes = 8 << 10
+
 // decodeAction is the body boundary: JSON only, bounded, no unknown field,
 // exactly one value.
 func decodeAction(w http.ResponseWriter, r *http.Request, v any) bool {
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+	return decodeActionWithLimit(w, r, v, defaultActionBodyBytes)
+}
+
+// decodeActionWithLimit is decodeAction with an explicit body ceiling, for
+// the one route whose request legitimately carries more than an identifier:
+// POST /v1/planning/artifacts, bounded to
+// planning.MaxPlanningArtifactRequestBytes rather than this package's
+// ordinary default. Every other route keeps calling decodeAction, so
+// raising one route's limit here never raises anyone else's.
+func decodeActionWithLimit(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(v) != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		fail(w, 400, "invalid_request")

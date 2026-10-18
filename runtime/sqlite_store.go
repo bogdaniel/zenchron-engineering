@@ -638,7 +638,7 @@ CREATE TABLE review_verification_claims (
 	revision INTEGER NOT NULL,
 	document TEXT NOT NULL
 );
-`}, append(productSchemaMigrations, remediationSchemaMigrations...)...)
+`}, append(append(productSchemaMigrations, remediationSchemaMigrations...), artifactActionReceiptSchemaMigrations...)...)
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
 var sqliteSchemaVersion = len(sqliteMigrations)

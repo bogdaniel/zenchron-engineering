@@ -108,7 +108,8 @@ function Screen({ route: r, onSessionInvalid }: { route: Route; onSessionInvalid
       ["overview", "actions", "controller"].includes(r.page) ||
       (r.page === "objectives" && !!r.id) ||
       (r.page === "workgraphs" && !!r.id) ||
-      (r.page === "runs" && !!r.id)
+      (r.page === "runs" && !!r.id) ||
+      (r.page === "products" && !r.id)
         ? api.controller(owner.signal)
         : Promise.resolve(undefined),
       ["overview", "actions"].includes(r.page) || (r.page === "objectives" && !r.id)
@@ -254,7 +255,15 @@ function Screen({ route: r, onSessionInvalid }: { route: Route; onSessionInvalid
       />
     );
   else if (r.page === "products" && data.products)
-    content = <ProductPortfolio products={data.products} onPage={setOffset} />;
+    content = (
+      <ProductPortfolio
+        products={data.products}
+        onPage={setOffset}
+        controller={data.controller}
+        stale={stale || loading}
+        onSettled={refresh}
+      />
+    );
   else if (r.page === "products" && data.product)
     content = <ProductWorkspace product={data.product} onPage={setOffset} />;
   else if (r.page === "intake") content = <ObjectiveIntake />;

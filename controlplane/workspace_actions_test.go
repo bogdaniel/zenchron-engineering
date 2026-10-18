@@ -71,7 +71,7 @@ func TestWorkspaceOptionsRemainReadableFromUnattestedDevelopmentController(t *te
 		if request.Command != rt.ControlWorkspaceOptions || request.ExpectedController != "" {
 			t.Fatalf("read should not request mutation authority: %+v", request)
 		}
-		payload, _ := json.Marshal(WorkspaceOptions{Repositories: []string{}, Agents: []WorkspaceAgent{}, Profiles: []string{}, Templates: []string{}})
+		payload, _ := json.Marshal(WorkspaceOptions{Repositories: []string{}, Agents: []WorkspaceAgent{}, Profiles: []string{}, Templates: []string{}, InstructionPacks: []string{}, ContextPolicies: []string{}})
 		return rt.ControlResponse{OK: true, Payload: payload}, nil
 	}
 	req := httptest.NewRequest("GET", "/v1/workspace/options", nil)
@@ -111,7 +111,7 @@ func TestNewBrowserBodiesRemainClosed(t *testing.T) {
 }
 
 func TestWorkspaceContractSchemas(t *testing.T) {
-	options := WorkspaceOptions{Repositories: []string{"example/repo"}, Agents: []WorkspaceAgent{}, Profiles: []string{}, Templates: []string{}}
+	options := WorkspaceOptions{Repositories: []string{"example/repo"}, Agents: []WorkspaceAgent{}, Profiles: []string{}, Templates: []string{}, InstructionPacks: []string{}, ContextPolicies: []string{}}
 	// A nonzero bounded envelope is operator configuration, never a browser grant.
 	options.Budget.MaxChildRuns = 1
 	options.Budget.MaxConcurrency = 1
@@ -143,6 +143,25 @@ func TestWorkspaceContractSchemas(t *testing.T) {
 		if err := schemas.Validate("control-plane-action-request", value); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// TestObjectiveIntakeForwardsProductID proves the HTTP decode step for
+// Product -> WorkGraph identity (#471/#479 Step 2): a product_id the operator
+// chose at intake reaches the ControlRequest the controller acts on, rather
+// than being dropped on the way from the browser body to the runtime.
+func TestObjectiveIntakeForwardsProductID(t *testing.T) {
+	f := newActionFixture(t)
+	f.reply = func(request rt.ControlRequest) (rt.ControlResponse, error) {
+		if request.Command != rt.ControlPlanRevise || request.ProductID != "storefront" {
+			t.Fatalf("product id did not reach the control request: %+v", request)
+		}
+		return rt.ControlResponse{Code: "plan_refused"}, nil
+	}
+	body := `{"controller_binding":"binding","repository":"example/repo","issue":1,"product_id":"storefront"}`
+	post(t, f.api, validRequest("/v1/objectives", body), 409)
+	if f.sends.Load() != 1 {
+		t.Fatal("objective intake must send exactly once")
 	}
 }
 

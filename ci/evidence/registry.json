@@ -162,6 +162,7 @@
         "runtime/projection.go",
         "runtime/event_payload.go",
         "runtime/operator_action_receipt.go",
+        "runtime/artifact_action_receipt.go",
         "runtime/run_summary.go"
       ],
       "tests": [
@@ -175,6 +176,7 @@
         "runtime/projection_test.go",
         "runtime/event_*_test.go",
         "runtime/operator_action_receipt_test.go",
+        "runtime/artifact_action_receipt_test.go",
         "runtime/changes_since_test.go",
         "runtime/canonical_json_test.go",
         "runtime/subject_store*_test.go",
@@ -200,7 +202,8 @@
         "runtime/control_reply_lost_test.go",
         "runtime/control_endpoint_ownership_test.go",
         "runtime/controller_status_test.go",
-        "runtime/operator_action_receipt_test.go"
+        "runtime/operator_action_receipt_test.go",
+        "runtime/artifact_action_receipt_test.go"
       ]
     },
     {
@@ -245,14 +248,24 @@
         "orchestration/workgraph*.go",
         "runtime/integration_dispatch.go",
         "runtime/integration_conflict_delivery.go",
-        "runtime/objective_workgraph.go"
+        "runtime/objective_workgraph.go",
+        "runtime/work_unit_context.go"
       ],
       "tests": [
         "runtime/workgraph*_test.go",
         "runtime/compose_integration_recovery_test.go",
         "runtime/integration_conflict_delivery_test.go",
         "runtime/objective_workgraph_test.go",
-        "runtime/objective_remediation_review_vertical_test.go"
+        "runtime/objective_remediation_review_vertical_test.go",
+        "runtime/dynamic_team_acceptance_test.go",
+        "runtime/product_objective_isolation_test.go",
+        "runtime/product_decision_resumption_test.go",
+        "runtime/product_team_journey_test.go",
+        "runtime/team_journey_refusal_test.go",
+        "runtime/plan_decision_hold.go",
+        "runtime/plan_decision_hold_test.go",
+        "runtime/remediation_plan_admission_test.go",
+        "runtime/objective_product_association_test.go"
       ]
     },
     {
@@ -261,6 +274,8 @@
       "race": true,
       "sources": [
         "runtime/remediation_activation.go",
+        "runtime/remediation_epoch_charge_store.go",
+        "runtime/remediation_plan_admission.go",
         "runtime/remediation_eligibility.go",
         "runtime/remediation_facts.go",
         "runtime/remediation_schema.go",
@@ -277,14 +292,19 @@
       "why": "The ProductEngineeringEnvironment (#476): product identity, mutable configuration, graph association and the knowledge promotion ladder - durable SQLite state with its own revision-transition and promotion-consistency invariants, proved under concurrent writers.",
       "race": true,
       "sources": [
+        "runtime/product.go",
         "runtime/product_store.go",
         "runtime/product_knowledge_store.go",
         "runtime/product_association_store.go",
         "runtime/product_schema.go",
+        "runtime/product_context.go",
+        "runtime/product_context_prompt.go",
         "product/*.go"
       ],
       "tests": [
-        "runtime/product_*_test.go"
+        "runtime/product_test.go",
+        "runtime/product_*_test.go",
+        "runtime/objective_product_association_test.go"
       ]
     },
     {

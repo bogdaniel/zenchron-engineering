@@ -90,7 +90,9 @@ type ContextRequest struct {
 	// caller with no frozen binding yet - nothing to pin - leaves it nil and
 	// gets the product's current configuration. A caller that DOES have one
 	// must pass it: substituting "current" for a bound WorkUnit's frozen
-	// revision is the exact drift #476's acceptance refuses.
+	// revision is the exact drift #476's acceptance refuses. A pin of 0 means
+	// the caller was frozen when the product had no configuration, and yields
+	// none.
 	ConfigurationRevision *int
 }
 
@@ -178,6 +180,11 @@ func CompileContext(store Store, request ContextRequest) (ProductContext, error)
 func resolveConfiguration(store Store, productID string, pinned *int) (ProductConfiguration, bool, error) {
 	if pinned == nil {
 		return store.CurrentConfiguration(productID)
+	}
+	// Revisions start at 1, so a pin of 0 can only mean "admitted when no
+	// configuration existed" - and must stay that way after one is adopted.
+	if *pinned == 0 {
+		return ProductConfiguration{}, false, nil
 	}
 	configuration, found, err := store.ConfigurationRevision(productID, *pinned)
 	if err != nil {

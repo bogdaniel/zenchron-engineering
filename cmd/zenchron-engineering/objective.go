@@ -19,6 +19,15 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 	if err != nil {
 		return runtime.PlanView{}, err
 	}
+	// Refused before the engine, the planning invocation and the plan/graph
+	// write all happen for nothing: an unknown product, or one that never
+	// named THIS repository, is certain to make AssociateProductGraph
+	// refuse later anyway - checked here, now that the repository the
+	// objective actually targets is resolved, rather than after paying for
+	// all of that.
+	if err := plans.RequireProductIfChosen(request.ProductID, repository); err != nil {
+		return runtime.PlanView{}, err
+	}
 	repo, err := runtime.ParseGitHubRepo(repository)
 	if err != nil {
 		return runtime.PlanView{}, err
@@ -54,6 +63,7 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 		Template: request.Template, Profile: request.Profile, Deterministic: request.Deterministic,
 		Agent:           request.Agent,
 		SubstituteHuman: request.SubstituteHuman, Note: request.Note,
+		ProductID: request.ProductID,
 	}
 	// A first proposal has no id yet. It is derived exactly as the local path
 	// derives it - from the issue, deterministically - so the view returned
@@ -73,7 +83,35 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 		current, err := plans.View(planID)
 		var absent *runtime.PlanRefusedError
 		if request.PlanID == "" && err == nil {
-			return current, nil
+			// This objective was already proposed - a resend of the SAME
+			// request, exactly like any other idempotent-resend action in
+			// this product. Serialized with the reconciler under the SAME
+			// plan lock a new proposal's write uses (#508-style: a reconciler
+			// tick must never start legacy work between this read and the
+			// graph being adopted), and re-read fresh INSIDE the lock rather
+			// than trusting the outer `current` read before it was acquired.
+			var recovered runtime.PlanView
+			if lockErr := supervisor.WithPlanLock(func() error {
+				fresh, err := plans.View(planID)
+				if err != nil {
+					return err
+				}
+				graphID, err := c.resumeObjectiveGraph(plans, fresh, issue, flags, request.Agent)
+				if err != nil {
+					return err
+				}
+				if err := c.requireAssociationGovernable(plans, fresh, graphID, request.ProductID); err != nil {
+					return err
+				}
+				if err := plans.AssociateProductGraph(request.ProductID, graphID); err != nil {
+					return err
+				}
+				recovered, err = plans.View(planID)
+				return err
+			}); lockErr != nil {
+				return runtime.PlanView{}, lockErr
+			}
+			return recovered, nil
 		}
 		if request.PlanID == "" && !errors.As(err, &absent) {
 			return runtime.PlanView{}, err
@@ -132,22 +170,105 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 	return plans.View(planID)
 }
 
+// resolveAgentID is the one resolution of the operator's agent preference
+// for a plan-to-WorkGraph bind, reused wherever one happens: a first
+// proposal (proposePlanAndGraph) and a resumed one (revisePlan's dedup
+// path) must record the same agent a request named, not two independent
+// readings of it.
+func resolveAgentID(c *composition, flags autonomyFlags) (string, error) {
+	if flags.Agent == "" {
+		return c.agents.Default(), nil
+	}
+	agent, err := c.agents.Agent(flags.Agent)
+	if err != nil {
+		return "", err
+	}
+	return agent.ID, nil
+}
+
+// resumeObjectiveGraph is a resend's graph step, called under the plan lock:
+// it reuses an already-bound WorkGraph rather than rebuilding it, and calls
+// the canonical BindObjectivePlan only when the graph is genuinely missing OR
+// stale. BindObjectivePlan's own "already-started" guard checks for a live
+// run BEFORE checking whether the graph it would bind already matches, so
+// calling it unconditionally would refuse an ordinary resend of an
+// objective that has simply begun executing - the exact case this must
+// stay idempotent for. A resend naming a DIFFERENT agent than the one the
+// existing graph was actually bound under is refused, the same way a
+// resend naming a different product is: a later request cannot silently
+// change who an admitted objective's work resolves to run as.
+func (c *composition) resumeObjectiveGraph(plans runtime.PlanService, fresh runtime.PlanView, issue int, flags autonomyFlags, requestedAgent string) (string, error) {
+	if fresh.WorkGraphID != "" {
+		graph, found, err := plans.Store.WorkGraph(fresh.WorkGraphID)
+		if err != nil {
+			return "", err
+		}
+		// objectiveGraphFor (which computed WorkGraphID) matches on plan ID
+		// alone, never revision: a graph whose OWN ObjectivePlan reference is
+		// not the EXACT revision/digest being represented here is stale - an
+		// earlier explicit revision's bind never completed - and reusing it
+		// as-is would silently represent the wrong plan content. Falling
+		// through to BindObjectivePlan rebinds it to the current revision
+		// through the same canonical path a first bind uses, including its
+		// own already-started protections; it is never bypassed, only
+		// reached by a different route.
+		if found && graph.ObjectivePlan != nil &&
+			graph.ObjectivePlan.Revision == fresh.Plan.Revision && graph.ObjectivePlan.Digest == fresh.Plan.Digest {
+			if requestedAgent != "" && graph.AgentID != requestedAgent {
+				return "", fmt.Errorf("objective %s is already bound to agent %s, not %s", fresh.Plan.ID, graph.AgentID, requestedAgent)
+			}
+			return fresh.WorkGraphID, nil
+		}
+	}
+	agentID, err := resolveAgentID(c, flags)
+	if err != nil {
+		return "", err
+	}
+	return plans.BindObjectivePlan(fresh.Plan, issue, agentID)
+}
+
+// requireAssociationGovernable refuses a FIRST-TIME product association
+// once the objective has been approved - not merely once a stage has
+// actually started, since approval is what makes the plan's content
+// authoritative and started work only one tick away. The association
+// determines which product's configuration and knowledge context a
+// WorkGraph's units may read; attaching that after approval would change
+// the meaning of work admitted without it. A resend naming the product the
+// graph is ALREADY associated with (or naming none) is unaffected - this is
+// idempotent-resend territory, not a new assignment - and a conflicting
+// DIFFERENT product remains AssociateWorkGraph's own transactional refusal,
+// unchanged.
+func (c *composition) requireAssociationGovernable(plans runtime.PlanService, fresh runtime.PlanView, graphID, productID string) error {
+	if productID == "" {
+		return nil
+	}
+	_, found, err := plans.Store.AssociatedProduct(graphID)
+	if err != nil {
+		return err
+	}
+	if !found && fresh.Snapshot.Approved.Status == domain.ApprovalApproved {
+		return fmt.Errorf("objective %s has already been approved; its product association can no longer be set through intake", fresh.Plan.ID)
+	}
+	return nil
+}
+
 func proposePlanAndGraph(ctx context.Context, composed *planComposition, input runtime.ProposeInput, flags autonomyFlags) (domain.EngineeringPlan, error) {
 	plan, err := composed.service.Propose(ctx, input)
 	if err != nil {
 		return plan, err
 	}
-	agentID := composed.built.agents.Default()
-	if flags.Agent != "" {
-		agent, resolveErr := composed.built.agents.Agent(flags.Agent)
-		err = resolveErr
-		if err != nil {
-			return domain.EngineeringPlan{}, err
-		}
-		agentID = agent.ID
+	agentID, err := resolveAgentID(composed.built, flags)
+	if err != nil {
+		return domain.EngineeringPlan{}, err
 	}
-	_, err = composed.service.BindObjectivePlan(plan, input.Issue, agentID)
-	return plan, err
+	graphID, err := composed.service.BindObjectivePlan(plan, input.Issue, agentID)
+	if err != nil {
+		return domain.EngineeringPlan{}, err
+	}
+	if err := composed.service.AssociateProductGraph(flags.ProductID, graphID); err != nil {
+		return domain.EngineeringPlan{}, err
+	}
+	return plan, nil
 }
 
 func renderObjectivePlan(flags autonomyFlags, view runtime.PlanView, stdout io.Writer, action string) (int, error) {

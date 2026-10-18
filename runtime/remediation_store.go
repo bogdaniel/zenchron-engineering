@@ -316,17 +316,7 @@ func execRemediationEpochInsert(q sqlExecutor, epoch RemediationEpoch) (bool, er
 // freshly randomized per call), so the replayed call finds exactly what it
 // would have created.
 func (s *SQLiteOperationStore) AdmitRemediationEpochBatch(batch orchestration.Batch, epoch RemediationEpoch) (orchestration.Batch, bool, error) {
-	if err := batch.Validate(); err != nil {
-		return orchestration.Batch{}, false, err
-	}
-	if err := validateRemediationEpoch(epoch); err != nil {
-		return orchestration.Batch{}, false, err
-	}
-	if batch.ID != epoch.BatchID {
-		return orchestration.Batch{}, false, fmt.Errorf("batch %s does not match the epoch claim's own batch %s", batch.ID, epoch.BatchID)
-	}
-	document, err := CanonicalJSON(batch)
-	if err != nil {
+	if err := validateEpochAdmission(batch, epoch); err != nil {
 		return orchestration.Batch{}, false, err
 	}
 	tx, err := s.db.BeginTx(context.Background(), nil)
@@ -334,6 +324,37 @@ func (s *SQLiteOperationStore) AdmitRemediationEpochBatch(batch orchestration.Ba
 		return orchestration.Batch{}, false, err
 	}
 	defer tx.Rollback()
+	stored, created, err := admitRemediationEpochTx(tx, batch, epoch)
+	if err != nil {
+		return orchestration.Batch{}, false, err
+	}
+	return stored, created, tx.Commit()
+}
+
+func validateEpochAdmission(batch orchestration.Batch, epoch RemediationEpoch) error {
+	if err := batch.Validate(); err != nil {
+		return err
+	}
+	if err := validateRemediationEpoch(epoch); err != nil {
+		return err
+	}
+	if batch.ID != epoch.BatchID {
+		return fmt.Errorf("batch %s does not match the epoch claim's own batch %s", batch.ID, epoch.BatchID)
+	}
+	return nil
+}
+
+// admitRemediationEpochTx writes the batch and its epoch claim inside the
+// caller's transaction, so a caller that must commit something else with them
+// (a plan's child-run charge) can make all of it one atomic fact.
+func admitRemediationEpochTx(tx *sql.Tx, batch orchestration.Batch, epoch RemediationEpoch) (orchestration.Batch, bool, error) {
+	document, err := CanonicalJSON(batch)
+	if err != nil {
+		return orchestration.Batch{}, false, err
+	}
+	if err := requireBatchProductBinding(tx, batch); err != nil {
+		return orchestration.Batch{}, false, err
+	}
 	result, err := tx.Exec(`INSERT INTO orchestration_batches (id, repository, created_unix_nano, document)
 		VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
 		batch.ID, batch.Repository, batch.CreatedAt.UnixNano(), string(document))
@@ -355,12 +376,12 @@ func (s *SQLiteOperationStore) AdmitRemediationEpochBatch(batch orchestration.Ba
 		if !found {
 			return orchestration.Batch{}, false, fmt.Errorf("orchestration batch %s was neither inserted nor found", batch.ID)
 		}
-		return stored, false, tx.Commit()
+		return stored, false, nil
 	}
 	if _, err := execRemediationEpochInsert(tx, epoch); err != nil {
 		return orchestration.Batch{}, false, err
 	}
-	return batch, true, tx.Commit()
+	return batch, true, nil
 }
 
 // RemediationAuthorizationByID reads one authorization by its own

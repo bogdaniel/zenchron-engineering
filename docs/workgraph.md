@@ -210,6 +210,12 @@ writing the batch and recording the activation replays onto the same batch and
 the same run, a restart reproduces the identical frontier, and no replay or
 recovery produces a second child run for a unit.
 
+A graph associated with a product (#476) also freezes the product context a unit
+was admitted with, on that same batch (`Batch.Product`). The pin is outside the
+batch identity, so a newer product configuration never names a second batch; the
+first write wins and every replay reads it back. See
+[`product-context.md`](product-context.md#execution-integration-480).
+
 ## Unresolved decisions
 
 A unit can be held by a readiness owner **outside** the graph: an unresolved

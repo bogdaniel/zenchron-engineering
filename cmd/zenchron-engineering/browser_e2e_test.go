@@ -109,6 +109,15 @@ func TestBrowserWorkspace(t *testing.T) {
 }
 
 func runBrowserFixture(t *testing.T, root string, built *composition, driver *runtime.Supervisor, environment []string) {
+	runBrowserFixtureWithScript(t, root, built, driver, "", environment)
+}
+
+// runBrowserFixtureWithScript is runBrowserFixture, naming the driver script
+// explicitly rather than inferring it from ZENCHRON_E2E_REACT=1. An empty
+// script keeps the existing inference (browser_e2e.mjs, or
+// check_reconciled_workspace.mjs under ZENCHRON_E2E_REACT=1), so existing
+// callers are unchanged.
+func runBrowserFixtureWithScript(t *testing.T, root string, built *composition, driver *runtime.Supervisor, script string, environment []string) {
 	t.Helper()
 	state := built.config.StateDir
 	react := false
@@ -161,9 +170,12 @@ func runBrowserFixture(t *testing.T, root string, built *composition, driver *ru
 	t.Cleanup(func() { _ = server.Close(); <-serverDone; _ = socket.Close(); <-controllerDone })
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
-	driverScript := "browser_e2e.mjs"
-	if react {
-		driverScript = "check_reconciled_workspace.mjs"
+	driverScript := script
+	if driverScript == "" {
+		driverScript = "browser_e2e.mjs"
+		if react {
+			driverScript = "check_reconciled_workspace.mjs"
+		}
 	}
 	command := exec.CommandContext(ctx, "node", filepath.Join(root, "scripts", driverScript))
 	command.Env = append(os.Environ(), "ZENCHRON_E2E_URL=http://"+listener.Addr().String(), "ZENCHRON_E2E_TOKEN_FILE="+tokenFile)

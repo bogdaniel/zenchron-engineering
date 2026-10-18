@@ -130,7 +130,14 @@ func (s *Supervisor) activateRemediationEpoch(graph WorkGraphView, unit WorkGrap
 			BatchID: batchID, RunID: planned.Items[0].RunID, InputsDigest: unit.InputsDigest,
 			AuthorizationID: authorization.ID, ActivatedAt: s.deps.Clock.Now(),
 		}
-		if stored, _, err = s.deps.Store.AdmitRemediationEpochBatch(planned, epoch); err != nil {
+		if graph.ObjectivePlan != nil {
+			// A plan-bound epoch is a child run of its plan: it is authorized
+			// against the plan and charged in the same transaction that admits it.
+			stored, err = s.admitPlanBoundEpoch(*graph.ObjectivePlan, graph.AgentID, unit.UnitID, planned, epoch)
+		} else {
+			stored, _, err = s.deps.Store.AdmitRemediationEpochBatch(planned, epoch)
+		}
+		if err != nil {
 			return err
 		}
 		return validateRemediationEpochBatch(stored, graph, unit, authorization)
@@ -209,12 +216,12 @@ func (r *EngineeringRuntime) planRemediationEpochBatch(id string, issue int, req
 	if owner, taken := reserved[runID]; taken {
 		return orchestration.Batch{}, &OrchestrationConflictError{Issue: issue, RunID: runID, Batch: owner}
 	}
-	return orchestration.Batch{
+	return r.deps.Store.pinProductContext(orchestration.Batch{
 		SchemaVersion: orchestration.BatchSchemaVersion, ID: id,
 		Repository: r.deps.Repository.Identity, AgentID: r.deps.Agent.ID,
 		RequestedBy: BoundedNote(requestedBy), CreatedAt: r.deps.Clock.Now(), Origin: &origin,
 		Items: []orchestration.BatchItem{{Issue: issue, RunID: runID}},
-	}, nil
+	})
 }
 
 // freeRemediationEpochRunID is freeIssueRunID's (runtime/orchestration.go)

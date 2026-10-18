@@ -103,6 +103,13 @@ type Request struct {
 	// is not reviewing it: an independent review stage runs in its own
 	// workspace at the trusted base, and this is what makes its work real.
 	Upstream []UpstreamContext
+	// Product is the product context a WorkGraph unit was admitted with (#480):
+	// the exact configuration revision and knowledge set frozen on its batch,
+	// resolved by the host. It is UNTRUSTED DATA exactly like Upstream - framed
+	// by the runtime-owned instructions, never an instruction, and it expands
+	// no permission, tool, budget or acceptance decision. Nil for every run
+	// that is not a unit of a product-associated graph.
+	Product *ProductContext
 	// ReviewerResultPath is the runtime-owned file this invocation must write
 	// its structured verdict to, set only for a reviewer stage.
 	//

@@ -1,8 +1,11 @@
 package runtime
 
 // WorkGraph-to-product association persistence (#476), proved against the
-// real SQLite store: a graph belongs to at most one product, and both sides
-// of an association must actually exist before it is accepted.
+// real SQLite store: a graph belongs to at most one product, both sides of
+// an association must actually exist before it is accepted, and the graph's
+// own repository must actually be one of the product's named repositories -
+// every adoptedGraph below compiles under "acme/repo", so every product
+// fixture here names it too.
 
 import (
 	"testing"
@@ -31,8 +34,8 @@ func adoptedGraph(t *testing.T, store *SQLiteOperationStore, name string, issue 
 func TestAssociateWorkGraphOneProductPerGraph(t *testing.T) {
 	_, first, second := openPair(t)
 	now := time.Unix(1700000000, 0).UTC()
-	productA := composeProduct(t, "storefront", 1, []string{"acme/shared-lib"}, now)
-	productB := composeProduct(t, "checkout", 1, []string{"acme/shared-lib"}, now)
+	productA := composeProduct(t, "storefront", 1, []string{"acme/repo"}, now)
+	productB := composeProduct(t, "checkout", 1, []string{"acme/repo"}, now)
 	if _, _, err := first.AdoptProductRevision(productA); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +76,7 @@ func TestAssociateWorkGraphOneProductPerGraph(t *testing.T) {
 func TestAssociateWorkGraphRequiresBothSidesToExist(t *testing.T) {
 	_, first, _ := openPair(t)
 	now := time.Unix(1700000000, 0).UTC()
-	productA := composeProduct(t, "storefront", 1, []string{"acme/shared-lib"}, now)
+	productA := composeProduct(t, "storefront", 1, []string{"acme/repo"}, now)
 	if _, _, err := first.AdoptProductRevision(productA); err != nil {
 		t.Fatal(err)
 	}
@@ -96,6 +99,32 @@ func TestAssociateWorkGraphRequiresBothSidesToExist(t *testing.T) {
 	}
 }
 
+// TestAssociateWorkGraphRefusesARepositoryTheProductDoesNotOwn proves the
+// authoritative boundary itself, not a frontend filter: a product that
+// exists and a graph that exists are each individually valid, but the
+// association is still refused when the graph's own repository is not one
+// of the product's named repositories.
+func TestAssociateWorkGraphRefusesARepositoryTheProductDoesNotOwn(t *testing.T) {
+	_, first, _ := openPair(t)
+	now := time.Unix(1700000000, 0).UTC()
+	unrelated := composeProduct(t, "unrelated-product", 1, []string{"acme/other-repo"}, now)
+	if _, _, err := first.AdoptProductRevision(unrelated); err != nil {
+		t.Fatal(err)
+	}
+	// adoptedGraph always compiles under "acme/repo", which "unrelated" never named.
+	graph := adoptedGraph(t, first, "mismatched-graph", 103, now)
+	mismatched, err := product.NewGraphAssociation(unrelated.ID, graph.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.AssociateWorkGraph(mismatched); err == nil {
+		t.Fatal("a product that does not name the graph's repository should be refused")
+	}
+	if _, found, err := first.AssociatedProduct(graph.ID); err != nil || found {
+		t.Fatalf("a refused association must not be partially recorded: found=%t err=%v", found, err)
+	}
+}
+
 // TestAssociatedGraphsPaginatesWithoutSilentTruncation proves a product with
 // MORE associations than one page never loses one: paging through
 // AssociatedGraphs with a small limit recovers every association exactly
@@ -105,7 +134,7 @@ func TestAssociateWorkGraphRequiresBothSidesToExist(t *testing.T) {
 func TestAssociatedGraphsPaginatesWithoutSilentTruncation(t *testing.T) {
 	_, store, _ := openPair(t)
 	now := time.Unix(1700000000, 0).UTC()
-	productA := composeProduct(t, "storefront", 1, []string{"acme/shared-lib"}, now)
+	productA := composeProduct(t, "storefront", 1, []string{"acme/repo"}, now)
 	if _, _, err := store.AdoptProductRevision(productA); err != nil {
 		t.Fatal(err)
 	}

@@ -696,7 +696,7 @@ var stateDigestReaders = map[string]bool{
 	"runtime/journal.go:queryStreamEventsLimited":      true, // column/document agreement
 	"runtime/journal.go:sqliteEventColumns":            true,
 	"runtime/journal.go:sqlitePlanEventColumns":        true,
-	"runtime/plan_store.go:AppendPlanEvent":            true, // plan row insert
+	"runtime/plan_store.go:planStream":                 true, // plan row insert (AppendPlanEvent's stream)
 	"runtime/sqlite_store.go:sqliteMigrations":         true, // DDL
 	"cmd/zenchron-engineering/operator.go:renderEvent": true, // display
 }
