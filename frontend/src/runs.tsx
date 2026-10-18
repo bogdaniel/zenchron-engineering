@@ -36,10 +36,10 @@ export function BudgetFacts({ r }: { r: RunDetail }) {
       rows={[
         ["Wall ceiling", r.budgets.wall_limit ? elapsed(r.budgets.wall_limit) : "Not recorded"],
         ["Lifecycle bound", r.budgets.lifecycle_deadline ? elapsed(r.budgets.lifecycle_deadline) : "Not recorded"],
-        ["Execution attempts", r.budgets.max_execution_attempts],
-        ["Continuations", r.budgets.max_execution_continuations],
-        ["Remediation attempts", r.budgets.max_remediation_attempts],
-        ["Assurance attempts", r.budgets.max_assurance_attempts],
+        ["Max execution attempts", r.budgets.max_execution_attempts],
+        ["Max continuations", r.budgets.max_execution_continuations],
+        ["Max remediation attempts", r.budgets.max_remediation_attempts],
+        ["Max assurance attempts", r.budgets.max_assurance_attempts],
         ...Object.entries(r.attempts).map(([key, value]): [string, number] => [`Consumed ${key}`, value]),
       ]}
     />
