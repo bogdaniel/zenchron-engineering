@@ -61,7 +61,7 @@ supervision minutes in Arm A and are measured there, not hidden.
 ## Final run on merged main
 
 Re-run on main `b02b8a4` (#625, #598, #634, #612 merged) with the harness from
-PR #636's successor branch `test/481-operator-rehearsal-harness-main`: result file
+PR #638 (branch `test/481-operator-rehearsal-harness-main`): result file
 `rehearsal-results-main-b02b8a4.json`. Steps 1-11, 13, 15 and 16 pass, including
 step 7 on the merged budget panel. Steps 12 and 14 stay PARTIAL: #629 (objective
 page has no PR/evidence summary) and #628 (a plan-stage run awaiting authority is
