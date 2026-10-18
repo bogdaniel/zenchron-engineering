@@ -379,6 +379,9 @@
     "candidate_discard_refused": {
       "type": "string"
     },
+    "awaiting_human_authority": {
+      "type": "boolean"
+    },
     "paused": {
       "type": "boolean"
     }

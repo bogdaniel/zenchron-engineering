@@ -189,9 +189,22 @@ func workspaceGraphActions(store *rt.ReadStore, detail WorkGraphDetail, graph or
 				UnitID: unit.UnitID, Decision: decision,
 			})
 		}
-		if unit.Run != nil && unit.Run.AuthorityRequest != nil && len(unit.Run.AuthorityRequest.Missing) > 0 {
+		if unit.Run != nil && awaitsHumanPublication(*unit.Run) {
 			publications = append(publications, workspacePublication{Run: *unit.Run, Unavailable: unavailable})
 		}
 	}
 	return decisions, publications, nil
 }
+
+// awaitsHumanPublication is whether a run is parked on human authority. The
+// read store cannot derive the exact authority request (it holds no policy),
+// so the durable wait reason is the signal; the controller still computes and
+// binds the exact request when the operator inspects it.
+func awaitsHumanPublication(run RunDetail) bool {
+	if run.AuthorityRequest != nil && len(run.AuthorityRequest.Missing) > 0 {
+		return true
+	}
+	return run.AwaitingHumanAuthority
+}
+
+const awaitingAuthorityReason = "awaiting_authority"
