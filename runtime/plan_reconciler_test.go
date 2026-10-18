@@ -348,29 +348,7 @@ func TestDependenciesAndGatesGateTheGraph(t *testing.T) {
 // even when every stage is dependency-ready.
 func TestTheAggregateEnvelopeBoundsChildRuns(t *testing.T) {
 	fixture := newPlanRunFixture(t, parallelStages())
-	// Tighten the approved plan to ONE child run and re-store it as revision 2,
-	// which is the only way a ceiling changes: through a revision an operator
-	// approves.
-	tightened := fixture.plan
-	tightened.Revision = 2
-	previous := fixture.plan.Revision
-	tightened.Provenance.PreviousRevision = &previous
-	tightened.BudgetEnvelope.MaxChildRuns = 1
-	digest, err := tightened.ContentDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	tightened.Digest = digest
-	if _, err := fixture.store.PutPlanRevision(tightened); err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.store.PutPlanContract(tightened.ID, tightened.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.service.Approve(tightened.ID, tightened.Revision, tightened.Digest, shownAssignments(t, fixture.service, tightened.ID, tightened.Revision), "operator", ""); err != nil {
-		t.Fatal(err)
-	}
-	fixture.plan = tightened
+	approveTightenedEnvelope(t, fixture, func(envelope *domain.PlanBudgetEnvelope) { envelope.MaxChildRuns = 1 })
 
 	report := fixture.reconcile(t)
 	if len(report.Started) != 1 {
