@@ -161,6 +161,10 @@ type autonomyOverrides struct {
 	// real timer; a test supplies its own so the schedule is asserted instead
 	// of slept through.
 	WatchWait func(ctx context.Context, until time.Time)
+	// CloneRemote replaces where the supervisor's engines fetch a repository
+	// from, so an offline test can serve its own local origin instead of
+	// github.com. Production leaves it nil.
+	CloneRemote func(runtime.GitHubRepo) string
 }
 
 // autonomyFlags is the whole flag surface. It is one struct rather than one
@@ -656,6 +660,7 @@ type composition struct {
 	sandbox          runtime.DockerSandbox
 	permissionBypass bool
 	providerInjected bool
+	cloneRemote      func(runtime.GitHubRepo) string
 	// reviewerAgent is #474 B3's opt-in: empty disables the automatic
 	// independent-review trigger entirely. See autonomyFlags.ReviewerAgent.
 	reviewerAgent string
@@ -799,6 +804,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		agents: registry, agent: agent, feedback: feedback, planning: customization,
 		sandbox: sandbox, permissionBypass: flags.PermissionBypass, providerInjected: providerInjected,
 		reviewerAgent: flags.ReviewerAgent,
+		cloneRemote:   overrides.CloneRemote,
 		storage:       runtime.StateStorage{Dir: config.StateDir, CeilingBytes: config.Storage.MaxStateBytes},
 		release:       release,
 	}, nil

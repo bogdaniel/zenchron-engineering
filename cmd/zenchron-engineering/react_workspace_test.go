@@ -191,18 +191,7 @@ func (p reactCandidateProvider) Execute(_ context.Context, r runtime.ExecutionRe
 }
 func seedReactPublication(t *testing.T, c *composition, forge *runtime.FakeGitHubAdapter, origin, base string) string {
 	t.Helper()
-	boundaries := map[string]domain.CriticalBoundary{"service": {Type: "service", Paths: []string{"internal/service/**"}}}
-	c.model = domain.ProjectModel{SchemaVersion: domain.SchemaVersion, ID: "isolated-model", Revision: "1", Subject: domain.Subject{Repository: "zenchron/seeded", Revision: base}, CriticalBoundaries: &boundaries}
-	claims := map[string]domain.RequiredClaim{"verification": {EvidenceClass: runtime.AssuranceEvidenceClass, IndependentFromChangeProducer: true}, "acceptance": {EvidenceClass: runtime.SemanticEvidenceClass, IndependentFromChangeProducer: true}, "publication-human": {EvidenceClass: runtime.HumanApprovalEvidenceClass, IndependentFromChangeProducer: true}}
-	permissions := []domain.Action{{Type: runtime.PublicationActionType, Target: "main"}}
-	conditions := []domain.AuthorityCondition{{Action: permissions[0], RequiredClaims: []string{"verification", "publication-human"}}}
-	discharge := []string{"acceptance"}
-	effect := domain.PolicyEffect{RequiredClaims: &claims, Permissions: &permissions, AuthorityConditions: &conditions, AcceptanceDischargeClaims: &discharge}
-	rules := map[string]domain.PolicyRule{}
-	for name, value := range map[string]domain.FactValue{"unknown": domain.FactUnknown, "clear": domain.FactFalse, "touched": domain.FactTrue} {
-		rules[name] = domain.PolicyRule{When: domain.PolicyCondition{Fact: "service.boundary_modified", Equals: value}, Effect: effect}
-	}
-	c.policy = domain.EngineeringPolicy{SchemaVersion: domain.SchemaVersion, ID: "isolated-human-publication", Revision: "1", Rules: rules}
+	c.model, c.policy = humanPublicationGovernance(base)
 	c.provider = reactCandidateProvider{}
 	c.providerInjected = true
 	c.assurance = &runtime.FakeAssuranceProvider{Results: []runtime.AssuranceResult{{ProviderID: "isolated-independent-verifier", VerifierDefinition: "verifier-v1", Passed: true}}}
@@ -225,4 +214,22 @@ func seedReactPublication(t *testing.T, c *composition, forge *runtime.FakeGitHu
 		t.Fatalf("real candidate did not reach human authority: disposition=%s err=%v", outcome.Disposition, err)
 	}
 	return id
+}
+
+// humanPublicationGovernance is the isolated model and policy under which a
+// candidate reaches a human publication decision.
+func humanPublicationGovernance(base string) (domain.ProjectModel, domain.EngineeringPolicy) {
+	boundaries := map[string]domain.CriticalBoundary{"service": {Type: "service", Paths: []string{"internal/service/**"}}}
+	model := domain.ProjectModel{SchemaVersion: domain.SchemaVersion, ID: "isolated-model", Revision: "1", Subject: domain.Subject{Repository: "zenchron/seeded", Revision: base}, CriticalBoundaries: &boundaries}
+	claims := map[string]domain.RequiredClaim{"verification": {EvidenceClass: runtime.AssuranceEvidenceClass, IndependentFromChangeProducer: true}, "acceptance": {EvidenceClass: runtime.SemanticEvidenceClass, IndependentFromChangeProducer: true}, "publication-human": {EvidenceClass: runtime.HumanApprovalEvidenceClass, IndependentFromChangeProducer: true}}
+	permissions := []domain.Action{{Type: runtime.PublicationActionType, Target: "main"}}
+	conditions := []domain.AuthorityCondition{{Action: permissions[0], RequiredClaims: []string{"verification", "publication-human"}}}
+	discharge := []string{"acceptance"}
+	effect := domain.PolicyEffect{RequiredClaims: &claims, Permissions: &permissions, AuthorityConditions: &conditions, AcceptanceDischargeClaims: &discharge}
+	rules := map[string]domain.PolicyRule{}
+	for name, value := range map[string]domain.FactValue{"unknown": domain.FactUnknown, "clear": domain.FactFalse, "touched": domain.FactTrue} {
+		rules[name] = domain.PolicyRule{When: domain.PolicyCondition{Fact: "service.boundary_modified", Equals: value}, Effect: effect}
+	}
+	policy := domain.EngineeringPolicy{SchemaVersion: domain.SchemaVersion, ID: "isolated-human-publication", Revision: "1", Rules: rules}
+	return model, policy
 }
