@@ -1398,9 +1398,16 @@ func bindIntegrationHandoffAdmit(s *runState) (string, bool) {
 	// engine: it only waits for the SAME semantic pass every other unit's
 	// handoff already implicitly waits for by settling goal_state_reached
 	// only once bindAssuranceSemantic itself has nothing left to plan.
-	if s.rt.deps.SemanticAssurance != nil && len(s.semanticClaims()) > 0 {
-		semantic := s.projection.SemanticAssurance
-		if semantic == nil || semantic.Stale || !semantic.Passed {
+	// A contract that cannot be rebuilt is not a contract that requires no
+	// semantic evidence, and it is not one that a recorded verdict can vouch
+	// for either: only a successful empty answer waives it, and only a fresh
+	// passing verdict satisfies a non-empty one.
+	if s.rt.deps.SemanticAssurance != nil {
+		claims, err := s.semanticClaims()
+		if err != nil {
+			return "", false
+		}
+		if semantic := s.projection.SemanticAssurance; len(claims) > 0 && (semantic == nil || semantic.Stale || !semantic.Passed) {
 			return "", false
 		}
 	}
@@ -1429,7 +1436,9 @@ func bindAssuranceSemantic(s *runState) (string, bool) {
 	if s.rt.deps.SemanticAssurance == nil {
 		return "", false
 	}
-	if len(s.semanticClaims()) == 0 {
+	// Fail closed: a rebuild error plans the operation, whose own execution
+	// reports it, rather than waiving semantic evidence nobody could check.
+	if claims, err := s.semanticClaims(); err == nil && len(claims) == 0 {
 		return "", false
 	}
 	return key, true
@@ -1438,11 +1447,17 @@ func bindAssuranceSemantic(s *runState) (string, bool) {
 // semanticClaims are the contract's required claims of the semantic class, with
 // the material obligations each one discharges. It is the whole question the
 // semantic verifier is asked, derived from the exact contract.
-func (s *runState) semanticClaims() []SemanticClaimRequest {
+func (s *runState) semanticClaims() ([]SemanticClaimRequest, error) {
 	contract, err := s.rt.contractFor(s)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("rebuild the contract for its semantic claims: %w", err)
 	}
+	return semanticClaimsOf(contract), nil
+}
+
+// semanticClaimsOf is the pure derivation, so a caller that already holds the
+// contract it just built does not rebuild it (and fail separately) to ask.
+func semanticClaimsOf(contract domain.EngineeringWorkContract) []SemanticClaimRequest {
 	var requests []SemanticClaimRequest
 	for claimID, claim := range contract.RequiredClaims {
 		if claim.EvidenceClass != SemanticEvidenceClass {
