@@ -67,7 +67,7 @@ re-queueing released material.
 | Controller | FREEZE: `zenchron-engineering` build version and source revision for Arm A |
 | Provider families and models | Implementer `codex` (openai, `codex-cli 0.163.0`), reviewer `claude` (anthropic, Claude Code `2.1.302`). Neither config pins a model; the CLIs' defaults apply. FREEZE: the resolved provider, model id, CLI version and relevant settings of each CLI, captured before Arm A. If a resolved model identity cannot be established, the CLI default is not a frozen identity: the limitation is recorded and resolved before the measured comparison launches. Resolved by one CLI invocation each on 2026-10-18 (owner-authorized, one trivial prompt per CLI): `codex` `codex-cli 0.163.0` reported model `gpt-6.1-sol`, provider `openai`, reasoning effort `high`; `claude` Claude Code `2.1.302`, configured alias `sonnet`, reported model `claude-sonnet-5-5`. The alias is not the identity: the frozen reviewer identity is `claude-sonnet-5-5`, and an alias that later resolves differently is a mismatch. Evidence limitation: these identities came from successful CLI invocations, but only the extracted model identifiers were retained. The raw output is unavailable, so they are operator-attested, not independently auditable, and are not reconstructed. In each arm, the first normal authorized provider invocation of each CLI captures and retains its structured model metadata (credentials excluded) and compares the resolved model with the frozen id; no identity-only provider call is made. A difference stops the arm and no model is substituted silently. Where this section says the facts are captured again at arm start, that means this first-invocation capture. At the start of each arm the same facts are captured again and compared with the frozen values; a difference (a default silently changing between arms) stops the arm and is reported, because it compromises comparability. Arm B uses the same CLIs, versions and models |
 | Agent capabilities and trust modes | PROPOSED from the operator config: `codex` (`codex_cli`, `operator_trusted`), `claude` (`claude_code`, `operator_trusted`), default agent `codex`. Arm B uses the same CLIs with the same permission modes |
-| Execution budgets | PROPOSED from the operator config: per run `wall_limit_seconds` 1800, `max_execution_attempts` 2, `max_remediation_attempts` 2, `max_assurance_attempts` 2. FREEZE: the plan budget envelope. Arm B has the same wall-clock allowance (see §7) |
+| Execution budgets | PROPOSED from the operator config: per run `wall_limit_seconds` 1800, `max_execution_attempts` 2, `max_remediation_attempts` 2, `max_assurance_attempts` 2. Plan budget envelope PROPOSED for the owner's freeze: `max_child_runs` 8, `max_concurrency` 2, `max_provider_invocations` 20, `max_wall_seconds` 14400, no `max_cost_micros` (subscription CLIs report no cost; cost stays unknown, never a currency figure). Derivation in §7.1. Arm B has the same elapsed-time allowance (see §7) |
 | Reviewer requirement | An independent reviewer of a different vendor family from the implementer. Arm B must also use a different-family reviewer, run by the operator |
 | Workspaces | two separate clones at the frozen base, distinct paths, distinct branches `dogfood/344-planned` and `dogfood/344-direct` |
 | Arm order | Arm A (`zenchron_planned`) first, Arm B (`direct_agent`) second |
@@ -142,6 +142,29 @@ limit without accepted work is recorded as an incomplete (censored) result with
 its state at the limit: not an artificial success and not a zero-productivity
 comparison. Stopping early is logged with a
 reason and is not repeated.
+
+### 7.1 Plan budget envelope is not the arm allowance
+
+The envelope bounds what the approved plan may spend; the four-hour allowance
+bounds elapsed time for an arm, including human preparation, review and
+unattended waiting. They are different limits and neither is derived from the
+other's unit.
+
+- `max_concurrency` 2: the operator's `supervisor.max_concurrent_runs` is 2 and a
+  plan cannot exceed the global ceiling, so a larger value would only be a
+  refusal. It still permits the parallel GC, CLI and Control Plane work.
+- `max_child_runs` 8: room for a planner-chosen team of about six agent stages
+  plus two remediation or integration runs. The planner decides the actual team;
+  the envelope is a ceiling.
+- `max_provider_invocations` 20: 8 runs at `max_execution_attempts` 2 is 16,
+  plus review and remediation margin.
+- `max_wall_seconds` 14400: the plan's ACTIVE execution time summed across runs
+  (elapsed less external waiting), bounded by 8 runs at the per-run
+  `wall_limit_seconds` of 1800. It is a spend ceiling across concurrent runs, so
+  it can exceed what concurrency 2 allows in elapsed time.
+- A plan that spends one dimension starts nothing further and says which; that
+  is recorded as an outcome of the arm, not retried by the operator with a larger
+  envelope. Raising the envelope after the arm starts invalidates the pair (§11).
 
 ## 8. Isolation
 
