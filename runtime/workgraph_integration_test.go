@@ -960,7 +960,7 @@ func TestWorkGraphIntegrationHandoffWaitsForRequiredSemanticAssurance(t *testing
 			t.Fatalf("tick: the integration handoff was admitted despite a failing required semantic verdict: %d handoffs", len(handoffs))
 		}
 		if state, err := engineLoadForTest(t, fixture, cRunID); err == nil {
-			if len(state.semanticClaims()) > 0 {
+			if claims, claimsErr := state.semanticClaims(); claimsErr == nil && len(claims) > 0 {
 				sawRequiredSemanticClaim = true
 			}
 			// The negative assertion below (RunHandoffs stays empty) must

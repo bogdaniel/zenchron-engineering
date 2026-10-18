@@ -2606,7 +2606,7 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 	if err != nil {
 		return failed(err)
 	}
-	claims := state.semanticClaims()
+	claims := semanticClaimsOf(kernel.Contract)
 	if len(claims) == 0 {
 		return failed(deterministicRefusal("contract.semantic_claim_missing", fmt.Errorf("no semantic claim is required by this contract")))
 	}
