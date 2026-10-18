@@ -1,0 +1,146 @@
+{
+  "schema_version": "0.2",
+  "benchmark": "zenchron-leverage",
+  "corpus_version": "synthetic",
+  "mode": "direct_agent",
+  "recorded_at": "2026-10-20T13:00:00Z",
+  "synthetic": true,
+  "harness": {
+    "implemented": false,
+    "note": "Minimal #66 measurement slice only: an operator activity log, a read-only runtime collector and this emitter. There is no corpus and no ratio is computed here; one paired observation proves nothing about leverage."
+  },
+  "case": {
+    "id": "synthetic-example",
+    "class": "synthetic",
+    "source": "none: invented for documentation",
+    "acceptance": "none: this record is not a real task"
+  },
+  "subject": {
+    "repository": "example/synthetic",
+    "base_revision": "0000000000000000000000000000000000000000"
+  },
+  "instrumentation": {
+    "version": "66-minimal-slice/1",
+    "arm": "direct_agent",
+    "base_sha": "0000000000000000000000000000000000000000",
+    "protocol_digest": "unfrozen-placeholder",
+    "protocol_frozen": false
+  },
+  "validity": {
+    "valid": true
+  },
+  "supervision": {
+    "arm": "direct_agent",
+    "operator": "synthetic-operator",
+    "active_human_seconds": 2460,
+    "unattended_wait_seconds": 1620,
+    "seconds_by_kind": {
+      "final_acceptance_merge": 180,
+      "manual_relay": 540,
+      "recovery_workaround": 240,
+      "reviewing_output": 900,
+      "task_preparation": 600,
+      "unattended_wait": 1620
+    },
+    "authority_interventions": 0,
+    "final_acceptance_merges": 1,
+    "recovery_workarounds": 1,
+    "non_authority_interventions": 3,
+    "relays": {
+      "total": 2,
+      "by_kind": {
+        "finding": 1,
+        "prompt": 1
+      },
+      "audited": 0,
+      "self_reported": 2,
+      "basis": "self_reported"
+    },
+    "open_intervals": 0,
+    "first_start": "2026-10-20T10:40:00Z",
+    "last_end": "2026-10-20T11:48:00Z"
+  },
+  "measured": {
+    "child_runs": {
+      "value": null,
+      "unknown_reason": "no runtime evidence for this arm"
+    },
+    "operation_attempts_all_kinds": {
+      "value": null,
+      "unknown_reason": "no runtime evidence for this arm"
+    },
+    "execution_attempts": {
+      "value": null,
+      "unknown_reason": "no runtime evidence for this arm"
+    },
+    "wall_seconds_runtime_first_create_to_last_end": {
+      "value": null,
+      "unknown_reason": "no runtime evidence for this arm"
+    },
+    "wall_seconds_arm_first_entry_to_last_entry": {
+      "value": 4080
+    },
+    "supervision_minutes": {
+      "value": 41
+    },
+    "unattended_wait_minutes": {
+      "value": 27
+    },
+    "review_observations": {
+      "value": null,
+      "unknown_reason": "no runtime evidence for this arm"
+    },
+    "review_continuations": {
+      "value": null,
+      "unknown_reason": "no runtime evidence for this arm"
+    },
+    "decision_deliveries": {
+      "value": null,
+      "unknown_reason": "no runtime evidence for this arm"
+    },
+    "tokens": {
+      "value": null,
+      "unknown_reason": "direct_agent arm: provider usage is not instrumented"
+    },
+    "cost": {
+      "known": false,
+      "amount_micros": null,
+      "reason": "direct_agent arm: provider cost is not instrumented; unknown is not zero"
+    },
+    "peak_execution_concurrency": {
+      "value": null,
+      "unknown_reason": "no runtime evidence for this arm"
+    },
+    "execution_overlap_seconds": {
+      "value": null,
+      "unknown_reason": "no runtime evidence for this arm"
+    }
+  },
+  "unmeasured": [
+    "relay completeness: a relay count is self_reported unless an audit record is attached; a count of zero can only be self_reported",
+    "leverage ratio: needs both arms and a corpus; none is computed",
+    "protocol: no frozen protocol digest was supplied, so the protocol is not bound to this record",
+    "tokens and cost: the direct_agent arm has no Zenchron runtime to read them from"
+  ],
+  "outcome": {
+    "result": "accepted",
+    "source": "operator_stated",
+    "reason": "invented"
+  },
+  "sources": [
+    {
+      "kind": "activity_log",
+      "path": "2026-10-20-synthetic-example.activity.jsonl",
+      "sha256": "047efbcafa5d165edfe3b95806a414fa57d509136b5940953a074dad8257b120"
+    }
+  ],
+  "interpretation": {
+    "leverage_claim": "none",
+    "note": "A single arm is a single observation. No ratio is computed here and none may be inferred from this file.",
+    "limitations": [
+      "n=1: one paired observation is not a representative result",
+      "order effect: the second arm benefits from the operator having already learned the task; this is not removed by measurement"
+    ]
+  },
+  "content_digest": "ab8c9072db378a09d1b297121a78a9ed903faa26a08d9f2c887195189f0dd139"
+}
