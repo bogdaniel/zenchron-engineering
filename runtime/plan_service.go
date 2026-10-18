@@ -211,6 +211,12 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	if err := s.RefuseConfigurationHold(input.PlanID); err != nil {
 		return domain.EngineeringPlan{}, err
 	}
+	// A hard ceiling nothing reports against is refused rather than carried as
+	// one the plan appears to honor (the StopCostBudgetUnenforceable law).
+	if s.Envelope.MaxCostMicros != nil {
+		return domain.EngineeringPlan{}, &PlanRefusedError{PlanID: input.PlanID,
+			Detail: "the operator's plan ceiling names max_cost_micros, but no execution provider reports cost to a plan, so it would be silently unenforced; remove plan.max_cost_micros"}
+	}
 	if err := s.refuseStartedObjectiveRevision(input.PlanID); err != nil {
 		return domain.EngineeringPlan{}, err
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/product"
 )
 
 const SchemaVersion = "0.1"
@@ -389,6 +390,21 @@ type RunPlanBinding struct {
 	// omitempty, because a run created before it existed must canonicalize
 	// exactly as it did: the genesis event is hashed against the run document.
 	StageBudget domain.StageBudget `json:"stage_budget,omitzero"`
+	// Product is the product context a plan stage run with no work-graph batch
+	// (an objective plan's reviewer stage) was created with (#480). It is
+	// frozen with the rest of the binding at run creation, and a replay adopts
+	// the stored run, so the first write stands.
+	//
+	// omitempty and nil for every stage of a graph with no product, so no
+	// existing run is re-identified.
+	Product *RunPlanProduct `json:"product,omitempty"`
+}
+
+// RunPlanProduct is the graph a plan stage run belongs to and the product
+// context pin it was created with.
+type RunPlanProduct struct {
+	GraphID string             `json:"graph_id"`
+	Pin     product.ContextPin `json:"pin"`
 }
 
 type RunOperation struct {

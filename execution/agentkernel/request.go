@@ -45,6 +45,11 @@ func (a *Adapter) translate(req execution.Request, now time.Time, ctxDeadline ti
 	if err := ref.Validate(); err != nil {
 		return api.ExecutionRequest{}, refuse("attempt", "%v", err)
 	}
+	if req.Product != nil {
+		// A unit admitted with product context must not silently run without
+		// it: the kernel has no channel for it (#518 owns adopting one).
+		return api.ExecutionRequest{}, refuse("product", "the kernel cannot carry host-resolved product context")
+	}
 	if err := refuseResultSlots(req); err != nil {
 		return api.ExecutionRequest{}, err
 	}

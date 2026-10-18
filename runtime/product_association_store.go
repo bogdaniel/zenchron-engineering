@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 	"github.com/bogdaniel/zenchron-engineering/product"
@@ -28,15 +29,26 @@ func (s *SQLiteOperationStore) AssociateWorkGraph(association product.GraphAssoc
 	}
 	defer tx.Rollback()
 
-	if _, found, err := currentProductTx(tx, association.ProductID); err != nil {
+	owner, found, err := currentProductTx(tx, association.ProductID)
+	if err != nil {
 		return false, err
 	} else if !found {
 		return false, fmt.Errorf("product %s does not exist", association.ProductID)
 	}
-	if _, found, err := currentWorkGraphTx(tx, association.GraphID); err != nil {
+	graph, found, err := currentWorkGraphTx(tx, association.GraphID)
+	if err != nil {
 		return false, err
 	} else if !found {
 		return false, fmt.Errorf("work graph %s does not exist", association.GraphID)
+	}
+	// The authoritative boundary, not objective intake's repository filter: a
+	// graph whose repository the product never named is refused rather than
+	// silently granting that graph's units the product's configuration and
+	// knowledge context. Two products may still legally share a repository -
+	// this only requires EACH to actually list it.
+	if !slices.Contains(owner.Repositories, graph.Repository) {
+		return false, fmt.Errorf("work graph %s's repository %s is not a member of product %s",
+			association.GraphID, graph.Repository, association.ProductID)
 	}
 
 	result, err := tx.Exec(`INSERT INTO product_graph_associations (graph_id, product_id, associated_unix_nano)
@@ -50,6 +62,21 @@ func (s *SQLiteOperationStore) AssociateWorkGraph(association product.GraphAssoc
 		return false, err
 	}
 	if inserted == 1 {
+		// A unit admitted before this association froze no product context
+		// (#480), and would have to execute without the context its graph now
+		// names or with one nothing pinned. Refuse the association instead.
+		// A batch counts even before its activation row exists (the crash
+		// window), so the check reads the batches themselves.
+		var activated int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM orchestration_batches
+			WHERE json_extract(document, '$.origin.graph_id') = ?`,
+			association.GraphID).Scan(&activated); err != nil {
+			return false, err
+		}
+		if activated > 0 {
+			return false, fmt.Errorf("work graph %s already has %d admitted unit(s); a product must be associated before any unit starts",
+				association.GraphID, activated)
+		}
 		return true, tx.Commit()
 	}
 	var existing string

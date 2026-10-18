@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/product"
 )
 
 // BatchSchemaVersion versions the durable batch document.
@@ -44,6 +45,17 @@ type Batch struct {
 	// operator batch digests, and reads back, exactly as it did before work
 	// graphs existed.
 	Origin *BatchOrigin `json:"origin,omitempty"`
+	// Product is the product context this unit execution was admitted with
+	// (#480): its product, exact configuration revision and knowledge set, as
+	// the runtime resolved them from the graph's association when the batch
+	// was written. Nil means the graph had no product at admission, which is
+	// every batch written before products existed.
+	//
+	// It is deliberately NOT part of the batch identity. The identity is what
+	// a crashed activation replays onto; if a newer configuration revision
+	// changed it, the replay would write a second batch and a second run for
+	// one unit. Instead the first write wins and every replay reads it back.
+	Product *product.ContextPin `json:"product,omitempty"`
 }
 
 // BatchOrigin is one WorkGraph unit execution: which unit, under which graph,
@@ -201,6 +213,15 @@ func (b Batch) Validate() error {
 		// unit execution produced several issues' output.
 		if len(b.Items) != 1 {
 			return fmt.Errorf("orchestration batch %s names a work graph unit and %d issues; a unit performs one", b.ID, len(b.Items))
+		}
+	}
+	if b.Product != nil {
+		// A pin is a statement about a unit's graph; a direct batch has none.
+		if b.Origin == nil {
+			return fmt.Errorf("orchestration batch %s carries a product context pin and no work graph unit", b.ID)
+		}
+		if err := b.Product.Validate(); err != nil {
+			return fmt.Errorf("orchestration batch %s: %w", b.ID, err)
 		}
 	}
 	id, err := batchIdentity(b.Repository, b.AgentID, issues, b.Origin)

@@ -22,7 +22,15 @@ func (s *SQLiteOperationStore) CreateOrchestrationBatch(batch orchestration.Batc
 	if err != nil {
 		return orchestration.Batch{}, false, err
 	}
-	result, err := s.db.Exec(`INSERT INTO orchestration_batches (id, repository, created_unix_nano, document)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return orchestration.Batch{}, false, err
+	}
+	defer tx.Rollback()
+	if err := requireBatchProductBinding(tx, batch); err != nil {
+		return orchestration.Batch{}, false, err
+	}
+	result, err := tx.Exec(`INSERT INTO orchestration_batches (id, repository, created_unix_nano, document)
 		VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
 		batch.ID, batch.Repository, batch.CreatedAt.UnixNano(), string(document))
 	if err != nil {
@@ -30,6 +38,9 @@ func (s *SQLiteOperationStore) CreateOrchestrationBatch(batch orchestration.Batc
 	}
 	inserted, err := result.RowsAffected()
 	if err != nil {
+		return orchestration.Batch{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
 		return orchestration.Batch{}, false, err
 	}
 	if inserted == 1 {

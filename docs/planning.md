@@ -406,7 +406,9 @@ max_wall_seconds           total ACTIVE execution wall time across the plan:
 max_cost_micros            optional, and usually absent
 ```
 
-Cost is reported only where the provider or runtime actually reports it. A
+Proposing a plan under a configured `plan.max_cost_micros` is refused: no execution provider
+reports cost to a plan and no stage budget carries a cost bound, so a stated
+ceiling would be silently unenforced. Cost is reported only where the provider or runtime actually reports it. A
 subscription CLI reports none, and unknown stays **unknown** in the approval view
 and everywhere else. It is never rendered as zero, and no currency figure is
 invented.
@@ -638,6 +640,17 @@ based on. The same rule guards the freeze itself: a stage does not start - and
 does not bind itself to an upstream head - while the run that produced that head
 is back at work. That covers a first performance too, because a plan stage stays
 completed while its run is re-activated.
+
+**A run that owes a human decision has not settled.** A worker can commit a
+candidate and ask a governed `decision_request` in the same invocation; the run
+reads as having reached its goal until the next orchestration pass admits the
+question. A stage whose run is in that state is not accepted and is not a head
+dependent work may start against, for as long as any of these holds: the run's
+question is open, its resolution has not been delivered to it, or its last
+invocation wrote a `decision_request` the runtime has not yet admitted or
+refused. The run keeps its own authority and assignment; the existing #508
+protocol resumes it, and only its final accepted output releases downstream work
+(`awaitsHumanDecision`, `runtime/plan_decision_hold.go`).
 
 The stage is then performed AGAIN under the same approved plan, as a new
 EXECUTION GENERATION. A producer moving from candidate A to candidate B is an
@@ -900,6 +913,72 @@ An attempt grants nothing. It is not approvable, because approval names a
 revision and there is no revision; it is not executable, because execution reads
 the approved revision and there is none. Proposing again is the ordinary next
 step, and it promotes the same plan identity rather than colliding with it.
+
+## A dynamic team, end to end
+
+The team an objective gets is whatever its planner proposes, bounded by what
+deterministic code admits. Nothing the model writes spawns a worker.
+
+```text
+registered planner agent  ->  InvokePlanner         non-mutating, workspace verified unchanged
+                          ->  PlanService.Propose   planning.Compile: vocabulary, budget envelope,
+                                                    dependencies, policy, independence, ratchet
+                          ->  BindObjectivePlan     the approved plan's WorkGraph projection
+                          ->  operator approval     names the plan digest and the assignments
+                          ->  plan reconciler       stages become ordinary EngineeringRuns
+                          ->  supervisor            the one scheduler
+```
+
+The smallest sufficient team is the planner's job and the compiler's check: a
+one-producer proposal compiles to a one-unit graph and one worker run, and the
+contract's required assurance gate is added by policy (a gate creates no run).
+A broad proposal - parallel producers, an `integration_compose` integrator -
+compiles to the units and edges it named; independent producers start together,
+the integrator waits for every upstream admitted handoff, and its composed
+candidate is what reaches the PR. A proposal outside the bounds (more producers
+than the plan's child-run envelope, a dependency on a stage that does not exist,
+a cycle, no material producer) is refused as a durable attempt: no plan
+revision, graph, batch or run exists afterwards.
+
+Composition happens before approval. Once any unit has started, the graph's
+plan binding is immutable (`BindObjectivePlan` refuses a started graph); a
+revision after discoveries needs the governed revision above, which preserves
+activated work and its frozen bindings. The proof is
+`runtime/dynamic_team_acceptance_test.go`.
+
+A plan stage on an objective graph follows its unit's CURRENT run. When a unit
+is remediated through a #581 epoch the work continues in the epoch's run, so
+`ReplayPlan` reads each remediated unit's stage against its latest epoch run
+(`runtime/plan_epoch_run.go`; the epoch table is the authority, the plan journal
+is not rewritten and still records the original run). The reconciler, `plan
+show` and the fleet summary therefore agree on one current run. Without that,
+the stage would stay parked on the first run, a downstream gate would be judged
+on superseded evidence, and the final candidate's publication would stay
+deferred behind a gate that cannot open.
+
+An epoch is also a child run of the plan, so it runs under what the plan
+approved (`runtime/remediation_plan_admission.go`), not as a generic WorkGraph
+unit. Before its batch is written it is admitted against the plan: refused, with
+no run created, when the plan's child-run or provider-invocation ceiling is
+spent, when the stage has spent its own allowance, when its frozen assignment
+cannot be read back, or when the worker has drifted - judged by the reconciler's
+own `refuseWorkerDrift` (provider kind, vendor family, trust mode, model). The
+run it becomes carries the stage's plan binding and frozen assignment, so it
+executes the stage's objective, instruction packs, context and model preference,
+and its budget is the stage's allowance less what every run of the stage has
+spent, narrowed by what the plan has left: an epoch never resets consumed
+allowance. The epoch's child-run charge and the epoch itself (its batch and epoch row) are
+committed in ONE transaction (`runtime/remediation_epoch_charge_store.go`), under
+the plan lock, with the ceiling re-checked against the plan journal inside that
+transaction. So a failed admission consumes no budget, two admissions cannot both
+take the last slot, and the charge is keyed by run and recorded once. An epoch
+stored by code before this rule, with no charge, is charged and materialized under
+the stage's binding before it can run; one whose run already exists is charged as
+the fact it is and never rebound. Lock order is `orchestrationMu`, then `plansMu`.
+A graph with no objective plan is unchanged.
+
+`ReplayPlan` accepts an epoch as a stage's current run only when it belongs to
+the plan's graph and unit and its run is bound to that plan and stage.
 
 ## Related documents
 

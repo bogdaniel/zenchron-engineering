@@ -403,7 +403,13 @@ func (f *fleetFixture) holdSource() func(string) (map[string]orchestration.Decis
 
 func (f *fleetFixture) supervisor() *Supervisor {
 	f.t.Helper()
-	registry := supervisorRegistry(f.t)
+	return f.supervisorOver(supervisorRegistry(f.t))
+}
+
+// supervisorOver is supervisor() resolving agents against registry, so a scenario
+// can ask what the same durable state does when the operator registry has moved.
+func (f *fleetFixture) supervisorOver(registry AgentRegistry) *Supervisor {
+	f.t.Helper()
 	repo, err := ParseGitHubRepo("acme/repo")
 	if err != nil {
 		f.t.Fatal(err)

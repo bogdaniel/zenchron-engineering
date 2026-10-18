@@ -248,14 +248,24 @@
         "orchestration/workgraph*.go",
         "runtime/integration_dispatch.go",
         "runtime/integration_conflict_delivery.go",
-        "runtime/objective_workgraph.go"
+        "runtime/objective_workgraph.go",
+        "runtime/work_unit_context.go"
       ],
       "tests": [
         "runtime/workgraph*_test.go",
         "runtime/compose_integration_recovery_test.go",
         "runtime/integration_conflict_delivery_test.go",
         "runtime/objective_workgraph_test.go",
-        "runtime/objective_remediation_review_vertical_test.go"
+        "runtime/objective_remediation_review_vertical_test.go",
+        "runtime/dynamic_team_acceptance_test.go",
+        "runtime/product_objective_isolation_test.go",
+        "runtime/product_decision_resumption_test.go",
+        "runtime/product_team_journey_test.go",
+        "runtime/team_journey_refusal_test.go",
+        "runtime/plan_decision_hold.go",
+        "runtime/plan_decision_hold_test.go",
+        "runtime/remediation_plan_admission_test.go",
+        "runtime/objective_product_association_test.go"
       ]
     },
     {
@@ -264,6 +274,8 @@
       "race": true,
       "sources": [
         "runtime/remediation_activation.go",
+        "runtime/remediation_epoch_charge_store.go",
+        "runtime/remediation_plan_admission.go",
         "runtime/remediation_eligibility.go",
         "runtime/remediation_facts.go",
         "runtime/remediation_schema.go",
@@ -285,11 +297,14 @@
         "runtime/product_knowledge_store.go",
         "runtime/product_association_store.go",
         "runtime/product_schema.go",
+        "runtime/product_context.go",
+        "runtime/product_context_prompt.go",
         "product/*.go"
       ],
       "tests": [
         "runtime/product_test.go",
-        "runtime/product_*_test.go"
+        "runtime/product_*_test.go",
+        "runtime/objective_product_association_test.go"
       ]
     },
     {

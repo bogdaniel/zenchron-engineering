@@ -58,24 +58,67 @@ func newPlanRunFixture(t *testing.T, stages []domain.PlanStage) *planRunFixture 
 	return newPlanRunFixtureOn(t, base, stages, base.deps.ConfigDigest)
 }
 
+// newPlanRunHarness wires a plan service and reconciler over a phase 8 fixture
+// and stores no plan: a scenario then either claims a hand-built plan or
+// proposes one through the real compiler.
+func newPlanRunHarness(base *phase8Fixture, config ConfigDigest) *planRunFixture {
+	return newPlanRunHarnessWith(base, config, defaultPlanFixtureEnvelope)
+}
+
+// defaultPlanFixtureEnvelope is what every scenario that does not say otherwise
+// is approved for.
+var defaultPlanFixtureEnvelope = domain.PlanBudgetEnvelope{MaxChildRuns: 4, MaxConcurrency: 3, MaxProviderInvocations: 12}
+
+func newPlanRunHarnessWith(base *phase8Fixture, config ConfigDigest, envelope domain.PlanBudgetEnvelope) *planRunFixture {
+	fixture := &planRunFixture{phase8Fixture: base}
+	fixture.service = PlanService{
+		Store: base.store, Clock: base.clock, Agents: planAgents(), DefaultAgent: "codex",
+		Envelope: envelope,
+		Config:   config,
+	}
+	if fixture.engines == nil {
+		fixture.engines = map[string]*EngineeringRuntime{}
+	}
+	fixture.reconciler = PlanReconciler{
+		Store: base.store, Clock: base.clock, Service: fixture.service,
+		Repository: "acme/repo", Issue: base.issue, StateDir: base.stateDir,
+		Engine: func(repository, agentID string) (*EngineeringRuntime, error) {
+			fixture.engineCalls = append(fixture.engineCalls, agentID)
+			// PER-AGENT RUNTIMES, when a scenario supplies one. The plan
+			// reconciler already builds the engine from the agent id, so a
+			// reviewer stage and a producer stage genuinely run through
+			// different providers - which is what lets a test drive the real
+			// reviewer-result path instead of injecting its outcome.
+			if runtime, ok := fixture.engines[agentID]; ok {
+				return runtime, nil
+			}
+			return base.runtime, nil
+		},
+	}
+	return fixture
+}
+
 // newPlanRunFixtureOn builds the same plan over an existing phase 8 fixture,
 // so a scenario that needs other durable state first shares its store.
 func newPlanRunFixtureOn(t *testing.T, base *phase8Fixture, stages []domain.PlanStage, config ConfigDigest) *planRunFixture {
 	t.Helper()
-	fixture := &planRunFixture{phase8Fixture: base}
-	fixture.service = PlanService{
-		Store: base.store, Clock: base.clock, Agents: planAgents(), DefaultAgent: "codex",
-		Envelope: domain.PlanBudgetEnvelope{MaxChildRuns: 4, MaxConcurrency: 3, MaxProviderInvocations: 12},
-		Config:   config,
-	}
+	return newPlanRunFixtureWith(t, base, stages, config, defaultPlanFixtureEnvelope)
+}
+
+func newPlanRunFixtureWith(t *testing.T, base *phase8Fixture, stages []domain.PlanStage, config ConfigDigest, envelope domain.PlanBudgetEnvelope) *planRunFixture {
+	t.Helper()
+	return newNamedPlanRunFixture(t, base, "plan-fixture", stages, config, envelope)
+}
+
+func newNamedPlanRunFixture(t *testing.T, base *phase8Fixture, planID string, stages []domain.PlanStage, config ConfigDigest, envelope domain.PlanBudgetEnvelope) *planRunFixture {
+	t.Helper()
+	fixture := newPlanRunHarnessWith(base, config, envelope)
 	plan := domain.EngineeringPlan{
-		SchemaVersion: domain.SchemaVersion, ID: "plan-fixture", Revision: 1,
-		Objective: "Make the widget idempotent.",
-		Subject:   domain.Subject{Repository: "acme/repo", Revision: base.base},
-		BudgetEnvelope: domain.PlanBudgetEnvelope{
-			MaxChildRuns: 4, MaxConcurrency: 3, MaxProviderInvocations: 12,
-		},
-		Stages: stages,
+		SchemaVersion: domain.SchemaVersion, ID: planID, Revision: 1,
+		Objective:      "Make the widget idempotent.",
+		Subject:        domain.Subject{Repository: "acme/repo", Revision: base.base},
+		BudgetEnvelope: envelope,
+		Stages:         stages,
 		Provenance: domain.PlanProvenance{
 			CompilerVersion: planning.CompilerVersion,
 			ProjectModel:    domain.ObjectRevision{ID: "project", Revision: "1"},
@@ -107,25 +150,6 @@ func newPlanRunFixtureOn(t *testing.T, base *phase8Fixture, stages []domain.Plan
 		t.Fatal(err)
 	}
 	fixture.plan = plan
-	if fixture.engines == nil {
-		fixture.engines = map[string]*EngineeringRuntime{}
-	}
-	fixture.reconciler = PlanReconciler{
-		Store: base.store, Clock: base.clock, Service: fixture.service,
-		Repository: "acme/repo", Issue: base.issue, StateDir: base.stateDir,
-		Engine: func(repository, agentID string) (*EngineeringRuntime, error) {
-			fixture.engineCalls = append(fixture.engineCalls, agentID)
-			// PER-AGENT RUNTIMES, when a scenario supplies one. The plan
-			// reconciler already builds the engine from the agent id, so a
-			// reviewer stage and a producer stage genuinely run through
-			// different providers - which is what lets a test drive the real
-			// reviewer-result path instead of injecting its outcome.
-			if runtime, ok := fixture.engines[agentID]; ok {
-				return runtime, nil
-			}
-			return base.runtime, nil
-		},
-	}
 	return fixture
 }
 
@@ -324,29 +348,7 @@ func TestDependenciesAndGatesGateTheGraph(t *testing.T) {
 // even when every stage is dependency-ready.
 func TestTheAggregateEnvelopeBoundsChildRuns(t *testing.T) {
 	fixture := newPlanRunFixture(t, parallelStages())
-	// Tighten the approved plan to ONE child run and re-store it as revision 2,
-	// which is the only way a ceiling changes: through a revision an operator
-	// approves.
-	tightened := fixture.plan
-	tightened.Revision = 2
-	previous := fixture.plan.Revision
-	tightened.Provenance.PreviousRevision = &previous
-	tightened.BudgetEnvelope.MaxChildRuns = 1
-	digest, err := tightened.ContentDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	tightened.Digest = digest
-	if _, err := fixture.store.PutPlanRevision(tightened); err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.store.PutPlanContract(tightened.ID, tightened.Revision, planFixtureContract(fixture.phase8Fixture)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.service.Approve(tightened.ID, tightened.Revision, tightened.Digest, shownAssignments(t, fixture.service, tightened.ID, tightened.Revision), "operator", ""); err != nil {
-		t.Fatal(err)
-	}
-	fixture.plan = tightened
+	approveTightenedEnvelope(t, fixture, func(envelope *domain.PlanBudgetEnvelope) { envelope.MaxChildRuns = 1 })
 
 	report := fixture.reconcile(t)
 	if len(report.Started) != 1 {
