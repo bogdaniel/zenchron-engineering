@@ -155,6 +155,7 @@ type RunDetail struct {
 	Repository               string                `json:"repository,omitempty"`
 	Phase                    rt.Phase              `json:"phase"`
 	Disposition              rt.Disposition        `json:"disposition"`
+	AwaitingHumanAuthority   bool                  `json:"awaiting_human_authority,omitempty"`
 	Elapsed                  time.Duration         `json:"elapsed"`
 	ActiveElapsed            time.Duration         `json:"active_elapsed"`
 	ExternalWaitElapsed      time.Duration         `json:"external_wait_elapsed"`
@@ -476,7 +477,8 @@ func operationProjection(p *rt.OperationStatus) *Operation {
 func runDetailProjection(s rt.StatusReport) RunDetail {
 	out := RunDetail{
 		ID: s.RunID, Repository: s.Repository, Phase: s.Phase, Disposition: s.Disposition,
-		Elapsed: s.Elapsed, ActiveElapsed: s.ActiveElapsed, ExternalWaitElapsed: s.ExternalWaitElapsed,
+		AwaitingHumanAuthority: s.Disposition == rt.Waiting && s.Reason == awaitingAuthorityReason,
+		Elapsed:                s.Elapsed, ActiveElapsed: s.ActiveElapsed, ExternalWaitElapsed: s.ExternalWaitElapsed,
 		Candidate: &Candidate{Branch: s.Candidate.Branch, Revision: s.Candidate.Revision, Tree: s.Candidate.Tree},
 		Base:      &Ref{ID: s.Base.ID, Revision: s.Base.Revision},
 		Contract:  &Ref{ID: s.Contract.ID, Revision: s.Contract.Revision},
