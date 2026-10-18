@@ -142,11 +142,7 @@ func (r *EngineeringRuntime) failureBinding(s *runState, op RunOperation, code s
 	case "kernel.source_unpinned":
 		return Digest(s.source != nil)
 	case "contract.semantic_claim_missing":
-		claims, err := s.semanticClaims()
-		if err != nil {
-			return "", err
-		}
-		return Digest(claims)
+		return Digest(s.semanticClaims())
 	case "format.go_paths_missing":
 		paths, err := candidatePaths(dir, s.pinnedBase(), s.projection.CandidateRevision)
 		if err != nil {
