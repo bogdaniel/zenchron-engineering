@@ -47,6 +47,10 @@ type objectivePlanRemediationWorker struct {
 	// run was asked to do.
 	firstRun   map[string]string
 	objectives map[string]string
+	// requests is the last ExecutionRequest each run was given, and attempts how
+	// many times each run reached the worker.
+	requests map[string]ExecutionRequest
+	attempts map[string]int
 }
 
 func (w *objectivePlanRemediationWorker) WritesTypedResults() bool { return true }
@@ -69,7 +73,10 @@ func (w *objectivePlanRemediationWorker) Execute(_ context.Context, request Exec
 	w.products = append(w.products, request.Product)
 	if w.firstRun == nil {
 		w.firstRun, w.objectives = map[string]string{}, map[string]string{}
+		w.requests, w.attempts = map[string]ExecutionRequest{}, map[string]int{}
 	}
+	w.requests[request.RunID] = request
+	w.attempts[request.RunID]++
 	w.objectives[request.RunID] = request.Objective
 	original := map[string]bool{}
 	for _, marker := range []string{"a", "b"} {

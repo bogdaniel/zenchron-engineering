@@ -320,6 +320,25 @@ which runs the real plan reconciler and supervisor until the reviewer stage run
 exists and reads the pin off its durable plan binding; the resolution seam is
 `TestAPlanStageRunWithNoBatchKeepsTheProductContextItWasCreatedWith`.
 
+**End-to-end acceptance.** `TestTwoProductsSharingARepositoryStayIsolatedThroughTheObjectiveJourney`
+(`runtime/product_objective_isolation_test.go`) puts two products over the same
+repository, each governing its own approved objective plan, and runs both through
+the real plan reconciler, supervisor, SQLite store and EngineeringRun lifecycle.
+Each stage is admitted (batch pinned, run created) and nothing has executed; then
+both products gain a newer configuration revision and newer knowledge, and the
+process's view of the store is reopened; then the stages execute. Every worker
+request carries its own product, configuration revision 1 and that product's
+admitted knowledge, none of the other product's, nothing newer, and each run
+executes exactly once with a durable pin on its batch.
+
+Each plan also has an independent reviewer stage after the backend. It is admitted
+only when its dependency completes - after the update in this test - so it is
+admitted with the revision then current (2), frozen on its own plan binding, and
+what the worker is given matches that pin. It receives its own product's
+knowledge and none of the backend's private promotion or raw discovery, and none
+of the other product's. A stage admitted before an update is never moved; a stage
+admitted after one starts from the revision then current.
+
 **Not covered here.** Production adoption of the Agent Execution Kernel is
 #518's, gated on #445; this integration reaches the worker through the existing
 host-owned `execution.Request` and changes no provider. The kernel adapter
