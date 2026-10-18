@@ -1,0 +1,14 @@
+{"schema_version":"0.1","op":"start","entry_id":"act-a1d3616e5be29eab","at":"2026-10-20T10:40:00Z","arm":"direct_agent","operator":"synthetic-operator","kind":"task_preparation","note":"synthetic"}
+{"schema_version":"0.1","op":"stop","entry_id":"act-a1d3616e5be29eab","at":"2026-10-20T10:50:00Z"}
+{"schema_version":"0.1","op":"start","entry_id":"act-40ea4c43de128cc9","at":"2026-10-20T10:50:00Z","arm":"direct_agent","operator":"synthetic-operator","kind":"manual_relay","relay_kind":"prompt","note":"synthetic"}
+{"schema_version":"0.1","op":"stop","entry_id":"act-40ea4c43de128cc9","at":"2026-10-20T10:53:00Z"}
+{"schema_version":"0.1","op":"start","entry_id":"act-2286d46092e3e46e","at":"2026-10-20T10:53:00Z","arm":"direct_agent","operator":"synthetic-operator","kind":"unattended_wait","note":"synthetic"}
+{"schema_version":"0.1","op":"stop","entry_id":"act-2286d46092e3e46e","at":"2026-10-20T11:20:00Z"}
+{"schema_version":"0.1","op":"start","entry_id":"act-a231b0ff1081a1ed","at":"2026-10-20T11:20:00Z","arm":"direct_agent","operator":"synthetic-operator","kind":"manual_relay","relay_kind":"finding","note":"synthetic"}
+{"schema_version":"0.1","op":"stop","entry_id":"act-a231b0ff1081a1ed","at":"2026-10-20T11:26:00Z"}
+{"schema_version":"0.1","op":"start","entry_id":"act-080569037a6a44fe","at":"2026-10-20T11:26:00Z","arm":"direct_agent","operator":"synthetic-operator","kind":"recovery_workaround","note":"synthetic"}
+{"schema_version":"0.1","op":"stop","entry_id":"act-080569037a6a44fe","at":"2026-10-20T11:30:00Z"}
+{"schema_version":"0.1","op":"start","entry_id":"act-2f71b55cf24b49a4","at":"2026-10-20T11:30:00Z","arm":"direct_agent","operator":"synthetic-operator","kind":"reviewing_output","note":"synthetic"}
+{"schema_version":"0.1","op":"stop","entry_id":"act-2f71b55cf24b49a4","at":"2026-10-20T11:45:00Z"}
+{"schema_version":"0.1","op":"start","entry_id":"act-3d400c962c8efd19","at":"2026-10-20T11:45:00Z","arm":"direct_agent","operator":"synthetic-operator","kind":"final_acceptance_merge","note":"synthetic"}
+{"schema_version":"0.1","op":"stop","entry_id":"act-3d400c962c8efd19","at":"2026-10-20T11:48:00Z"}
