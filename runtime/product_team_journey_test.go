@@ -31,6 +31,9 @@ type journeyWorker struct {
 	asks     map[string]string
 	requests map[string]ExecutionRequest
 	attempts map[string]int
+	// reviewer answers the invocations that carry a verdict channel, whichever
+	// engine the host drove them through.
+	reviewer *recordingReviewer
 }
 
 func (w *journeyWorker) WritesTypedResults() bool { return true }
@@ -40,7 +43,10 @@ func (w *journeyWorker) Isolation() ProviderIsolation {
 		NetworkDenied: IsolationProven, CredentialScope: IsolationProven}
 }
 
-func (w *journeyWorker) Execute(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
+func (w *journeyWorker) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	if request.ReviewerResultPath != "" {
+		return w.reviewer.Execute(ctx, request)
+	}
 	w.mu.Lock()
 	w.requests[request.RunID] = request
 	w.attempts[request.RunID]++
@@ -71,6 +77,29 @@ func (w *journeyWorker) reached(runID string) (ExecutionRequest, int) {
 	return w.requests[runID], w.attempts[runID]
 }
 
+// recordingReviewer is the second agent: it writes real structured verdicts
+// through the runtime-owned result path and remembers what it was handed.
+type recordingReviewer struct {
+	*FakeReviewerProvider
+	mu      sync.Mutex
+	request ExecutionRequest
+	calls   int
+}
+
+func (r *recordingReviewer) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	r.mu.Lock()
+	r.request = request
+	r.calls++
+	r.mu.Unlock()
+	return r.FakeReviewerProvider.Execute(ctx, request)
+}
+
+func (r *recordingReviewer) reached() (ExecutionRequest, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.request, r.calls
+}
+
 func journeyStages() []domain.PlanStage {
 	code := []domain.EngineeringCapability{domain.CapabilityCodeChange, domain.CapabilityRepositoryAnalysis}
 	return []domain.PlanStage{
@@ -83,14 +112,19 @@ func journeyStages() []domain.PlanStage {
 			InvocationMode: domain.InvocationModeMutating},
 		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer, Objective: "Review the composed candidate.",
 			DependsOn: []string{"integrate"}, RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityRepositoryAnalysis},
-			InvocationMode: domain.InvocationModeMutating},
+			InvocationMode: domain.InvocationModeMutating,
+			Independence: &domain.IndependenceRequirement{
+				Dimension: domain.IndependenceVendorFamily, DifferentFrom: []string{"backend", "frontend", "integrate"},
+			}},
 	}
 }
 
 func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurableHumanDecision(t *testing.T) {
 	fleet := newFleetFixture(t, 4)
 	fleet.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
-	worker := &journeyWorker{asks: map[string]string{}, requests: map[string]ExecutionRequest{}, attempts: map[string]int{}}
+	reviewerProvider := &recordingReviewer{FakeReviewerProvider: NewFakeReviewerProvider(ReviewerResult{
+		SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted, Reason: "every obligation was observed"})}
+	worker := &journeyWorker{reviewer: reviewerProvider, asks: map[string]string{}, requests: map[string]ExecutionRequest{}, attempts: map[string]int{}}
 	fleet.deps.Provider = worker
 	fleet.runtime = fleet.newRuntime(fleet.deps)
 	f := &productUnitFixture{fleetFixture: fleet, at: time.Unix(1700000000, 0).UTC()}
@@ -172,6 +206,10 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 	plan.service.Store, plan.reconciler.Store = store, store
 	plan.reconciler.Service = plan.service
 	supervisor = fleet.supervisor()
+	reviewerDeps := fleet.deps
+	reviewerDeps.Provider = reviewerProvider
+	reviewerDeps.Agent = ResolvedAgent{ID: "claude", Kind: AgentKindClaudeCode, TrustMode: TrustOperatorTrusted}
+	plan.engines["claude"] = fleet.newRuntime(reviewerDeps)
 
 	reviewRun := ""
 	for range 80 {
@@ -181,12 +219,12 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 			t.Fatal(err)
 		}
 		if reviewRun = snapshot.Stages["review"].RunID; reviewRun != "" {
-			if _, attempts := worker.reached(reviewRun); attempts > 0 {
+			if _, calls := reviewerProvider.reached(); calls > 0 {
 				break
 			}
 		}
 	}
-	if reviewRun == "" {
+	if _, calls := reviewerProvider.reached(); calls == 0 {
 		t.Fatal("the reviewer never reached its worker")
 	}
 
@@ -232,7 +270,7 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 
 	// Reviewer: independent run, admitted after the update, no private or raw
 	// knowledge of any producer or of the integrator, none of the rival's.
-	request, _ := worker.reached(reviewRun)
+	request, _ := reviewerProvider.reached()
 	prompt := providerPrompt(request)
 	if delivered := productOf(t, request); delivered.ProductID != owner.ID {
 		t.Fatalf("the reviewer ran as %s", delivered.ProductID)
@@ -241,6 +279,25 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 		t.Fatal("the reviewer shares a run with a producer")
 	}
 	requireAbsent(t, prompt, "PRIVATE-", "RAW-", "RIVAL", "approach-b")
+
+	// Independence is real: the reviewer's frozen assignment is a different
+	// vendor family and agent from every stage it reviews, and the run that
+	// executed it is that other agent's.
+	snapshot, err := fleet.store.ReplayPlan(plan.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewer := snapshot.Stages["review"]
+	for _, unit := range units {
+		produced := snapshot.Stages[unit]
+		if reviewer.VendorFamily == produced.VendorFamily || reviewer.AgentID == produced.AgentID {
+			t.Fatalf("the reviewer (%s/%s) is not independent of %s (%s/%s)", reviewer.AgentID, reviewer.VendorFamily, unit, produced.AgentID, produced.VendorFamily)
+		}
+	}
+
+	if row, _ := storedRun(t, fleet.phase8Fixture, reviewRun); row.AgentID != reviewer.AgentID {
+		t.Fatalf("the reviewer's run executed as %s, not its assigned %s", row.AgentID, reviewer.AgentID)
+	}
 
 	// Provenance: objective plan -> graph -> pinned batch -> run -> handoff, and
 	// the delivered decision on the run that asked.
@@ -289,6 +346,33 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 	if reviewRow.Plan == nil || reviewRow.Plan.Product == nil || reviewRow.Plan.Product.Pin.ProductID != owner.ID ||
 		reviewRow.Plan.Product.Pin.ConfigurationRevision != 2 {
 		t.Fatalf("the reviewer's run has no durable pin of the revision it was admitted with: %+v", reviewRow.Plan)
+	}
+	// The reviewer's verdict about the integrator's exact head is admitted, which
+	// is what releases publication.
+	for range 40 {
+		if snap, _ := fleet.store.ReplayPlan(plan.plan.ID); snap.Stages["review"].Review != nil {
+			break
+		}
+		tick()
+	}
+	snapshot, err = fleet.store.ReplayPlan(plan.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if review := snapshot.Stages["review"].Review; review == nil || review.Verdict != StageReviewAccepted ||
+		review.Candidate != integrate.Output.CandidateRevision {
+		t.Fatalf("no accepting verdict is bound to the integrator's admitted head: %+v", snapshot.Stages["review"].Review)
+	}
+	// The final candidate: the integrator's admitted head is what is published.
+	for range 20 {
+		plan.reconcile(t)
+		if _, err := fleet.runtime.Reconcile(context.Background(), integrate.RunID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	final := fleet.state(integrate.RunID)
+	if final.projection.PullRequest == nil || final.projection.CandidateRevision != integrate.Output.CandidateRevision {
+		t.Fatalf("the integrator candidate %s was not published: deferred=%v reason=%v", integrate.Output.CandidateRevision, final.publicationDeferred, final.snapshot.Reason)
 	}
 	events, err := fleet.store.Events(backendRun)
 	if err != nil {

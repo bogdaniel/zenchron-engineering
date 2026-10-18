@@ -349,7 +349,10 @@ operator resolves it; the store is reopened. The same run resumes once, with the
 resolution and its admitted context. Each worker holds only its own private
 knowledge, the integrator's pin holds none of the producers', the reviewer's
 prompt holds no private or raw knowledge at all, and the durable record names plan, graph, pinned batch, run, handoff and the
-delivered decision. Stages admitted after the update (integrator, reviewer)
+delivered decision. The reviewer is a different agent and vendor family from
+every stage it reviews (a frozen assignment under an independence requirement,
+run by that agent's engine), its accepting verdict is bound to the integrator's
+exact admitted head, and that head is what is published. Stages admitted after the update (integrator, reviewer)
 start from the revision then current, as documented above. A worker that
 commits a candidate *and* asks a question lets its plan stage settle before the
 question is admitted; the journey's worker asks without changing anything.
