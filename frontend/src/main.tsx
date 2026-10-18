@@ -126,7 +126,7 @@ function Screen({ route: r, onSessionInvalid }: { route: Route; onSessionInvalid
       r.page === "workgraphs" && r.id ? ops.graph(r.id, owner.signal) : Promise.resolve(undefined),
       r.page === "products" && !r.id ? ops.products(offset, owner.signal) : Promise.resolve(undefined),
       r.page === "products" && r.id ? ops.product(r.id, offset, owner.signal) : Promise.resolve(undefined),
-      r.page === "overview" ? ops.fleet(owner.signal) : Promise.resolve(undefined),
+      r.page === "overview" || (r.page === "workgraphs" && !!r.id) ? ops.fleet(owner.signal) : Promise.resolve(undefined),
     ])
       .then(([controller, index, runs, context, run, graphs, graph, products, product, fleet]) => {
         if (owner.signal.aborted) return;
@@ -252,6 +252,7 @@ function Screen({ route: r, onSessionInvalid }: { route: Route; onSessionInvalid
         graph={data.graph}
         controller={data.controller}
         stale={stale || loading}
+        fleet={data.fleet}
       />
     );
   else if (r.page === "products" && data.products)

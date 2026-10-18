@@ -2,7 +2,7 @@ import { HumanDecision } from "./human-requests";
 import * as api from "./api";
 import type { Controller } from "./api";
 import { useMemo, useState } from "react";
-import type { GraphDetail, GraphRow, Graphs, ProductDetail, Products, Unit } from "./operations-api";
+import type { Fleet, GraphDetail, GraphRow, Graphs, ProductDetail, Products, Unit } from "./operations-api";
 import { Badge, Disclosure, Empty, FilterBar, Head, Link, Pagination, Panel } from "./components";
 import { TextField } from "./form";
 import { GovernedAction, useReusableGovernedAction, type ActionReview } from "./governed-action";
@@ -17,7 +17,7 @@ import {
   unresolvedDependencies,
   useDependencyArrow,
 } from "./dependency-graph";
-import { Facts } from "./runs";
+import { BudgetFacts, Facts } from "./runs";
 
 export function GraphTable({ rows }: { rows: GraphRow[] }) {
   return rows.length ? (
@@ -260,9 +260,14 @@ function UnitInspector({
         ]}
       />
       {u.run ? (
-        <Link to={`runs/${encodeURIComponent(u.run.run_id)}`}>
-          Inspect run · {u.run.phase} · {u.run.disposition}
-        </Link>
+        <>
+          <Link to={`runs/${encodeURIComponent(u.run.run_id)}`}>
+            Inspect run · {u.run.phase} · {u.run.disposition}
+          </Link>
+          <Disclosure title="Budget observations">
+            <BudgetFacts r={u.run} />
+          </Disclosure>
+        </>
       ) : (
         <p className="muted">Run not recorded; no worker execution is inferred.</p>
       )}
@@ -350,11 +355,13 @@ export function GraphWorkspace({
   controller,
   stale = false,
   embedded = false,
+  fleet,
 }: {
   graph: GraphDetail;
   controller?: Controller;
   stale?: boolean;
   embedded?: boolean;
+  fleet?: Fleet;
 }) {
   const [offset, setOffset] = useState(0),
     [selected, setSelected] = useState(g.units[0]?.unit_id || "");
@@ -418,6 +425,17 @@ export function GraphWorkspace({
           <Panel title="Runtime counts">
             <Facts rows={Object.entries(g.counts)} />
           </Panel>
+          {fleet && (
+            <Panel title="Fleet concurrency">
+              <Facts
+                rows={[
+                  ["Executing / capacity", `${fleet.executing} / ${fleet.capacity || "Unknown to this reader"}`],
+                  ["Nonterminal runs (all graphs)", fleet.active],
+                  ["Supervisor role presence", fleet.supervisor_running ? "Present at read time" : "Not reported"],
+                ]}
+              />
+            </Panel>
+          )}
           <Panel title="Scope & identity">
             <Facts
               rows={[
