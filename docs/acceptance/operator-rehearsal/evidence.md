@@ -57,3 +57,14 @@ human decision, dependency release, the independent review verdict and the PR
 from the Product Workspace with no terminal. #629 and #628 are discoverability
 gaps: the operator must know to look at the run page. They are expected to cost
 supervision minutes in Arm A and are measured there, not hidden.
+
+## Final run on merged main
+
+Re-run on main `b02b8a4` (#625, #598, #634, #612 merged) with the harness from
+PR #636's successor branch `test/481-operator-rehearsal-harness-main`: result file
+`rehearsal-results-main-b02b8a4.json`. Steps 1-11, 13, 15 and 16 pass, including
+step 7 on the merged budget panel. Steps 12 and 14 stay PARTIAL: #629 (objective
+page has no PR/evidence summary) and #628 (a plan-stage run awaiting authority is
+undiscoverable), both open and non-blocking. Screenshots above are from the
+earlier pre-merge integration run; the final run's artifacts stay in the
+operator's scratch directory and are not committed.
