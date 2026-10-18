@@ -259,6 +259,7 @@
         "runtime/objective_remediation_review_vertical_test.go",
         "runtime/dynamic_team_acceptance_test.go",
         "runtime/product_objective_isolation_test.go",
+        "runtime/product_decision_resumption_test.go",
         "runtime/remediation_plan_admission_test.go",
         "runtime/objective_product_association_test.go"
       ]
