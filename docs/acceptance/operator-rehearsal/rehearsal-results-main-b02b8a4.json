@@ -1,0 +1,244 @@
+{
+  "results": [
+    {
+      "id": 1,
+      "title": "Open and select the product",
+      "status": "PASS",
+      "evidence": [
+        "01-products.png",
+        "01-product-workspace.png"
+      ],
+      "notes": [
+        "product page: Products | ↗ | / | Product scope | PRODUCT / SCOPE WORKSPACE | storefront | zenchron/seeded | Revision 1 | Associated WorkGraphs | No WorkGraphs in this page | WorkGraphs remain separate from engineering plans. No relationship is inferred from a shared repository. | 0 loaded · offset 0 | Previous | Next | Configuration r"
+      ],
+      "owner": ""
+    },
+    {
+      "id": 2,
+      "title": "Create an objective for the product",
+      "status": "PASS",
+      "evidence": [
+        "02-intake-filled.png",
+        "02-intake-confirm.png",
+        "02-objective-created.png"
+      ],
+      "notes": [
+        "plan id plan-b5d65c5d8defcc269c6d49334eb8b98b"
+      ],
+      "owner": ""
+    },
+    {
+      "id": 3,
+      "title": "Inspect the proposed plan (stages, profiles, dependencies, budget)",
+      "status": "PASS",
+      "evidence": [
+        "03-proposed-plan.png"
+      ],
+      "notes": [
+        "shows profiles: true, agents: true"
+      ],
+      "owner": ""
+    },
+    {
+      "id": 4,
+      "title": "Approve the plan through the governed UI action",
+      "status": "PASS",
+      "evidence": [
+        "04-approve-confirm.png",
+        "04-approved.png"
+      ],
+      "notes": [],
+      "owner": ""
+    },
+    {
+      "id": 5,
+      "title": "Inspect the WorkGraph",
+      "status": "PASS",
+      "evidence": [
+        "05-workgraphs.png",
+        "05-workgraph-detail.png"
+      ],
+      "notes": [
+        "graph graph-c4e1390785762dd9858da395a509d87e"
+      ],
+      "owner": ""
+    },
+    {
+      "id": 6,
+      "title": "Understand assignments, dependencies and concurrent execution",
+      "status": "PASS",
+      "evidence": [
+        "06-objective-assignments.png",
+        "06-review-stage-assignment.png",
+        "06-graph-concurrent.png"
+      ],
+      "notes": [
+        "objective page names assigned agent codex: true; claude: false",
+        "review stage assigned to claude / independent: false / true",
+        "two units shown running together: true"
+      ],
+      "owner": ""
+    },
+    {
+      "id": 7,
+      "title": "Inspect a WorkUnit's budget and attempts (#612 panel)",
+      "status": "PASS",
+      "evidence": [
+        "07-budget-attempts.png"
+      ],
+      "notes": [
+        "panel text:  | ⌄ | Wall ceiling | ≈ 10m 0s | Lifecycle bound | Not recorded | Max execution attempts | 2 | Max continuations | 8 | Max remediation attempts | 2 | Max assurance attempts | 2 | Consumed candidate.create | 1 | Consumed contract.compile | 1 | Consumed execution.invoke | 1 | Consumed source.observe | 2 | Runtime counts | awaiting_decision | 0 | blocked | 1 | completed | 0 | failed | 0 | handoff_pending | 0 | invalidated | 0 | ready | 0 | running | 2 | stopped | 0 | total | 3 | unknown | 0 | Fleet concurrency | Executing / capacity | 2 / Unknown to this reader | Nonterminal runs (all graphs) | 2 | Supervisor role presence | Present at read time | Scope & identity | Graph | graph-c4e1390785762dd9858da395a509d87e | Repository | zenchron/seeded | Execution agent | codex | Product · storefront | ↗ | Runnable frontier"
+      ],
+      "owner": ""
+    },
+    {
+      "id": 8,
+      "title": "Read an admitted handoff (frontend) and the unit's evidence",
+      "status": "PASS",
+      "evidence": [
+        "08-graph-after-frontend.png"
+      ],
+      "notes": [
+        "frontend completion visible: true"
+      ],
+      "owner": ""
+    },
+    {
+      "id": 9,
+      "title": "Find the open human DecisionRequest",
+      "status": "PASS",
+      "evidence": [
+        "09-action-required.png"
+      ],
+      "notes": [],
+      "owner": ""
+    },
+    {
+      "id": 10,
+      "title": "Resolve the decision through the authorized UI action",
+      "status": "PASS",
+      "evidence": [
+        "10-decision-open.png",
+        "10-decision-confirm.png",
+        "10-decision-resolved.png"
+      ],
+      "notes": [],
+      "owner": ""
+    },
+    {
+      "id": 11,
+      "title": "Observe the dependent WorkUnit become runnable and the backend resume",
+      "status": "PASS",
+      "evidence": [
+        "11-graph-all-complete.png"
+      ],
+      "notes": [
+        "all three units completed: true"
+      ],
+      "owner": ""
+    },
+    {
+      "id": "11b",
+      "title": "Diagnose: every run's state",
+      "status": "PASS",
+      "evidence": [
+        "11b-runs.png",
+        "11b-run-0.png",
+        "11b-run-1.png",
+        "11b-run-2.png",
+        "11b-run-3.png"
+      ],
+      "notes": [],
+      "owner": ""
+    },
+    {
+      "id": 14,
+      "title": "Find and authorize the outstanding publication request, then locate the PR",
+      "status": "PARTIAL",
+      "evidence": [
+        "14-actions-publication.png",
+        "14-review-run.png",
+        "14-publication-confirm.png",
+        "14-publication-authorized.png"
+      ],
+      "notes": [
+        "Action required publication cards while the review stage's own run awaits human authority: 0"
+      ],
+      "owner": ""
+    },
+    {
+      "id": 15,
+      "title": "After authorization: review completes, integrator candidate, PR evidence",
+      "status": "PASS",
+      "evidence": [
+        "15-objective-final.png",
+        "15-stage-integrate.png",
+        "15-stage-review.png",
+        "15-actions.png",
+        "15-runs.png",
+        "15-run-0.png",
+        "15-run-1.png",
+        "15-run-2.png",
+        "15-run-3.png"
+      ],
+      "notes": [
+        "lifecycle left executing: true"
+      ],
+      "owner": ""
+    },
+    {
+      "id": 16,
+      "title": "Integrator candidate: reach publication authority and a PR",
+      "status": "PASS",
+      "evidence": [
+        "16-integrator-run.png",
+        "16-actions-while-integrator-awaits.png",
+        "16-publication-from-actions.png",
+        "16-integrator-authorized.png",
+        "16-integrator-pr.png"
+      ],
+      "notes": [
+        "integrator run link from the objective page: #/runs/run-e4757a1f9a0500b30cb84cdc3817a32c",
+        "integrator publication request appeared within 150s: true",
+        "seconds until Action required listed it: 42",
+        "Action required cards while the integrator awaits publication authority: 1",
+        "integrator PR recorded: true"
+      ],
+      "owner": ""
+    },
+    {
+      "id": 12,
+      "title": "Locate review outcome, assurance, candidate revision, PR and completion",
+      "status": "PARTIAL",
+      "evidence": [
+        "12-review-stage.png"
+      ],
+      "notes": [
+        "review outcome on the objective page: accepted @ 9b535ceffe33",
+        "objective lifecycle: completed · approved revision 1.",
+        "PR / publication state shown on the objective page itself: false (otherwise only on the integrator run page, step 16)"
+      ],
+      "owner": ""
+    },
+    {
+      "id": 13,
+      "title": "Agents page: identity vs provider/model vs trust vs eligibility",
+      "status": "PASS",
+      "evidence": [
+        "13-agents.png"
+      ],
+      "notes": [
+        "four separate columns: true; ineligible agent shown: true"
+      ],
+      "owner": ""
+    }
+  ],
+  "posts": [
+    "/v1/objectives",
+    "/v1/plans/plan-b5d65c5d8defcc269c6d49334eb8b98b/approve",
+    "/v1/decisions/message-4334f9c08d8eca428d3619014c1c6485/resolve",
+    "/v1/runs/run-8dac9c2aee37db61f4ead967d2572870/authorize",
+    "/v1/runs/run-e4757a1f9a0500b30cb84cdc3817a32c/authorize"
+  ],
+  "pageErrors": []
+}
