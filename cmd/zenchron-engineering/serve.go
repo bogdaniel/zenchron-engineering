@@ -396,9 +396,13 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 			return runtime.AgentProberFor(agent, c.artifacts, operatorHome())
 		},
 		Runtime: func(repo runtime.GitHubRepo, agent runtime.ResolvedAgent) (*runtime.EngineeringRuntime, error) {
+			remote := repo.CloneURL()
+			if c.cloneRemote != nil {
+				remote = c.cloneRemote(repo)
+			}
 			return c.engineFor(runtime.RepositoryTarget{
 				Identity:      repo.String(),
-				Remote:        repo.CloneURL(),
+				Remote:        remote,
 				DefaultBranch: watchedDefaultBranch,
 			}, agent)
 		},
