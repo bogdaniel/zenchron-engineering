@@ -65,13 +65,13 @@ re-queueing released material.
 | #344 code on base | none (verified at freeze: no release operation exists; `git grep -n -i 'release' runtime/ | grep -i held` empty) |
 | Instrumentation version | FREEZE: git SHA of the measurement slice and its `benchmark` result schema version |
 | Controller | FREEZE: `zenchron-engineering` build version and source revision for Arm A |
-| Provider families and models | PROPOSED, owner confirms: implementer `codex` (openai, `codex-cli 0.163.0`), reviewer `claude` (anthropic, Claude Code `2.1.302`). Neither config pins a model; the CLIs' defaults apply and the model each reports is recorded at the start of each arm. FREEZE: confirm or pin model ids and effort. Arm B uses the same CLIs, versions and models |
+| Provider families and models | PROPOSED, owner confirms: implementer `codex` (openai, `codex-cli 0.163.0`), reviewer `claude` (anthropic, Claude Code `2.1.302`). Neither config pins a model; the CLIs' defaults apply. FREEZE: the resolved provider, model id, CLI version and relevant settings of each CLI, captured before Arm A. At the start of each arm the same facts are captured again and compared with the frozen values; a difference (a default silently changing between arms) stops the arm and is reported, because it compromises comparability. Arm B uses the same CLIs, versions and models |
 | Agent capabilities and trust modes | PROPOSED from the operator config: `codex` (`codex_cli`, `operator_trusted`), `claude` (`claude_code`, `operator_trusted`), default agent `codex`. Arm B uses the same CLIs with the same permission modes |
 | Execution budgets | PROPOSED from the operator config: per run `wall_limit_seconds` 1800, `max_execution_attempts` 2, `max_remediation_attempts` 2, `max_assurance_attempts` 2. FREEZE: the plan budget envelope. Arm B has the same wall-clock allowance (see §7) |
 | Reviewer requirement | An independent reviewer of a different vendor family from the implementer. Arm B must also use a different-family reviewer, run by the operator |
 | Workspaces | two separate clones at the frozen base, distinct paths, distinct branches `dogfood/344-planned` and `dogfood/344-direct` |
 | Arm order | Arm A (`zenchron_planned`) first, Arm B (`direct_agent`) second |
-| Operator | one named human operates both arms and times both arms |
+| Operator | Bogdan Olteanu operates both arms and times both arms |
 
 ## 4. Operator rules
 
@@ -135,8 +135,12 @@ way and reported unchanged. Failure is a result, not an invalidation.
 
 Each arm stops at the first of: a review-ready PR with all criteria met and an
 independent review recorded; the operator declares the arm failed; or the
-wall-clock allowance FREEZE: `<hours>` of elapsed time since the arm's first log
-entry. The same allowance applies to both arms. Stopping early is logged with a
+wall-clock allowance of 4 hours of elapsed time since the arm's first log
+entry. The same allowance applies to both arms. Active human supervision is
+measured separately and is not what the allowance counts. An arm that reaches the
+limit without accepted work is recorded as an incomplete (censored) result with
+its state at the limit: not an artificial success and not a zero-productivity
+comparison. Stopping early is logged with a
 reason and is not repeated.
 
 ## 8. Isolation
