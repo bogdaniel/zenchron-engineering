@@ -261,6 +261,8 @@
         "runtime/product_objective_isolation_test.go",
         "runtime/product_decision_resumption_test.go",
         "runtime/product_team_journey_test.go",
+        "runtime/plan_decision_hold.go",
+        "runtime/plan_decision_hold_test.go",
         "runtime/remediation_plan_admission_test.go",
         "runtime/objective_product_association_test.go"
       ]

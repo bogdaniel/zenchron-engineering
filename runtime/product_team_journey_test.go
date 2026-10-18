@@ -54,10 +54,10 @@ func (w *journeyWorker) Execute(ctx context.Context, request ExecutionRequest) (
 	attempt := w.attempts[request.RunID]
 	w.mu.Unlock()
 	if document != "" && attempt == 1 {
-		// A worker that has a question and nothing else to report: it changes
-		// nothing, so no candidate or plan stage can settle before the answer.
-		return ExecutionResult{ProviderID: "journey-worker", Outcome: execution.Succeeded},
-			os.WriteFile(request.MessagePath, []byte(document), 0o600)
+		// The hard case: the worker commits a candidate AND asks, in one invocation.
+		if err := os.WriteFile(request.MessagePath, []byte(document), 0o600); err != nil {
+			return ExecutionResult{}, err
+		}
 	}
 	file := filepath.Join(request.CandidateDir, fmt.Sprintf("work-%s-%d.go", request.RunID, attempt))
 	if err := os.WriteFile(file, []byte("package candidate\n"), 0o600); err != nil {
@@ -189,11 +189,41 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 	if len(open) != 1 || fleet.graph(graphID).unit(t, "frontend").Output == nil {
 		t.Fatalf("expected a parked backend and a finished frontend: open=%d", len(open))
 	}
-	if fleet.graph(graphID).unit(t, "integrate").RunID != "" {
-		t.Fatal("the integrator started before its producer's human decision was resolved")
+	// The committed candidate is not yet a settled head: the stage stays running
+	// and nothing downstream may start, before and after a restart.
+	row, _ := storedRun(t, fleet.phase8Fixture, backendRun)
+	firstHead := row.Candidate.Revision
+	if firstHead == "" {
+		t.Fatal("the backend never committed a candidate before asking; the hazard is not exercised")
+	}
+	assertHeld := func(when string) {
+		t.Helper()
+		snapshot, err := fleet.store.ReplayPlan(plan.plan.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state := snapshot.Stages["backend"].State; state != PlanStageRunning {
+			t.Fatalf("%s: the backend stage is %s while its question is outstanding", when, state)
+		}
+		if snapshot.Stages["integrate"].RunID != "" || fleet.graph(graphID).unit(t, "integrate").RunID != "" ||
+			snapshot.Stages["review"].RunID != "" {
+			t.Fatalf("%s: dependent work started against an unsettled candidate", when)
+		}
+	}
+	assertHeld("while the question is outstanding")
+	store, _ := reopen(t, fleet.phase8Fixture)
+	plan.service.Store, plan.reconciler.Store = store, store
+	plan.reconciler.Service = plan.service
+	supervisor = fleet.supervisor()
+	for range 5 {
+		tick()
+	}
+	assertHeld("after a restart")
+	if open, _ = fleet.store.OpenDecisionRequestsForRun(backendRun); len(open) != 1 {
+		t.Fatalf("the open question did not survive the restart: %d", len(open))
 	}
 
-	// The world moves while the human decides, and the process restarts.
+	// The world moves while the human decides; the operator resolves.
 	f.adoptConfiguration(owner.ID, 2, map[string]string{"owner": "NEWER-REVISION"})
 	f.widelyPromote(owner.ID, "PROMOTED-AFTER-ADMISSION")
 	if _, err := supervisor.ResolveDecision(ControlRequest{
@@ -202,10 +232,6 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 	}); err != nil {
 		t.Fatal(err)
 	}
-	store, _ := reopen(t, fleet.phase8Fixture)
-	plan.service.Store, plan.reconciler.Store = store, store
-	plan.reconciler.Service = plan.service
-	supervisor = fleet.supervisor()
 	reviewerDeps := fleet.deps
 	reviewerDeps.Provider = reviewerProvider
 	reviewerDeps.Agent = ResolvedAgent{ID: "claude", Kind: AgentKindClaudeCode, TrustMode: TrustOperatorTrusted}
@@ -347,6 +373,9 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 		t.Fatalf("the integrator consumed %d inputs, want the two producers' handoffs", len(integrate.Inputs))
 	}
 	for _, input := range integrate.Inputs {
+		if input.UnitID == "backend" && (input.CandidateRevision == firstHead || input.CandidateRevision == "") {
+			t.Fatalf("the integrator consumed the backend's pre-answer head %s, not its final one", firstHead)
+		}
 		if produced := view.unit(t, input.UnitID).Output; produced == nil || input.HandoffID != produced.HandoffID {
 			t.Fatalf("the integrator's input %s is not the admitted handoff", input.UnitID)
 		}

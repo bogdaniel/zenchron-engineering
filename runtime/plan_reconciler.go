@@ -729,7 +729,11 @@ func (r PlanReconciler) movedUpstream(assignment domain.AgentAssignment) (string
 		}
 		// A terminal failure leaves a last head, not a replacement input
 		// that dependent work can consume.
-		if outcome, settled := runSettled(run); !settled || outcome != "completed" {
+		outcome, settled, err := r.settledRun(run)
+		if err != nil {
+			return "", err
+		}
+		if !settled || outcome != "completed" {
 			continue
 		}
 		head := run.Candidate.Revision
@@ -1180,7 +1184,11 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		if !found {
 			continue
 		}
-		if _, settled := runSettled(run); !settled {
+		_, settled, err := r.settledRun(run)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !settled {
 			return nil, &PlanStageBlock{
 				StageID: stage.ID, Kind: "upstream",
 				Reason: boundedDetail(fmt.Sprintf("stage %s is producing a different candidate; this stage starts against the head it settles on", upstream.StageID)),
@@ -1659,6 +1667,11 @@ func (r PlanReconciler) stageAcceptance(plan domain.EngineeringPlan, stage domai
 	case terminalDisposition(run.Disposition):
 		return "failed", true, nil
 	case run.Disposition == Waiting && run.Reason == ReasonGoalStateReached:
+		// A run that has asked a human, or is about to have its question
+		// admitted, has not produced a head this stage may settle on.
+		if awaiting, err := r.awaitsHumanDecision(run); err != nil || awaiting {
+			return "", false, err
+		}
 	default:
 		return "", false, nil
 	}
@@ -1769,8 +1782,8 @@ func (r PlanReconciler) stageWorkStopped(projection PlanStageProjection) (bool, 
 	if err != nil || !found {
 		return false, err
 	}
-	_, stopped := runSettled(run)
-	return stopped, nil
+	_, stopped, err := r.settledRun(run)
+	return stopped, err
 }
 
 // deliverBlockingReviews hands each blocking reviewer verdict to the run that
