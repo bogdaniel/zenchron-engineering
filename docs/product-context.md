@@ -339,6 +339,24 @@ knowledge and none of the backend's private promotion or raw discovery, and none
 of the other product's. A stage admitted before an update is never moved; a stage
 admitted after one starts from the revision then current.
 
+**Team journey with a human decision.** `TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurableHumanDecision`
+(`runtime/product_team_journey_test.go`) runs one approved objective plan - two
+parallel producers, a deterministic integrator and an independent reviewer -
+for a product that shares its repository with a rival. Each producer, and the
+integrator, has private audienced and raw knowledge. One producer asks a #508
+decision and parks; a newer configuration and newer knowledge land; the
+operator resolves it; the store is reopened. The same run resumes once, with the
+resolution and its admitted context. Each worker holds only its own private
+knowledge, the integrator's pin holds none of the producers', the reviewer's
+prompt holds no private or raw knowledge at all, and the durable record names plan, graph, pinned batch, run, handoff and the
+delivered decision. The reviewer is a different agent and vendor family from
+every stage it reviews (a frozen assignment under an independence requirement,
+run by that agent's engine), its accepting verdict is bound to the integrator's
+exact admitted head, and that head is what is published. Stages admitted after the update (integrator, reviewer)
+start from the revision then current, as documented above. A worker that
+commits a candidate *and* asks a question lets its plan stage settle before the
+question is admitted; the journey's worker asks without changing anything.
+
 **Not covered here.** Production adoption of the Agent Execution Kernel is
 #518's, gated on #445; this integration reaches the worker through the existing
 host-owned `execution.Request` and changes no provider. The kernel adapter
