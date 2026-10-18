@@ -27,13 +27,28 @@ func TestABlockedReviewOfTheIntegratorsCandidateNeverReleasesPublication(t *test
 		t.Fatal(err)
 	}
 	plan.approve(t)
-	reviewerDeps := fleet.deps
-	reviewerDeps.Provider = reviewerProvider
-	reviewerDeps.Agent = ResolvedAgent{ID: "claude", Kind: AgentKindClaudeCode, TrustMode: TrustOperatorTrusted}
-	plan.engines["claude"] = fleet.newRuntime(reviewerDeps)
+	bindReviewer := func() {
+		reviewerDeps := fleet.deps
+		reviewerDeps.Provider = reviewerProvider
+		reviewerDeps.Agent = ResolvedAgent{ID: "claude", Kind: AgentKindClaudeCode, TrustMode: TrustOperatorTrusted}
+		plan.engines["claude"] = fleet.newRuntime(reviewerDeps)
+	}
+	bindReviewer()
 
 	supervisor := fleet.supervisor()
+	reopened := false
 	for range 60 {
+		// Restart at the boundary between two admitted handoffs and the stage
+		// that consumes them: the integrator must start exactly once afterwards.
+		if view := fleet.graph(graphID); !reopened && view.unit(t, "backend").Output != nil &&
+			view.unit(t, "frontend").Output != nil && view.unit(t, "integrate").RunID == "" {
+			store, _ := reopen(t, fleet.phase8Fixture)
+			plan.service.Store, plan.reconciler.Store = store, store
+			plan.reconciler.Service = plan.service
+			supervisor = fleet.supervisor()
+			bindReviewer()
+			reopened = true
+		}
 		plan.reconcile(t)
 		if _, err := supervisor.Tick(context.Background()); err != nil {
 			t.Fatal(err)
@@ -45,6 +60,9 @@ func TestABlockedReviewOfTheIntegratorsCandidateNeverReleasesPublication(t *test
 	}
 	if _, calls := reviewerProvider.reached(); calls == 0 {
 		t.Fatal("the reviewer never reached its worker; the refusal is not exercised")
+	}
+	if !reopened {
+		t.Fatal("the restart boundary between admitted handoffs and the integrator was never observed")
 	}
 	integrate := fleet.graph(graphID).unit(t, "integrate")
 	if integrate.RunID == "" || integrate.Output == nil {
