@@ -293,7 +293,7 @@ export function InstalledAgents() {
                   </li>
                 ))}
               </ul>
-              <p>These specialize existing workers and planning inputs; they grant no authority.</p>
+              <p>These specialize existing workers and planning inputs; they grant no authority. The configuration projection lists profile and template ids only, so which agent each profile specializes is not reported here.</p>
             </>
           ) : (
             <p>Configuration has not been observed.</p>

@@ -1,6 +1,5 @@
-import { InstalledAgents } from "./installed-agents";
-import type { Controller, Runs } from "./api";
-import { Badge, ControllerFacts, Disclosure, Empty, Head, Link, Pagination, Panel } from "./components";
+import type { Controller } from "./api";
+import { ControllerFacts, Disclosure, Head, Link, Panel } from "./components";
 import { Facts } from "./runs";
 
 export function ControllerWorkspace({ controller: c, stale }: { controller: Controller; stale: boolean }) {
@@ -53,62 +52,6 @@ export function ControllerWorkspace({ controller: c, stale }: { controller: Cont
           </Panel>
         </aside>
       </div>
-    </>
-  );
-}
-export function Agents({ runs, onPage }: { runs: Runs; onPage: (v: number) => void }) {
-  return (
-    <>
-      <Head eyebrow="SYSTEM / EXECUTION AGENTS" title="Agents">
-        Recorded execution bindings in the loaded run page. Agent identity, provider kind and execution trust remain
-        separate.
-      </Head>
-      <Panel title="Observed agent bindings" extra={<Badge>{runs.runs.length} run observations</Badge>}>
-        {runs.runs.length ? (
-          <div className="table-scroll" tabIndex={0} role="region" aria-label="Observed agent bindings">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  {["Agent identity", "Provider / model", "Execution trust", "Source run"].map((s) => (
-                    <th scope="col" key={s}>
-                      {s}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {runs.runs.map((r) => (
-                  <tr key={r.run_id}>
-                    <td data-label="Agent identity">{r.agent || "Not recorded"}</td>
-                    <td data-label="Provider / model">
-                      {r.provider_kind || "Unknown"} / {r.model || "Provider default not recorded"}
-                    </td>
-                    <td data-label="Execution trust">{r.trust_mode || "Unknown"}</td>
-                    <td data-label="Source run">
-                      <Link to={`runs/${encodeURIComponent(r.run_id)}`}>{r.run_id}</Link>
-                      {r.unavailable && (
-                        <small className="row-meta">
-                          Observation unavailable; retained identity grants no authority.
-                        </small>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <Empty title="No execution bindings in this page">This does not prove that no agents are installed.</Empty>
-        )}
-        <Pagination
-          label="Agent observation pagination"
-          offset={runs.offset}
-          count={runs.runs.length}
-          more={runs.has_more}
-          onPage={onPage}
-        />
-      </Panel>
-      <InstalledAgents />
     </>
   );
 }
