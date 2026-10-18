@@ -26,6 +26,10 @@ func isolationProducerStages() []domain.PlanStage {
 			Objective:            "Implement the frontend half.",
 			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityCodeChange, domain.CapabilityRepositoryAnalysis},
 			InvocationMode:       domain.InvocationModeMutating},
+		{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer, Objective: "Review the backend half.",
+			DependsOn:            []string{"backend"},
+			RequiresCapabilities: []domain.EngineeringCapability{domain.CapabilityRepositoryAnalysis},
+			InvocationMode:       domain.InvocationModeMutating},
 	}
 }
 
@@ -46,9 +50,10 @@ func TestTwoProductsSharingARepositoryStayIsolatedThroughTheObjectiveJourney(t *
 		product string
 		graph   string
 		other   string
+		label   string
 	}
 	var plans []*governed
-	for _, spec := range []struct{ id, product, other string }{{"plan-one", one.ID, "TWO-ONLY"}, {"plan-two", two.ID, "ONE-ONLY"}} {
+	for _, spec := range []struct{ id, product, other, label string }{{"plan-one", one.ID, "TWO-ONLY", "ONE"}, {"plan-two", two.ID, "ONE-ONLY", "TWO"}} {
 		plan := newNamedPlanRunFixture(t, fleet.phase8Fixture, spec.id, isolationProducerStages(), fleet.deps.ConfigDigest, defaultPlanFixtureEnvelope)
 		graphID, err := plan.service.BindObjectivePlan(plan.plan, plan.issue, plan.service.DefaultAgent)
 		if err != nil {
@@ -57,8 +62,11 @@ func TestTwoProductsSharingARepositoryStayIsolatedThroughTheObjectiveJourney(t *
 		if err := plan.service.AssociateProductGraph(spec.product, graphID); err != nil {
 			t.Fatal(err)
 		}
+		// The producer's private knowledge, which must stay with its owner.
+		f.audiencedPromote(spec.product, graphID, "backend", "PRIVATE-"+spec.label)
+		f.rawDiscovery(spec.product, graphID, "backend", "RAW-"+spec.label)
 		plan.approve(t)
-		plans = append(plans, &governed{plan: plan, product: spec.product, graph: graphID, other: spec.other})
+		plans = append(plans, &governed{plan: plan, product: spec.product, graph: graphID, other: spec.other, label: spec.label})
 	}
 
 	supervisor := fleet.supervisor()
@@ -175,6 +183,58 @@ func TestTwoProductsSharingARepositoryStayIsolatedThroughTheObjectiveJourney(t *
 		}
 	}
 	if invoked != 4 {
-		t.Fatalf("expected four stage runs, saw %d", invoked)
+		t.Fatalf("expected four producer stage runs, saw %d", invoked)
+	}
+
+	// The independent reviewer of each plan: it consumes the producer's admitted
+	// work and nothing private to the producer.
+	reviewRuns := map[string]string{}
+	for range 60 {
+		for _, g := range plans {
+			snapshot, err := fleet.store.ReplayPlan(g.plan.plan.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if runID := snapshot.Stages["review"].RunID; runID != "" {
+				worker.mu.Lock()
+				_, reached := worker.requests[runID]
+				worker.mu.Unlock()
+				if reached {
+					reviewRuns[g.plan.plan.ID] = runID
+				}
+			}
+		}
+		if len(reviewRuns) == len(plans) {
+			break
+		}
+		tick()
+	}
+	if len(reviewRuns) != len(plans) {
+		t.Fatalf("not every reviewer stage reached its worker: %v", reviewRuns)
+	}
+	for _, g := range plans {
+		worker.mu.Lock()
+		request := worker.requests[reviewRuns[g.plan.plan.ID]]
+		worker.mu.Unlock()
+		prompt := providerPrompt(request)
+		delivered := productOf(t, request)
+		reviewRun, _ := storedRun(t, fleet.phase8Fixture, reviewRuns[g.plan.plan.ID])
+		// The reviewer stage is admitted when its dependency completes, which is
+		// AFTER both products gained revision 2, so revision 2 is what it is
+		// admitted with - frozen on its own durable plan binding, and what the
+		// worker is then given. A stage admitted before the update (above) is
+		// never moved; one admitted after it starts from the revision then current.
+		if reviewRun.Plan == nil || reviewRun.Plan.Product == nil || reviewRun.Plan.Product.Pin.ConfigurationRevision != 2 ||
+			delivered.ProductID != g.product || delivered.ConfigurationRevision != reviewRun.Plan.Product.Pin.ConfigurationRevision {
+			t.Fatalf("%s reviewer ran as product %s revision %d against pin %+v", g.plan.plan.ID, delivered.ProductID, delivered.ConfigurationRevision, reviewRun.Plan)
+		}
+		claim := "CLAIM-ONE-ONLY"
+		if g.label == "TWO" {
+			claim = "CLAIM-TWO-ONLY"
+		}
+		if !strings.Contains(prompt, claim) {
+			t.Fatalf("%s reviewer did not receive its own product's admitted context", g.plan.plan.ID)
+		}
+		requireAbsent(t, prompt, g.other, "PRIVATE-"+g.label, "RAW-"+g.label, "PRIVATE-"+map[string]string{"ONE": "TWO", "TWO": "ONE"}[g.label])
 	}
 }
