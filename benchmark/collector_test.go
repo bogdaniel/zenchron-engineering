@@ -64,6 +64,11 @@ func opAfter(seq int64, opID, kind string, attempt int, started, ended time.Time
 	return runtime.EngineeringEvent{Sequence: seq, Type: runtime.EventOperationAfter, OccurredAt: ended, Payload: payload}
 }
 
+func opBefore(seq int64, opID, kind string, started time.Time) runtime.EngineeringEvent {
+	payload, _ := json.Marshal(runtime.RunOperation{ID: opID, RunID: "r", Kind: kind, State: runtime.Running, StartedAt: &started})
+	return runtime.EngineeringEvent{Sequence: seq, Type: runtime.EventOperationBefore, OccurredAt: started, Payload: payload}
+}
+
 func terminal(seq int64, at time.Time) runtime.EngineeringEvent {
 	return runtime.EngineeringEvent{Sequence: seq, Type: runtime.EventRunCompleted, OccurredAt: at}
 }
@@ -83,8 +88,8 @@ func twoWorkerSource() fakeSource {
 			"r2": status("claude", minute(4), runtime.Completed),
 		},
 		events: map[string][]runtime.EngineeringEvent{
-			"r1": {opAfter(1, "o1", "execute", 1, minute(1), minute(9)), terminal(2, minute(10))},
-			"r2": {opAfter(1, "o2", "execute", 1, minute(5), minute(12)), {Sequence: 2, Type: runtime.EventReviewContinuationGranted},
+			"r1": {opAfter(1, "o1", runtime.OpExecutionInvoke, 1, minute(1), minute(9)), terminal(2, minute(10))},
+			"r2": {opAfter(1, "o2", runtime.OpExecutionInvoke, 1, minute(5), minute(12)), {Sequence: 2, Type: runtime.EventReviewContinuationGranted},
 				{Sequence: 3, Type: runtime.EventHandoffReported}, terminal(4, minute(14))},
 		},
 	}
@@ -95,11 +100,8 @@ func TestCollectComputesConcurrencyFromRealRunAndOperationIntervals(t *testing.T
 	if len(ev.Problems) != 0 || len(ev.Runs) != 2 {
 		t.Fatalf("problems=%v runs=%d", ev.Problems, len(ev.Runs))
 	}
-	if ev.RunSpans.Peak != 2 || ev.RunSpans.OverlapSeconds != 6*60 {
-		t.Fatalf("run overlap [0,10] x [4,14] should be 6 minutes at peak 2: %+v", ev.RunSpans)
-	}
-	if ev.OperationSpan.Peak != 2 || ev.OperationSpan.OverlapSeconds != 4*60 {
-		t.Fatalf("operation overlap [1,9] x [5,12] should be 4 minutes: %+v", ev.OperationSpan)
+	if !ev.Execution.Established || ev.Execution.Peak != 2 || ev.Execution.OverlapSeconds != 4*60 {
+		t.Fatalf("execution overlap [1,9] x [5,12] should be 4 minutes at peak 2: %+v", ev.Execution)
 	}
 	r2 := ev.Runs[1]
 	if r2.Agent != "claude" || r2.ReviewContinuations != 1 || r2.HandoffsReported != 1 || !r2.Terminal {
@@ -173,7 +175,7 @@ func TestUnreadableGraphIsAProblem(t *testing.T) {
 	}
 }
 
-func TestNonTerminalRunHasUnknownWallAndIsExcludedFromConcurrency(t *testing.T) {
+func TestNonTerminalRunHasUnknownWall(t *testing.T) {
 	src := twoWorkerSource()
 	src.events["r2"] = []runtime.EngineeringEvent{{Sequence: 1, Type: runtime.EventHandoffReported}}
 	src.status["r2"] = status("claude", minute(4), runtime.Waiting)
@@ -182,11 +184,8 @@ func TestNonTerminalRunHasUnknownWallAndIsExcludedFromConcurrency(t *testing.T) 
 	if r2.Terminal || r2.WallSeconds.IsKnown() {
 		t.Fatalf("a waiting run has no known wall time: %+v", r2.WallSeconds)
 	}
-	if ev.RunSpans.Spans != 1 || ev.RunSpans.Peak != 1 {
-		t.Fatalf("non-terminal run must not fabricate an interval: %+v", ev.RunSpans)
-	}
-	if len(ev.Limitations) == 0 {
-		t.Fatal("exclusion must be stated as a limitation")
+	if !ev.Execution.Established || ev.Execution.Spans != 1 {
+		t.Fatalf("only r1's execution is established here: %+v", ev.Execution)
 	}
 }
 
@@ -220,5 +219,64 @@ func TestRunScopeIsBounded(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("oversized scope must be reported: %v", ev.Problems)
+	}
+}
+
+// nonTerminalPair is the shape of the rehearsal that exposed the defect: both
+// producers reached their goal and are waiting on publication authority, so no
+// run is terminal, yet their worker executions demonstrably overlapped.
+func nonTerminalPair() fakeSource {
+	return fakeSource{
+		graph: runtime.WorkGraphView{GraphID: "g", Units: []runtime.WorkGraphUnitView{{UnitID: "be", RunID: "r1"}, {UnitID: "fe", RunID: "r2"}}},
+		status: map[string]runtime.StatusReport{
+			"r1": status("codex", minute(0), runtime.Waiting),
+			"r2": status("codex", minute(0), runtime.Waiting),
+		},
+		events: map[string][]runtime.EngineeringEvent{
+			"r1": {opBefore(1, "e1", runtime.OpExecutionInvoke, minute(2)), opAfter(2, "e1", runtime.OpExecutionInvoke, 1, minute(2), minute(8)),
+				opBefore(3, "s1", "source.observe", minute(1)), opAfter(4, "s1", "source.observe", 1, minute(1), minute(30))},
+			"r2": {opBefore(1, "e2", runtime.OpExecutionInvoke, minute(4)), opAfter(2, "e2", runtime.OpExecutionInvoke, 1, minute(4), minute(10)),
+				opBefore(3, "s2", "source.observe", minute(1)), opAfter(4, "s2", "source.observe", 1, minute(1), minute(30))},
+		},
+	}
+}
+
+func TestNonTerminalRunsStillReportRealExecutionOverlap(t *testing.T) {
+	ev := Collect(nonTerminalPair(), Scope{GraphID: "g"}, minute(60))
+	for _, r := range ev.Runs {
+		if r.Terminal || r.WallSeconds.IsKnown() {
+			t.Fatalf("precondition: runs are non-terminal with unknown wall: %+v", r)
+		}
+	}
+	if !ev.Execution.Established || ev.Execution.Peak != 2 || ev.Execution.OverlapSeconds != 4*60 {
+		t.Fatalf("executions [2,8] x [4,10] overlap 4 minutes at peak 2: %+v", ev.Execution)
+	}
+	if ev.Execution.Spans != 2 {
+		t.Fatalf("source.observe polling is not worker execution and must not count: %+v", ev.Execution)
+	}
+	r, _ := Build(Input{Arm: ArmPlanned, Runtime: &ev})
+	m := r.Measured
+	if !m.PeakExecConcurrency.IsKnown() || *m.PeakExecConcurrency.Value != 2 || *m.ExecOverlapSeconds.Value != 240 {
+		t.Fatalf("result measures: %+v %+v", m.PeakExecConcurrency, m.ExecOverlapSeconds)
+	}
+	if *m.ExecutionAttempts.Value != 2 || *m.OperationAttempts.Value != 4 {
+		t.Fatalf("execution attempts must be reported apart from all-kind operations: %+v %+v", m.ExecutionAttempts, m.OperationAttempts)
+	}
+}
+
+func TestMissingExecutionEvidenceIsUnknownNeverZero(t *testing.T) {
+	noExec := nonTerminalPair()
+	noExec.events = map[string][]runtime.EngineeringEvent{"r1": {}, "r2": {}}
+	unfinished := nonTerminalPair()
+	unfinished.events["r2"] = []runtime.EngineeringEvent{opBefore(1, "e2", runtime.OpExecutionInvoke, minute(4))}
+	for name, src := range map[string]fakeSource{"no execution at all": noExec, "execution never ended": unfinished} {
+		ev := Collect(src, Scope{GraphID: "g"}, minute(60))
+		if ev.Execution.Established || ev.Execution.UnknownReason == "" {
+			t.Fatalf("%s: must be unknown with a reason: %+v", name, ev.Execution)
+		}
+		r, _ := Build(Input{Arm: ArmPlanned, Runtime: &ev})
+		if r.Measured.PeakExecConcurrency.IsKnown() || r.Measured.ExecOverlapSeconds.IsKnown() {
+			t.Fatalf("%s: concurrency was reported as a number, not unknown", name)
+		}
 	}
 }

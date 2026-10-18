@@ -97,21 +97,20 @@ type Cost struct {
 
 // Measured uses the existing member names where one exists.
 type Measured struct {
-	ChildRuns          Measure[int]     `json:"child_runs"`
-	OperationAttempts  Measure[int]     `json:"operation_attempts"`
-	RuntimeWallSeconds Measure[float64] `json:"wall_seconds_runtime_first_create_to_last_end"`
-	ArmWallSeconds     Measure[float64] `json:"wall_seconds_arm_first_entry_to_last_entry"`
-	SupervisionMinutes Measure[float64] `json:"supervision_minutes"`
-	UnattendedWaitMins Measure[float64] `json:"unattended_wait_minutes"`
-	ReviewCycles       Measure[int]     `json:"review_observations"`
-	RemediationCycles  Measure[int]     `json:"review_continuations"`
-	DecisionDeliveries Measure[int]     `json:"decision_deliveries"`
-	Tokens             Measure[int64]   `json:"tokens"`
-	Cost               Cost             `json:"cost"`
-	PeakRunConcurrency Measure[int]     `json:"peak_run_concurrency"`
-	RunOverlapSeconds  Measure[float64] `json:"run_overlap_seconds"`
-	PeakOpConcurrency  Measure[int]     `json:"peak_operation_concurrency"`
-	OpOverlapSeconds   Measure[float64] `json:"operation_overlap_seconds"`
+	ChildRuns           Measure[int]     `json:"child_runs"`
+	OperationAttempts   Measure[int]     `json:"operation_attempts_all_kinds"`
+	ExecutionAttempts   Measure[int]     `json:"execution_attempts"`
+	RuntimeWallSeconds  Measure[float64] `json:"wall_seconds_runtime_first_create_to_last_end"`
+	ArmWallSeconds      Measure[float64] `json:"wall_seconds_arm_first_entry_to_last_entry"`
+	SupervisionMinutes  Measure[float64] `json:"supervision_minutes"`
+	UnattendedWaitMins  Measure[float64] `json:"unattended_wait_minutes"`
+	ReviewCycles        Measure[int]     `json:"review_observations"`
+	RemediationCycles   Measure[int]     `json:"review_continuations"`
+	DecisionDeliveries  Measure[int]     `json:"decision_deliveries"`
+	Tokens              Measure[int64]   `json:"tokens"`
+	Cost                Cost             `json:"cost"`
+	PeakExecConcurrency Measure[int]     `json:"peak_execution_concurrency"`
+	ExecOverlapSeconds  Measure[float64] `json:"execution_overlap_seconds"`
 }
 
 // SourceRef points at raw evidence by path and content digest.
@@ -263,21 +262,20 @@ func runtimeReasons(in Input) []string {
 
 func measure(in Input, sup Supervision, hasSup bool) Measured {
 	m := Measured{
-		ChildRuns:          Unknown[int]("no runtime evidence for this arm"),
-		OperationAttempts:  Unknown[int]("no runtime evidence for this arm"),
-		RuntimeWallSeconds: Unknown[float64]("no runtime evidence for this arm"),
-		ReviewCycles:       Unknown[int]("no runtime evidence for this arm"),
-		RemediationCycles:  Unknown[int]("no runtime evidence for this arm"),
-		DecisionDeliveries: Unknown[int]("no runtime evidence for this arm"),
-		PeakRunConcurrency: Unknown[int]("no runtime evidence for this arm"),
-		RunOverlapSeconds:  Unknown[float64]("no runtime evidence for this arm"),
-		PeakOpConcurrency:  Unknown[int]("no runtime evidence for this arm"),
-		OpOverlapSeconds:   Unknown[float64]("no runtime evidence for this arm"),
-		Tokens:             Unknown[int64]("direct_agent arm: provider usage is not instrumented"),
-		Cost:               Cost{Reason: "direct_agent arm: provider cost is not instrumented; unknown is not zero"},
-		SupervisionMinutes: Unknown[float64]("no activity log entries for this arm"),
-		UnattendedWaitMins: Unknown[float64]("no activity log entries for this arm"),
-		ArmWallSeconds:     Unknown[float64]("no completed activity log entries for this arm"),
+		ChildRuns:           Unknown[int]("no runtime evidence for this arm"),
+		OperationAttempts:   Unknown[int]("no runtime evidence for this arm"),
+		RuntimeWallSeconds:  Unknown[float64]("no runtime evidence for this arm"),
+		ReviewCycles:        Unknown[int]("no runtime evidence for this arm"),
+		RemediationCycles:   Unknown[int]("no runtime evidence for this arm"),
+		DecisionDeliveries:  Unknown[int]("no runtime evidence for this arm"),
+		PeakExecConcurrency: Unknown[int]("no runtime evidence for this arm"),
+		ExecOverlapSeconds:  Unknown[float64]("no runtime evidence for this arm"),
+		ExecutionAttempts:   Unknown[int]("no runtime evidence for this arm"),
+		Tokens:              Unknown[int64]("direct_agent arm: provider usage is not instrumented"),
+		Cost:                Cost{Reason: "direct_agent arm: provider cost is not instrumented; unknown is not zero"},
+		SupervisionMinutes:  Unknown[float64]("no activity log entries for this arm"),
+		UnattendedWaitMins:  Unknown[float64]("no activity log entries for this arm"),
+		ArmWallSeconds:      Unknown[float64]("no completed activity log entries for this arm"),
 	}
 	if hasSup {
 		m.SupervisionMinutes = Known(sup.ActiveHumanSeconds / 60)
@@ -293,11 +291,12 @@ func measure(in Input, sup Supervision, hasSup bool) Measured {
 }
 
 func runtimeMeasures(m *Measured, rt *RuntimeEvidence) {
-	var attempts, reviews, continuations, decisions int
+	var attempts, execAttempts, reviews, continuations, decisions int
 	var first, last *time.Time
 	allTerminal := true
 	for _, run := range rt.Runs {
 		attempts += len(run.Operations)
+		execAttempts += run.ExecutionAttempts
 		reviews += len(run.Reviews)
 		continuations += run.ReviewContinuations
 		decisions += run.DecisionDeliveries
@@ -310,10 +309,13 @@ func runtimeMeasures(m *Measured, rt *RuntimeEvidence) {
 			last = run.EndedAt
 		}
 	}
-	m.ChildRuns, m.OperationAttempts = Known(len(rt.Runs)), Known(attempts)
+	m.ChildRuns, m.OperationAttempts, m.ExecutionAttempts = Known(len(rt.Runs)), Known(attempts), Known(execAttempts)
 	m.ReviewCycles, m.RemediationCycles, m.DecisionDeliveries = Known(reviews), Known(continuations), Known(decisions)
-	m.PeakRunConcurrency, m.RunOverlapSeconds = Known(rt.RunSpans.Peak), Known(rt.RunSpans.OverlapSeconds)
-	m.PeakOpConcurrency, m.OpOverlapSeconds = Known(rt.OperationSpan.Peak), Known(rt.OperationSpan.OverlapSeconds)
+	m.PeakExecConcurrency = Unknown[int](rt.Execution.UnknownReason)
+	m.ExecOverlapSeconds = Unknown[float64](rt.Execution.UnknownReason)
+	if rt.Execution.Established {
+		m.PeakExecConcurrency, m.ExecOverlapSeconds = Known(rt.Execution.Peak), Known(rt.Execution.OverlapSeconds)
+	}
 	m.Tokens = rt.Tokens
 	m.Cost = Cost{Known: rt.CostMicros.IsKnown(), AmountMicros: rt.CostMicros.Value, Reason: rt.CostMicros.UnknownReason}
 	switch {

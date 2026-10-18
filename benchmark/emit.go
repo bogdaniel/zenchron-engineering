@@ -153,10 +153,10 @@ func Report(r Result) string {
 	}
 	b.WriteString("\n## Runtime\n\n")
 	m := r.Measured
-	fmt.Fprintf(&b, "- Child runs: %s\n- Operation attempts: %s\n- Review observations: %s; review continuations: %s\n",
-		show(m.ChildRuns), show(m.OperationAttempts), show(m.ReviewCycles), show(m.RemediationCycles))
-	fmt.Fprintf(&b, "- Peak run concurrency: %s; run overlap seconds: %s\n- Runtime wall seconds: %s\n",
-		show(m.PeakRunConcurrency), show(m.RunOverlapSeconds), show(m.RuntimeWallSeconds))
+	fmt.Fprintf(&b, "- Child runs: %s\n- Execution attempts (worker invocations): %s; operation attempts, all kinds: %s\n- Review observations: %s; review continuations: %s\n",
+		show(m.ChildRuns), show(m.ExecutionAttempts), show(m.OperationAttempts), show(m.ReviewCycles), show(m.RemediationCycles))
+	fmt.Fprintf(&b, "- Peak execution concurrency: %s; execution overlap seconds: %s\n- Runtime wall seconds: %s\n",
+		show(m.PeakExecConcurrency), show(m.ExecOverlapSeconds), show(m.RuntimeWallSeconds))
 	fmt.Fprintf(&b, "- Tokens: %s\n- Cost: %s\n", show(m.Tokens), showCost(m.Cost))
 	b.WriteString("\n## Sources\n\n")
 	for _, s := range r.Sources {

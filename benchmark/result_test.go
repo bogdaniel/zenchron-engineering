@@ -193,7 +193,7 @@ func TestPlannedArmWithRuntimeEvidenceIsValidAndMeasured(t *testing.T) {
 		t.Fatalf("reasons: %v", em.Result.Validity.Reasons)
 	}
 	m := em.Result.Measured
-	if *m.ChildRuns.Value != 2 || *m.PeakRunConcurrency.Value != 2 || *m.RemediationCycles.Value != 1 {
+	if *m.ChildRuns.Value != 2 || *m.PeakExecConcurrency.Value != 2 || *m.RemediationCycles.Value != 1 {
 		t.Fatalf("runtime measures wrong: %+v", m)
 	}
 	if m.Cost.Known || m.Tokens.IsKnown() {

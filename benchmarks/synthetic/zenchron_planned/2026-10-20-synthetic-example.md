@@ -16,9 +16,9 @@ Outcome: accepted (operator_stated). Base 00000000000000000000000000000000000000
 ## Runtime
 
 - Child runs: 2
-- Operation attempts: 2
+- Execution attempts (worker invocations): 2; operation attempts, all kinds: 2
 - Review observations: 0; review continuations: 1
-- Peak run concurrency: 2; run overlap seconds: 360
+- Peak execution concurrency: 2; execution overlap seconds: 240
 - Runtime wall seconds: 840
 - Tokens: unknown (no durable per-run token record exists in runtime state)
 - Cost: unknown (no plan stream consumption with a reported cost; a subscription CLI reports none, and unknown is not zero)
@@ -26,9 +26,9 @@ Outcome: accepted (operator_stated). Base 00000000000000000000000000000000000000
 ## Sources
 
 - activity_log: `2026-10-20-synthetic-example.activity.jsonl` sha256 `f6d3ca1b7fb2c3a56601a502aa09b34bb7fd90792906381d298ba5b1bc3bcf77`
-- runtime_collection: `2026-10-20-synthetic-example.runtime.json` sha256 `e653b7501dc1812d93b18522e5ee9365d848b5db73eec5437cd4c6d67b62578b`
+- runtime_collection: `2026-10-20-synthetic-example.runtime.json` sha256 `a03d17fe0f104f78e245c62d097b27b0d4858d16de58c4f676557edeb3ae2458`
 
-Content digest: `fbd2ba0a409ac011ad2807417c5f893e5ebdbdfa9ac15a3f66fc7c110843ad32`
+Content digest: `dde4331295f807ababe90b531affd1fe70416778e81413e7eaba0ef89460e026`
 
 ## Limitations
 

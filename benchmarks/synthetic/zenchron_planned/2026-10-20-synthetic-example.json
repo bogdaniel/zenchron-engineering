@@ -105,13 +105,15 @@
         "operations": [
           {
             "operation_id": "o1",
-            "kind": "execute",
+            "kind": "execution.invoke",
             "attempt": 1,
             "state": "succeeded",
             "start": "2026-10-20T09:01:00Z",
             "end": "2026-10-20T09:09:00Z"
           }
         ],
+        "execution_attempts": 1,
+        "execution_unfinished": 0,
         "handoffs_reported": 0,
         "handoffs_refused": 0,
         "reviews": [],
@@ -137,13 +139,15 @@
         "operations": [
           {
             "operation_id": "o2",
-            "kind": "execute",
+            "kind": "execution.invoke",
             "attempt": 1,
             "state": "succeeded",
             "start": "2026-10-20T09:05:00Z",
             "end": "2026-10-20T09:12:00Z"
           }
         ],
+        "execution_attempts": 1,
+        "execution_unfinished": 0,
         "handoffs_reported": 1,
         "handoffs_refused": 0,
         "reviews": [],
@@ -153,21 +157,14 @@
         "events": 4
       }
     ],
-    "run_concurrency": {
-      "spans": 2,
-      "ignored": 0,
-      "peak": 2,
-      "union_seconds": 840,
-      "overlap_seconds": 360,
-      "sum_seconds": 1200
-    },
-    "operation_concurrency": {
+    "execution_concurrency": {
       "spans": 2,
       "ignored": 0,
       "peak": 2,
       "union_seconds": 660,
       "overlap_seconds": 240,
-      "sum_seconds": 900
+      "sum_seconds": 900,
+      "established": true
     },
     "tokens": {
       "value": null,
@@ -182,7 +179,10 @@
     "child_runs": {
       "value": 2
     },
-    "operation_attempts": {
+    "operation_attempts_all_kinds": {
+      "value": 2
+    },
+    "execution_attempts": {
       "value": 2
     },
     "wall_seconds_runtime_first_create_to_last_end": {
@@ -215,16 +215,10 @@
       "amount_micros": null,
       "reason": "no plan stream consumption with a reported cost; a subscription CLI reports none, and unknown is not zero"
     },
-    "peak_run_concurrency": {
+    "peak_execution_concurrency": {
       "value": 2
     },
-    "run_overlap_seconds": {
-      "value": 360
-    },
-    "peak_operation_concurrency": {
-      "value": 2
-    },
-    "operation_overlap_seconds": {
+    "execution_overlap_seconds": {
       "value": 240
     }
   },
@@ -247,7 +241,7 @@
     {
       "kind": "runtime_collection",
       "path": "2026-10-20-synthetic-example.runtime.json",
-      "sha256": "e653b7501dc1812d93b18522e5ee9365d848b5db73eec5437cd4c6d67b62578b"
+      "sha256": "a03d17fe0f104f78e245c62d097b27b0d4858d16de58c4f676557edeb3ae2458"
     }
   ],
   "interpretation": {
@@ -258,5 +252,5 @@
       "order effect: the second arm benefits from the operator having already learned the task; this is not removed by measurement"
     ]
   },
-  "content_digest": "fbd2ba0a409ac011ad2807417c5f893e5ebdbdfa9ac15a3f66fc7c110843ad32"
+  "content_digest": "dde4331295f807ababe90b531affd1fe70416778e81413e7eaba0ef89460e026"
 }

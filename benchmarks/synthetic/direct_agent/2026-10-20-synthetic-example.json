@@ -65,7 +65,11 @@
       "value": null,
       "unknown_reason": "no runtime evidence for this arm"
     },
-    "operation_attempts": {
+    "operation_attempts_all_kinds": {
+      "value": null,
+      "unknown_reason": "no runtime evidence for this arm"
+    },
+    "execution_attempts": {
       "value": null,
       "unknown_reason": "no runtime evidence for this arm"
     },
@@ -103,19 +107,11 @@
       "amount_micros": null,
       "reason": "direct_agent arm: provider cost is not instrumented; unknown is not zero"
     },
-    "peak_run_concurrency": {
+    "peak_execution_concurrency": {
       "value": null,
       "unknown_reason": "no runtime evidence for this arm"
     },
-    "run_overlap_seconds": {
-      "value": null,
-      "unknown_reason": "no runtime evidence for this arm"
-    },
-    "peak_operation_concurrency": {
-      "value": null,
-      "unknown_reason": "no runtime evidence for this arm"
-    },
-    "operation_overlap_seconds": {
+    "execution_overlap_seconds": {
       "value": null,
       "unknown_reason": "no runtime evidence for this arm"
     }
@@ -146,5 +142,5 @@
       "order effect: the second arm benefits from the operator having already learned the task; this is not removed by measurement"
     ]
   },
-  "content_digest": "5521c20b8f8071031417037083f079595c2f8bb3f71b4daa8662e1d92b615b45"
+  "content_digest": "ab8c9072db378a09d1b297121a78a9ed903faa26a08d9f2c887195189f0dd139"
 }

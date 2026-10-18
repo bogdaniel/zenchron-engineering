@@ -81,11 +81,16 @@ number and head, attempts, executed operation intervals, handoffs reported and
 refused, review observations, review continuations, delivered decisions and
 human-authority records; and the plan stream's event counts and budget cost.
 
-Concurrency is **computed from real intervals** (run create-to-terminal and
-executed-operation start-to-end), never from a configured limit: peak, time with
-at least one active, and time with two or more. A run that was not terminal at
-collection has an unknown wall time and is excluded from the run-interval
-concurrency, and the result says so.
+Concurrency is **computed from real worker-execution intervals**: each finished
+`execution.invoke` attempt's `started_at` to its journalled `operation.after`,
+across the scope's runs. Housekeeping operations (source or GitHub polling,
+assurance, base integration) are not work and are excluded, and a run's
+create-to-terminal lifespan is never used (a run parked awaiting publication
+authority is not terminal but its executions are exact). It is reported only when
+established: at least one finished execution and no execution that began without
+a recorded end; otherwise it is **unknown with a reason**, never zero. "Execution
+attempts" counts worker invocations; "operation attempts, all kinds" counts every
+bounded operation and is not a measure of work.
 
 Bounds: at most 64 runs, 5000 events per run, 5000 plan events. Exceeding a bound
 is reported as a problem that invalidates the result, not silently sampled.

@@ -47,12 +47,24 @@ type RuntimeEvidence struct {
 	Graph         *GraphEvidence `json:"graph,omitempty"`
 	Plan          *PlanEvidence  `json:"plan,omitempty"`
 	Runs          []RunEvidence  `json:"runs"`
-	RunSpans      Concurrency    `json:"run_concurrency"`
-	OperationSpan Concurrency    `json:"operation_concurrency"`
-	Tokens        Measure[int64] `json:"tokens"`
-	CostMicros    Measure[int64] `json:"cost_micros"`
-	Problems      []string       `json:"problems,omitempty"`
-	Limitations   []string       `json:"limitations,omitempty"`
+	// Execution is computed from execution.invoke attempts (worker execution)
+	// only: housekeeping operations such as source.observe or github.observe
+	// polling are not work and must not read as parallelism.
+	Execution   ExecutionConcurrency `json:"execution_concurrency"`
+	Tokens      Measure[int64]       `json:"tokens"`
+	CostMicros  Measure[int64]       `json:"cost_micros"`
+	Problems    []string             `json:"problems,omitempty"`
+	Limitations []string             `json:"limitations,omitempty"`
+}
+
+// ExecutionConcurrency is overlap of real worker-execution intervals. It is
+// Established only when every needed interval is exact: at least one finished
+// attempt, none still running or unfinished in the journal, no truncated read.
+// Otherwise it is unknown with a reason, never a zero.
+type ExecutionConcurrency struct {
+	Concurrency
+	Established   bool   `json:"established"`
+	UnknownReason string `json:"unknown_reason,omitempty"`
 }
 
 // GraphEvidence is the WorkGraph and its work units as the runtime projects them.
@@ -110,9 +122,14 @@ type RunEvidence struct {
 	PullRequest       *PullRequestRef  `json:"pull_request,omitempty"`
 	Attempts          map[string]int   `json:"attempts,omitempty"`
 	Operations        []OperationSpan  `json:"operations"`
-	HandoffsReported  int              `json:"handoffs_reported"`
-	HandoffsRefused   int              `json:"handoffs_refused"`
-	Reviews           []ReviewSighting `json:"reviews"`
+	// ExecutionAttempts counts finished execution.invoke attempts (worker
+	// invocations); ExecutionUnfinished counts execution attempts that began and
+	// have no recorded end in the journal.
+	ExecutionAttempts   int              `json:"execution_attempts"`
+	ExecutionUnfinished int              `json:"execution_unfinished"`
+	HandoffsReported    int              `json:"handoffs_reported"`
+	HandoffsRefused     int              `json:"handoffs_refused"`
+	Reviews             []ReviewSighting `json:"reviews"`
 	// ReviewContinuations counts review.continuation_granted events: each is a
 	// remediation invocation the runtime granted after a review.
 	ReviewContinuations int `json:"review_continuations"`
@@ -185,7 +202,8 @@ func Collect(src RuntimeSource, scope Scope, now time.Time) RuntimeEvidence {
 		ev.Problems = append(ev.Problems, fmt.Sprintf("scope names %d runs; the collector reads at most %d", len(runIDs), maxRuns))
 		runIDs = runIDs[:maxRuns]
 	}
-	var runSpans, opSpans []Span
+	var execSpans []Span
+	unfinished := 0
 	// ponytail: one Status plus paged journal read per run, sequential; fine at
 	// the 64-run bound. Batch the reads if a cohort ever needs more.
 	for _, id := range runIDs {
@@ -195,21 +213,33 @@ func Collect(src RuntimeSource, scope Scope, now time.Time) RuntimeEvidence {
 			continue
 		}
 		ev.Runs = append(ev.Runs, run)
-		if run.EndedAt != nil {
-			runSpans = append(runSpans, Span{Label: id, Start: run.CreatedAt, End: *run.EndedAt})
-		} else {
-			ev.Limitations = append(ev.Limitations, fmt.Sprintf("run %s was not terminal at collection and is excluded from run concurrency", id))
-		}
+		unfinished += run.ExecutionUnfinished
 		if run.EventsTruncated {
 			ev.Problems = append(ev.Problems, fmt.Sprintf("run %s has more than %d events; the journal read was truncated", id, maxEventsPerRun))
 		}
-		opSpans = append(opSpans, ops...)
+		execSpans = append(execSpans, ops...)
 	}
-	ev.RunSpans, ev.OperationSpan = ComputeConcurrency(runSpans), ComputeConcurrency(opSpans)
+	ev.Execution = establishExecution(execSpans, unfinished, len(ev.Problems))
 	if planID != "" {
 		collectPlan(src, &ev)
 	}
 	return ev
+}
+
+func establishExecution(spans []Span, unfinished, problems int) ExecutionConcurrency {
+	c := ComputeConcurrency(spans)
+	out := ExecutionConcurrency{Concurrency: c}
+	switch {
+	case problems > 0:
+		out.UnknownReason = "collection had problems; execution intervals are not exact"
+	case unfinished > 0:
+		out.UnknownReason = fmt.Sprintf("%d execution attempt(s) began with no recorded end", unfinished)
+	case c.Spans-c.Ignored < 1:
+		out.UnknownReason = "no finished execution.invoke attempt with a recorded start and end"
+	default:
+		out.Established = true
+	}
+	return out
 }
 
 func graphEvidence(v runtime.WorkGraphView) *GraphEvidence {
@@ -273,8 +303,14 @@ func readEvents(src RuntimeSource, id string) (events []runtime.EngineeringEvent
 func foldRunEvents(run *RunEvidence, events []runtime.EngineeringEvent) []Span {
 	var spans []Span
 	seen := map[string]bool{}
+	began := 0
 	for _, e := range events {
 		switch e.Type {
+		case runtime.EventOperationBefore:
+			var op runtime.RunOperation
+			if json.Unmarshal(e.Payload, &op) == nil && op.Kind == runtime.OpExecutionInvoke {
+				began++
+			}
 		case runtime.EventRunCompleted, runtime.EventRunFailed, runtime.EventRunCancelled:
 			if run.EndedAt == nil {
 				at := e.OccurredAt.UTC()
@@ -294,6 +330,10 @@ func foldRunEvents(run *RunEvidence, events []runtime.EngineeringEvent) []Span {
 			span := OperationSpan{OperationID: op.ID, Kind: op.Kind, Attempt: op.Attempt, State: string(op.State),
 				Start: op.StartedAt.UTC(), End: e.OccurredAt.UTC()}
 			run.Operations = append(run.Operations, span)
+			if op.Kind != runtime.OpExecutionInvoke {
+				continue
+			}
+			run.ExecutionAttempts++
 			spans = append(spans, Span{Label: fmt.Sprintf("%s/%s#%d", run.RunID, op.Kind, op.Attempt), Start: span.Start, End: span.End})
 		case runtime.EventHandoffReported:
 			run.HandoffsReported++
@@ -312,6 +352,9 @@ func foldRunEvents(run *RunEvidence, events []runtime.EngineeringEvent) []Span {
 					State: p.State, FindingCount: p.FindingCount})
 			}
 		}
+	}
+	if began > run.ExecutionAttempts {
+		run.ExecutionUnfinished = began - run.ExecutionAttempts
 	}
 	return spans
 }
