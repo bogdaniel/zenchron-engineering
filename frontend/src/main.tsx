@@ -6,7 +6,8 @@ import { Empty, Head, Link, Panel } from "./components";
 import { Overview, Portfolio, Workspace } from "./pages";
 import { Decisions } from "./decisions";
 import { Login } from "./login";
-import { Agents, ControllerWorkspace } from "./system";
+import { ControllerWorkspace } from "./system";
+import { InstalledAgents } from "./installed-agents";
 import { JournalHistory } from "./history";
 import * as ops from "./operations-api";
 import { RunPortfolio, RunWorkspace } from "./runs";
@@ -114,7 +115,7 @@ function Screen({ route: r, onSessionInvalid }: { route: Route; onSessionInvalid
       ["overview", "actions"].includes(r.page) || (r.page === "objectives" && !r.id)
         ? api.plans(owner.signal, offset, query)
         : Promise.resolve(undefined),
-      ["overview", "agents"].includes(r.page) || (r.page === "runs" && !r.id)
+      r.page === "overview" || (r.page === "runs" && !r.id)
         ? api.runs(owner.signal, offset, filter === "all" ? "" : filter, query)
         : Promise.resolve(undefined),
       r.id && ["objectives", "actions"].includes(r.page)
@@ -125,7 +126,7 @@ function Screen({ route: r, onSessionInvalid }: { route: Route; onSessionInvalid
       r.page === "workgraphs" && r.id ? ops.graph(r.id, owner.signal) : Promise.resolve(undefined),
       r.page === "products" && !r.id ? ops.products(offset, owner.signal) : Promise.resolve(undefined),
       r.page === "products" && r.id ? ops.product(r.id, offset, owner.signal) : Promise.resolve(undefined),
-      r.page === "overview" ? ops.fleet(owner.signal) : Promise.resolve(undefined),
+      r.page === "overview" || (r.page === "workgraphs" && !!r.id) ? ops.fleet(owner.signal) : Promise.resolve(undefined),
     ])
       .then(([controller, index, runs, context, run, graphs, graph, products, product, fleet]) => {
         if (owner.signal.aborted) return;
@@ -251,6 +252,7 @@ function Screen({ route: r, onSessionInvalid }: { route: Route; onSessionInvalid
         graph={data.graph}
         controller={data.controller}
         stale={stale || loading}
+        fleet={data.fleet}
       />
     );
   else if (r.page === "products" && data.products)
@@ -266,7 +268,16 @@ function Screen({ route: r, onSessionInvalid }: { route: Route; onSessionInvalid
   else if (r.page === "products" && data.product)
     content = <ProductWorkspace product={data.product} onPage={setOffset} />;
   else if (r.page === "intake") content = <ObjectiveIntake />;
-  else if (r.page === "agents" && data.runs) content = <Agents runs={data.runs} onPage={setOffset} />;
+  else if (r.page === "agents")
+    content = (
+      <>
+        <Head eyebrow="SYSTEM / EXECUTION AGENTS" title="Agents">
+          Installed execution agents as the controller reports them. Agent identity, provider kind and execution trust
+          remain separate.
+        </Head>
+        <InstalledAgents />
+      </>
+    );
   else if (r.page === "attempts" && r.id)
     content = (
       <>
