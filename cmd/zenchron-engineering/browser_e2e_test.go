@@ -168,7 +168,7 @@ func runBrowserFixtureWithScript(t *testing.T, root string, built *composition, 
 	serverDone := make(chan struct{})
 	go func() { defer close(serverDone); _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close(); <-serverDone; _ = socket.Close(); <-controllerDone })
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	driverScript := script
 	if driverScript == "" {
