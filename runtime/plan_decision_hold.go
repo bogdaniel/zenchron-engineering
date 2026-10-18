@@ -116,7 +116,10 @@ func (r PlanReconciler) awaitsHumanDecision(run EngineeringRun) (bool, error) {
 		}
 		report, digest, present, err := readMessageReport(path)
 		if !present || err != nil || digest != observed.DocumentSHA256 {
-			continue // admission refuses a report that is no longer the journalled one
+			// Admission will durably refuse a report that is no longer the
+			// journalled one, but until it has, nobody knows it carried no
+			// question. An undecided observation is not permission to settle.
+			return true, nil
 		}
 		for _, draft := range report.Messages {
 			if draft.Kind == orchestration.KindDecisionRequest {
