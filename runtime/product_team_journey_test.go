@@ -212,8 +212,17 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 	plan.engines["claude"] = fleet.newRuntime(reviewerDeps)
 
 	reviewRun := ""
+	blockedWhileUnreviewed := false
 	for range 80 {
 		tick()
+		// While the review is outstanding the integrator's candidate is held back.
+		if u := fleet.graph(graphID).unit(t, "integrate"); u.RunID != "" && u.Output != nil {
+			held := fleet.state(u.RunID)
+			if snap, _ := fleet.store.ReplayPlan(plan.plan.ID); snap.Stages["review"].Review == nil &&
+				held.projection.PullRequest == nil && held.publicationDeferred {
+				blockedWhileUnreviewed = true
+			}
+		}
 		snapshot, err := fleet.store.ReplayPlan(plan.plan.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -354,6 +363,9 @@ func TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurable
 			break
 		}
 		tick()
+	}
+	if !blockedWhileUnreviewed {
+		t.Fatal("the integrator's candidate was never observed held back while its review was outstanding")
 	}
 	snapshot, err = fleet.store.ReplayPlan(plan.plan.ID)
 	if err != nil {
