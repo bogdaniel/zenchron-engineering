@@ -26,8 +26,9 @@ against #66's representative ≥2× gate. `zenchron_planned` is not the
 ## 2. Frozen task
 
 Issue #344, "Governed operator release for held-material workspaces", exactly as
-it reads at the freeze. FREEZE: issue body digest (`gh issue view 344 --json
-body` sha256) and the `updatedAt` observed.
+it reads at the freeze. Issue body sha256 `d045a5e90188212846ac2705c4fccab0b4e36c59de45c4b68419e22c61d62054`,
+issue `updatedAt` `2026-10-03T18:28:36Z`, observed 2026-10-18. Re-check both at the
+freeze; a difference stops the freeze.
 
 Both arms receive the identical task text below as their only task statement, and
 the same acceptance criteria. Nothing else about the solution is supplied.
@@ -64,9 +65,9 @@ re-queueing released material.
 | #344 code on base | none (verified at freeze: no release operation exists; `git grep -n -i 'release' runtime/ | grep -i held` empty) |
 | Instrumentation version | FREEZE: git SHA of the measurement slice and its `benchmark` result schema version |
 | Controller | FREEZE: `zenchron-engineering` build version and source revision for Arm A |
-| Provider families and models | FREEZE: implementer family, reviewer family, model ids and effort settings. Arm B uses the same families and models |
-| Agent capabilities and trust modes | FREEZE: registered agent ids, provider kinds, trust modes. Arm B uses the same CLIs with the same permission modes |
-| Execution budgets | FREEZE: per-run and plan budget envelope for Arm A. Arm B has the same wall-clock allowance (see §7) |
+| Provider families and models | PROPOSED, owner confirms: implementer `codex` (openai, `codex-cli 0.163.0`), reviewer `claude` (anthropic, Claude Code `2.1.302`). Neither config pins a model; the CLIs' defaults apply and the model each reports is recorded at the start of each arm. FREEZE: confirm or pin model ids and effort. Arm B uses the same CLIs, versions and models |
+| Agent capabilities and trust modes | PROPOSED from the operator config: `codex` (`codex_cli`, `operator_trusted`), `claude` (`claude_code`, `operator_trusted`), default agent `codex`. Arm B uses the same CLIs with the same permission modes |
+| Execution budgets | PROPOSED from the operator config: per run `wall_limit_seconds` 1800, `max_execution_attempts` 2, `max_remediation_attempts` 2, `max_assurance_attempts` 2. FREEZE: the plan budget envelope. Arm B has the same wall-clock allowance (see §7) |
 | Reviewer requirement | An independent reviewer of a different vendor family from the implementer. Arm B must also use a different-family reviewer, run by the operator |
 | Workspaces | two separate clones at the frozen base, distinct paths, distinct branches `dogfood/344-planned` and `dogfood/344-direct` |
 | Arm order | Arm A (`zenchron_planned`) first, Arm B (`direct_agent`) second |
