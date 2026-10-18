@@ -29,3 +29,9 @@ particular:
 
 A record must never be edited to look better. If a result is poor, neutral or
 invalidated, it says so and says why.
+
+The minimal measurement slice (an operator activity log, a read-only runtime
+collector and an immutable result emitter) is described in
+[`docs/benchmarking.md`](../docs/benchmarking.md). Its results use schema 0.2
+(additive over the records above, which stay as they are). Invented examples
+live only under `benchmarks/synthetic/` and carry `"synthetic": true`.
