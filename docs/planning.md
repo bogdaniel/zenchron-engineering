@@ -639,6 +639,17 @@ does not bind itself to an upstream head - while the run that produced that head
 is back at work. That covers a first performance too, because a plan stage stays
 completed while its run is re-activated.
 
+**A run that owes a human decision has not settled.** A worker can commit a
+candidate and ask a governed `decision_request` in the same invocation; the run
+reads as having reached its goal until the next orchestration pass admits the
+question. A stage whose run is in that state is not accepted and is not a head
+dependent work may start against, for as long as any of these holds: the run's
+question is open, its resolution has not been delivered to it, or its last
+invocation wrote a `decision_request` the runtime has not yet admitted or
+refused. The run keeps its own authority and assignment; the existing #508
+protocol resumes it, and only its final accepted output releases downstream work
+(`awaitsHumanDecision`, `runtime/plan_decision_hold.go`).
+
 The stage is then performed AGAIN under the same approved plan, as a new
 EXECUTION GENERATION. A producer moving from candidate A to candidate B is an
 execution fact, not a change to the plan: the role, profile, worker, trust
