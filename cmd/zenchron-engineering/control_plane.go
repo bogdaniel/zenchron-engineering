@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/controlplane"
@@ -40,6 +41,9 @@ func controlPlane(args []string, stdout io.Writer) (int, error) {
 		return 1, err
 	}
 	defer listener.Close()
+	// The address is not a secret; the token is, so only the file holding it is named.
+	fmt.Fprintf(stdout, "control plane:http://%s/app (sign in with the token in %s)\n",
+		listener.Addr(), filepath.Join(*state, controlplane.TokenFile))
 	observe := observeLiveController(*state)
 	// Send is the ONLY mutation path: one governed request to the controller's
 	// own socket. The store handle above stays read-only.
