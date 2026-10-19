@@ -204,7 +204,10 @@ that disables it),
 consumed across retries, `AssuranceRerun`, controller restarts and crashed
 workers, and never reset by them. Each assurance attempt is bounded by what
 remains of it. When it is spent the run fails `run_assurance_budget_exhausted`
-and the candidate is retained as held material; exhausted, failed or timed-out
+and the candidate is retained as held material. The 3600 second allowance gives
+headroom over one 43 minute full-suite verification; it does NOT fit two full
+43 minute passes, and a complete rerun is not promised. Exhaustion is reported
+(`run_assurance_budget_exhausted`), never absorbed. Exhausted, failed or timed-out
 assurance never satisfies assurance, authority or publication. Total active
 work is still reported: status shows `active consumed` (execution + assurance +
 other charged work, the figure a plan's aggregate ceiling is judged by) with its

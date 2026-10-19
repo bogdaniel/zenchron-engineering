@@ -38,7 +38,9 @@ func takeActiveWorkSnapshot(t *testing.T, fixture *phase8Fixture, runID string) 
 // WallLimit - activeElapsed, never a figure derived from lifecycle age.
 func assertHandoffAgreesWithReconciler(t *testing.T, fixture *phase8Fixture, snap activeWorkSnapshot) {
 	t.Helper()
-	want := int64((fixture.deps.Budgets.WallLimit - snap.status.ActiveElapsed) / time.Second)
+	// The carried wall budget is the EXECUTION share of active work (#640);
+	// assurance is metered against its own allowance.
+	want := int64((fixture.deps.Budgets.WallLimit - snap.status.ExecutionElapsed) / time.Second)
 	if !snap.budgets.WallSeconds.Known || snap.budgets.WallSeconds.Remaining != want {
 		t.Fatalf("handoff record carries wall_seconds %#v; reconciler active accounting leaves %ds (active %s, age %s)",
 			snap.budgets.WallSeconds, want, snap.status.ActiveElapsed, snap.status.Elapsed)
@@ -203,7 +205,7 @@ func TestAMultiDayReviewWaitSeparatesTheThreeClocks(t *testing.T) {
 	if resumed <= 0 || resumed > resumeEnd.Sub(resumeStart) {
 		t.Fatalf("resumed work charged %s active; the resume occupied %s", resumed, resumeEnd.Sub(resumeStart))
 	}
-	if got, want := after.budgets.WallSeconds.Remaining, int64((fixture.deps.Budgets.WallLimit-before.status.ActiveElapsed-resumed)/time.Second); got != want {
+	if got, want := after.budgets.WallSeconds.Remaining, int64((fixture.deps.Budgets.WallLimit-before.status.ExecutionElapsed-(after.status.ExecutionElapsed-before.status.ExecutionElapsed))/time.Second); got != want {
 		t.Fatalf("remaining after resume = %ds, want pre-wait remainder minus resumed work = %ds", got, want)
 	}
 	assertHandoffAgreesWithReconciler(t, fixture, after)

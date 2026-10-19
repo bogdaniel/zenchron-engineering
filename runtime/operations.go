@@ -2446,11 +2446,8 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	// left of the run's assurance allowance, whatever the verifier does, and
 	// the confirmation rerun shares the same bound.
 	parent := ctx
-	if op.DeadlineBound == BoundAssuranceWork && op.Deadline != nil {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, max(op.Deadline.Sub(r.deps.Clock.Now()), 0))
-		defer cancel()
-	}
+	ctx, cancel := r.boundAssurance(ctx, op)
+	defer cancel()
 	result, class, assureErr := AssuranceRerun(ctx, r.deps.Assurance, AssuranceRequest{
 		RunID:       state.run.ID,
 		Commit:      commit,
@@ -2463,10 +2460,8 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 		Policy:   Ref{ID: r.deps.Policy.ID, Revision: r.deps.Policy.Revision},
 		Producer: Ref{ID: r.deps.ControllerID, Revision: r.controller},
 	})
-	if parent.Err() == nil && ctx.Err() != nil {
-		// The allowance ran out mid-verification. Whatever the verifier
-		// reported, this is not a verdict and never satisfies assurance.
-		return failed(fmt.Errorf("assurance work budget exhausted during verification: %w", context.Cause(ctx)))
+	if err := assuranceCutOff(parent, ctx); err != nil {
+		return failed(err)
 	}
 	if assureErr != nil && result.VerifierDefinition == "" {
 		return failed(assureErr)
@@ -2632,6 +2627,9 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 	if a := state.projection.Assurance; a != nil {
 		automated = fmt.Sprintf("verifier=%s passed=%t", a.VerifierDefinition, a.Passed)
 	}
+	parent := ctx
+	ctx, cancel := r.boundAssurance(ctx, op)
+	defer cancel()
 	result, assureErr := r.deps.SemanticAssurance.Assure(ctx, AssuranceRequest{
 		RunID: state.run.ID, Commit: commit, Tree: tree, CheckoutDir: checkout,
 		Attempt:    op.AttemptIdentity,
@@ -2642,6 +2640,9 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 		Objective: kernel.Contract.Objective, ChangedPaths: paths,
 		AutomatedAssurance: automated, SemanticClaims: claims,
 	})
+	if err := assuranceCutOff(parent, ctx); err != nil {
+		return failed(err)
+	}
 	if assureErr != nil && result.VerifierDefinition == "" {
 		return failed(assureErr)
 	}

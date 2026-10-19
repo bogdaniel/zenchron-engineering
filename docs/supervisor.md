@@ -180,7 +180,9 @@ attempt_wall_limit_seconds  bounds ONE physical provider attempt; its deadline
 
 Assurance work (#640) is a separate cumulative meter, frozen per run (3600
 seconds for new runs; not yet an operator configuration member) and never reset
-by retry or restart. It is charged apart from `wall_limit_seconds`, so a long
+by retry or restart. It leaves headroom over one long verification but not two
+full ones: exhaustion is reported as `run_assurance_budget_exhausted` and a
+complete rerun is not promised. It is charged apart from `wall_limit_seconds`, so a long
 successful verification does not spend the execution budget.
 
 `wall_limit_seconds` is cumulative across every attempt; the attempt limit is

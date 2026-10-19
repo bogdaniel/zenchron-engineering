@@ -272,7 +272,10 @@ execution + assurance + other charged work: it is what status reports as
 `execution_elapsed` and `assurance_elapsed` report the split. Each assurance
 attempt is bounded by the remaining assurance allowance (durable operation
 deadline, `deadline_bound: assurance_work`, applied to the verifier's context),
-so retries, `AssuranceRerun`, restarts and crashed workers can never reset it. An
+so retries, `AssuranceRerun`, restarts and crashed workers can never reset it. The
+bound applies to both assurance operations through one shared path. The
+default allowance (3600s) leaves headroom over one long verification but does
+not promise a complete second pass. An
 exhausted allowance fails the run `run_assurance_budget_exhausted`, retains the
 held candidate, and never satisfies assurance, authority or publication. A run
 frozen without the member (pre-#640) keeps the legacy rule; a negative frozen

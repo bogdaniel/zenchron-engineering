@@ -1,6 +1,10 @@
 package runtime
 
-import "time"
+import (
+	"context"
+	"fmt"
+	"time"
+)
 
 // The run's assurance work meter (#640).
 //
@@ -99,4 +103,24 @@ func (s *runState) operationLimit(kind string, now time.Time) *AttemptLimit {
 		return &AttemptLimit{Within: remaining, Bound: BoundAssuranceWork}
 	}
 	return s.attemptLimit(now)
+}
+
+// boundAssurance is the ONE physical bound of an assurance attempt, shared by
+// assurance.go and assurance.semantic: the verifier's context ends at the
+// operation's durable assurance deadline, whatever the verifier does.
+func (r *EngineeringRuntime) boundAssurance(ctx context.Context, op RunOperation) (context.Context, context.CancelFunc) {
+	if op.DeadlineBound != BoundAssuranceWork || op.Deadline == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, max(op.Deadline.Sub(r.deps.Clock.Now()), 0))
+}
+
+// assuranceCutOff reports that the assurance allowance (not the caller) ended
+// the verification. Whatever the verifier then returned is not a verdict and
+// must never be journalled as one.
+func assuranceCutOff(parent, bounded context.Context) error {
+	if parent.Err() == nil && bounded.Err() != nil {
+		return fmt.Errorf("assurance work budget exhausted during verification: %w", context.Cause(bounded))
+	}
+	return nil
 }
