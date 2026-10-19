@@ -125,6 +125,7 @@
         "runtime/execution_continuation_budget.go",
         "runtime/external_wait_reasons.go",
         "runtime/run_policy.go",
+        "runtime/assurance_meter.go",
         "runtime/deterministic_retry*.go",
         "runtime/disposition.go",
         "runtime/work_admission.go"

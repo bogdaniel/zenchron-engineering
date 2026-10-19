@@ -216,6 +216,20 @@ type RunBudgets struct {
 	// operation's own remaining WallBudget, nothing else. Nothing is
 	// backfilled.
 	AttemptWallLimit time.Duration `json:"attempt_wall_limit,omitempty"`
+	// AssuranceWallLimit bounds the run's CUMULATIVE assurance work (#640): the
+	// time spent inside assurance.go / assurance.semantic. It is a different
+	// resource from WallLimit, which bounds execution and remediation. A
+	// repository's full-suite verification is real work that must not spend the
+	// execution allowance, and it is not unlimited either: this is its own
+	// finite ceiling, consumed across retries, restarts and AssuranceRerun and
+	// never reset by them.
+	//
+	// Frozen at run creation (absent in configuration resolves to
+	// DefaultAssuranceWallLimit) and read back EXACTLY. omitempty, and absent
+	// means the run predates #640 and keeps the legacy rule: assurance time is
+	// charged to WallLimit as it always was. Nothing is backfilled, and a
+	// negative value is refused as corrupt state (runState.invariants).
+	AssuranceWallLimit time.Duration `json:"assurance_wall_limit,omitempty"`
 }
 
 // Dependencies is the complete, explicit input to a runtime instance. Every
@@ -482,6 +496,10 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 // provider inactivity window and cumulative run active-work budget (#497).
 const DefaultAttemptWallLimit = 3 * time.Hour
 
+// DefaultAssuranceWallLimit is the total assurance allowance of one new run
+// (#640), sized for a normal full-suite verification with room for one rerun.
+const DefaultAssuranceWallLimit = time.Hour
+
 func (b RunBudgets) defaults() RunBudgets {
 	if b.WallLimit <= 0 {
 		b.WallLimit = time.Hour
@@ -513,6 +531,9 @@ func (b RunBudgets) defaults() RunBudgets {
 	}
 	if b.AttemptWallLimit > b.WallLimit {
 		b.AttemptWallLimit = b.WallLimit
+	}
+	if b.AssuranceWallLimit <= 0 {
+		b.AssuranceWallLimit = DefaultAssuranceWallLimit
 	}
 	return b
 }
@@ -1157,6 +1178,11 @@ type StatusReport struct {
 	Elapsed             time.Duration `json:"elapsed"`
 	ActiveElapsed       time.Duration `json:"active_elapsed"`
 	ExternalWaitElapsed time.Duration `json:"external_wait_elapsed"`
+	// ActiveElapsed is TOTAL active work (execution + assurance + other charged
+	// work). AssuranceElapsed is the assurance share of it, and
+	// ExecutionElapsed the rest, the amount WallLimit is judged against (#640).
+	AssuranceElapsed time.Duration `json:"assurance_elapsed,omitempty"`
+	ExecutionElapsed time.Duration `json:"execution_elapsed,omitempty"`
 
 	Evidence             []Ref                   `json:"evidence,omitempty"`
 	Assurance            *AssuranceObservation   `json:"assurance,omitempty"`
@@ -1261,6 +1287,8 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		Elapsed:               now.Sub(state.run.CreatedAt),
 		ActiveElapsed:         state.activeElapsed(now),
 		ExternalWaitElapsed:   now.Sub(state.run.CreatedAt) - state.activeElapsed(now),
+		AssuranceElapsed:      state.assuranceElapsed(now),
+		ExecutionElapsed:      state.executionElapsed(now),
 		Evidence:              state.projection.EvidenceBundles,
 		Assurance:             state.projection.Assurance,
 		PullRequest:           state.projection.PullRequest,

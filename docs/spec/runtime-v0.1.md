@@ -262,6 +262,25 @@ members, no unknown members - and each digests to a stable SHA-256 over its
 canonical form, so a run records exactly which configuration governed it
 rather than a path that may have moved.
 
+Assurance work is a separate, bounded meter (#640). Time inside
+`assurance.go` / `assurance.semantic` is derived from the journal (an attempt a
+crash left unfinished is charged to its successor's start; verification-capacity
+waits are excluded exactly as in total active work) and charged to
+`RunBudgets.assurance_wall_limit`, not to `wall_limit`. Total active work remains
+execution + assurance + other charged work: it is what status reports as
+`active_elapsed` and what a plan's aggregate wall ceiling is judged by, while
+`execution_elapsed` and `assurance_elapsed` report the split. Each assurance
+attempt is bounded by the remaining assurance allowance (durable operation
+deadline, `deadline_bound: assurance_work`, applied to the verifier's context),
+so retries, `AssuranceRerun`, restarts and crashed workers can never reset it. The
+bound applies to both assurance operations through one shared path. The
+default allowance (3600s) leaves headroom over one long verification but does
+not promise a complete second pass. An
+exhausted allowance fails the run `run_assurance_budget_exhausted`, retains the
+held candidate, and never satisfies assurance, authority or publication. A run
+frozen without the member (pre-#640) keeps the legacy rule; a negative frozen
+value fails closed.
+
 The physical provider-attempt wall is a last-resort hard fuse (#497), separate
 from provider inactivity and cumulative run active-work authority. An unstated
 `attempt_wall_limit_seconds` remains absent from canonical operator configuration

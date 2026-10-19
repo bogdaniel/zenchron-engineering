@@ -906,6 +906,9 @@ func (s *runState) invariants() error {
 	if s.snapshot.ID != s.run.ID {
 		return fmt.Errorf("replayed snapshot identity does not match the run")
 	}
+	if s.run.Budgets != nil && s.run.Budgets.AssuranceWallLimit < 0 {
+		return fmt.Errorf("run froze a negative assurance wall limit")
+	}
 	if s.projection.CandidateRevision != "" && s.projection.Contract == (Ref{}) {
 		return fmt.Errorf("a candidate commit exists with no governing contract")
 	}
@@ -960,7 +963,7 @@ func (s *runState) conditions() (Disposition, string) {
 	// are different questions and overloading one to answer both is what made a
 	// pull request awaiting review look like a runaway run.
 	reviewDelivered := false
-	if runBudgetSpent(s.budgets().WallLimit, s.activeElapsed(now)) {
+	if runBudgetSpent(s.budgets().WallLimit, s.executionElapsed(now)) {
 		if len(s.outstandingReviewKeys()) > 0 {
 			if s.reviewContinuationRemaining(now) <= 0 {
 				return Waiting, ReasonReviewBudgetExhausted
@@ -1109,7 +1112,7 @@ func (s *runState) activeWorkRemaining(now time.Time) time.Duration {
 	if _, granted := s.reviewContinuationGrant(); granted {
 		return s.reviewContinuationRemaining(now)
 	}
-	return max(s.budgets().WallLimit-s.activeElapsed(now), 0)
+	return max(s.budgets().WallLimit-s.executionElapsed(now), 0)
 }
 
 // attemptLimit is the authority ONE physical attempt starting now receives:
@@ -1905,6 +1908,13 @@ func (r *EngineeringRuntime) cancelStaleLeasedOperation(state *runState, leased 
 //	events
 //	after   -> (crash here: journal is authoritative, store is reconciled)
 func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, desired desiredOperation, live Disposition) (bool, Outcome, error) {
+	// An exhausted assurance allowance refuses further assurance before any
+	// operation is planned. It fails the run with the real reason and keeps the
+	// held candidate; it never satisfies assurance (#640).
+	if remaining, bounded := state.assuranceRemaining(r.deps.Clock.Now()); bounded && remaining <= 0 && isAssuranceKind(desired.kind) {
+		outcome, err := r.settle(state, Failed, ReasonAssuranceBudgetExhausted)
+		return false, outcome, err
+	}
 	planned, created, err := r.scheduler.Plan(RunOperation{
 		RunID:            state.run.ID,
 		Kind:             desired.kind,
@@ -1915,7 +1925,7 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		// stage that tightened its run's wall budget was previously ignored
 		// here, so the operation was planned against a ceiling the run itself
 		// had already narrowed.
-		WallBudget: state.budgets().WallLimit,
+		WallBudget: state.operationWallBudget(desired.kind),
 	})
 	if err != nil {
 		return false, Outcome{}, err
@@ -2067,7 +2077,7 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		outcome, err := r.settle(state, Waiting, ReasonDeterministicFailureUnchanged)
 		return false, outcome, err
 	}
-	started, err := r.scheduler.StartWithin(leased.ID, state.attemptLimit(r.deps.Clock.Now()))
+	started, err := r.scheduler.StartWithin(leased.ID, state.operationLimit(leased.Kind, r.deps.Clock.Now()))
 	if err != nil {
 		return false, Outcome{}, err
 	}

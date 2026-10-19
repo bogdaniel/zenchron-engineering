@@ -194,6 +194,29 @@ names those members in `run_policy.unverifiable`, sets the operation's
 each one as `unknown`. It never shows this process's configuration, a zero, or
 an absent "none" as the run's value.
 
+`assurance_wall_limit_seconds` (#640) is the run's CUMULATIVE assurance-work
+ceiling and a different resource from `wall_limit_seconds`: time spent inside
+`assurance.go` and `assurance.semantic` is charged to it and NOT to the
+execution budget, so a successful 43 minute full-suite verification does not
+spend a 30 minute execution allowance. It is finite (every new run freezes 3600
+seconds; there is no operator configuration member for it yet, and no spelling
+that disables it),
+consumed across retries, `AssuranceRerun`, controller restarts and crashed
+workers, and never reset by them. Each assurance attempt is bounded by what
+remains of it. When it is spent the run fails `run_assurance_budget_exhausted`
+and the candidate is retained as held material. The 3600 second allowance gives
+headroom over one 43 minute full-suite verification; it does NOT fit two full
+43 minute passes, and a complete rerun is not promised. Exhaustion is reported
+(`run_assurance_budget_exhausted`), never absorbed. Exhausted, failed or timed-out
+assurance never satisfies assurance, authority or publication. Total active
+work is still reported: status shows `active consumed` (execution + assurance +
+other charged work, the figure a plan's aggregate ceiling is judged by) with its
+execution and assurance parts alongside. The value is frozen per run at
+creation, so configuration digests do not move. A run frozen before #640 has no such
+ceiling and keeps the legacy rule exactly: its assurance time is charged to
+`wall_limit_seconds`. Nothing is backfilled, and a negative frozen value is
+refused as corrupt state.
+
 `attempt_wall_limit_seconds` bounds ONE physical provider attempt, and it is a
 different resource from `wall_limit_seconds`, which is the run's CUMULATIVE
 active-work budget across every attempt and operation (#328). When the operator

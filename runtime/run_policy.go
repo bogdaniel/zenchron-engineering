@@ -173,6 +173,7 @@ func (s *runState) budgets() RunBudgets {
 	configured := s.rt.deps.Budgets.defaults()
 	if s.run.Budgets == nil {
 		configured.AttemptWallLimit = 0
+		configured.AssuranceWallLimit = 0
 		configured.MaxProviderInvocations = 0
 		configured.MaxExecutionContinuations = s.continuationLimit()
 		return configured

@@ -734,10 +734,10 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	}
 	line("run policy", policy)
 	if budgets := view.Budgets; budgets != nil {
-		line("run budgets", fmt.Sprintf("wall=%s attempt_wall=%s lifecycle=%s inactivity=%s attempts=%d continuations=%d invocations=%d remediation=%d assurance=%d",
+		line("run budgets", fmt.Sprintf("wall=%s attempt_wall=%s lifecycle=%s inactivity=%s attempts=%d continuations=%d invocations=%d remediation=%d assurance=%d assurance_wall=%s",
 			budgets.WallLimit, budgets.AttemptWallLimit, budgets.LifecycleDeadline, budgets.ProviderInactivityLimit,
 			budgets.MaxExecutionAttempts, budgets.MaxExecutionContinuations, budgets.MaxProviderInvocations,
-			budgets.MaxRemediationAttempts, budgets.MaxAssuranceAttempts))
+			budgets.MaxRemediationAttempts, budgets.MaxAssuranceAttempts, budgets.AssuranceWallLimit))
 	} else {
 		// UNKNOWN is printed as unknown, never as a zero or an absent "none".
 		unknown := make([]string, len(view.RunPolicy.Unverifiable))
@@ -763,7 +763,7 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		line("next probe", "at "+view.Retry.NotBefore.UTC().Format(time.RFC3339)+" (no earlier, across restarts)")
 	}
 	line("phase", view.Phase)
-	line("active consumed", view.ActiveElapsed)
+	line("active consumed", fmt.Sprintf("%s (execution %s, assurance %s)", view.ActiveElapsed, view.ExecutionElapsed, view.AssuranceElapsed))
 	line("external wait", view.ExternalWaitElapsed)
 	line("lifecycle age", view.Elapsed)
 	line("base", view.Base.ID+"@"+short(view.Base.Revision))

@@ -129,12 +129,14 @@ const (
 	ReasonLifecycleDeadlineExhausted   = "run_lifecycle_deadline_exhausted"
 	ReasonContinuationsExhausted       = "execution_continuations_exhausted"
 	ReasonProviderInvocationsExhausted = "run_provider_invocations_exhausted"
+	ReasonAssuranceBudgetExhausted     = "run_assurance_budget_exhausted"
 	attemptsExhaustedSuffix            = "_attempts_exhausted"
 )
 
 var budgetReasons = map[string]bool{
 	ReasonRunWallBudgetExhausted: true, ReasonLifecycleDeadlineExhausted: true,
 	ReasonContinuationsExhausted: true, ReasonProviderInvocationsExhausted: true,
+	ReasonAssuranceBudgetExhausted: true,
 }
 
 // BudgetBoundary reports whether a terminal failure is a budget boundary: one

@@ -2442,6 +2442,12 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	if err != nil {
 		return failed(err)
 	}
+	// THE PHYSICAL BOUND (#640): this attempt may run no longer than what is
+	// left of the run's assurance allowance, whatever the verifier does, and
+	// the confirmation rerun shares the same bound.
+	parent := ctx
+	ctx, cancel := r.boundAssurance(ctx, op)
+	defer cancel()
 	result, class, assureErr := AssuranceRerun(ctx, r.deps.Assurance, AssuranceRequest{
 		RunID:       state.run.ID,
 		Commit:      commit,
@@ -2454,6 +2460,9 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 		Policy:   Ref{ID: r.deps.Policy.ID, Revision: r.deps.Policy.Revision},
 		Producer: Ref{ID: r.deps.ControllerID, Revision: r.controller},
 	})
+	if err := assuranceCutOff(parent, ctx); err != nil {
+		return failed(err)
+	}
 	if assureErr != nil && result.VerifierDefinition == "" {
 		return failed(assureErr)
 	}
@@ -2618,6 +2627,9 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 	if a := state.projection.Assurance; a != nil {
 		automated = fmt.Sprintf("verifier=%s passed=%t", a.VerifierDefinition, a.Passed)
 	}
+	parent := ctx
+	ctx, cancel := r.boundAssurance(ctx, op)
+	defer cancel()
 	result, assureErr := r.deps.SemanticAssurance.Assure(ctx, AssuranceRequest{
 		RunID: state.run.ID, Commit: commit, Tree: tree, CheckoutDir: checkout,
 		Attempt:    op.AttemptIdentity,
@@ -2628,6 +2640,9 @@ func (r *EngineeringRuntime) assureSemantics(ctx context.Context, state *runStat
 		Objective: kernel.Contract.Objective, ChangedPaths: paths,
 		AutomatedAssurance: automated, SemanticClaims: claims,
 	})
+	if err := assuranceCutOff(parent, ctx); err != nil {
+		return failed(err)
+	}
 	if assureErr != nil && result.VerifierDefinition == "" {
 		return failed(assureErr)
 	}
