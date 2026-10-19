@@ -139,7 +139,7 @@ export function GovernedAction({
         saved?.operation_id,
       );
       setReview(null);
-      announce(`${outcome.outcome}${outcome.code ? ` · ${outcome.code}` : ""}`);
+      announce(`${outcome.outcome}${outcome.code ? ` · ${outcome.code}` : ""}${outcome.detail ? ` · ${outcome.detail}` : ""}`);
       if (["applied", "already_applied"].includes(outcome.outcome)) {
         if (saved) {
           const receipt = await readActionReceipt(saved, owner.current.signal);
