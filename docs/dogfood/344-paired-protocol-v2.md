@@ -62,6 +62,30 @@ not promised, and exhaustion is reported as an outcome. It does not make
 verification faster and does not guarantee that a whole WorkGraph fits inside
 the four-hour allowance.
 
+### 2.1 Carried forward unchanged, stated explicitly
+
+- Task and acceptance criteria: issue #344 exactly as v1 section 2. Issue body
+  sha256 `d045a5e90188212846ac2705c4fccab0b4e36c59de45c4b68419e22c61d62054`,
+  issue `updatedAt` `2026-10-03T18:28:36Z`. **Revalidated 2026-10-19** against
+  the live issue: both values are unchanged. They are re-checked once more at
+  the freeze, and a difference stops it.
+- Operator: Bogdan Olteanu operates and times both arms.
+- Reviewer independence: an independent reviewer of a different vendor family
+  from the implementer, in both arms.
+- Attempt limits per run: `max_execution_attempts` 2, `max_remediation_attempts`
+  2, `max_assurance_attempts` 2.
+- Comparison rules: one pair is one observation; no leverage ratio; the confounds
+  in v1 section 9 stand.
+
+### 2.2 Freeze record and single reference
+
+The blob and content sha256 of this file are recorded in the PR freeze comment
+at the exact approved head, as v1's were; a digest written into this file would
+change the digest. **Both arms reference this same v2 freeze** (its recorded blob
+digest, the same base SHA and the same budgets) in the first line of each arm's
+operator log. An arm that references any other protocol text is invalid under
+v1 section 11.
+
 ## 3. Preconditions before the owner is asked for launch authorization
 
 These are not satisfied by this document. Each is separately evidenced.
