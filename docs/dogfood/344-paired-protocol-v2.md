@@ -1,6 +1,8 @@
 # #344 paired dogfood protocol, amendment v2 (#481)
 
 Status: **DRAFT for owner review. Not a freeze, and not launch authorization.**
+The owner approved drafting it on 2026-10-19 with the decisions in section 2,
+including a corrected plan aggregate budget.
 It becomes the frozen replacement only when the owner approves this file at an
 exact PR head and it merges. Launching a measured arm needs a separate, later
 owner authorization.
@@ -48,8 +50,8 @@ elapsed allowance and censoring (section 7), isolation (section 8), confounds
 | Controller | plain `go build` of the base, Go `1.27.2` | plain `go build` of `61b28f8`, Go `1.27.2` darwin/arm64, unattested; reported build and source revision captured at Arm A start and must match the base |
 | Execution budget per run | `wall_limit_seconds` 1800 | unchanged: 1800 s (attempt wall 30 min). It now bounds execution and other charged work only |
 | Assurance budget per run | none (charged to the 1800 s) | new: a separate bounded **3600 s** cumulative assurance allowance, frozen per run at creation (`RunBudgets.AssuranceWallLimit`, `DefaultAssuranceWallLimit` = 1 hour, #640). Assurance is not unlimited: exhaustion ends the run `run_assurance_budget_exhausted` with the candidate held, and a timed-out or exhausted verification never satisfies assurance, authority or publication |
-| Aggregate accounting | plan `max_wall_seconds` 14400 | unchanged 14400. Total active work is reported as execution plus assurance plus other charged work, and the plan aggregate still bounds all of it |
-| Plan envelope | `max_child_runs` 8, `max_concurrency` 2, `max_provider_invocations` 20, `max_wall_seconds` 14400, no `max_cost_micros` | unchanged. The operator configuration `plan` block must equal these values at Arm A start; a plan proposed under a different configuration is refused by the controller (`configuration_changed`) |
+| Aggregate accounting | plan `max_wall_seconds` 14400 | **corrected to 28800** (owner decision 2026-10-19). Total active work is reported as execution plus assurance plus other charged work, and the plan aggregate still bounds all of it. 14400 would have been an unintended earlier bottleneck: it counts execution and assurance across every child run, and six runs each performing a 43-minute verification alone consume 15,480 s. 28800 s is 8 hours of summed active work, matching two concurrent workers over the four-hour elapsed allowance. It does not lengthen the four-hour allowance and does not guarantee success; verification capacity, serial execution and legitimate failures can still prevent completion |
+| Plan envelope | `max_child_runs` 8, `max_concurrency` 2, `max_provider_invocations` 20, `max_wall_seconds` 14400, no `max_cost_micros` | `max_child_runs` 8, `max_concurrency` 2, `max_provider_invocations` 20, **`max_wall_seconds` 28800**, no `max_cost_micros`. The operator configuration `plan` block is the operator ceiling a proposed plan may not exceed, so it must equal these values at Arm A start (the machine's block currently holds 14400 and must be changed before any plan is proposed); a plan proposed under a different configuration is refused by the controller (`configuration_changed`). The compiler also divides the envelope wall budget by the planned agents to cap each stage, so the per-stage cap changes with this value; each run's own 1800 s and 3600 s limits still apply |
 | Provider families and models | frozen resolved ids, operator-attested | unchanged: `codex` `gpt-6.1-sol`, `claude` `claude-sonnet-5-5`. They are re-captured from each CLI's first normal invocation per arm and a difference stops the arm. They remain operator-attested |
 | Four-hour allowance, both arms | 4 h elapsed | unchanged |
 | Runtime state, Arm A | not stated | a **fresh, empty state directory** for Arm A. The earlier state directory holds the invalid test run and rehearsal runs and is not reused |
@@ -78,8 +80,7 @@ These are not satisfied by this document. Each is separately evidenced.
 
 This draft carries defaults; it asks, and does not assume:
 
-- Base `61b28f8` as the shared pre-#344 base.
-- The 3600 s assurance allowance and unchanged other budgets.
+- Decided by the owner (2026-10-19): base `61b28f8`, 3600 s assurance, 1800 s execution, the 8/2/20 limits, 28800 s aggregate and the file name. Section 4 now asks only what remains open.
 - **How the plan binds to the frozen base.** The planner reads the repository's
   current `main`, so a plan is bound to whatever `main` is when it is proposed.
   In the invalid test run it was bound to `222831c`, not the frozen `b02b8a4`.
