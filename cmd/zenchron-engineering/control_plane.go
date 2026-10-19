@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -13,6 +15,12 @@ import (
 )
 
 func controlPlane(args []string, stdout io.Writer) (int, error) {
+	return controlPlaneUntil(context.Background(), args, stdout)
+}
+
+// controlPlaneUntil serves until ctx is cancelled, then shuts the server down
+// and returns only after it has stopped, so a caller owns the listener's life.
+func controlPlaneUntil(ctx context.Context, args []string, stdout io.Writer) (int, error) {
 	flags := flag.NewFlagSet("control-plane", flag.ContinueOnError)
 	flags.SetOutput(stdout)
 	state := flags.String("state-dir", "", "existing Zenchron state directory")
@@ -60,5 +68,20 @@ func controlPlane(args []string, stdout io.Writer) (int, error) {
 	mux.Handle("/v1/", api.Handler())
 	mux.Handle("/", web.Handler())
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
-	return 1, server.Serve(listener)
+	stopped := make(chan struct{})
+	defer close(stopped)
+	go func() {
+		select {
+		case <-ctx.Done():
+			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = server.Shutdown(shutdown)
+		case <-stopped:
+		}
+	}()
+	err = server.Serve(listener)
+	if errors.Is(err, http.ErrServerClosed) && ctx.Err() != nil {
+		return 0, nil
+	}
+	return 1, err
 }

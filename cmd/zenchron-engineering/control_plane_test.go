@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -25,37 +28,63 @@ func TestControlPlaneCommandRejectsInvalidInvocation(t *testing.T) {
 	}
 }
 
-// #639: an operator found no link to open. The startup line must name the URL
-// and the token FILE, and must never contain the token itself.
-func TestControlPlaneStartupPrintsURLNeverToken(t *testing.T) {
-	state, err := os.MkdirTemp("/tmp", "zc-cp-")
-	if err != nil {
-		t.Fatal(err)
+// firstLineWriter hands over the first startup line, so a test waits on the
+// event rather than polling.
+type firstLineWriter struct{ lines chan string }
+
+func (w firstLineWriter) Write(p []byte) (int, error) {
+	select {
+	case w.lines <- string(p):
+	default:
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(state) })
-	dir, config, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git", func(c map[string]any) { c["state_dir"] = state })
+	return len(p), nil
+}
+
+// #639: an operator found no link to open. The startup line must name the URL
+// and the token FILE, and must never contain the token itself. The server is
+// stopped and joined before the test returns, so no listener outlives it.
+func TestControlPlaneStartupPrintsURLNeverToken(t *testing.T) {
+	dir, config, _ := seededWorkspace(t, "https://github.com/zenchron/seeded.git")
 	t.Chdir(dir)
 	built, err := newComposition(autonomyFlags{Config: config}, planOverrides(t, 41))
 	if err != nil {
 		t.Fatal(err)
 	}
+	state := built.config.StateDir
 	built.release()
-	out := &lockedBuffer{}
-	// ponytail: Serve has no stop; the goroutine ends with the test binary.
-	go func() { _, _ = controlPlane([]string{"--state-dir", state, "--listen", "127.0.0.1:0"}, out) }()
-	deadline := time.Now().Add(10 * time.Second)
-	for !strings.Contains(out.String(), "\n") && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
+
+	ctx, stop := context.WithCancel(context.Background())
+	out := firstLineWriter{lines: make(chan string, 1)}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = controlPlaneUntil(ctx, []string{"--state-dir", state, "--listen", "127.0.0.1:0"}, out)
+	}()
+	var line string
+	select {
+	case line = <-out.lines:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no startup line")
 	}
-	line := out.String()
+	address := regexp.MustCompile(`http://([0-9.]+:\d+)/app`).FindStringSubmatch(line)
 	token, err := os.ReadFile(filepath.Join(state, controlplane.TokenFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(line, "http://127.0.0.1:") || !strings.Contains(line, "/app") || !strings.Contains(line, controlplane.TokenFile) {
+	if address == nil || !strings.Contains(line, controlplane.TokenFile) {
 		t.Fatalf("startup output does not give the URL and token file: %q", line)
 	}
 	if strings.Contains(line, strings.TrimSpace(string(token))) {
 		t.Fatalf("startup output leaked the token: %q", line)
+	}
+	stop()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("control plane did not stop after cancellation")
+	}
+	if conn, err := net.DialTimeout("tcp", address[1], time.Second); err == nil {
+		_ = conn.Close()
+		t.Fatalf("listener %s outlived the test", address[1])
 	}
 }
