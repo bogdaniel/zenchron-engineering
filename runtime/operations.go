@@ -2442,6 +2442,15 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	if err != nil {
 		return failed(err)
 	}
+	// THE PHYSICAL BOUND (#640): this attempt may run no longer than what is
+	// left of the run's assurance allowance, whatever the verifier does, and
+	// the confirmation rerun shares the same bound.
+	parent := ctx
+	if op.DeadlineBound == BoundAssuranceWork && op.Deadline != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, max(op.Deadline.Sub(r.deps.Clock.Now()), 0))
+		defer cancel()
+	}
 	result, class, assureErr := AssuranceRerun(ctx, r.deps.Assurance, AssuranceRequest{
 		RunID:       state.run.ID,
 		Commit:      commit,
@@ -2454,6 +2463,11 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 		Policy:   Ref{ID: r.deps.Policy.ID, Revision: r.deps.Policy.Revision},
 		Producer: Ref{ID: r.deps.ControllerID, Revision: r.controller},
 	})
+	if parent.Err() == nil && ctx.Err() != nil {
+		// The allowance ran out mid-verification. Whatever the verifier
+		// reported, this is not a verdict and never satisfies assurance.
+		return failed(fmt.Errorf("assurance work budget exhausted during verification: %w", context.Cause(ctx)))
+	}
 	if assureErr != nil && result.VerifierDefinition == "" {
 		return failed(assureErr)
 	}

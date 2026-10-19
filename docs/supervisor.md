@@ -178,6 +178,11 @@ attempt_wall_limit_seconds  bounds ONE physical provider attempt; its deadline
                             absent derives to min(3h, wall_limit_seconds) for new runs
 ```
 
+Assurance work (#640) is a separate cumulative meter, frozen per run (3600
+seconds for new runs; not yet an operator configuration member) and never reset
+by retry or restart. It is charged apart from `wall_limit_seconds`, so a long
+successful verification does not spend the execution budget.
+
 `wall_limit_seconds` is cumulative across every attempt; the attempt limit is
 per attempt. Status names which of the three per-attempt bounds ended an
 attempt (`provider_inactivity`, `attempt_wall`, `run_active_work`) and never

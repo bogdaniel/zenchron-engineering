@@ -251,7 +251,7 @@ func (r *EngineeringRuntime) remainingBudgets(state *runState) RemainingBudgets 
 	// would record wall_seconds: 0 in a durable handoff record while the
 	// runtime would still grant it nearly its whole budget - provenance
 	// disagreeing with the semantics it exists to carry forward.
-	elapsed := state.activeElapsed(r.deps.Clock.Now())
+	elapsed := state.executionElapsed(r.deps.Clock.Now())
 	remainingWall := budgets.WallLimit - elapsed
 	if len(state.outstandingReviewKeys()) > 0 && remainingWall < 0 {
 		remainingWall = state.reviewContinuationRemaining(r.deps.Clock.Now())

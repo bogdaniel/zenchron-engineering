@@ -705,6 +705,7 @@ const (
 	BoundProviderInactivity AttemptBound = "provider_inactivity"
 	BoundAttemptWall        AttemptBound = "attempt_wall"
 	BoundRunActiveWork      AttemptBound = "run_active_work"
+	BoundAssuranceWork      AttemptBound = "assurance_work"
 )
 
 // The InvocationProvenance termination causes the runtime reads back. For

@@ -19,6 +19,7 @@ var frozenPolicy = RunBudgets{
 	MaxRemediationAttempts:    2,
 	MaxAssuranceAttempts:      2,
 	ProviderInactivityLimit:   5 * time.Minute,
+	AssuranceWallLimit:        45 * time.Minute,
 }
 
 // INVARIANT (ADR-0003 B1): every RunPolicy member is frozen at run creation. A
@@ -193,7 +194,7 @@ func TestTheLegacyRunPolicyRule(t *testing.T) {
 		state := &runState{rt: rt, run: EngineeringRun{ID: "oldest"}}
 		got := state.budgets()
 		want := live.defaults()
-		want.AttemptWallLimit, want.MaxProviderInvocations = 0, 0
+		want.AttemptWallLimit, want.MaxProviderInvocations, want.AssuranceWallLimit = 0, 0, 0
 		want.MaxExecutionContinuations = live.MaxExecutionAttempts
 		if got != want {
 			t.Fatalf("nil-budget run\n got %+v\nwant %+v", got, want)

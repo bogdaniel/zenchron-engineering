@@ -102,7 +102,7 @@ func (s *runState) reviewContinuationRemaining(now time.Time) time.Duration {
 	if !ok {
 		return 0
 	}
-	spent := s.activeElapsed(now) - grant.ActiveBaseline
+	spent := s.executionElapsed(now) - grant.ActiveBaseline
 	if spent < 0 {
 		spent = 0
 	}
@@ -125,7 +125,7 @@ func (r *EngineeringRuntime) grantReviewContinuation(s *runState) error {
 		return nil
 	}
 	limit := s.budgets().WallLimit
-	elapsed := s.activeElapsed(r.deps.Clock.Now())
+	elapsed := s.executionElapsed(r.deps.Clock.Now())
 	if !runBudgetSpent(limit, elapsed) {
 		return nil
 	}

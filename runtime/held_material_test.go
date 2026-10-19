@@ -100,6 +100,20 @@ func verifiedHeldRun(t *testing.T) (*phase8Fixture, string, Outcome) {
 	fixture.deps.SemanticAssurance = &burningAssurance{inner: fixture.deps.SemanticAssurance, clock: fixture.clock, burn: 31 * time.Minute}
 	fixture.runtime = fixture.newRuntime(fixture.deps)
 	runID := fixture.start()
+	// Since #640 a new run draws verification time from its own assurance
+	// allowance, so a verifier can no longer spend the execution envelope. This
+	// shape survives only for a run frozen BEFORE #640, which keeps the legacy
+	// rule (assurance charged to the run wall): model exactly that run.
+	run, _, err := fixture.deps.Store.Run(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := *run.Budgets
+	legacy.AssuranceWallLimit = 0
+	run.Budgets = &legacy
+	if err := fixture.deps.Store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
 	return fixture, runID, fixture.reconcile(runID)
 }
 
