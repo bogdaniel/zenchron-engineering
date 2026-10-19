@@ -1,0 +1,97 @@
+# #344 paired dogfood protocol, amendment v2 (#481)
+
+Status: **DRAFT for owner review. Not a freeze, and not launch authorization.**
+It becomes the frozen replacement only when the owner approves this file at an
+exact PR head and it merges. Launching a measured arm needs a separate, later
+owner authorization.
+
+This file supersedes `docs/dogfood/344-paired-protocol.md` (v1) for the
+controls named in section 2 and leaves v1 byte-for-byte unchanged. v1 blob
+`3e41da871527167ff0e595474f20b3f0966abe31`, sha256
+`c1f0ab31331e896504154dccdd8f37ae7eecf281adf05642c9b2a3c187e4eed1`.
+
+Parent epic #471. Milestone #481. Measurement definitions #66. Owner decisions:
+issue #481 comment 6251685466, and the owner decisions recorded on #639 and
+#640 on 2026-10-19.
+
+## 1. Why v1 is amended
+
+No measured arm has validly started. After v1 froze, an assistant-driven test
+run of #344 was made at the owner's explicit instruction. It deliberately
+violated v1 sections 4 and 11, so it is **not** a valid Arm A and produces no
+benchmark datum. It found two launch-blocking defects:
+
+- #639: the operator could not plan, approve and review through the Product
+  Workspace without a long, error-prone command sequence;
+- #640: the frozen 30-minute per-run wall budget could not fit the repository's
+  successful 43-minute full-suite assurance. The run (`run-de5b6172075e37120b6abd30cb907e12`)
+  spent about 8 minutes executing and about 43 minutes verifying, then ended
+  `failed run_wall_budget_exhausted` with its candidate held.
+
+The test run's evidence is preserved and is not part of any arm. It is not
+counted, averaged or hidden. A further nonblocking status inconsistency is #645.
+
+## 2. What changes
+
+Everything not listed here is unchanged from v1 and still binding: the question
+(section 1), the task text and acceptance criteria (section 2), the operator
+rules (section 4), logging (section 5), measurements (section 6), the four-hour
+elapsed allowance and censoring (section 7), isolation (section 8), confounds
+(section 9), audit (section 10), invalidation (section 11) and outputs
+(section 12). The invalid test run does not count as an arm that "started".
+
+| Control | v1 | v2 (proposed, for owner review) |
+| --- | --- | --- |
+| Base SHA, both arms | `b02b8a4369d11afce2d7c12d60ee69f1d1bf9769` | `61b28f8bde92b9c9ed4303d3b28912b08f3be520` (`main` after #625, #598, #634, #612, #638, #641, #643 and #644 merged). Both arms clone exactly this revision. This file and later docs-only changes are not part of the base |
+| #344 code on base | none | none. Verified at `61b28f8`: no held-material release command, event or operation exists. The invalid test run's candidate branch was never published or merged |
+| Instrumentation | `66-minimal-slice/1`, schema `0.2` | unchanged (`benchmark.InstrumentationVersion` at the new base) |
+| Controller | plain `go build` of the base, Go `1.27.2` | plain `go build` of `61b28f8`, Go `1.27.2` darwin/arm64, unattested; reported build and source revision captured at Arm A start and must match the base |
+| Execution budget per run | `wall_limit_seconds` 1800 | unchanged: 1800 s (attempt wall 30 min). It now bounds execution and other charged work only |
+| Assurance budget per run | none (charged to the 1800 s) | new: a separate bounded **3600 s** cumulative assurance allowance, frozen per run at creation (`RunBudgets.AssuranceWallLimit`, `DefaultAssuranceWallLimit` = 1 hour, #640). Assurance is not unlimited: exhaustion ends the run `run_assurance_budget_exhausted` with the candidate held, and a timed-out or exhausted verification never satisfies assurance, authority or publication |
+| Aggregate accounting | plan `max_wall_seconds` 14400 | unchanged 14400. Total active work is reported as execution plus assurance plus other charged work, and the plan aggregate still bounds all of it |
+| Plan envelope | `max_child_runs` 8, `max_concurrency` 2, `max_provider_invocations` 20, `max_wall_seconds` 14400, no `max_cost_micros` | unchanged. The operator configuration `plan` block must equal these values at Arm A start; a plan proposed under a different configuration is refused by the controller (`configuration_changed`) |
+| Provider families and models | frozen resolved ids, operator-attested | unchanged: `codex` `gpt-6.1-sol`, `claude` `claude-sonnet-5-5`. They are re-captured from each CLI's first normal invocation per arm and a difference stops the arm. They remain operator-attested |
+| Four-hour allowance, both arms | 4 h elapsed | unchanged |
+| Runtime state, Arm A | not stated | a **fresh, empty state directory** for Arm A. The earlier state directory holds the invalid test run and rehearsal runs and is not reused |
+
+What the 60-minute assurance allowance does **not** do: it leaves headroom over
+one successful 43-minute verification but cannot hold two. A complete rerun is
+not promised, and exhaustion is reported as an outcome. It does not make
+verification faster and does not guarantee that a whole WorkGraph fits inside
+the four-hour allowance.
+
+## 3. Preconditions before the owner is asked for launch authorization
+
+These are not satisfied by this document. Each is separately evidenced.
+
+1. #640 accepted by the owner. (Merged in #644; the issue stays open until
+   accepted.)
+2. #639 accepted by the owner: the held-plan and unobserved-controller states
+   verified and the operator workflow accepted. #641 and #643 are merged.
+3. A **human-operated** Product Workspace preflight by the operator against the
+   intended intake path, with setup friction logged honestly rather than
+   concealed. Automated Chrome evidence does not substitute for it.
+4. Post-merge `go` on the exact base SHA is green (it is for `61b28f8`).
+5. The base, budgets and this file digest are recorded in the launch request.
+
+## 4. Decisions requested from the owner in review
+
+This draft carries defaults; it asks, and does not assume:
+
+- Base `61b28f8` as the shared pre-#344 base.
+- The 3600 s assurance allowance and unchanged other budgets.
+- **How the plan binds to the frozen base.** The planner reads the repository's
+  current `main`, so a plan is bound to whatever `main` is when it is proposed.
+  In the invalid test run it was bound to `222831c`, not the frozen `b02b8a4`.
+  Either `main` must equal the frozen base when Arm A plans (this file would
+  then have to merge before the base is cut, which changes the base), or the plan
+  is allowed to bind to a docs-only descendant and the difference is recorded.
+  This draft does not choose.
+- That the invalid test run stays recorded as overhead and finding evidence,
+  outside both arms.
+
+## 5. What this document claims
+
+No leverage ratio. No measured result. No acceptance of #639, #640, #481, #479,
+#66 or #471. The operator log from the test run exists and is preserved
+unedited. Nothing here is a launch authorization.
