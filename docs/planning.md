@@ -24,7 +24,9 @@ an issue, or a stated objective
    plan show PLAN           read it
         |
         v
-   plan approve PLAN --revision N --digest SHA   the boundary: nothing ran before this
+   approve in the Product Workspace   the boundary: nothing ran before this
+        |                   (Action required -> Review & approve; `plan approve`
+        |                   with its digests is the scriptable equivalent)
         |
         v
    serve executes           ordinary EngineeringRuns, one per agent stage
@@ -461,6 +463,21 @@ zenchron-engineering autonomy plan revise PLAN [--template ...] [--deterministic
 zenchron-engineering autonomy plan status PLAN [--text]
 zenchron-engineering autonomy plan list [--text]
 ```
+
+**Approving without copying digests.** A plan proposed by `plan issue` is an
+ordinary objective plan; the Control Plane lists it under Objectives and in
+Action required, whether or not it belongs to a product. Open
+`http://127.0.0.1:8787/app` (the address `control-plane` prints), sign in with
+the token file it names, open the plan from Action required, read the stages,
+assignments and budget, then choose Review & approve. The dialog binds the exact
+revision, plan digest and live assignment digest for you; the controller still
+refuses a stale revision, a changed worker binding or a changed controller
+configuration. A plan proposed from the browser's "Create objective" form with a
+product chosen is additionally associated with that product, so its WorkGraph
+appears under the Product Workspace; a CLI-proposed plan is not, and the Products
+page says where to find it. Templates such as `zenchron-feature` are operator
+files in the planning directory, not shipped; `plan issue` without `--template`
+uses the default, and `GET /v1/workspace/options` lists the installed ones.
 
 `plan issue` compiles a proposal, binds its objective WorkGraph, and stores it.
 It does not execute work before the exact plan and assignment digests are approved.

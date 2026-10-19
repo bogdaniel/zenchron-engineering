@@ -257,6 +257,19 @@ or SQLite handle for it:
 | `/workgraphs` | every adopted WorkGraph |
 | `/workgraphs/{id}` | one WorkGraph's engineering-oriented drill-down: units, frontier, independent-review state, per-unit run detail and open decisions |
 
+`control-plane` prints one line on startup, `control plane: http://ADDR/app (sign in
+with the token in STATE/control-plane.token)`. It names the token file and never
+prints the token.
+
+Plan approval needs no copied digests (#639). A plan proposed from the CLI
+(`autonomy plan issue N`) or from the browser is the same objective plan. It is
+listed under Objectives and Action required; Review & approve binds the exact
+revision, plan digest and live assignment digest. Only a plan created through
+the browser intake with a product chosen is associated with a product, so only
+that plan's WorkGraph appears under `/products/{id}`; the Products page links to
+Action required for the rest. `TestOperatorPlanApprovalJourney` (opt-in, real
+Chrome, `ZENCHRON_OPERATOR_REHEARSAL=1`) proves it for a CLI-shaped proposal.
+
 A browser cannot attach `Authorization` on a plain navigation, so the console
 accepts the same token via a cookie instead: open any console page, paste
 the token from `control-plane.token` into the sign-in form, and the page's
