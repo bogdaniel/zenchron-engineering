@@ -47,7 +47,7 @@ elapsed allowance and censoring (section 7), isolation (section 8), confounds
 | Base SHA, both arms | `b02b8a4369d11afce2d7c12d60ee69f1d1bf9769` | **The merge commit of the PR that merges this file into `main`.** Owner decision 2026-10-19: the planner has no explicit pinned-base argument and reads the revision of `main`, so the benchmark base is the revision the planner will actually use. The exact SHA cannot be written into this file (it does not exist before the merge, and writing it would change the file); it is recorded in a separate freeze record (section 2.3). Both arms clone exactly that revision. A docs-only descendant is **not** an acceptable substitute for exact equality |
 | #344 code on base | none | none. To be verified on the merge commit before it is frozen (section 2.3). It was verified on `61b28f8` before drafting: no held-material release command, event or operation. The invalid test run's candidate branch was never published or merged |
 | Instrumentation | `66-minimal-slice/1`, schema `0.2` | unchanged (`benchmark.InstrumentationVersion` at the new base) |
-| Controller | plain `go build` of the base, Go `1.27.2` | plain `go build` of the frozen base (the merge commit), Go `1.27.2` darwin/arm64, unattested; reported build and source revision captured at Arm A start and must match the frozen base |
+| Controller | plain `go build` of the base, Go `1.27.2` | **adopted** controller built by `controller build-adopted` from the frozen base (the merge commit, which must be trusted main with accepted post-merge `go` evidence), Go `1.27.2` darwin/arm64, run by the published artifact and sanctioned with `controller re-adopt`; `/v1/controller` must report `live_build.kind` `adopted`, `generation_match` `match`, `role` `held`, `serving` `serving` and `durable_consistency` `consistent`, with `source_revision` equal to the frozen base, captured at Arm A start. A plain `go build` is unattested: it records no durable generation and the Control Plane refuses every governed action, so it is not a valid measured arm |
 | Execution budget per run | `wall_limit_seconds` 1800 | unchanged: 1800 s (attempt wall 30 min). It now bounds execution and other charged work only |
 | Assurance budget per run | none (charged to the 1800 s) | new: a separate bounded **3600 s** cumulative assurance allowance, frozen per run at creation (`RunBudgets.AssuranceWallLimit`, `DefaultAssuranceWallLimit` = 1 hour, #640). Assurance is not unlimited: exhaustion ends the run `run_assurance_budget_exhausted` with the candidate held, and a timed-out or exhausted verification never satisfies assurance, authority or publication |
 | Aggregate accounting | plan `max_wall_seconds` 14400 | **corrected to 28800** (owner decision 2026-10-19). Total active work is reported as execution plus assurance plus other charged work, and the plan aggregate still bounds all of it. 14400 would have been an unintended earlier bottleneck: it counts execution and assurance across every child run, and six runs each performing a 43-minute verification alone consume 15,480 s. 28800 s is 8 hours of summed active work, matching two concurrent workers over the four-hour elapsed allowance. It does not lengthen the four-hour allowance and does not guarantee success; verification capacity, serial execution and legitimate failures can still prevent completion |
@@ -110,6 +110,16 @@ These are not satisfied by this document. Each is separately evidenced.
 4. Post-merge `go` on the exact frozen base SHA (the merge commit) is green.
 5. The freeze record of section 2.3 exists, and `main` has not moved since.
 6. The base, budgets and this file digest are recorded in the launch request.
+7. The controller of section 2 is established through the supported lifecycle
+   (demonstrated end to end on a fresh state directory): operator
+   configuration with `github.governance_credential_mode` `github-cli` and a
+   signed-in `gh`, a running Docker daemon with the configured pinned assurance
+   image, then `controller build-adopted --repo <owner/name> --config <path>`,
+   then, with `serve` stopped, `controller re-adopt --reason <text>` run from
+   the published `main-<sha>/zenchron-engineering` artifact itself (not a copy),
+   then `serve` and `control-plane` from that artifact. Set
+   `ZENCHRON_CONTROLLER_ROOT` identically for every one of these commands when
+   an isolated controller root is used. No activation record is hand-written.
 
 ## 4. Decisions recorded from the owner
 
