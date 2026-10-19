@@ -44,10 +44,10 @@ elapsed allowance and censoring (section 7), isolation (section 8), confounds
 
 | Control | v1 | v2 (proposed, for owner review) |
 | --- | --- | --- |
-| Base SHA, both arms | `b02b8a4369d11afce2d7c12d60ee69f1d1bf9769` | `61b28f8bde92b9c9ed4303d3b28912b08f3be520` (`main` after #625, #598, #634, #612, #638, #641, #643 and #644 merged). Both arms clone exactly this revision. This file and later docs-only changes are not part of the base |
-| #344 code on base | none | none. Verified at `61b28f8`: no held-material release command, event or operation exists. The invalid test run's candidate branch was never published or merged |
+| Base SHA, both arms | `b02b8a4369d11afce2d7c12d60ee69f1d1bf9769` | **The merge commit of the PR that merges this file into `main`.** Owner decision 2026-10-19: the planner has no explicit pinned-base argument and reads the revision of `main`, so the benchmark base is the revision the planner will actually use. The exact SHA cannot be written into this file (it does not exist before the merge, and writing it would change the file); it is recorded in a separate freeze record (section 2.3). Both arms clone exactly that revision. A docs-only descendant is **not** an acceptable substitute for exact equality |
+| #344 code on base | none | none. To be verified on the merge commit before it is frozen (section 2.3). It was verified on `61b28f8` before drafting: no held-material release command, event or operation. The invalid test run's candidate branch was never published or merged |
 | Instrumentation | `66-minimal-slice/1`, schema `0.2` | unchanged (`benchmark.InstrumentationVersion` at the new base) |
-| Controller | plain `go build` of the base, Go `1.27.2` | plain `go build` of `61b28f8`, Go `1.27.2` darwin/arm64, unattested; reported build and source revision captured at Arm A start and must match the base |
+| Controller | plain `go build` of the base, Go `1.27.2` | plain `go build` of the frozen base (the merge commit), Go `1.27.2` darwin/arm64, unattested; reported build and source revision captured at Arm A start and must match the frozen base |
 | Execution budget per run | `wall_limit_seconds` 1800 | unchanged: 1800 s (attempt wall 30 min). It now bounds execution and other charged work only |
 | Assurance budget per run | none (charged to the 1800 s) | new: a separate bounded **3600 s** cumulative assurance allowance, frozen per run at creation (`RunBudgets.AssuranceWallLimit`, `DefaultAssuranceWallLimit` = 1 hour, #640). Assurance is not unlimited: exhaustion ends the run `run_assurance_budget_exhausted` with the candidate held, and a timed-out or exhausted verification never satisfies assurance, authority or publication |
 | Aggregate accounting | plan `max_wall_seconds` 14400 | **corrected to 28800** (owner decision 2026-10-19). Total active work is reported as execution plus assurance plus other charged work, and the plan aggregate still bounds all of it. 14400 would have been an unintended earlier bottleneck: it counts execution and assurance across every child run, and six runs each performing a 43-minute verification alone consume 15,480 s. 28800 s is 8 hours of summed active work, matching two concurrent workers over the four-hour elapsed allowance. It does not lengthen the four-hour allowance and does not guarantee success; verification capacity, serial execution and legitimate failures can still prevent completion |
@@ -86,6 +86,16 @@ digest, the same base SHA and the same budgets) in the first line of each arm's
 operator log. An arm that references any other protocol text is invalid under
 v1 section 11.
 
+### 2.3 Freeze record, kept outside this file
+
+After this file merges, a separate freeze record (a PR comment, as v1's was)
+states: the merge commit SHA (the frozen base); a check that it contains no #344
+implementation; the blob and content sha256 of this file at that commit; the
+effective operator configuration (the `plan` block, `budgets`, models and trust
+modes, with before and after values and a digest); and that `main` is held. Each
+arm then verifies that the **actual plan subject and run base equal the frozen
+SHA** and stops if they differ.
+
 ## 3. Preconditions before the owner is asked for launch authorization
 
 These are not satisfied by this document. Each is separately evidenced.
@@ -97,23 +107,21 @@ These are not satisfied by this document. Each is separately evidenced.
 3. A **human-operated** Product Workspace preflight by the operator against the
    intended intake path, with setup friction logged honestly rather than
    concealed. Automated Chrome evidence does not substitute for it.
-4. Post-merge `go` on the exact base SHA is green (it is for `61b28f8`).
-5. The base, budgets and this file digest are recorded in the launch request.
+4. Post-merge `go` on the exact frozen base SHA (the merge commit) is green.
+5. The freeze record of section 2.3 exists, and `main` has not moved since.
+6. The base, budgets and this file digest are recorded in the launch request.
 
-## 4. Decisions requested from the owner in review
+## 4. Decisions recorded from the owner
 
-This draft carries defaults; it asks, and does not assume:
-
-- Decided by the owner (2026-10-19): base `61b28f8`, 3600 s assurance, 1800 s execution, the 8/2/20 limits, 28800 s aggregate and the file name. Section 4 now asks only what remains open.
-- **How the plan binds to the frozen base.** The planner reads the repository's
-  current `main`, so a plan is bound to whatever `main` is when it is proposed.
-  In the invalid test run it was bound to `222831c`, not the frozen `b02b8a4`.
-  Either `main` must equal the frozen base when Arm A plans (this file would
-  then have to merge before the base is cut, which changes the base), or the plan
-  is allowed to bind to a docs-only descendant and the difference is recorded.
-  This draft does not choose.
-- That the invalid test run stays recorded as overhead and finding evidence,
-  outside both arms.
+- Decided 2026-10-19: 3600 s assurance, 1800 s execution, the 8/2/20 limits,
+  28800 s aggregate, the file name, and that the benchmark base is the merge
+  commit of this file (section 2).
+- The invalid test run stays recorded as overhead and finding evidence, outside
+  both arms.
+- **Trade-off, stated plainly:** exact base equality requires `main` to stay
+  unchanged throughout both measured arms. If development must keep merging into
+  `main`, a governed pinned-base capability in the planner has to exist before
+  launch instead; a docs-only descendant is not accepted.
 
 ## 5. What this document claims
 
