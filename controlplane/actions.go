@@ -16,6 +16,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -239,6 +240,12 @@ func (a *API) actResponse(w http.ResponseWriter, r *http.Request, res ActionResu
 		if code == "" {
 			code = "runtime_refused"
 		}
+		// A plan refusal is the controller's own explanation, written for the
+		// operator (for example configuration_changed and how to recover). The
+		// bare code hid it; other codes keep theirs.
+		if code == rt.ControlCodePlanRefused {
+			res.Detail = refusalDetail(response.Error)
+		}
 		refuse(409, code)
 	default:
 		if applied != nil {
@@ -251,6 +258,14 @@ func (a *API) actResponse(w http.ResponseWriter, r *http.Request, res ActionResu
 		res.Outcome = OutcomeApplied
 		reply(200)
 	}
+}
+
+// maxRefusalDetail matches the action-result schema's detail bound (characters).
+const maxRefusalDetail = 400
+
+func refusalDetail(explanation string) string {
+	runes := []rune(strings.ToValidUTF8(explanation, ""))
+	return string(runes[:min(maxRefusalDetail, len(runes))])
 }
 
 // defaultActionBodyBytes is every ordinary governed command's body boundary.

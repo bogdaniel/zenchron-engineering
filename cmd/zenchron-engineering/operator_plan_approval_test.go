@@ -17,7 +17,13 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
-func TestOperatorPlanApprovalJourney(t *testing.T) {
+func TestOperatorPlanApprovalJourney(t *testing.T) { runApprovalJourney(t, "approve") }
+
+// #639: the two states the happy path does not cover.
+func TestOperatorHeldPlanVisibility(t *testing.T)             { runApprovalJourney(t, "held") }
+func TestOperatorUnobservedControllerVisibility(t *testing.T) { runApprovalJourney(t, "unobserved") }
+
+func runApprovalJourney(t *testing.T, mode string) {
 	if os.Getenv("ZENCHRON_OPERATOR_REHEARSAL") != "1" {
 		t.Skip("opt-in: ZENCHRON_OPERATOR_REHEARSAL=1 with Chrome and Playwright")
 	}
@@ -74,5 +80,9 @@ func TestOperatorPlanApprovalJourney(t *testing.T) {
 	if !response.OK {
 		t.Fatalf("CLI-shaped proposal refused: %+v", response)
 	}
-	runBrowserFixtureWithScript(t, root, built, driver, "operator_plan_approval.mjs", []string{"ZENCHRON_E2E_REACT=1"})
+	if mode == "held" {
+		// The effective configuration changes after the proposal.
+		built.config.Digest = runtime.ConfigDigest{Global: "changed-after-proposal"}
+	}
+	runBrowserFixtureWithScript(t, root, built, driver, "operator_plan_approval.mjs", []string{"ZENCHRON_E2E_REACT=1", "ZENCHRON_JOURNEY_MODE=" + mode})
 }

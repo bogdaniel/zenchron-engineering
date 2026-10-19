@@ -31,6 +31,22 @@ func TestBrowserApprovalBindsAssignmentsAndDoesNotAcceptActor(t *testing.T) {
 	}
 }
 
+// #639: a plan held after a configuration change is refused by the controller
+// with a reason and a recovery. The browser must receive it, not a bare code.
+func TestPlanRefusalExplanationReachesTheOperator(t *testing.T) {
+	f := newActionFixture(t)
+	reason := "configuration_changed: plan p was proposed under a different controller-effective configuration; " +
+		"it is not carried across that boundary - propose the issue again under the current configuration"
+	f.reply = func(rt.ControlRequest) (rt.ControlResponse, error) {
+		return rt.ControlResponse{Code: rt.ControlCodePlanRefused, Error: reason}, nil
+	}
+	body := `{"controller_binding":"binding","revision":1,"digest":"` + f.digest + `","assignments_digest":"assignments"}`
+	got := post(t, f.api, validRequest("/v1/plans/p/approve", body), 409)
+	if outcome(got) != "refused" || got["detail"] != reason {
+		t.Fatalf("operator was not told why the plan was refused: %v", got)
+	}
+}
+
 func TestBrowserReadsRequireLiveControllerAndUseReadOnlyControl(t *testing.T) {
 	f := newActionFixture(t)
 	f.reply = func(request rt.ControlRequest) (rt.ControlResponse, error) {

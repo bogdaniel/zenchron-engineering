@@ -270,6 +270,15 @@ that plan's WorkGraph appears under `/products/{id}`; the Products page links to
 Action required for the rest. `TestOperatorPlanApprovalJourney` (opt-in, real
 Chrome, `ZENCHRON_OPERATOR_REHEARSAL=1`) proves it for a CLI-shaped proposal.
 
+Two blocked states are shown, never bypassed. With no controller role held,
+Review & approve is disabled and the page says "Controller role not held". A plan
+proposed under an earlier effective configuration is refused by the controller;
+the refusal's explanation (`configuration_changed: ... propose the issue again
+under the current configuration`) is returned in the action result's `detail`
+(up to 400 characters, plan refusals only) and shown beside the refusal.
+`TestOperatorHeldPlanVisibility` and `TestOperatorUnobservedControllerVisibility`
+cover both in a real browser.
+
 A browser cannot attach `Authorization` on a plain navigation, so the console
 accepts the same token via a cookie instead: open any console page, paste
 the token from `control-plane.token` into the sign-in form, and the page's
