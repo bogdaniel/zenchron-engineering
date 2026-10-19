@@ -47,6 +47,22 @@ func TestPlanRefusalExplanationReachesTheOperator(t *testing.T) {
 	}
 }
 
+// The explanation is bounded by the schema AFTER the re-read warning is
+// composed in: the explanation shrinks, the warning stays.
+func TestLongPlanRefusalKeepsTheRereadWarningWithinTheSchema(t *testing.T) {
+	f := newActionFixture(t)
+	f.reply = func(rt.ControlRequest) (rt.ControlResponse, error) {
+		f.api.Store.Close() // the refusal lands; the control plane can no longer re-read
+		return rt.ControlResponse{Code: rt.ControlCodePlanRefused, Error: strings.Repeat("x", 900)}, nil
+	}
+	body := `{"controller_binding":"binding","revision":1,"digest":"` + f.digest + `","assignments_digest":"assignments"}`
+	got := post(t, f.api, validRequest("/v1/plans/p/approve", body), 409) // post validates the schema
+	detail, _ := got["detail"].(string)
+	if outcome(got) != "refused" || code(got) != rt.ControlCodePlanRefused || !strings.HasSuffix(detail, stateUnread) {
+		t.Fatalf("refusal or re-read warning lost: %v", got)
+	}
+}
+
 func TestBrowserReadsRequireLiveControllerAndUseReadOnlyControl(t *testing.T) {
 	f := newActionFixture(t)
 	f.reply = func(request rt.ControlRequest) (rt.ControlResponse, error) {

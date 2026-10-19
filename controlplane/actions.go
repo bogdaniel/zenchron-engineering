@@ -173,7 +173,7 @@ func (a *API) actResponse(w http.ResponseWriter, r *http.Request, res ActionResu
 		} else if res.Detail == "" {
 			res.Detail = stateUnread
 		} else {
-			res.Detail += "; " + stateUnread
+			res.Detail = withWarning(res.Detail, stateUnread)
 		}
 		send(w, status, res)
 	}
@@ -264,8 +264,21 @@ func (a *API) actResponse(w http.ResponseWriter, r *http.Request, res ActionResu
 const maxRefusalDetail = 400
 
 func refusalDetail(explanation string) string {
-	runes := []rune(strings.ToValidUTF8(explanation, ""))
-	return string(runes[:min(maxRefusalDetail, len(runes))])
+	return truncateRunes(strings.ToValidUTF8(explanation, ""), maxRefusalDetail)
+}
+
+// withWarning appends a warning to an explanation inside the schema bound. The
+// explanation is shortened; the warning is never dropped, because it says the
+// outcome must be re-read before retrying.
+func withWarning(explanation, warning string) string {
+	suffix := "; " + warning
+	room := maxRefusalDetail - len([]rune(suffix))
+	return truncateRunes(explanation, room) + suffix
+}
+
+func truncateRunes(text string, limit int) string {
+	runes := []rune(text)
+	return string(runes[:min(limit, len(runes))])
 }
 
 // defaultActionBodyBytes is every ordinary governed command's body boundary.
