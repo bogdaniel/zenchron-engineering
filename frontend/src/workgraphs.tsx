@@ -563,6 +563,11 @@ export function ProductPortfolio({
         Recorded product scope and its associated operational graphs.
       </Head>
       <ProductCreate controller={controller} stale={stale} onSettled={onSettled} />
+      <p className="small muted">
+        A plan proposed outside a product (for example by <span className="mono">autonomy plan issue N</span>) is not
+        listed here. Review and approve it from <Link to="actions">Action required</Link>, or find it under{" "}
+        <Link to="objectives">Objectives</Link>. No digest needs to be copied.
+      </p>
       <Panel title="Product inventory">
         {products.products.length ? (
           <div className="table-scroll" tabIndex={0} role="region" aria-label="Products">
