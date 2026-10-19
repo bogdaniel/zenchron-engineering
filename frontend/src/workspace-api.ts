@@ -73,7 +73,7 @@ export type Requests = {
   graphs_offset: number;
   graphs_has_more: boolean;
 };
-export type Result = { action: string; outcome: string; code: string; state?: unknown };
+export type Result = { action: string; outcome: string; code: string; detail: string; state?: unknown };
 export type Receipt = { title: string; detail: string; at?: string; destination?: string };
 export async function preview(id: string, signal: AbortSignal): Promise<Preview> {
   const p = object((await request(`/v1/plans/${encodeURIComponent(id)}/preview`, signal)).value),
@@ -218,7 +218,7 @@ export async function send(
     Object.entries(target).some(([k, v]) => actual[k] !== v)
   )
     throw new Error("invalid_response");
-  return { action, outcome, code: str(r.code, ""), state: r.state };
+  return { action, outcome, code: str(r.code, ""), detail: str(r.detail, ""), state: r.state };
 }
 export async function resolution(
   id: string,

@@ -16,6 +16,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -172,7 +173,7 @@ func (a *API) actResponse(w http.ResponseWriter, r *http.Request, res ActionResu
 		} else if res.Detail == "" {
 			res.Detail = stateUnread
 		} else {
-			res.Detail += "; " + stateUnread
+			res.Detail = withWarning(res.Detail, stateUnread)
 		}
 		send(w, status, res)
 	}
@@ -239,6 +240,12 @@ func (a *API) actResponse(w http.ResponseWriter, r *http.Request, res ActionResu
 		if code == "" {
 			code = "runtime_refused"
 		}
+		// A plan refusal is the controller's own explanation, written for the
+		// operator (for example configuration_changed and how to recover). The
+		// bare code hid it; other codes keep theirs.
+		if code == rt.ControlCodePlanRefused {
+			res.Detail = refusalDetail(response.Error)
+		}
 		refuse(409, code)
 	default:
 		if applied != nil {
@@ -251,6 +258,27 @@ func (a *API) actResponse(w http.ResponseWriter, r *http.Request, res ActionResu
 		res.Outcome = OutcomeApplied
 		reply(200)
 	}
+}
+
+// maxRefusalDetail matches the action-result schema's detail bound (characters).
+const maxRefusalDetail = 400
+
+func refusalDetail(explanation string) string {
+	return truncateRunes(strings.ToValidUTF8(explanation, ""), maxRefusalDetail)
+}
+
+// withWarning appends a warning to an explanation inside the schema bound. The
+// explanation is shortened; the warning is never dropped, because it says the
+// outcome must be re-read before retrying.
+func withWarning(explanation, warning string) string {
+	suffix := "; " + warning
+	room := maxRefusalDetail - len([]rune(suffix))
+	return truncateRunes(explanation, room) + suffix
+}
+
+func truncateRunes(text string, limit int) string {
+	runes := []rune(text)
+	return string(runes[:min(limit, len(runes))])
 }
 
 // defaultActionBodyBytes is every ordinary governed command's body boundary.
