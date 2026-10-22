@@ -13,15 +13,17 @@ import (
 
 // fakeUpHost is the machine boundary of `up`: processes, ports, the browser.
 type fakeUpHost struct {
-	controllerUp bool
-	alive        map[int]bool
-	busyPorts    map[string]bool
-	answering    map[string]bool
-	spawned      [][]string
-	exitAtOnce   bool
-	terminated   []int
-	opened       []string
-	stateDir     string
+	controllerUp       bool
+	alive              map[int]bool
+	busyPorts          map[string]bool
+	answering          map[string]bool
+	spawned            [][]string
+	spawnedExecutables []string
+	controllerBinary   string
+	exitAtOnce         bool
+	terminated         []int
+	opened             []string
+	stateDir           string
 }
 
 func (h *fakeUpHost) ControllerAnswers(string) bool        { return h.controllerUp }
@@ -37,8 +39,11 @@ func (h *fakeUpHost) Terminate(pid int) error {
 
 // Spawn behaves like the real services: a started process becomes ready and
 // records itself, unless it is configured to die at once.
-func (h *fakeUpHost) Spawn(_ string, args []string) (int, <-chan struct{}, error) {
+func (h *fakeUpHost) ControllerExecutable(string) string { return h.controllerBinary }
+
+func (h *fakeUpHost) Spawn(executable, _ string, args []string) (int, <-chan struct{}, error) {
 	h.spawned = append(h.spawned, args)
+	h.spawnedExecutables = append(h.spawnedExecutables, executable)
 	exited := make(chan struct{})
 	if h.exitAtOnce {
 		close(exited)
@@ -173,5 +178,17 @@ func TestProcessRecordIsClearedOnlyByItsOwner(t *testing.T) {
 	clearProcessRecord(dir, serviceServe) // a predecessor exiting after its successor took over
 	if _, ok, _ := readProcessRecord(dir, serviceServe); !ok {
 		t.Fatal("a predecessor deleted its successor's record")
+	}
+}
+
+func TestUpRunsTheDashboardAsTheServingControllersBinary(t *testing.T) {
+	host, args := newUpFixture(t)
+	host.controllerUp = true
+	host.controllerBinary = "/adopted/main-1/zenchron-engineering"
+	if _, err := upCommand(append(args, "--no-open"), host, fastTiming, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(host.spawnedExecutables) != 1 || host.spawnedExecutables[0] != host.controllerBinary {
+		t.Fatalf("dashboard started with %v, want the controller's own binary", host.spawnedExecutables)
 	}
 }

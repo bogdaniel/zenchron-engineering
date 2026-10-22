@@ -133,9 +133,12 @@ type upHost interface {
 	// authenticated reads on address. Any other program answering there, or a
 	// Control Plane of another state directory, is not it.
 	DashboardHealthy(address, stateDir string) bool
-	// Spawn starts a detached child of this binary and returns a channel
-	// that yields when it exits.
-	Spawn(logPath string, args []string) (pid int, exited <-chan struct{}, err error)
+	// ControllerExecutable is the binary the serving controller runs, or ""
+	// when none answers or it does not say.
+	ControllerExecutable(stateDir string) string
+	// Spawn starts a detached child and returns a channel that yields when
+	// it exits. An empty executable means this binary.
+	Spawn(executable, logPath string, args []string) (pid int, exited <-chan struct{}, err error)
 	// Terminate asks pid to shut down gracefully.
 	Terminate(pid int) error
 	// Open shows url in the operator's browser.
@@ -205,10 +208,20 @@ func dashboardStatus(address, token string) int {
 	return response.StatusCode
 }
 
-func (osUpHost) Spawn(logPath string, args []string) (int, <-chan struct{}, error) {
-	executable, err := os.Executable()
+func (osUpHost) ControllerExecutable(stateDir string) string {
+	snapshot, err := observeLiveController(stateDir)()
 	if err != nil {
-		return 0, nil, err
+		return ""
+	}
+	return snapshot.Identity.ExecutablePath
+}
+
+func (osUpHost) Spawn(executable, logPath string, args []string) (int, <-chan struct{}, error) {
+	if executable == "" {
+		var err error
+		if executable, err = os.Executable(); err != nil {
+			return 0, nil, err
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		return 0, nil, err

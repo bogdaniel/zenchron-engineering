@@ -116,7 +116,7 @@ bin/zenchron-engineering down    # graceful stop of what `up` started
 `up` accepts the flags `serve` does (`--repo`, `--config`, `--agent`,
 `--reviewer-agent`) plus `--listen 127.0.0.1:PORT` and `--no-open`. Run it from
 inside the clone you want worked on. It runs the same binary you ran, so an
-adopted controller stays the adopted controller, and it reuses a healthy
+adopted controller stays the adopted controller (the dashboard is started with the serving controller's own binary, because the controller refuses a caller whose build differs from its generation), and it reuses a healthy
 supervisor or dashboard instead of starting a second one. If the default
 dashboard port (8787) is held by another program, the dashboard moves to the
 next free port and `up` prints where. An explicit `--listen` that is busy is a

@@ -143,7 +143,7 @@ func ensureServe(host upHost, timing upTiming, stateDir string, flags autonomyFl
 			args = append(args, option.name, option.value)
 		}
 	}
-	pid, exited, err := host.Spawn(serveLogPath(stateDir), args)
+	pid, exited, err := host.Spawn("", serveLogPath(stateDir), args)
 	if err != nil {
 		return fmt.Errorf("start the supervisor: %w", err)
 	}
@@ -171,7 +171,10 @@ func ensureControlPlane(host upHost, timing upTiming, stateDir, requested string
 	if err != nil {
 		return "", err
 	}
-	pid, exited, err := host.Spawn(controlPlaneLogPath(stateDir),
+	// The dashboard acts on the controller's behalf, and the controller refuses
+	// a caller whose build differs from its own generation. So it runs the
+	// serving controller's binary, not whichever one happened to run `up`.
+	pid, exited, err := host.Spawn(host.ControllerExecutable(stateDir), controlPlaneLogPath(stateDir),
 		[]string{serviceControlPlane, "--state-dir", stateDir, "--listen", address})
 	if err != nil {
 		return "", fmt.Errorf("start the dashboard: %w", err)
