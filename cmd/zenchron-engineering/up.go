@@ -161,12 +161,29 @@ func ensureControlPlane(host upHost, timing upTiming, stateDir, requested string
 		return "", err
 	}
 	if recorded && host.Alive(record, serviceControlPlane) && host.DashboardHealthy(record.Listen, stateDir) {
+		// A controller handover changes the generation the dashboard must
+		// match. One built from the previous generation still answers, but the
+		// controller would refuse everything it tried to do, so it is replaced
+		// on the same address rather than reused.
+		if serving := host.ControllerExecutable(stateDir); serving != "" && record.Executable != "" && record.Executable != serving {
+			if err := stopService(host, timing, stateDir, serviceControlPlane, stdout); err != nil {
+				return "", err
+			}
+			if requested == "" {
+				requested = record.Listen
+			}
+			return startDashboard(host, timing, stateDir, requested, stdout)
+		}
 		if requested != "" && requested != record.Listen {
 			return "", fmt.Errorf("the dashboard already runs on %s; run `down` first to move it to %s", record.Listen, requested)
 		}
 		fmt.Fprintf(stdout, "%-14s running (reused, pid %d)\n", "dashboard host", record.PID)
 		return record.Listen, nil
 	}
+	return startDashboard(host, timing, stateDir, requested, stdout)
+}
+
+func startDashboard(host upHost, timing upTiming, stateDir, requested string, stdout io.Writer) (string, error) {
 	address, err := chooseDashboardAddress(host, requested)
 	if err != nil {
 		return "", err
