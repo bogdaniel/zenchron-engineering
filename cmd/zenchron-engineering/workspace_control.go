@@ -13,7 +13,7 @@ func browserGovernedCommand(command string) bool {
 	switch command {
 	case runtime.ControlStop, runtime.ControlPlanReject, runtime.ControlPlanApprove,
 		runtime.ControlResolveDecision, runtime.ControlPause, runtime.ControlUnpause, runtime.ControlPlanRevise, runtime.ControlAuthorize, runtime.ControlPlanView, runtime.ControlWorkspaceOptions, runtime.ControlAuthorityView, runtime.ControlResume, runtime.ControlRefresh,
-		runtime.ControlPlanningArtifactPropose, runtime.ControlPlanningReload, runtime.ControlProductPropose:
+		runtime.ControlPlanningArtifactPropose, runtime.ControlPlanningReload, runtime.ControlProductPropose, runtime.ControlIssueCreate:
 		return true
 	}
 	return false

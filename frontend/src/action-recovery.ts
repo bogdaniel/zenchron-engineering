@@ -26,7 +26,7 @@ function decode(value: unknown): PendingAction {
     r.version !== 1 ||
     !reference.test(api.str(r.operation_id)) ||
     !/^[a-f0-9]{64}$/.test(api.str(r.request_digest)) ||
-    !["plan-revise", "resume", "refresh", "planning-artifact-propose", "product-propose"].includes(api.str(r.action))
+    !["plan-revise", "resume", "refresh", "planning-artifact-propose", "product-propose", "issue-create"].includes(api.str(r.action))
   )
     throw new Error("Invalid saved action reference");
   return {
@@ -65,6 +65,18 @@ export async function readActionReceipt(p: PendingAction, signal: AbortSignal): 
   )
     throw new Error("Recovered receipt does not match the original request");
   let destination: string | undefined;
+  if (p.action === "issue-create") {
+    const issue = api.num(r.source_issue),
+      repository = api.str(r.repository);
+    if (issue < 1 || !repository) throw new Error("Invalid recovered issue reference");
+    if (repository.toLowerCase() !== String(p.bindings.repository).toLowerCase())
+      throw new Error("Recovered issue differs from the original exact subject");
+    return {
+      title: "Historical operator action receipt",
+      detail: `${p.action} · ${repository}#${issue} · request ${p.operation_id}`,
+      issue,
+    };
+  }
   if (p.action === "plan-revise") {
     const id = api.str(r.plan_id),
       revision = api.num(r.revision),
