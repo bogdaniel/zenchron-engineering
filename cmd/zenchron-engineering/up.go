@@ -124,7 +124,7 @@ func ensureServe(host upHost, timing upTiming, stateDir string, flags autonomyFl
 	if err != nil {
 		return err
 	}
-	if recorded && host.Alive(record.PID, serviceServe) {
+	if recorded && host.Alive(record, serviceServe) {
 		// It is starting, or finishing a controller handover. Wait for it
 		// rather than start a second supervisor that would only be refused
 		// the controller role.
@@ -160,7 +160,7 @@ func ensureControlPlane(host upHost, timing upTiming, stateDir, requested string
 	if err != nil {
 		return "", err
 	}
-	if recorded && host.Alive(record.PID, serviceControlPlane) && host.PortAnswers(record.Listen) {
+	if recorded && host.Alive(record, serviceControlPlane) && host.DashboardHealthy(record.Listen, stateDir) {
 		if requested != "" && requested != record.Listen {
 			return "", fmt.Errorf("the dashboard already runs on %s; run `down` first to move it to %s", record.Listen, requested)
 		}
@@ -176,7 +176,7 @@ func ensureControlPlane(host upHost, timing upTiming, stateDir, requested string
 	if err != nil {
 		return "", fmt.Errorf("start the dashboard: %w", err)
 	}
-	if !pollFor(timing, exited, func() bool { return host.PortAnswers(address) }) {
+	if !pollFor(timing, exited, func() bool { return host.DashboardHealthy(address, stateDir) }) {
 		return "", fmt.Errorf("the dashboard did not become ready on %s; see %s", address, controlPlaneLogPath(stateDir))
 	}
 	fmt.Fprintf(stdout, "%-14s started (pid %d), log %s\n", "dashboard host", pid, controlPlaneLogPath(stateDir))
@@ -259,7 +259,7 @@ func stopService(host upHost, timing upTiming, stateDir, service string, stdout 
 	if err != nil {
 		return err
 	}
-	if !recorded || !host.Alive(record.PID, service) {
+	if !recorded || !host.Alive(record, service) {
 		if recorded {
 			_ = os.Remove(processRecordPath(stateDir, service))
 		}
@@ -272,7 +272,7 @@ func stopService(host upHost, timing upTiming, stateDir, service string, stdout 
 	if err := host.Terminate(record.PID); err != nil {
 		return fmt.Errorf("stop %s (pid %d): %w", service, record.PID, err)
 	}
-	if !pollUntil(timing, func() bool { return !host.Alive(record.PID, service) }) {
+	if !pollUntil(timing, func() bool { return !host.Alive(record, service) }) {
 		return fmt.Errorf("%s (pid %d) is still shutting down; it is finishing in-flight work, run `down` again shortly", service, record.PID)
 	}
 	fmt.Fprintf(stdout, "%-14s stopped (pid %d)\n", service, record.PID)
@@ -296,7 +296,7 @@ func statusCommand(args []string, host upHost, stdout io.Writer) (int, error) {
 		return runtime.ExitFailed, err
 	} else if ok && supervisor == "running" {
 		supervisor += fmt.Sprintf(" (pid %d)", record.PID)
-	} else if ok && !host.Alive(record.PID, serviceServe) {
+	} else if ok && !host.Alive(record, serviceServe) {
 		supervisor += " (stale record from pid " + strconv.Itoa(record.PID) + "; `up` will replace it)"
 	}
 	fmt.Fprintf(stdout, "%-14s %s\n", "supervisor", supervisor)
@@ -307,7 +307,7 @@ func statusCommand(args []string, host upHost, stdout io.Writer) (int, error) {
 		return runtime.ExitFailed, err
 	}
 	switch {
-	case ok && host.Alive(record.PID, serviceControlPlane) && host.PortAnswers(record.Listen):
+	case ok && host.Alive(record, serviceControlPlane) && host.DashboardHealthy(record.Listen, stateDir):
 		dashboard = fmt.Sprintf("http://%s/ (pid %d)", record.Listen, record.PID)
 	case ok:
 		dashboard = "not running (stale record; `up` will replace it)"

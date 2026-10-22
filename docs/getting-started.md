@@ -126,7 +126,11 @@ refusal. Sign in to the dashboard with the contents of
 Each service writes `<state_dir>/serve.process.json` or
 `control-plane.process.json` about itself, so `status` and `down` find a
 supervisor however it was started, including after a controller handover. A
-record whose pid has been recycled by an unrelated program is ignored. `down`
+record is trusted only while the process it names is still the one that wrote it:
+same pid, same start time and same executable running that service, so a
+recycled pid is ignored even when it now runs another Zenchron service. The
+dashboard counts as running only when it refuses a wrong token and accepts this
+state directory's own, so a different program on the port is never reused. `down`
 never kills: `serve` shuts down gracefully and leaves every run as resumable as
 its journal says. A supervisor started by a build older than this feature
 never recorded itself, so `down` names it and leaves it for you to stop.

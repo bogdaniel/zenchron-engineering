@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -75,7 +74,7 @@ func controlPlaneUntil(ctx context.Context, args []string, stdout io.Writer) (in
 	mux.Handle("/v1/", api.Handler())
 	mux.Handle("/", web.Handler())
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
-	if err := writeProcessRecord(*state, serviceControlPlane, processRecord{PID: os.Getpid(), Listen: listener.Addr().String()}); err != nil {
+	if err := writeProcessRecord(*state, serviceControlPlane, selfProcessRecord(listener.Addr().String())); err != nil {
 		return 1, err
 	}
 	defer clearProcessRecord(*state, serviceControlPlane)

@@ -24,11 +24,11 @@ type fakeUpHost struct {
 	stateDir     string
 }
 
-func (h *fakeUpHost) ControllerAnswers(string) bool { return h.controllerUp }
-func (h *fakeUpHost) Alive(pid int, _ string) bool  { return h.alive[pid] }
-func (h *fakeUpHost) PortFree(a string) bool        { return !h.busyPorts[a] && !h.answering[a] }
-func (h *fakeUpHost) PortAnswers(a string) bool     { return h.answering[a] }
-func (h *fakeUpHost) Open(url string) error         { h.opened = append(h.opened, url); return nil }
+func (h *fakeUpHost) ControllerAnswers(string) bool        { return h.controllerUp }
+func (h *fakeUpHost) Alive(r processRecord, _ string) bool { return h.alive[r.PID] }
+func (h *fakeUpHost) PortFree(a string) bool               { return !h.busyPorts[a] && !h.answering[a] }
+func (h *fakeUpHost) DashboardHealthy(a, _ string) bool    { return h.answering[a] }
+func (h *fakeUpHost) Open(url string) error                { h.opened = append(h.opened, url); return nil }
 func (h *fakeUpHost) Terminate(pid int) error {
 	h.terminated = append(h.terminated, pid)
 	h.alive[pid] = false

@@ -105,7 +105,7 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	// it was started and after any controller handover. A record that cannot
 	// be written would make a healthy controller unstoppable by name, so it
 	// is a refusal rather than a warning.
-	if err := writeProcessRecord(built.config.StateDir, serviceServe, processRecord{PID: os.Getpid()}); err != nil {
+	if err := writeProcessRecord(built.config.StateDir, serviceServe, selfProcessRecord("")); err != nil {
 		return runtime.ExitInvalid, err
 	}
 	defer clearProcessRecord(built.config.StateDir, serviceServe)

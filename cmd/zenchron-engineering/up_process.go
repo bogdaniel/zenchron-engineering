@@ -20,10 +20,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/controlplane"
 )
 
 const (
@@ -32,9 +35,36 @@ const (
 )
 
 // processRecord is what a service writes about itself in its state directory.
+// Executable and Started pin the identity of the process, not just its pid: a
+// recycled pid, even one now running another Zenchron service, matches neither.
 type processRecord struct {
-	PID    int    `json:"pid"`
-	Listen string `json:"listen,omitempty"`
+	PID        int    `json:"pid"`
+	Listen     string `json:"listen,omitempty"`
+	Executable string `json:"executable,omitempty"`
+	Started    string `json:"started,omitempty"`
+}
+
+// selfProcessRecord is the record of this process, with its identity filled in
+// as far as the platform can establish it.
+func selfProcessRecord(listen string) processRecord {
+	record := processRecord{PID: os.Getpid(), Listen: listen}
+	record.Executable, _ = os.Executable()
+	record.Started = processStartMarker(record.PID)
+	return record
+}
+
+// processStartMarker is the process's start time as `ps` reports it, or ""
+// where the platform cannot say. ponytail: shells out to ps (unix); Windows has
+// no marker, so there a recycled pid is caught only by the Alive check.
+func processStartMarker(pid int) string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	started, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(started))
 }
 
 func processRecordPath(stateDir, service string) string {
@@ -94,13 +124,15 @@ type upHost interface {
 	// ControllerAnswers reports whether a live controller answers on the
 	// control endpoint of stateDir.
 	ControllerAnswers(stateDir string) bool
-	// Alive reports whether pid is a running process whose command line
-	// names the service, so a recycled pid is never mistaken for it.
-	Alive(pid int, service string) bool
+	// Alive reports whether record still names the running process it was
+	// written by: same pid, same start time, same executable running service.
+	Alive(record processRecord, service string) bool
 	// PortFree reports whether nothing listens on address.
 	PortFree(address string) bool
-	// PortAnswers reports whether an HTTP server answers on address.
-	PortAnswers(address string) bool
+	// DashboardHealthy reports whether the Control Plane of stateDir serves
+	// authenticated reads on address. Any other program answering there, or a
+	// Control Plane of another state directory, is not it.
+	DashboardHealthy(address, stateDir string) bool
 	// Spawn starts a detached child of this binary and returns a channel
 	// that yields when it exits.
 	Spawn(logPath string, args []string) (pid int, exited <-chan struct{}, err error)
@@ -117,18 +149,25 @@ func (osUpHost) ControllerAnswers(stateDir string) bool {
 	return err == nil
 }
 
-func (osUpHost) Alive(pid int, service string) bool {
-	process, err := os.FindProcess(pid)
+func (osUpHost) Alive(record processRecord, service string) bool {
+	process, err := os.FindProcess(record.PID)
 	if err != nil || process.Signal(syscall.Signal(0)) != nil {
 		return false
 	}
-	// ponytail: shells out to ps (unix); a recycled pid is rejected by command
-	// line. Windows reports a live pid as alive without the identity check.
 	if runtime.GOOS == "windows" {
 		return true
 	}
-	command, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
-	return err == nil && strings.Contains(string(command), service)
+	command, err := exec.Command("ps", "-p", strconv.Itoa(record.PID), "-o", "command=").Output()
+	if err != nil {
+		return false
+	}
+	if record.Executable != "" && !strings.HasPrefix(string(command), record.Executable+" ") {
+		return false
+	}
+	if !slices.Contains(strings.Fields(string(command)), service) {
+		return false
+	}
+	return record.Started == "" || processStartMarker(record.PID) == record.Started
 }
 
 func (osUpHost) PortFree(address string) bool {
@@ -140,14 +179,30 @@ func (osUpHost) PortFree(address string) bool {
 	return true
 }
 
-func (osUpHost) PortAnswers(address string) bool {
-	client := http.Client{Timeout: 2 * time.Second}
-	response, err := client.Get("http://" + address + "/")
+func (osUpHost) DashboardHealthy(address, stateDir string) bool {
+	token, err := os.ReadFile(filepath.Join(stateDir, controlplane.TokenFile))
 	if err != nil {
 		return false
 	}
+	// A Control Plane refuses a wrong credential and accepts its own. A program
+	// that answers 200 to everything, or one gated by another state
+	// directory's token, fails one of the two.
+	return dashboardStatus(address, "not-the-token") == http.StatusUnauthorized &&
+		dashboardStatus(address, strings.TrimSpace(string(token))) == http.StatusOK
+}
+
+func dashboardStatus(address, token string) int {
+	request, err := http.NewRequest(http.MethodGet, "http://"+address+"/v1/runs?limit=1", nil)
+	if err != nil {
+		return 0
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := (&http.Client{Timeout: 3 * time.Second}).Do(request)
+	if err != nil {
+		return 0
+	}
 	_ = response.Body.Close()
-	return true
+	return response.StatusCode
 }
 
 func (osUpHost) Spawn(logPath string, args []string) (int, <-chan struct{}, error) {
