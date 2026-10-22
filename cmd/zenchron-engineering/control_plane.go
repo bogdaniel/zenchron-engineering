@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/controlplane"
@@ -15,7 +18,11 @@ import (
 )
 
 func controlPlane(args []string, stdout io.Writer) (int, error) {
-	return controlPlaneUntil(context.Background(), args, stdout)
+	// A termination signal ends the dashboard cleanly, which is what lets
+	// `down` stop it and its process record go with it.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return controlPlaneUntil(ctx, args, stdout)
 }
 
 // controlPlaneUntil serves until ctx is cancelled, then shuts the server down
@@ -68,6 +75,10 @@ func controlPlaneUntil(ctx context.Context, args []string, stdout io.Writer) (in
 	mux.Handle("/v1/", api.Handler())
 	mux.Handle("/", web.Handler())
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+	if err := writeProcessRecord(*state, serviceControlPlane, processRecord{PID: os.Getpid(), Listen: listener.Addr().String()}); err != nil {
+		return 1, err
+	}
+	defer clearProcessRecord(*state, serviceControlPlane)
 	stopped := make(chan struct{})
 	defer close(stopped)
 	go func() {

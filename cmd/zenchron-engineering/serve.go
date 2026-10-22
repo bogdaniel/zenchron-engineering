@@ -101,6 +101,14 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	}
 	defer func() { _ = role.Release() }()
 	built.role = role
+	// The controller names itself, so `up`, `down` and `status` find it however
+	// it was started and after any controller handover. A record that cannot
+	// be written would make a healthy controller unstoppable by name, so it
+	// is a refusal rather than a warning.
+	if err := writeProcessRecord(built.config.StateDir, serviceServe, processRecord{PID: os.Getpid()}); err != nil {
+		return runtime.ExitInvalid, err
+	}
+	defer clearProcessRecord(built.config.StateDir, serviceServe)
 
 	// The control endpoint is opened before any work is driven, so an operator
 	// can reach a supervisor that is starting up. It proves nothing about
