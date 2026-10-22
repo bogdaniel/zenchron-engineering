@@ -4,7 +4,7 @@ import * as ops from "./operations-api";
 import * as workspace from "./workspace-api";
 import { GovernedAction, type ActionReview } from "./governed-action";
 import { Disclosure, Empty, Head, Panel, Link } from "./components";
-import { CheckboxField, NumberField, SelectField } from "./form";
+import { CheckboxField, NumberField, SelectField, TextareaField, TextField } from "./form";
 
 export async function freshController(signal: AbortSignal, expected?: string) {
   const live = await api.controller(signal),
@@ -192,6 +192,10 @@ export function ObjectiveIntake() {
   const [product, setProduct] = useState(""),
     [repository, setRepository] = useState(""),
     [issue, setIssue] = useState(""),
+    [describe, setDescribe] = useState(false),
+    [title, setTitle] = useState(""),
+    [description, setDescription] = useState(""),
+    [created, setCreated] = useState<workspace.Receipt | null>(null),
     [agent, setAgent] = useState(""),
     [profile, setProfile] = useState(""),
     [template, setTemplate] = useState(""),
@@ -219,6 +223,16 @@ export function ObjectiveIntake() {
   const availableRepositories =
     chosenProduct && options ? options.repositories.filter((r) => chosenProduct.repositories.includes(r)) : options?.repositories || [];
   const number = Number(issue),
+    createWhy =
+      error ||
+      (!options || !controller
+        ? "Reading controller-owned options"
+        : api.blocker(controller) ||
+          (!repository
+            ? "A governed repository is required"
+            : !title.trim() || !description.trim()
+              ? "Enter a title and a description"
+              : "")),
     why =
       error ||
       (!options || !controller
@@ -272,10 +286,35 @@ export function ObjectiveIntake() {
       timeout: 1270000,
     };
   };
+  const prepareIssue = async (_note: string, signal: AbortSignal): Promise<ActionReview> => {
+    const [fresh, live] = await Promise.all([
+      workspace.options(signal),
+      freshController(signal, controller?.controller_binding),
+    ]);
+    if (!fresh.repositories.includes(repository)) throw new Error("Controller options changed; reload intake");
+    return {
+      title: "Create this GitHub issue?",
+      subject: `${repository} · ${title.trim()}`,
+      consequence:
+        "This writes a new issue to GitHub with your existing credential. The issue becomes the objective's source; nothing is planned or executed until you review and approve a plan.",
+      details: [
+        ["Repository", repository],
+        ["Issue title", title.trim()],
+        ["Description", description.trim()],
+        ["Serving controller", live.controller_binding],
+      ],
+      path: "/v1/issues",
+      action: "issue-create",
+      target: {},
+      body: { controller_binding: live.controller_binding, repository, title: title.trim(), description: description.trim() },
+    };
+  };
   return (
     <>
       <Head eyebrow="OPERATIONS / OBJECTIVE INTAKE" title="Create objective">
-        Existing issue → controller proposal → explicit plan approval.
+        {describe
+          ? "Describe the objective → GitHub issue → controller proposal → explicit plan approval."
+          : "Existing issue → controller proposal → explicit plan approval."}
       </Head>
       <Panel title="Engineering intent">
         <div className="product-body intake-form">
@@ -303,7 +342,43 @@ export function ObjectiveIntake() {
               <option key={r}>{r}</option>
             ))}
           </SelectField>
-          <NumberField label="Existing issue" min="1" value={issue} onChange={(e) => setIssue(e.target.value)} />
+          <CheckboxField
+            label="Describe a new objective instead of using an existing issue"
+            checked={describe}
+            onChange={(e) => {
+              setDescribe(e.target.checked);
+              if (e.target.checked) setCreated(null);
+            }}
+          />
+          {describe && !created && (
+            <>
+              <TextField label="Objective title" maxLength={200} value={title} onChange={(e) => setTitle(e.target.value)} />
+              <TextareaField
+                label="Objective description"
+                maxLength={3000}
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                help="Becomes the GitHub issue body. State the outcome, the constraints and how it will be checked."
+              />
+              <GovernedAction
+                label="Review issue creation"
+                recoveryKey="issue-create"
+                reason={createWhy}
+                noteAllowed={false}
+                prepare={prepareIssue}
+                onSettled={(receipt) => {
+                  if (!receipt?.issue) return;
+                  setCreated(receipt);
+                  setIssue(String(receipt.issue));
+                  setDescribe(false);
+                }}
+              />
+            </>
+          )}
+          {created && <p role="status">Created {created.detail}. Review the proposal below.</p>}
+          {!describe && (
+            <NumberField label="Existing issue" min="1" value={issue} onChange={(e) => setIssue(e.target.value)} />
+          )}
           <SelectField label="Planning agent" value={agent} onChange={(e) => setAgent(e.target.value)}>
             {options?.agents
               .filter((a) => a.eligible)

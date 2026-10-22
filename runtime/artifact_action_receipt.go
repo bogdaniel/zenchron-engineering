@@ -51,6 +51,8 @@ type ArtifactActionReceipt struct {
 	ArtifactDigest    string `json:"artifact_digest,omitempty"`
 	ProductID         string `json:"product_id,omitempty"`
 	ProductRevision   int    `json:"product_revision,omitempty"`
+	Repository        string `json:"repository,omitempty"`
+	SourceIssue       int    `json:"source_issue,omitempty"`
 }
 
 func (r ArtifactActionReceipt) validate() error {
@@ -59,12 +61,16 @@ func (r ArtifactActionReceipt) validate() error {
 	}
 	switch r.Action {
 	case ControlPlanningArtifactPropose:
-		if r.ArtifactKind == "" || r.ArtifactID == "" || !digestPattern.MatchString(r.ArtifactDigest) || r.ProductID != "" || r.ProductRevision != 0 {
+		if r.ArtifactKind == "" || r.ArtifactID == "" || !digestPattern.MatchString(r.ArtifactDigest) || r.ProductID != "" || r.ProductRevision != 0 || r.Repository != "" || r.SourceIssue != 0 {
 			return errors.New("invalid planning-artifact receipt subject")
 		}
 	case ControlProductPropose:
-		if r.ProductID == "" || r.ProductRevision < 1 || r.ArtifactKind != "" || r.ArtifactID != "" || r.ArtifactDigest != "" {
+		if r.ProductID == "" || r.ProductRevision < 1 || r.ArtifactKind != "" || r.ArtifactID != "" || r.ArtifactDigest != "" || r.Repository != "" || r.SourceIssue != 0 {
 			return errors.New("invalid product receipt subject")
+		}
+	case ControlIssueCreate:
+		if r.Repository == "" || r.SourceIssue < 1 || r.ArtifactKind != "" || r.ArtifactID != "" || r.ArtifactDigest != "" || r.ProductID != "" || r.ProductRevision != 0 {
+			return errors.New("invalid issue-create receipt subject")
 		}
 	default:
 		return errors.New("unsupported artifact receipt action")

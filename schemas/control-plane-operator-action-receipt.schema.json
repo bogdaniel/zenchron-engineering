@@ -7,7 +7,7 @@
     "operation_id": {"type":"string", "pattern":"^[a-f0-9-]{36}$"},
     "request_digest": {"type":"string", "pattern":"^[a-f0-9]{64}$"},
     "controller_binding": {"type":"string"},
-    "action": {"enum":["plan-revise", "resume", "refresh", "planning-artifact-propose", "product-propose"]},
+    "action": {"enum":["plan-revise", "resume", "refresh", "planning-artifact-propose", "product-propose", "issue-create"]},
     "plan_id": {"type":"string", "minLength":1},
     "revision": {"type":"integer", "minimum":1},
     "plan_digest": {"type":"string", "pattern":"^[a-f0-9]{64}$"},
@@ -25,6 +25,7 @@
     {"properties":{"action":{"const":"plan-revise"}}, "required":["plan_id","revision","plan_digest","repository","source_issue"], "not":{"anyOf":[{"required":["run_id"]},{"required":["source_run_id"]},{"required":["artifact_kind"]},{"required":["artifact_id"]},{"required":["artifact_digest"]},{"required":["product_id"]},{"required":["product_revision"]}]}},
     {"properties":{"action":{"enum":["resume","refresh"]}}, "required":["run_id","source_run_id"], "not":{"anyOf":[{"required":["plan_id"]},{"required":["revision"]},{"required":["plan_digest"]},{"required":["repository"]},{"required":["source_issue"]},{"required":["artifact_kind"]},{"required":["artifact_id"]},{"required":["artifact_digest"]},{"required":["product_id"]},{"required":["product_revision"]}]}},
     {"properties":{"action":{"const":"planning-artifact-propose"}}, "required":["artifact_kind","artifact_id","artifact_digest"], "not":{"anyOf":[{"required":["plan_id"]},{"required":["revision"]},{"required":["plan_digest"]},{"required":["repository"]},{"required":["source_issue"]},{"required":["run_id"]},{"required":["source_run_id"]},{"required":["product_id"]},{"required":["product_revision"]}]}},
-    {"properties":{"action":{"const":"product-propose"}}, "required":["product_id","product_revision"], "not":{"anyOf":[{"required":["plan_id"]},{"required":["revision"]},{"required":["plan_digest"]},{"required":["repository"]},{"required":["source_issue"]},{"required":["run_id"]},{"required":["source_run_id"]},{"required":["artifact_kind"]},{"required":["artifact_id"]},{"required":["artifact_digest"]}]}}
+    {"properties":{"action":{"const":"product-propose"}}, "required":["product_id","product_revision"], "not":{"anyOf":[{"required":["plan_id"]},{"required":["revision"]},{"required":["plan_digest"]},{"required":["repository"]},{"required":["source_issue"]},{"required":["run_id"]},{"required":["source_run_id"]},{"required":["artifact_kind"]},{"required":["artifact_id"]},{"required":["artifact_digest"]}]}},
+    {"properties":{"action":{"const":"issue-create"}}, "required":["repository","source_issue"], "not":{"anyOf":[{"required":["plan_id"]},{"required":["revision"]},{"required":["plan_digest"]},{"required":["run_id"]},{"required":["source_run_id"]},{"required":["artifact_kind"]},{"required":["artifact_id"]},{"required":["artifact_digest"]},{"required":["product_id"]},{"required":["product_revision"]}]}}
   ]
 }

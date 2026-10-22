@@ -536,6 +536,8 @@ func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.S
 			"instruction_packs": registry.PackIDs(), "context_policies": registry.ContextPolicyIDs(),
 			"profiles": registry.ProfileIDs(), "templates": registry.TemplateIDs(),
 		})
+	case runtime.ControlIssueCreate:
+		return c.createIssue(ctx, supervisor, request, governed)
 	case runtime.ControlProductPropose:
 		if governed {
 			operator, err := c.config.ResolveOperator()
