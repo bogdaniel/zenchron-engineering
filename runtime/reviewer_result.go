@@ -450,10 +450,12 @@ func boundedReviewerFindings(findings []ReviewerFinding) ([]string, error) {
 // fence, leaves text the strict decode refuses.
 func unfencedReviewerResult(document []byte) []byte {
 	trimmed := strings.TrimSpace(string(document))
-	if !strings.HasPrefix(trimmed, "```") || !strings.HasSuffix(trimmed, "```") || len(trimmed) < 6 {
+	// The closing fence is a line of its own: backticks attached to the JSON
+	// value are part of that value's line, not a fence that wraps it.
+	if !strings.HasPrefix(trimmed, "```") || !strings.HasSuffix(trimmed, "\n```") {
 		return document
 	}
-	inner := trimmed[3 : len(trimmed)-3]
+	inner := trimmed[3 : len(trimmed)-4]
 	opening, body, found := strings.Cut(inner, "\n")
 	if !found || (strings.TrimSpace(opening) != "" && !strings.EqualFold(strings.TrimSpace(opening), "json")) {
 		return document

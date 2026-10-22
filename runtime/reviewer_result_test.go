@@ -629,15 +629,17 @@ func TestAFencedVerdictIsReadAndEveryNearMissIsStillRefused(t *testing.T) {
 		document string
 		admitted bool
 	}{
-		"bare":                    {bare, true},
-		"json fence":              {"```json\n" + bare + "\n```", true},
-		"plain fence":             {"```\n" + bare + "\n```\n", true},
-		"prose before":            {"Here is my review:\n```json\n" + bare + "\n```", false},
-		"prose after":             {"```json\n" + bare + "\n```\nHope that helps.", false},
-		"two fences":              {"```json\n" + bare + "\n```\n```json\n" + bare + "\n```", false},
-		"another language":        {"```python\n" + bare + "\n```", false},
-		"unknown member in fence": {"```json\n" + `{"schema_version":"0.1","verdict":"accepted","findings":[],"approved_by":"me"}` + "\n```", false},
-		"unclosed fence":          {"```json\n" + bare, false},
+		"bare":                              {bare, true},
+		"json fence":                        {"```json\n" + bare + "\n```", true},
+		"plain fence":                       {"```\n" + bare + "\n```\n", true},
+		"prose before":                      {"Here is my review:\n```json\n" + bare + "\n```", false},
+		"prose after":                       {"```json\n" + bare + "\n```\nHope that helps.", false},
+		"two fences":                        {"```json\n" + bare + "\n```\n```json\n" + bare + "\n```", false},
+		"another language":                  {"```python\n" + bare + "\n```", false},
+		"unknown member in fence":           {"```json\n" + `{"schema_version":"0.1","verdict":"accepted","findings":[],"approved_by":"me"}` + "\n```", false},
+		"unclosed fence":                    {"```json\n" + bare, false},
+		"closing fence on the value's line": {"```json\n" + bare + "```", false},
+		"opening fence on the value's line": {"```" + bare + "\n```", false},
 	} {
 		path := filepath.Join(t.TempDir(), "reviewer-result.json")
 		if err := os.WriteFile(path, []byte(test.document), 0o600); err != nil {
