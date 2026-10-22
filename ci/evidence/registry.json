@@ -499,6 +499,7 @@
       "race": true,
       "sources": [
         "runtime/authority_request.go",
+        "runtime/publication_decision_display.go",
         "authority/*.go",
         "policy/*.go"
       ],
