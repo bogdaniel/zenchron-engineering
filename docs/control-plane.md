@@ -47,6 +47,16 @@ as Action Required. Inbox cards link back to their explicitly bound objective.
 Resolved holds disappear from durable reads after reconnect; resolution never
 starts a bypass run. Recorded review findings and current review eligibility
 are shown separately, alongside assurance and classified runtime failures.
+The React objective page's Outcome panel (#629) is read-only and sits between the
+plan inspection and the WorkGraph. It reads, from each fact's own record, the
+independent review verdict and reviewer, the assurance gate state, and for every
+producer run its candidate revision, assurance result, publication-authority
+status and recorded pull request (linked to GitHub only for an exact `owner/name`
+repository). A plan that is `completed` with no recorded pull request says "No
+pull request yet" and names the recorded reason - a missing human authority, a
+non-authorized publication authority, or that none is recorded - rather than
+implying publication. Anything unrecorded stays "Not recorded"; it is never shown
+as passed, failed or absent. The panel offers no action and grants no authority.
 The Changes and PR section consumes outstanding publication requests through the
 existing authority preview and authorization path. It names candidate commit,
 tree and publication target before confirmation, preserves exact request binding,

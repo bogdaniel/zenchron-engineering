@@ -263,7 +263,7 @@ export function ObjectiveIntake() {
       details: [
         ["Product", chosenProduct?.name || "None selected"],
         ["Repository / issue", `${repository}#${number}`],
-        ["Execution agent", agent],
+        ["Planning agent", agent],
         ["Profile", profile || "Controller resolution"],
         ["Template", template || "Controller default"],
         ["Planning mode", deterministic ? "Deterministic" : "Reasoned proposal"],
@@ -379,7 +379,7 @@ export function ObjectiveIntake() {
           {!describe && (
             <NumberField label="Existing issue" min="1" value={issue} onChange={(e) => setIssue(e.target.value)} />
           )}
-          <SelectField label="Execution agent" value={agent} onChange={(e) => setAgent(e.target.value)}>
+          <SelectField label="Planning agent" value={agent} onChange={(e) => setAgent(e.target.value)}>
             {options?.agents
               .filter((a) => a.eligible)
               .map((a) => (
@@ -388,6 +388,10 @@ export function ObjectiveIntake() {
                 </option>
               ))}
           </SelectField>
+          <p>
+            The planning agent drafts the proposal and does not write code. Implementer and reviewer workers are assigned in the
+            plan, and you approve those exact assignments before anything runs.
+          </p>
           <SelectField label="Agent profile" value={profile} onChange={(e) => setProfile(e.target.value)}>
             <option value="">Resolve from policy and plan</option>
             {options?.profiles.map((p) => (

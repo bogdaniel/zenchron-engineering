@@ -518,3 +518,58 @@ func TestCandidateCommitCarriesTheContentBehindAHiddenGitlink(t *testing.T) {
 		t.Fatalf("a producer hid its change behind a staged gitlink: %q %v", content, err)
 	}
 }
+
+func TestResolveRepositoryCheckoutRequirement(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		init, origin  bool
+		action, cause string
+	}{
+		{name: "non repository", action: "cd into", cause: "not a git repository"},
+		{name: "no origin", init: true, action: "add an origin remote", cause: "no origin remote"},
+		{name: "valid checkout", init: true, origin: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.init {
+				if _, err := runGit(dir, "init"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const remote = "https://github.com/example/target.git"
+			if tc.origin {
+				if err := os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("[remote \"origin\"]\n\turl = "+remote+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, explicit := range []string{"", "explicit/target"} {
+				target, err := ResolveRepository(dir, explicit)
+				if tc.origin {
+					identity := "example/target"
+					if explicit != "" {
+						identity = explicit
+					}
+					if err != nil || target != (RepositoryTarget{Identity: identity, Remote: remote, DefaultBranch: "main"}) {
+						t.Fatalf("target=%+v err=%v", target, err)
+					}
+					continue
+				}
+				var refusal *RepositoryTargetError
+				if !errors.As(err, &refusal) || target != (RepositoryTarget{}) {
+					t.Fatalf("target=%+v err=%v", target, err)
+				}
+				for _, want := range []string{"must run from a Git checkout containing the target repository, with an origin remote", tc.action, tc.cause, "git remote get-url origin"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("missing %q: %v", want, err)
+					}
+				}
+				if strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), "--repo") {
+					t.Errorf("unsafe or misleading guidance: %v", err)
+				}
+				if errors.Unwrap(refusal).Error() != tc.cause {
+					t.Errorf("unsanitized cause: %v", errors.Unwrap(refusal))
+				}
+			}
+		})
+	}
+}
