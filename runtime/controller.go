@@ -1485,6 +1485,9 @@ func statusOperationElapsed(op RunOperation, events []EngineeringEvent, now time
 func publicationAuthorityOf(state *runState) *PublicationAuthority {
 	decision, ok := state.publicationDecision()
 	if !ok {
+		decision, ok = state.recordedPublicationDecision()
+	}
+	if !ok {
 		return nil
 	}
 	return &PublicationAuthority{Decision: decision.Decision, Action: decision.Action, Status: decision.Status}
