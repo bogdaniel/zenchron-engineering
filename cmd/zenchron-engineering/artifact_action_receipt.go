@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
@@ -57,6 +58,12 @@ func (c *composition) dispatchArtifactWithReceipt(ctx context.Context, superviso
 		receipt.ArtifactKind = string(request.PlanningArtifact.Kind)
 		receipt.ArtifactID = sealed.ID
 		receipt.ArtifactDigest = sealed.Digest
+	} else if request.Command == runtime.ControlIssueCreate {
+		var created createdIssue
+		if extractErr = json.Unmarshal(response.Payload, &created); extractErr == nil && (created.Number < 1 || !strings.EqualFold(created.Repository, request.Repository)) {
+			extractErr = fmt.Errorf("issue-create result differs from original request")
+		}
+		receipt.Repository, receipt.SourceIssue = created.Repository, created.Number
 	} else {
 		var adopted struct {
 			ID       string `json:"id"`

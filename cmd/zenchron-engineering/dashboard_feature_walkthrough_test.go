@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,6 +24,41 @@ import (
 //	ZENCHRON_PLAYWRIGHT_MODULE=/path/to/node_modules/playwright/index.mjs \
 //	go test ./cmd/zenchron-engineering -run '^TestDashboardFeatureWalkthrough$' -v
 func TestDashboardFeatureWalkthrough(t *testing.T) {
+	root, built, driver := walkthroughFixture(t, planOverrides(t, 41))
+	runBrowserFixtureWithScript(t, root, built, driver, "check_dashboard_walkthrough.mjs", []string{"ZENCHRON_E2E_REACT=1"})
+}
+
+// TestDashboardDescribedObjective drives a REAL browser through describing an
+// objective in words: the dashboard opens the GitHub issue after a dialog that
+// states the write, and the new issue number flows into the proposal step.
+func TestDashboardDescribedObjective(t *testing.T) {
+	overrides := planOverrides(t, 41)
+	// The fake already holds the issue the dashboard will "create", so the
+	// proposal step can read it back without the double being written
+	// concurrently.
+	fake := overrides.GitHub.(*runtime.FakeGitHubAdapter)
+	fake.Issues[42] = runtime.GitHubIssue{
+		Number: 42, URL: "https://github.com/zenchron/seeded/issues/42", Title: "make the gadget idempotent",
+		Body: "The gadget must be idempotent; prove it with a test.", State: runtime.GitHubOpen,
+		UpdatedAt: time.Unix(1_700_000_000, 0).UTC(), Author: runtime.GitHubActor{Login: "operator", ID: 7},
+	}
+	overrides.GitHub = creatingForge{FakeGitHubAdapter: fake}
+	root, built, driver := walkthroughFixture(t, overrides)
+	runBrowserFixtureWithScript(t, root, built, driver, "check_described_objective.mjs", []string{"ZENCHRON_E2E_REACT=1"})
+}
+
+// creatingForge is a forge that can open the issue a described objective needs.
+type creatingForge struct{ *runtime.FakeGitHubAdapter }
+
+func (f creatingForge) CreateIssue(_ context.Context, repo runtime.GitHubRepo, _, _ string) (runtime.GitHubIssue, error) {
+	return runtime.GitHubIssue{Number: 42, URL: "https://github.com/" + repo.String() + "/issues/42"}, nil
+}
+
+// walkthroughFixture is the isolated controller the browser cases drive: a
+// temporary state directory, a held controller role and a re-adopted attested
+// build, with the forge the caller supplies.
+func walkthroughFixture(t *testing.T, overrides autonomyOverrides) (string, *composition, *runtime.Supervisor) {
+	t.Helper()
 	if os.Getenv("ZENCHRON_REACT_BROWSER_E2E") != "1" {
 		t.Skip("opt-in browser host required")
 	}
@@ -38,7 +74,7 @@ func TestDashboardFeatureWalkthrough(t *testing.T) {
 	dir, configPath := planWorkspaceIn(t, stateDir)
 	t.Chdir(dir)
 
-	built, err := newComposition(autonomyFlags{Config: configPath}, planOverrides(t, 41))
+	built, err := newComposition(autonomyFlags{Config: configPath}, overrides)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,5 +108,5 @@ func TestDashboardFeatureWalkthrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runBrowserFixtureWithScript(t, root, built, driver, "check_dashboard_walkthrough.mjs", []string{"ZENCHRON_E2E_REACT=1"})
+	return root, built, driver
 }

@@ -2391,3 +2391,12 @@ func TestRunAcceptsAnExplicitNewGeneration(t *testing.T) {
 		})
 	}
 }
+
+func TestRepositoryTargetPropagatesCheckoutGuidance(t *testing.T) {
+	dir := t.TempDir()
+	_, err := repositoryTarget(dir, "")
+	var refusal *runtime.RepositoryTargetError
+	if !errors.As(err, &refusal) || !strings.Contains(err.Error(), "cd into") {
+		t.Fatalf("shared checkout guidance was lost: %v", err)
+	}
+}

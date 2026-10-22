@@ -47,6 +47,16 @@ as Action Required. Inbox cards link back to their explicitly bound objective.
 Resolved holds disappear from durable reads after reconnect; resolution never
 starts a bypass run. Recorded review findings and current review eligibility
 are shown separately, alongside assurance and classified runtime failures.
+The React objective page's Outcome panel (#629) is read-only and sits between the
+plan inspection and the WorkGraph. It reads, from each fact's own record, the
+independent review verdict and reviewer, the assurance gate state, and for every
+producer run its candidate revision, assurance result, publication-authority
+status and recorded pull request (linked to GitHub only for an exact `owner/name`
+repository). A plan that is `completed` with no recorded pull request says "No
+pull request yet" and names the recorded reason - a missing human authority, a
+non-authorized publication authority, or that none is recorded - rather than
+implying publication. Anything unrecorded stays "Not recorded"; it is never shown
+as passed, failed or absent. The panel offers no action and grants no authority.
 The Changes and PR section consumes outstanding publication requests through the
 existing authority preview and authorization path. It names candidate commit,
 tree and publication target before confirmation, preserves exact request binding,
@@ -315,6 +325,7 @@ A changed revision, worker binding or controller generation is refused.
 | `GET /v1/workspace/options` | Controller-owned repositories, agents, profiles, templates and budget envelope |
 | `GET /v1/plans/{id}/preview` | Live `PlanService.View`, including exact assignment digest |
 | `POST /v1/objectives` | Bounded AI planning intake; an existing plan requires an explicit revision |
+| `POST /v1/issues` | Opens one GitHub issue on a governed repository from the operator's typed title (≤200 bytes, one line) and description (≤3000 bytes) with the runtime's existing forge credential; the body ends with a footer naming the dashboard and operator. It is the only way an objective starts from words instead of an existing issue. A request reference makes a lost reply recoverable through `GET /v1/operator-action-receipts/{id}`, whose `issue-create` receipt names the repository and issue number, so a resend never opens a second issue. It grants no planning, execution or publication authority |
 | `POST /v1/plans/{id}/approve` | Exact revision/digest/assignments approval |
 | `POST /v1/plans/{id}/revise` | Existing proposal path, exact predecessor revision/digest |
 | `POST /v1/decisions/{id}/resolve` | `Supervisor.ResolveDecision`, configured operator provenance |

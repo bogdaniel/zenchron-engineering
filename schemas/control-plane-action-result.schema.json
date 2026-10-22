@@ -24,7 +24,8 @@
         "refresh",
         "planning-artifact-propose",
         "planning-reload",
-        "product-propose"
+        "product-propose",
+        "issue-create"
       ]
     },
     "target": {
