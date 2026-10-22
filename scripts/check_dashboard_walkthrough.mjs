@@ -35,6 +35,17 @@ const confirm = async (command) => {
     .getByRole("button", { name: "Confirm " + command, exact: true })
     .click();
 };
+// A governed create reads its exact delivery receipt back from the controller
+// and shows it (a product also lands on its own page). That receipt is the
+// durable outcome; the transient "applied" line is no longer shown for them.
+const receiptFor = (action, subject) => page.getByText(new RegExp(`${action} · .*${subject}`)).first().waitFor();
+const durable = async (path) => {
+  const response = await fetch(base + path, {
+    headers: { Authorization: "Bearer " + (await readFile(process.env.ZENCHRON_E2E_TOKEN_FILE, "utf8")).trim() },
+  });
+  assert.equal(response.status, 200, path);
+  return response.json();
+};
 const stage = (index) => page.getByRole("group", { name: `Stage ${index}`, exact: true });
 
 try {
@@ -53,7 +64,10 @@ try {
   await page.getByRole("dialog").waitFor();
   assert.match(await page.getByRole("dialog").innerText(), /walkthrough-product/);
   await confirm("product propose");
-  await page.getByText(/applied/).first().waitFor();
+  await page.waitForURL(/#\/products\/product-/);
+  assert.match(await page.locator("main").innerText(), /walkthrough-product/);
+  const products = await durable("/v1/products");
+  assert(products.products.some((p) => p.name === "walkthrough-product"), "the product never reached durable state");
   await capture("02-product-created");
 
   // 2. Author an agent profile.
@@ -67,7 +81,7 @@ try {
   await page.getByRole("dialog").waitFor();
   assert.match(await page.getByRole("dialog").innerText(), /walkthrough-implementer/);
   await confirm("planning artifact propose");
-  await page.getByText(/applied/).first().waitFor();
+  await receiptFor("planning-artifact-propose", "walkthrough-implementer");
   await capture("03-profile-created");
 
   // 3. Reload so the profile just written is one the template below can
@@ -101,7 +115,7 @@ try {
   await page.getByRole("dialog").waitFor();
   assert.match(await page.getByRole("dialog").innerText(), /walkthrough-feature/);
   await confirm("planning artifact propose");
-  await page.getByText(/applied/).first().waitFor();
+  await receiptFor("planning-artifact-propose", "walkthrough-feature");
   await capture("04-template-created");
 
   // 5. Reload again so the objective below sees the template too.
