@@ -21,6 +21,7 @@ import { NumberField } from "./form";
 import { PlanDependencyGraph } from "./dependency-graph";
 import { Facts } from "./runs";
 import { JournalHistory } from "./history";
+import { ObjectiveOutcome } from "./outcome";
 import type { Fleet } from "./operations-api";
 
 export function PlanTable({ index }: { index: PlanIndex }) {
@@ -435,6 +436,7 @@ export function Workspace({
               </div>
             )}
           </Panel>
+          <ObjectiveOutcome plan={p} pending={context.pending} />
           <Panel title="WorkGraph">
             {graph ? (
               <>
