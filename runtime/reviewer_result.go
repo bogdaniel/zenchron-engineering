@@ -244,6 +244,7 @@ func ReadReviewerResult(path string) (*ReviewerResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	document = unfencedReviewerResult(document)
 	// STRICT decoding, the way every other governed document in this system is
 	// decoded: exactly one JSON value and no unknown member. A result carrying
 	// a member this build does not know is a result from a protocol this build
@@ -436,4 +437,26 @@ func boundedReviewerFindings(findings []ReviewerFinding) ([]string, error) {
 		return nil, nil
 	}
 	return out, nil
+}
+
+// unfencedReviewerResult removes ONE markdown code fence that wraps the whole
+// answer, and nothing else. Models routinely put a JSON answer in a ```json
+// block; the same verdict that is admitted bare was refused for that, failed the
+// stage after its bounded retry (run-c9d15e0f, #659), and said nothing about
+// the review itself. The document inside is decoded exactly as strictly as a
+// bare one - a single value, no unknown member, no trailing text - and every
+// authority check in AdmitReviewerResult is unchanged, so this widens the
+// accepted ENVELOPE and no claim. Prose before or after the fence, or a second
+// fence, leaves text the strict decode refuses.
+func unfencedReviewerResult(document []byte) []byte {
+	trimmed := strings.TrimSpace(string(document))
+	if !strings.HasPrefix(trimmed, "```") || !strings.HasSuffix(trimmed, "```") || len(trimmed) < 6 {
+		return document
+	}
+	inner := trimmed[3 : len(trimmed)-3]
+	opening, body, found := strings.Cut(inner, "\n")
+	if !found || (strings.TrimSpace(opening) != "" && !strings.EqualFold(strings.TrimSpace(opening), "json")) {
+		return document
+	}
+	return []byte(body)
 }
