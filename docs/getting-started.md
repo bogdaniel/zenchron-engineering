@@ -105,6 +105,36 @@ shapes are in `schemas/project-model.schema.json` and
 worked examples of both. Every member is explained in
 [configuration.md](configuration.md).
 
+## Start, check and stop everything
+
+```bash
+bin/zenchron-engineering up      # supervisor + dashboard, then opens the dashboard
+bin/zenchron-engineering status  # what is running, and where the dashboard is
+bin/zenchron-engineering down    # graceful stop of what `up` started
+```
+
+`up` accepts the flags `serve` does (`--repo`, `--config`, `--agent`,
+`--reviewer-agent`) plus `--listen 127.0.0.1:PORT` and `--no-open`. Run it from
+inside the clone you want worked on. It runs the same binary you ran, so an
+adopted controller stays the adopted controller (the dashboard is started with the serving controller's own binary, because the controller refuses a caller whose build differs from its generation), and it reuses a healthy
+supervisor or dashboard instead of starting a second one. If the default
+dashboard port (8787) is held by another program, the dashboard moves to the
+next free port and `up` prints where. An explicit `--listen` that is busy is a
+refusal. Sign in to the dashboard with the contents of
+`<state_dir>/control-plane.token`. Logs are under `<state_dir>/logs/`.
+
+Each service writes `<state_dir>/serve.process.json` or
+`control-plane.process.json` about itself, so `status` and `down` find a
+supervisor however it was started, including after a controller handover. A
+record is trusted only while the process it names is still the one that wrote it:
+same pid, same start time and same executable running that service, so a
+recycled pid is ignored even when it now runs another Zenchron service. The
+dashboard counts as running only when it refuses a wrong token and accepts this
+state directory's own, so a different program on the port is never reused. `down`
+never kills: `serve` shuts down gracefully and leaves every run as resumable as
+its journal says. A supervisor started by a build older than this feature
+never recorded itself, so `down` names it and leaves it for you to stop.
+
 ## Check the installation before spending anything
 
 ```bash
