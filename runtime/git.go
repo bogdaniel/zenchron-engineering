@@ -17,11 +17,37 @@ import (
 
 type RepositoryTarget struct{ Identity, Remote, DefaultBranch string }
 
+// RepositoryTargetError refuses target discovery without a checkout and origin.
+// Cause contains only a fixed diagnostic, never Git's potentially sensitive stderr.
+type RepositoryTargetError struct {
+	Cause         error
+	MissingOrigin bool
+}
+
+func (e *RepositoryTargetError) Error() string {
+	action := "cd into the target repository's checkout"
+	if e.MissingOrigin {
+		action = "add an origin remote for the target repository"
+	}
+	return fmt.Sprintf("repository target: this command must run from a Git checkout containing the target repository, with an origin remote; %s (git remote get-url origin: %v)", action, e.Cause)
+}
+
+func (e *RepositoryTargetError) Unwrap() error { return e.Cause }
+
 // ResolveRepository is intentionally conservative: an explicit identity wins;
 // cwd inference requires exactly one origin URL with a recognizable identity.
 func ResolveRepository(cwd, explicit string) (RepositoryTarget, error) {
 	remote, err := gitOutput(cwd, "remote", "get-url", "origin")
 	if err != nil {
+		var commandError *gitCommandError
+		if errors.As(err, &commandError) {
+			switch {
+			case strings.Contains(commandError.message, "fatal: not a git repository"):
+				return RepositoryTarget{}, &RepositoryTargetError{Cause: errors.New("not a git repository")}
+			case strings.Contains(commandError.message, "error: No such remote 'origin'"):
+				return RepositoryTarget{}, &RepositoryTargetError{Cause: errors.New("no origin remote"), MissingOrigin: true}
+			}
+		}
 		return RepositoryTarget{}, fmt.Errorf("repository target: %w", err)
 	}
 	identity, ok := githubIdentity(strings.TrimSpace(remote))
