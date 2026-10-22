@@ -24,6 +24,8 @@ ZENCHRON_REACT_BROWSER_E2E=1 go test ./cmd/zenchron-engineering \
   -run '^TestReactEngineeringOSGovernedWorkspace$' -count=1 -v
 ZENCHRON_BROWSER_E2E=1 go test ./cmd/zenchron-engineering \
   -run '^TestBrowserWorkspace$' -count=1 -v
+ZENCHRON_REACT_BROWSER_E2E=1 go test ./cmd/zenchron-engineering \
+  -run '^TestDashboardDescribedObjective$' -count=1 -v
 go test ./cmd/zenchron-engineering \
   -run '^TestEngineeringOSPlanRejectEndToEnd$' -count=1 -v
 ```

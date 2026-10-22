@@ -7,13 +7,6 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
 
-// issueCreator is the one forge capability issue-create needs. It is asserted
-// rather than added to runtime.GitHubAdapter so every other adapter and fake
-// keeps its present shape, and a forge without it refuses instead of guessing.
-type issueCreator interface {
-	CreateIssue(ctx context.Context, repo runtime.GitHubRepo, title, body string) (runtime.GitHubIssue, error)
-}
-
 // createdIssue is the control payload and what the receipt records.
 type createdIssue struct {
 	Repository string `json:"repository"`
@@ -39,7 +32,7 @@ func (c *composition) createIssue(ctx context.Context, supervisor *runtime.Super
 	if !ok {
 		return controlError(fmt.Errorf("repository %q is not governed by this supervisor", request.Repository))
 	}
-	creator, ok := c.forge.(issueCreator)
+	creator, ok := c.forge.(runtime.NewIssueCreator)
 	if !ok {
 		return controlError(fmt.Errorf("the configured forge cannot create issues"))
 	}

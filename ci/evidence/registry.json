@@ -443,11 +443,12 @@
       "sources": [
         "runtime/github*.go",
         "runtime/feedback*.go",
-        "runtime/forge_multiplex.go",
+        "runtime/forge_multiplex*.go",
         "runtime/remediation.go"
       ],
       "tests": [
         "runtime/github*_test.go",
+        "runtime/forge_multiplex_issue_test.go",
         "runtime/feedback*_test.go",
         "runtime/conversation_pagination_test.go",
         "runtime/remediation_test.go"
