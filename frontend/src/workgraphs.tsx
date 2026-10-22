@@ -441,7 +441,7 @@ export function GraphWorkspace({
               rows={[
                 ["Graph", g.graph_id],
                 ["Repository", g.repository],
-                ["Execution agent", g.agent_id || "Not recorded"],
+                ["Graph default agent", g.agent_id || "Not recorded"],
               ]}
             />
             <div className="product-body">
