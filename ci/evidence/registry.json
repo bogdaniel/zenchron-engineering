@@ -499,11 +499,13 @@
       "race": true,
       "sources": [
         "runtime/authority_request.go",
+        "runtime/publication_decision_display.go",
         "authority/*.go",
         "policy/*.go"
       ],
       "tests": [
         "runtime/authority_*_test.go",
+        "runtime/publication_decision_display_test.go",
         "runtime/provider_authority_test.go",
         "runtime/lattice_test.go"
       ]
