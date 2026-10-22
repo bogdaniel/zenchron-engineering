@@ -25,7 +25,7 @@ func (c *composition) dispatchWithReceipt(ctx context.Context, supervisor *runti
 	switch request.Command {
 	case runtime.ControlPlanRevise, runtime.ControlResume, runtime.ControlRefresh:
 		return c.dispatchPlanOrRunWithReceipt(ctx, supervisor, shutdown, request)
-	case runtime.ControlPlanningArtifactPropose, runtime.ControlProductPropose:
+	case runtime.ControlPlanningArtifactPropose, runtime.ControlProductPropose, runtime.ControlIssueCreate:
 		return c.dispatchArtifactWithReceipt(ctx, supervisor, shutdown, request)
 	default:
 		return controlError(fmt.Errorf("invalid action recovery reference"))

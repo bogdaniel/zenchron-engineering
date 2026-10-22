@@ -48,7 +48,7 @@ export function GovernedAction({
   label: string;
   reason: string;
   prepare: (note: string, signal: AbortSignal) => Promise<ActionReview>;
-  onSettled?: () => void;
+  onSettled?: (receipt?: workspace.Receipt) => void;
   noteAllowed?: boolean;
   children?: ReactNode;
   alternatives?: { label: string; prepare: (note: string, signal: AbortSignal) => Promise<ActionReview> }[];
@@ -113,7 +113,7 @@ export function GovernedAction({
       setUnknown(null);
       setAcknowledged(true);
       announce("Exact-subject receipt or state observed. No request was resent.");
-      onSettled?.();
+      onSettled?.(value);
     } else {
       setUnknown(bound);
       announce("No durable receipt observed for this exact subject. Re-read without resending.");
@@ -148,7 +148,7 @@ export function GovernedAction({
           setReceipt(receipt);
           setAcknowledged(true);
           announce("Exact original request receipt observed. No request was resent.");
-          onSettled?.();
+          onSettled?.(receipt);
           if (receipt.destination) location.hash = "#/" + receipt.destination;
           return;
         }
@@ -196,7 +196,7 @@ export function GovernedAction({
       setUnknown(null);
       setAcknowledged(true);
       announce("Exact original request receipt observed. No request was resent.");
-      onSettled?.();
+      onSettled?.(value);
     } catch {
       announce("Reconciliation unavailable. Outcome remains unknown; no request was resent.");
     } finally {

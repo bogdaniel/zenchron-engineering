@@ -74,7 +74,7 @@ export type Requests = {
   graphs_has_more: boolean;
 };
 export type Result = { action: string; outcome: string; code: string; detail: string; state?: unknown };
-export type Receipt = { title: string; detail: string; at?: string; destination?: string };
+export type Receipt = { title: string; detail: string; at?: string; destination?: string; issue?: number };
 export async function preview(id: string, signal: AbortSignal): Promise<Preview> {
   const p = object((await request(`/v1/plans/${encodeURIComponent(id)}/preview`, signal)).value),
     plan = api.decodePlan(p);

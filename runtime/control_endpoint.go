@@ -132,6 +132,9 @@ type ControlRequest struct {
 	// composition time come from the supervisor; a proposer states only its
 	// name, revision and repository list.
 	Product *product.ProductProposal `json:"product,omitempty"`
+	// NewIssue is the operator-typed title and description of an issue to
+	// open on a governed repository (ControlIssueCreate).
+	NewIssue *NewIssue `json:"new_issue,omitempty"`
 	// Agent is the named execution agent, resolved against the operator's own
 	// registry. A request naming an agent the operator did not configure is
 	// refused; it cannot introduce one.
@@ -248,6 +251,11 @@ const (
 	// ControlProductPropose adopts (or finds) one Product revision (#476):
 	// Product carries the proposed name, revision and repository list.
 	ControlProductPropose = "product-propose"
+	// ControlIssueCreate opens one issue on a governed repository from an
+	// operator-typed title and description, so an objective can start from
+	// words rather than from an issue someone already wrote. Repository
+	// selects the governed repository; NewIssue carries the text.
+	ControlIssueCreate = "issue-create"
 	// ControlCommandControllerSnapshot asks the running controller for ONE
 	// coherent observation of itself: which generation it is, whether it holds
 	// the controller role, and whether it is admitting work. It is read-only
