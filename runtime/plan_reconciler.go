@@ -1608,7 +1608,7 @@ func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapsh
 		// once more under a new generation instead of settling failed (#669); see
 		// plan_reviewer_recovery.go for what is preserved and what bounds it.
 		if outcome == string(Failed) {
-			retry, err := r.retryFailedReviewer(plan, stage, projection, snapshot, run)
+			retry, err := r.retryFailedReviewer(plan, stage, projection, run)
 			if err != nil {
 				return settled, err
 			}

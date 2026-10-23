@@ -264,6 +264,92 @@ func TestARetryTheEnvelopeCannotAffordLeavesTheStageFailedWithItsRealFailure(t *
 	}
 }
 
+// The failed reviewer's OWN invocations are what exhaust the plan. They are
+// attributed to the plan in the same pass that decides whether to retry, so the
+// decision has to read the consumption AFTER that attribution: judged against
+// the snapshot taken before it, the plan still looks affordable, the retry is
+// recorded, and the next pass blocks the stage on budget instead of settling it
+// failed.
+func TestAReviewerThatSpendsThePlansLastInvocationsIsNotRetried(t *testing.T) {
+	base := newPhase8Fixture(t)
+	fixture := newPlanRunFixtureWith(t, base, closedLoopStages(), base.deps.ConfigDigest,
+		domain.PlanBudgetEnvelope{MaxChildRuns: 4, MaxConcurrency: 3, MaxProviderInvocations: 3})
+	reviewer, first := recoveryScenario(t, fixture,
+		map[int]string{0: malformedVerdict, 1: malformedVerdict2}, acceptingVerdict(), acceptingVerdict(), acceptingVerdict())
+	driveUntilSettled(t, fixture, first)
+	for range 3 {
+		fixture.reconcile(t)
+	}
+
+	// The premise: the failed reviewer used every invocation the plan had.
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewer.Reviewed) != 2 || snapshot.Consumed.ProviderInvocations != 3 {
+		t.Fatalf("the scenario is not the one under test: %d reviewer invocations, %d charged to a plan that allows 3",
+			len(reviewer.Reviewed), snapshot.Consumed.ProviderInvocations)
+	}
+	final := planStageState(t, fixture, "review")
+	if final.State != PlanStageFailed || final.Generation != 0 {
+		t.Fatalf("the stage is %s at generation %d, want failed at 0: the plan cannot pay for a retry", final.State, final.Generation)
+	}
+	if n := settlements(t, fixture, "review", planStageInvalidated); n != 0 {
+		t.Fatalf("a retry the plan cannot afford was recorded %d time(s)", n)
+	}
+	if runs := stageRuns(t, fixture, "review"); len(runs) != 1 {
+		t.Fatalf("%d reviewer runs, want 1", len(runs))
+	}
+}
+
+// The decision reads the plan's LATEST durable consumption, not the snapshot the
+// pass took before it attributed spend. This is the race itself: a pass holds a
+// snapshot in which the plan is affordable, and consumption that is already
+// durable by the time it decides (the failed reviewer's own attributed spend, or
+// another run's) has spent the last of it. Judged against the held snapshot the
+// retry is recorded and the next pass blocks the stage on budget; judged against
+// the latest it settles failed with its real failure.
+//
+// The failed run here is eligible by its class and its reason: with the plan's
+// ceiling narrowing every run to the headroom it has, a reviewer that spends the
+// whole remainder itself ends on a run-level budget and is excluded on that
+// ground (TestAReviewerThatSpendsThePlansLastInvocationsIsNotRetried), so this
+// one lands the consumption between the snapshot and the decision directly.
+func TestARetryIsJudgedAgainstTheLatestDurableConsumptionNotTheHeldSnapshot(t *testing.T) {
+	fixture := newPlanRunFixture(t, closedLoopStages())
+	_, first := recoveryScenario(t, fixture,
+		map[int]string{0: malformedVerdict, 1: malformedVerdict2}, acceptingVerdict(), acceptingVerdict(), acceptingVerdict())
+	driveUntilSettled(t, fixture, first)
+
+	held, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ceiling := fixture.plan.BudgetEnvelope.MaxProviderInvocations
+	if held.Consumed.ProviderInvocations >= ceiling {
+		t.Fatalf("the held snapshot already shows the plan exhausted (%d of %d): not the scenario under test", held.Consumed.ProviderInvocations, ceiling)
+	}
+	// The remainder is spent after the snapshot was taken and before the decision.
+	if err := fixture.reconciler.appendPlan(fixture.plan.ID, EventPlanBudgetConsumed, PlanBudgetConsumedPayload{
+		Key: "test:late-spend", StageID: "review", RunID: first, ProviderInvocations: ceiling - held.Consumed.ProviderInvocations,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fixture.reconciler.settleFinishedStages(fixture.plan, held); err != nil {
+		t.Fatal(err)
+	}
+	if n := settlements(t, fixture, "review", planStageInvalidated); n != 0 {
+		t.Fatalf("a retry the plan could not afford was recorded %d time(s) against a stale snapshot", n)
+	}
+	if final := planStageState(t, fixture, "review"); final.State != PlanStageFailed || final.Generation != 0 {
+		t.Fatalf("the stage is %s at generation %d, want failed at 0 with its real failure", final.State, final.Generation)
+	}
+	if runs := stageRuns(t, fixture, "review"); len(runs) != 1 {
+		t.Fatalf("%d reviewer runs, want 1", len(runs))
+	}
+}
+
 func TestABlockingVerdictIsAReviewNotAFailedInvocationAndIsNeverRetried(t *testing.T) {
 	fixture := newPlanRunFixture(t, closedLoopStages())
 	blocking := ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewBlocked,
@@ -331,7 +417,7 @@ func TestOnlyAReviewerStageIsEverRetried(t *testing.T) {
 		"implementer": {ID: "implementation", Kind: domain.StageAgent, Role: domain.RoleImplementer},
 		"gate":        {ID: "assurance", Kind: domain.StageAssuranceGate},
 	} {
-		reason, err := PlanReconciler{}.retryFailedReviewer(domain.EngineeringPlan{}, stage, PlanStageProjection{}, PlanSnapshot{}, EngineeringRun{Disposition: Failed})
+		reason, err := PlanReconciler{}.retryFailedReviewer(domain.EngineeringPlan{}, stage, PlanStageProjection{}, EngineeringRun{Disposition: Failed})
 		if err != nil || reason != "" {
 			t.Errorf("%s: retry=%q err=%v, want neither", name, reason, err)
 		}

@@ -69,7 +69,7 @@ func reviewerFailureRecoverable(run EngineeringRun, diagnostic *ExecutionDiagnos
 // stage should be performed once more instead of settling failed, and the empty
 // string when it should settle failed. Every doubt answers empty: a stage that
 // cannot prove it is eligible keeps its real failure.
-func (r PlanReconciler) retryFailedReviewer(plan domain.EngineeringPlan, stage domain.PlanStage, projection PlanStageProjection, snapshot PlanSnapshot, run EngineeringRun) (string, error) {
+func (r PlanReconciler) retryFailedReviewer(plan domain.EngineeringPlan, stage domain.PlanStage, projection PlanStageProjection, run EngineeringRun) (string, error) {
 	if stage.Kind != domain.StageAgent || !stage.Role.ProducesReviewVerdict() {
 		return "", nil
 	}
@@ -83,8 +83,19 @@ func (r PlanReconciler) retryFailedReviewer(plan domain.EngineeringPlan, stage d
 	// The envelope is checked HERE as well as at the start, so a retry the plan
 	// cannot afford leaves the stage failed with its real failure instead of
 	// invalidated and blocked forever behind a budget message.
-	if snapshot.Consumed.ChildRuns >= plan.BudgetEnvelope.MaxChildRuns ||
-		invocationCeilingReached(plan, snapshot, stage.ID) != nil {
+	//
+	// Against the LATEST DURABLE consumption, read now: the pass that called this
+	// attributed the failed reviewer's own spend (and may have seen other runs
+	// spend) after it took its snapshot, so that snapshot can still call an
+	// exhausted plan affordable. It is the same replay, and the same two
+	// predicates, startAgentStage applies when the retry would start, so what is
+	// admitted here is what can actually start.
+	latest, err := r.Store.ReplayPlan(plan.ID)
+	if err != nil {
+		return "", err
+	}
+	if latest.Consumed.ChildRuns >= plan.BudgetEnvelope.MaxChildRuns ||
+		invocationCeilingReached(plan, latest, stage.ID) != nil {
 		return "", nil
 	}
 	assignment, found, err := r.Service.frozenAssignment(plan, projection, stage.ID)
