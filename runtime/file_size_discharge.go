@@ -71,7 +71,7 @@ func (s *runState) fileSizeBindingSuffix() string {
 	if s.rt == nil {
 		return ""
 	}
-	return fileSizeBindingSuffixFor(s.rt.deps.Policy, s.pinnedBase(), func() (domain.EngineeringWorkContract, error) {
+	return fileSizeBindingSuffixFor(s.rt.deps.Policy, fileSizeCheckerRevision(), s.pinnedBase(), func() (domain.EngineeringWorkContract, error) {
 		return s.rt.contractFor(s)
 	})
 }
@@ -79,7 +79,17 @@ func (s *runState) fileSizeBindingSuffix() string {
 // fileSizeBindingSuffixFor is the pure decision. A contract that cannot be
 // rebuilt leaves the binding as it was: it cannot be shown to require the
 // claim, and discharging the claim is refused independently of planning.
-func fileSizeBindingSuffixFor(policy domain.EngineeringPolicy, base string, rebuild func() (domain.EngineeringWorkContract, error)) string {
+//
+// The suffix names the CHECKER REVISION as well as the base. fileSizeCheckProves
+// accepts only a record by the current checker, so a release that changes the
+// checker rejects every earlier record; if the binding did not change with it,
+// the scheduler would still read the operation as satisfied and never run the
+// newer checker, stranding an already-assured candidate. With the revision in
+// the binding the check becomes eligible again for the same commit, tree and
+// contract, and it spends the run's ordinary assurance attempts (they are
+// counted per operation kind, not per binding), so nothing is renewed. An
+// unchanged revision leaves the binding byte-for-byte stable.
+func fileSizeBindingSuffixFor(policy domain.EngineeringPolicy, checkerRevision, base string, rebuild func() (domain.EngineeringWorkContract, error)) string {
 	if !policyListsFileSizeClaim(policy) {
 		return ""
 	}
@@ -87,7 +97,10 @@ func fileSizeBindingSuffixFor(policy domain.EngineeringPolicy, base string, rebu
 	if err != nil || !fileSizePolicyRequired(contract) {
 		return ""
 	}
-	return "|file-size-policy@" + base
+	if len(checkerRevision) > 16 {
+		checkerRevision = checkerRevision[:16]
+	}
+	return "|file-size-policy@" + checkerRevision + "@" + base
 }
 
 // fileSizeBaseRefusal refuses verification of a contract that requires the

@@ -33,7 +33,10 @@ var subjectContentReaders = map[string]string{
 	// The file-size check reads the verifier's ASSURANCE CHECKOUT, never the
 	// candidate workspace: assuranceCheckout cloned it from the verified subject
 	// store, and fileSizeVerdict proves its HEAD commit and tree are the exact
-	// recorded ones (verifyAssuranceCheckout) before any of these run.
+	// recorded ones (verifyAssuranceCheckout) before any of these run. These
+	// entries are NOT permission for future callers to read an unverified
+	// workspace: a new reader must read from subjectStore, or prove its directory
+	// to be the exact recorded commit and tree as fileSizeVerdict does.
 	"runtime/file_size_policy.go:manifestAtBase":       "reads the proven assurance checkout, which was cloned from the subject store",
 	"runtime/file_size_policy.go:readFileSizeManifest": "reads the proven assurance checkout, which was cloned from the subject store",
 	"runtime/file_size_policy.go:CheckFileSizePolicy":  "reads the proven assurance checkout, which was cloned from the subject store",

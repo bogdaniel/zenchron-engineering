@@ -293,7 +293,8 @@ commit and tree and to the contract's governing base. A generic passing suite
 discharges every other `automated_test` claim it always did and never this one.
 Observations written before the member existed carry none, and absence is never
 read as proof; replay does not synthesize it. A contract that newly requires the
-claim changes the `assurance.go` operation binding, so the existing scheduler
+claim changes the `assurance.go` operation binding (it gains the checker
+revision and the governing base, so a changed checker also re-plans), so the existing scheduler
 plans the missing verification for the exact subject within the run's assurance
 attempt and wall budgets (an exhausted budget settles as it always does and is
 never renewed), and a required check with no base revision refuses verification.

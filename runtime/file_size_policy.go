@@ -140,27 +140,7 @@ func readFileSizeManifest(dir, base, name string, columns int) (map[string]int, 
 	if err != nil {
 		return nil, fmt.Errorf("read %s at %s: %w", name, base, err)
 	}
-	limits := map[string]int{}
-	for number, line := range strings.Split(data, "\n") {
-		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimLeft(line, " \t"), "#") {
-			continue
-		}
-		fields := strings.Split(line, "\t")
-		if len(fields) != columns {
-			return nil, fmt.Errorf("malformed %s entry at line %d", name, number+1)
-		}
-		for _, field := range fields {
-			if strings.TrimSpace(field) == "" {
-				return nil, fmt.Errorf("malformed %s entry at line %d", name, number+1)
-			}
-		}
-		limit, err := strconv.Atoi(fields[1])
-		if err != nil || limit <= fileSizeHardCap || strconv.Itoa(limit) != fields[1] {
-			return nil, fmt.Errorf("%s line %d: limit must be an integer above %d", name, number+1, fileSizeHardCap)
-		}
-		limits[fields[0]] = limit
-	}
-	return limits, nil
+	return parseFileSizeManifest(name, data, columns)
 }
 
 // CheckFileSizePolicy reports every file of tree that the policy refuses, using
@@ -182,6 +162,9 @@ func CheckFileSizePolicy(dir, base, tree string) ([]FileSizeViolation, error) {
 	}
 	exceptions, err := readFileSizeManifest(dir, base, fileSizeExceptionFile, 3)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateFileSizeLimits(ceilings, exceptions); err != nil {
 		return nil, err
 	}
 	blobs, err := countedBlobs(dir, tree)

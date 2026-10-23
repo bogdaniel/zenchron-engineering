@@ -191,17 +191,17 @@ func TestARequirementThatAppearsChangesTheAssuranceBinding(t *testing.T) {
 	notRequired := dischargeContract()
 	delete(notRequired.RequiredClaims, FileSizePolicyClaimID)
 
-	if got := fileSizeBindingSuffixFor(listing, dischargeBase, rebuild(required)); got != "|file-size-policy@"+dischargeBase {
+	if got := fileSizeBindingSuffixFor(listing, "rev-a", dischargeBase, rebuild(required)); got != "|file-size-policy@rev-a@"+dischargeBase {
 		t.Fatalf("a newly required check does not change the binding: %q", got)
 	}
 	for name, got := range map[string]string{
-		"a policy that does not list the claim": fileSizeBindingSuffixFor(silent, dischargeBase, rebuild(required)),
-		"a contract compiled without the claim": fileSizeBindingSuffixFor(listing, dischargeBase, rebuild(notRequired)),
-		"a contract that cannot be rebuilt": fileSizeBindingSuffixFor(listing, dischargeBase, func() (domain.EngineeringWorkContract, error) {
+		"a policy that does not list the claim": fileSizeBindingSuffixFor(silent, "rev-a", dischargeBase, rebuild(required)),
+		"a contract compiled without the claim": fileSizeBindingSuffixFor(listing, "rev-a", dischargeBase, rebuild(notRequired)),
+		"a contract that cannot be rebuilt": fileSizeBindingSuffixFor(listing, "rev-a", dischargeBase, func() (domain.EngineeringWorkContract, error) {
 			return domain.EngineeringWorkContract{}, context.Canceled
 		}),
 		"a run whose runtime is not yet attached": (&runState{}).fileSizeBindingSuffix(),
-		"a policy with no rules":                  fileSizeBindingSuffixFor(domain.EngineeringPolicy{}, dischargeBase, rebuild(required)),
+		"a policy with no rules":                  fileSizeBindingSuffixFor(domain.EngineeringPolicy{}, "rev-a", dischargeBase, rebuild(required)),
 	} {
 		if got != "" {
 			t.Errorf("%s changed the binding: %q", name, got)
@@ -209,7 +209,7 @@ func TestARequirementThatAppearsChangesTheAssuranceBinding(t *testing.T) {
 	}
 	// A rebuild that must not even be attempted when the policy cannot require the claim.
 	attempted := false
-	fileSizeBindingSuffixFor(silent, dischargeBase, func() (domain.EngineeringWorkContract, error) {
+	fileSizeBindingSuffixFor(silent, "rev-a", dischargeBase, func() (domain.EngineeringWorkContract, error) {
 		attempted = true
 		return required, nil
 	})

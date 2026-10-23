@@ -35,6 +35,17 @@ verifier runs the size policy **before** the sandbox starts the Go suite:
   commit, tree, contract and policy revision. It is never an agent's statement.
 - A size policy that cannot be read (missing base revision, malformed manifest)
   is a prerequisite failure, never a silently empty, permissive policy.
+- The manifests are validated exactly as `scripts/check_file_sizes.py` validates
+  them, and a manifest it refuses is refused here, naming the manifest and the
+  entry: two entries for one path (the later one never silently widens an
+  approved limit), a path that is absolute, has a `..`, `.`, empty or trailing
+  component, a wrong column count, an empty field, a limit that is not a
+  canonical integer above 1,000, and an exception for a baseline file that does
+  not state a limit above its ceiling. Parity tests run the real script and the
+  Go verifier on the same manifests and require the same refusal. The script's
+  *stale-entry* rules (an entry for a path that is no longer a source file over
+  the cap) are repository maintenance, not a property of a candidate, and are
+  not part of this gate.
 
 A contract compiled **without** the claim is verified exactly as before.
 
@@ -113,9 +124,14 @@ prerequisite failure, never a verdict.
 
 The `assurance.go` operation binding is `commit | tree | contract revision`. When
 the loaded policy lists the claim and the rebuilt contract requires it, the
-binding gains `| file-size-policy@<base>`. An assurance that ran before the
-requirement existed no longer satisfies that binding, so the existing scheduler
-plans the verification again for the exact subject (no second scheduler). It runs
+binding gains `| file-size-policy@<checker revision>@<base>`. An assurance that
+ran before the requirement existed no longer satisfies that binding, and neither
+does one recorded by an older checker: a release that changes the checker's
+revision changes the binding too, because the claim accepts only a record by the
+current checker and the candidate would otherwise be stranded as "already
+assured". An unchanged revision keeps the binding stable, so nothing re-runs
+needlessly. The scheduler then plans the verification again for the exact
+subject (no second scheduler). It runs
 under the run's ordinary assurance attempt and wall budgets: when they are
 exhausted the run settles with the existing bounded failure, and no budget is
 renewed. A run whose contract does not require the claim keeps the binding it
