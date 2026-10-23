@@ -1539,6 +1539,9 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 	if commit, err := gitOutput(request.CheckoutDir, "rev-parse", "HEAD"); err != nil || strings.TrimSpace(commit) != request.Commit {
 		return AssuranceResult{}, fmt.Errorf("exact candidate commit unavailable")
 	}
+	if result, done, err := v.fileSizeVerdict(request); done {
+		return result, err
+	}
 	if err := v.prepare(ctx, request.CheckoutDir); err != nil {
 		// A prerequisite failure is not a verdict about the candidate and,
 		// unless the sandbox itself was unavailable, not transient either.
@@ -1587,7 +1590,7 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 	if signatureErr != nil {
 		return AssuranceResult{}, signatureErr
 	}
-	result := AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), Passed: runErr == nil && ctx.Err() == nil, Artifacts: artifacts, ArtifactRef: artifactRef, FailureSignature: signature, Evidence: &EvidenceBinding{Commit: request.Commit, Tree: request.Tree, Contract: request.Contract, Policy: request.Policy, Producer: Ref{ID: "baseline-go", Revision: v.Definition()}, Environment: Ref{ID: "docker-network-none", Revision: v.Sandbox.Image}}}
+	result := AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), Passed: runErr == nil && ctx.Err() == nil, Artifacts: artifacts, ArtifactRef: artifactRef, FailureSignature: signature, Evidence: v.evidenceBinding(request)}
 	// The workload is `gofmt; go vet; go test` under sh -e, which exits 1 or 2
 	// when the candidate fails. Every other code - Docker's own 125, an
 	// unexecutable 126/127, a signal death such as 137 - is not a verdict.

@@ -2459,6 +2459,8 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 		Contract: Ref{ID: kernel.Contract.ID, Revision: kernel.Contract.Revision},
 		Policy:   Ref{ID: r.deps.Policy.ID, Revision: r.deps.Policy.Revision},
 		Producer: Ref{ID: r.deps.ControllerID, Revision: r.controller},
+		// Present only when the compiled contract requires the file-size claim.
+		FileSizePolicyBase: fileSizePolicyBase(kernel.Contract, state.pinnedBase()),
 	})
 	if err := assuranceCutOff(parent, ctx); err != nil {
 		return failed(err)
