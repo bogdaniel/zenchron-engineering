@@ -85,6 +85,11 @@ test("a verified candidate is held only behind a downstream stage that recorded 
   // Unrecorded or failed assurance is not "verified"; a PR means nothing is held; an unrelated failure is no reason.
   assert.equal(heldBehindFailedStage("write", stages, { candidate: verified.candidate }), "");
   assert.equal(heldBehindFailedStage("write", stages, { ...verified, assurance: { ...passed, passed: false } }), "");
+  // A passed assurance that is stale no longer vouches for the current candidate.
+  assert.equal(heldBehindFailedStage("write", stages, { ...verified, assurance: { ...passed, stale: true } }), "");
+  // A stage name that is not a plain identifier is never echoed into the claim.
+  const unsafe = [stages[0], { ...stages[1], stage_id: "Review <b>x</b>", state: "failed" }];
+  assert.equal(heldBehindFailedStage("write", [stages[0], { ...unsafe[1], depends_on: ["write"] }], verified), "");
   const pr = { number: 1, state: "open", merged: false, stale: false };
   assert.equal(heldBehindFailedStage("write", stages, { ...verified, pull_request: pr }), "");
   assert.equal(heldBehindFailedStage("write", [stages[0], stages[3]], verified), "");

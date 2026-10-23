@@ -21,7 +21,7 @@ export function noPullRequestReason(d: Pick<RunDetail, "authority_request" | "pu
 // Failure classes and stages are closed sets of identifiers the runtime itself
 // names. They are shown verbatim and only when they look like one, so a
 // malformed read can never put arbitrary text in the panel.
-const identifier = (value: string) => (/^[a-z][a-z0-9_.-]{0,63}$/.test(value) ? value : "");
+export const identifier = (value: string) => (/^[a-z][a-z0-9_.-]{0,63}$/.test(value) ? value : "");
 
 // Why a run ended failed, from its recorded diagnostic only. Nothing here
 // suggests a recovery: none is recorded, and a missing field stays unsaid.
@@ -43,8 +43,8 @@ export function failedRunLines(d: Pick<RunDetail, "disposition" | "execution_dia
 type StageEdge = { stage_id: string; state: string; depends_on: string[] };
 
 // The failed stage a producer's verified candidate is waiting behind, if the
-// record shows one: the candidate has a recorded revision and a PASSED
-// assurance, no pull request exists, and a stage that depends on the producer
+// record shows one: the candidate has a recorded revision and a PASSED,
+// non-stale assurance, no pull request exists, and a stage that depends on the producer
 // (directly or through others) failed. Unrecorded assurance is not "verified",
 // so nothing is claimed for it.
 export function heldBehindFailedStage(
@@ -52,7 +52,7 @@ export function heldBehindFailedStage(
   stages: StageEdge[],
   d: Pick<RunDetail, "candidate" | "assurance" | "pull_request">,
 ): string {
-  if (!d.candidate?.revision || d.assurance?.passed !== true || d.pull_request) return "";
+  if (!d.candidate?.revision || d.assurance?.passed !== true || d.assurance.stale === true || d.pull_request) return "";
   const downstream = new Set([producerId]);
   // ponytail: repeated scan, fine for a plan's handful of stages; index by edge if plans grow wide.
   for (let changed = true; changed; ) {
@@ -63,5 +63,5 @@ export function heldBehindFailedStage(
         changed = true;
       }
   }
-  return stages.find((s) => s.state === "failed" && s.stage_id !== producerId && downstream.has(s.stage_id))?.stage_id ?? "";
+  return identifier(stages.find((s) => s.state === "failed" && s.stage_id !== producerId && downstream.has(s.stage_id))?.stage_id ?? "");
 }

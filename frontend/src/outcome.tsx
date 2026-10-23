@@ -3,7 +3,7 @@ import type { Plan, Stage } from "./api";
 import { Empty, Panel } from "./components";
 import { Facts } from "./runs";
 import * as ops from "./operations-api";
-import { failedRunLines, heldBehindFailedStage, noPullRequestReason, pullRequestURL } from "./outcome-reading";
+import { failedRunLines, heldBehindFailedStage, identifier, noPullRequestReason, pullRequestURL } from "./outcome-reading";
 
 type Loaded = { detail?: ops.RunDetail; error?: string };
 
@@ -13,11 +13,12 @@ const deliveredBy = (stages: Stage[]) => stages.filter((s) => s.kind === "agent"
 
 function RunOutcome({ stage, stages, loaded }: { stage: Stage; stages: Stage[]; loaded?: Loaded }) {
   const d = loaded?.detail;
+  const label = /reviewer$/.test(stage.role) ? "Reviewer run" : "Producer run";
   if (!d)
     return (
       <Facts
         rows={[
-          ["Producer run", stage.run_id],
+          [label, stage.run_id],
           ["Outcome", loaded?.error ? "Unavailable: " + loaded.error : "Reading run"],
         ]}
       />
@@ -26,7 +27,6 @@ function RunOutcome({ stage, stages, loaded }: { stage: Stage; stages: Stage[]; 
   const url = pr ? pullRequestURL(d.repository, pr.number) : "";
   const failure = failedRunLines(d);
   const heldBehind = heldBehindFailedStage(stage.stage_id, stages, d);
-  const label = /reviewer$/.test(stage.role) ? "Reviewer run" : "Producer run";
   return (
     <>
       <Facts
@@ -126,7 +126,7 @@ export function ObjectiveOutcome({ plan, pending }: { plan: Plan; pending: boole
         ))}
         {failedStages.map((s) => (
           <p key={s.stage_id} role="status">
-            The plan is blocked by failed stage {s.stage_id}
+            The plan is blocked by failed stage {identifier(s.stage_id) || "(name not displayable)"}
             {s.role ? ` (${s.role})` : ""}.
           </p>
         ))}
