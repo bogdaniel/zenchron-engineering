@@ -26,9 +26,9 @@ func parseFileSizeManifest(name, data string, columns int) (map[string]int, erro
 		return nil, fmt.Errorf("%s is not valid UTF-8", name)
 	}
 	limits := map[string]int{}
-	for number, line := range strings.Split(data, "\n") {
-		line = strings.TrimSuffix(line, "\r") // the checker reads with splitlines()
-		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimLeft(line, " \t"), "#") {
+	// Cut, strip and judge the text exactly as Python does (file_size_pytext.go).
+	for number, line := range splitPythonLines(data) {
+		if trimPythonSpace(line) == "" || strings.HasPrefix(trimLeftPythonSpace(line), "#") {
 			continue
 		}
 		fields := strings.Split(line, "\t")
@@ -36,7 +36,7 @@ func parseFileSizeManifest(name, data string, columns int) (map[string]int, erro
 			return nil, fmt.Errorf("malformed %s entry at line %d", name, number+1)
 		}
 		for _, field := range fields {
-			if strings.TrimSpace(field) == "" {
+			if trimPythonSpace(field) == "" {
 				return nil, fmt.Errorf("malformed %s entry at line %d", name, number+1)
 			}
 		}

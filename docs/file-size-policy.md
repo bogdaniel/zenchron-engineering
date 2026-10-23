@@ -44,7 +44,13 @@ verifier runs the size policy **before** the sandbox starts the Go suite:
   not state a limit above its ceiling, and an entry (in either manifest) that is a
   symlink. The symlink test uses the pinned candidate tree's own listing (git
   mode 120000), never a filesystem path a producer could have shaped; not
-  counting a symlink as a source file is a separate rule. Parity tests run the real script and the
+  counting a symlink as a source file is a separate rule. The text is cut and
+  stripped with Python's own semantics, not `\n` alone: lines split on
+  `str.splitlines()`'s separators (`\n \v \f \r \x1c \x1d \x1e` U+0085 U+2028
+  U+2029, with CRLF one separator) and blank/comment/empty-field tests use
+  `str.strip()` whitespace. Both character sets are enumerated from the
+  Python that runs the script and pinned by a test, so a manifest cannot be
+  two policies. Parity tests run the real script and the
   Go verifier on the same manifests and require the same refusal. The script's
   *stale-entry* rules (an entry for a path that is no longer a source file over
   the cap) are repository maintenance, not a property of a candidate, and are
