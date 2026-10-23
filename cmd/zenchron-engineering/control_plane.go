@@ -70,6 +70,12 @@ func controlPlaneUntil(ctx context.Context, args []string, stdout io.Writer) (in
 			return 1, err
 		}
 		defer primary.Release()
+		// A dashboard started by a build from before the lock holds none, so
+		// the claim above cannot see it. Its record can, while we hold the
+		// claim and nothing else can write it.
+		if err := refuseLiveLegacyPrimary(osUpHost{}, *state); err != nil {
+			return 1, err
+		}
 	}
 	listener, err := controlplane.Listen(*address)
 	if err != nil {
@@ -159,4 +165,18 @@ func primaryHeldError(state string) error {
 		where = fmt.Sprintf("pid %d on http://%s/", record.PID, record.Listen)
 	}
 	return fmt.Errorf("a primary control plane already runs for this state directory (%s); stop it with `zenchron-engineering down`, or add --auxiliary --listen <another address> for a read-only instance", where)
+}
+
+// refuseLiveLegacyPrimary refuses to start beside, and overwrite the record of,
+// a control plane that predates the primary lock. The record counts only if the
+// process it names is still that process (pid, start time, executable and
+// service, as `up` judges it), so a dead, recycled or unreadable record never
+// blocks a start. Called while holding the primary claim, so it cannot race
+// another new-code starter.
+func refuseLiveLegacyPrimary(host upHost, state string) error {
+	record, ok, err := readProcessRecord(state, serviceControlPlane)
+	if err != nil || !ok || record.PID == os.Getpid() || !host.Alive(record, serviceControlPlane) {
+		return nil
+	}
+	return primaryHeldError(state)
 }

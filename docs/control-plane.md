@@ -85,7 +85,10 @@ become the dashboard. A second one is refused with the live primary's pid and
 address from its process record and the way out. The kernel releases the lock if
 the primary dies, so a crash leaves nothing stale. Only the primary writes or
 removes `control-plane.process.json`, which is what `up`, `down` and `status`
-read.
+read. A dashboard started by a build from before the lock holds none, so after
+taking the lock a new primary also reads that record and refuses to start beside
+a process it still names (pid, start time, executable and service all verified,
+as `up` judges it); a dead, recycled or unreadable record never blocks a start.
 
 **Auxiliary instance.** `control-plane --auxiliary --listen 127.0.0.1:PORT` starts
 a READ-ONLY instance beside the primary, for example to inspect the same state
