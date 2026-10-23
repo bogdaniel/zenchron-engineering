@@ -1604,6 +1604,24 @@ func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapsh
 		if _, err := r.attributeRunSpend(plan, snapshot, stage.ID, projection.RunID); err != nil {
 			return settled, err
 		}
+		// A reviewer whose INVOCATION failed reached no verdict. It is performed
+		// once more under a new generation instead of settling failed (#669); see
+		// plan_reviewer_recovery.go for what is preserved and what bounds it.
+		if outcome == string(Failed) {
+			retry, err := r.retryFailedReviewer(plan, stage, projection, run)
+			if err != nil {
+				return settled, err
+			}
+			if retry != "" {
+				if err := r.appendPlan(plan.ID, EventPlanStageSettled, PlanStageSettledPayload{
+					StageID: stage.ID, Outcome: planStageInvalidated, Revision: plan.Revision, Reason: retry,
+				}); err != nil {
+					return settled, err
+				}
+				settled = append(settled, stage.ID)
+				continue
+			}
+		}
 		if err := r.appendPlan(plan.ID, EventPlanStageSettled, PlanStageSettledPayload{
 			StageID: stage.ID, Outcome: outcome, Reason: boundedDetail(stageSettlementReason(outcome, run)),
 		}); err != nil {

@@ -29,7 +29,10 @@ jobs:
         # retain every test's start, result and elapsed time in the downloadable
         # job log, including failure-only fixture diagnostics and panic stacks.
         # A package alarm's current test does not identify accumulated suite cost.
-        run: go test -json -timeout 30m ./...
+        # 45m, not 30m: the runtime package alone takes about 25 minutes on a hosted
+        # runner, so a slow runner failed an unchanged suite (#656). Only the bound
+        # changed; no test is skipped, sharded or retried.
+        run: go test -json -timeout 45m ./...
 
   # T0 + T1 (#516): static evidence, then the behavioral evidence that
   # ci/evidence/registry.json selects for what this pull request changed. It

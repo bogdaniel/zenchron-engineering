@@ -130,10 +130,61 @@ record is trusted only while the process it names is still the one that wrote it
 same pid, same start time and same executable running that service, so a
 recycled pid is ignored even when it now runs another Zenchron service. The
 dashboard counts as running only when it refuses a wrong token and accepts this
-state directory's own, so a different program on the port is never reused. `down`
+state directory's own, so a different program on the port is never reused. After a controller handover, a dashboard built from the previous generation is replaced on the same address, because the controller would refuse everything it tried to do. `down`
 never kills: `serve` shuts down gracefully and leaves every run as resumable as
 its journal says. A supervisor started by a build older than this feature
 never recorded itself, so `down` names it and leaves it for you to stop.
+
+There is one primary dashboard per state directory. Starting a second
+`control-plane` (or an `up` racing a hand-started one) is refused, naming the
+running one. To look at the same state from another port, start an explicitly
+read-only instance: `control-plane --auxiliary --listen 127.0.0.1:PORT`. It
+cannot act, and `up`, `down` and `status` never see it.
+
+## From the dashboard to a pull request
+
+1. **Sign in.** Open the dashboard address printed by `up` (or shown by
+   `status`). Enter the contents of `<state_dir>/control-plane.token` in
+   **Control Plane token**, then choose **Connect**.
+2. **Create or select a Product.** In **Products**, use **Create a product**:
+   enter a name and comma-separated repositories such as `owner/repo`, then
+   choose **Review & create** and confirm the details. If a Product already
+   exists, use it in the next step. A Product groups repositories; creating it
+   grants no execution authority.
+3. **Describe the objective.** Open **Objectives** → **Create objective**,
+   select the Product and a governed repository, then either enter an
+   **Existing issue** number or select **Describe a new objective instead of
+   using an existing issue**. For a new objective, enter its title and
+   description, including the desired result, constraints and checks. Choose
+   **Review issue creation** and confirm: this writes a GitHub issue with your
+   existing credential, which becomes the objective's source. Creating the
+   issue does not start execution.
+4. **Request a plan.** Select the **Planning agent**, then use **Review
+   objective proposal** and confirm the proposal request. The planning agent
+   drafts the proposal; it does not write code. The implementer and reviewer
+   workers are assigned in the plan, separately from this planning-agent
+   choice.
+5. **Approve the exact plan.** On the objective page, inspect the
+   **Controller-resolved plan & prospective assignments**, including the
+   stages and their assigned workers. Use **Review & approve**, review the
+   exact plan revision and assignments, and confirm. Unbound assignments must
+   be resolved before approval; if the plan or assignments change, inspect the
+   new preview. Approval permits execution within existing budget and policy
+   ceilings. Acceptance and publication authority remain separate.
+6. **Follow the work and read the outcome.** The objective page's
+   **Engineering lifecycle** and **Plan dependency inspection** show progress
+   and stage details, including links to recorded runs. Its **Outcome** panel
+   brings together the independent review verdict and reviewed candidate,
+   assurance gate state, producer run and candidate revision, assurance result,
+   publication authority status, and the pull request link and observed state.
+   When there is no pull request yet, it gives the recorded reason. It also
+   shows recorded waits for a human plan decision or publication authority.
+   A completed plan alone does not mean a change was published.
+7. **Review and merge in GitHub.** Follow the pull request link when it appears.
+   Merging remains a human action in GitHub; approving the plan does not grant
+   merge authority.
+
+For more about plans and approval, see [planning.md](planning.md).
 
 ## Check the installation before spending anything
 

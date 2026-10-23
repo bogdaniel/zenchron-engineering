@@ -10,7 +10,7 @@ disappearing.
 | T0 | `gofmt`, `go vet`, Windows build and vet | every PR | `ci/static.sh` |
 | T1 | every package except `runtime` whole, plus the `runtime` tests the impact registry selects | every PR | `go run ./ci/evidence` |
 | T1 race | the same selected high-risk (`race: true`) test names partitioned across four isolated runners; every part must pass | every PR | `go run ./ci/evidence -race -race-shard 1/4` (and 2/4–4/4) |
-| T2 | `go test -timeout 30m ./...` | today: every PR and every push to `main` (the required `go` check) | `.github/workflows/ci.yml` |
+| T2 | `go test -timeout 45m ./...` | today: every PR and every push to `main` (the required `go` check) | `.github/workflows/ci.yml` |
 | T3 | `go test -race ./...` | nightly, on request | `.github/workflows/assurance.yml` |
 
 ## Status
