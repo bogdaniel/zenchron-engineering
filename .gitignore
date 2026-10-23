@@ -33,3 +33,7 @@ go.work.sum
 bin/
 .DS_Store
 frontend/node_modules/
+
+# A binary built at the repository root (go build ./cmd/zenchron-engineering) must never be committed;
+# it once was (#670) and the candidate credential scan refused the repository for it.
+/zenchron-engineering
