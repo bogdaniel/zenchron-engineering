@@ -698,7 +698,7 @@ var stateDigestReaders = map[string]bool{
 	"runtime/journal.go:sqlitePlanEventColumns":        true,
 	"runtime/plan_store.go:planStream":                 true, // plan row insert (AppendPlanEvent's stream)
 	"runtime/sqlite_store.go:sqliteMigrations":         true, // DDL
-	"cmd/zenchron-engineering/operator.go:renderEvent": true, // display
+	"cmd/zenchron-engineering/operator_events.go:renderEvent": true, // display
 }
 
 // TestNoProductionCodeReadsStateDigestsAsAuthority is #453's search guard, at
