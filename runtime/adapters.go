@@ -179,6 +179,10 @@ type AssuranceResult struct {
 	// runtime/assurance_evidence.go.
 	ArtifactRef      string
 	FailureSignature string
+	// Checks are the specialised deterministic checks this verifier completed
+	// on the exact commit and tree (verification_check.go). They are recorded
+	// on the observation; a claim that needs one is discharged only from them.
+	Checks []VerificationCheck
 	// Model and Tokens are recorded only when the producer actually reports
 	// them. Nothing here is invented when a provider does not expose usage.
 	Model  string

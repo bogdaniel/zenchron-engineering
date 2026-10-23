@@ -1520,7 +1520,10 @@ func (v BaselineGoVerifier) Definition() string {
 	d, _ := Digest(struct{ Name, Version string }{"baseline-go-offline", "gofmt-vet-test-v3"})
 	return d
 }
-func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest) (AssuranceResult, error) {
+
+// assureInSandbox is the Go suite in the network-less sandbox. Assure
+// (file_size_assurance.go) wraps it with the checks that run on the host.
+func (v BaselineGoVerifier) assureInSandbox(ctx context.Context, request AssuranceRequest) (AssuranceResult, error) {
 	if request.Commit == "" || request.Tree == "" || request.CheckoutDir == "" || request.Contract.ID == "" {
 		return AssuranceResult{}, fmt.Errorf("incomplete assurance binding")
 	}
@@ -1538,9 +1541,6 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 	}
 	if commit, err := gitOutput(request.CheckoutDir, "rev-parse", "HEAD"); err != nil || strings.TrimSpace(commit) != request.Commit {
 		return AssuranceResult{}, fmt.Errorf("exact candidate commit unavailable")
-	}
-	if result, done, err := v.fileSizeVerdict(request); done {
-		return result, err
 	}
 	if err := v.prepare(ctx, request.CheckoutDir); err != nil {
 		// A prerequisite failure is not a verdict about the candidate and,

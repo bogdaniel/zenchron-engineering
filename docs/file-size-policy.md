@@ -70,6 +70,65 @@ and to its `acceptance_discharge_claims`. (Keep each rule's existing
 policy, compiles it, and checks the claim, the obligation and the authority
 condition all reach the contract.
 
+## The claim is proven by its own recorded check
+
+A passing automated-test observation proves what the Go suite covers. It does
+**not** prove the file-size policy was checked, so it never discharges
+`claim-file-size-policy`. The verifier records each specialised check it
+completed as a typed record on the `assurance.observed` payload
+(`checks`, an optional bounded list; see
+[spec/runtime-v0.1.md](spec/runtime-v0.1.md)):
+
+```json
+{"kind": "file_size_policy", "checker": "file-size-policy-go",
+ "checker_revision": "sha256:…", "outcome": "passed",
+ "commit": "<exact candidate commit>", "tree": "<exact candidate tree>",
+ "base_revision": "<governing base the rules were read from>"}
+```
+
+When the evidence bundle is rebuilt, the claim is discharged **only** if the
+current passing observation carries a successful record by the current checker,
+bound to the observation's own commit and tree and to the contract's governing
+base. Its evidence names the host-side checker as producer
+(`deterministic_tool`) and `controller_host` as the environment, not the sandbox
+verifier. Every other claim a generic passing suite supports is discharged exactly
+as before.
+
+Before the check reads anything, the verifier proves the assurance checkout's
+HEAD is the exact recorded commit and tree (the checkout was cloned from the
+verified subject store); a checkout that is not the exact candidate is a
+prerequisite failure, never a verdict.
+
+### Fail closed
+
+- An observation written before the record existed carries none, and absence is
+  **never** read as proof. Replay does not synthesize a record; earlier passing
+  observations keep discharging the claims they always discharged.
+- A record that names another commit, tree, base, checker or checker revision, a
+  failed outcome, or another kind proves nothing.
+- A contract that requires the claim for a run with **no base revision** refuses
+  verification. It is never skipped.
+
+### A newly required check is planned, not stranded
+
+The `assurance.go` operation binding is `commit | tree | contract revision`. When
+the loaded policy lists the claim and the rebuilt contract requires it, the
+binding gains `| file-size-policy@<base>`. An assurance that ran before the
+requirement existed no longer satisfies that binding, so the existing scheduler
+plans the verification again for the exact subject (no second scheduler). It runs
+under the run's ordinary assurance attempt and wall budgets: when they are
+exhausted the run settles with the existing bounded failure, and no budget is
+renewed. A run whose contract does not require the claim keeps the binding it
+always had.
+
+### Compatibility and rollback
+
+`checks` is additive and optional, so every existing journal stays readable and
+valid. Event payloads are decoded strictly, so a controller built **before** this
+change cannot read an `assurance.observed` event that carries `checks`: roll back
+only past a point where no such event has been written, or hand over to a build
+that includes the member.
+
 ## What is and is not frozen
 
 A contract records the policy revision it was compiled under, and the claim
@@ -78,8 +137,10 @@ contract compiled before the change has no claim and is not checked. The runtime
 does not, today, freeze a policy per run (a run's frozen policy covers budgets
 and agent); a run is judged under the policy its serving controller loaded, so a
 policy change takes effect for runs whose contract is recompiled after the
-handover, as it does for every other policy change. This change adds no new
-mechanism for that.
+handover, as it does for every other policy change. For such a run the claim can
+be discharged only by a fresh observation that carries the record, which the
+binding change above causes to be planned. This change adds no new mechanism for
+freezing a policy.
 
 ## Not covered here
 

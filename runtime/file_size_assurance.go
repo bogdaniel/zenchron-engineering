@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -15,10 +16,45 @@ import (
 // the contract listed it: a contract compiled before the policy changed has no
 // such claim and is verified exactly as it always was.
 func fileSizePolicyBase(contract domain.EngineeringWorkContract, base string) string {
-	if _, required := contract.RequiredClaims[FileSizePolicyClaimID]; !required {
+	if !fileSizePolicyRequired(contract) {
 		return ""
 	}
 	return base
+}
+
+// fileSizePolicyRequired reports whether the contract's compiled required claims
+// include the file-size claim. A required check with no base revision to read
+// the rules from is refused by the caller, never skipped.
+func fileSizePolicyRequired(contract domain.EngineeringWorkContract) bool {
+	_, required := contract.RequiredClaims[FileSizePolicyClaimID]
+	return required
+}
+
+// Assure is the baseline verifier: the checks that run on the host first, then
+// the Go suite in the sandbox. A host-side refusal is a verdict and the suite
+// is not started. A completed host-side check is recorded on whatever result
+// follows, as a typed record bound to the exact commit, tree and base, because
+// that record - not a passing suite - is what proves the file-size claim.
+func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest) (AssuranceResult, error) {
+	incomplete := request.Commit == "" || request.Tree == "" || request.CheckoutDir == "" || request.Contract.ID == ""
+	if request.FileSizePolicyBase == "" || incomplete {
+		return v.assureInSandbox(ctx, request)
+	}
+	if result, done, err := v.fileSizeVerdict(request); done {
+		return result, err
+	}
+	result, err := v.assureInSandbox(ctx, request)
+	result.Checks = append(result.Checks, fileSizeCheck(request, CheckOutcomePassed))
+	return result, err
+}
+
+// fileSizeCheck is the record of the size check for this request's exact
+// candidate and base.
+func fileSizeCheck(request AssuranceRequest, outcome string) VerificationCheck {
+	return VerificationCheck{
+		Kind: CheckKindFileSizePolicy, Checker: fileSizeCheckerID, CheckerRevision: fileSizeCheckerRevision(),
+		Outcome: outcome, Commit: request.Commit, Tree: request.Tree, BaseRevision: request.FileSizePolicyBase,
+	}
 }
 
 // fileSizeVerdict runs the size policy for an assurance request that carries
@@ -34,6 +70,13 @@ func fileSizePolicyBase(contract domain.EngineeringWorkContract, base string) st
 func (v BaselineGoVerifier) fileSizeVerdict(request AssuranceRequest) (result AssuranceResult, done bool, err error) {
 	if request.FileSizePolicyBase == "" {
 		return AssuranceResult{}, false, nil
+	}
+	// The check reads the checkout, so the checkout must be proven to BE the
+	// exact candidate first, as the suite's own run proves it (#437): it was
+	// cloned from the verified subject store, and its commit and tree are
+	// compared to the recorded ones here before any content is read.
+	if err := verifyAssuranceCheckout(request); err != nil {
+		return AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), FailureClass: FailureAssurancePrerequisite}, true, err
 	}
 	violations, checkErr := CheckFileSizePolicy(request.CheckoutDir, request.FileSizePolicyBase, request.Tree)
 	if checkErr != nil {
@@ -55,6 +98,18 @@ func (v BaselineGoVerifier) fileSizeVerdict(request AssuranceRequest) (result As
 		return AssuranceResult{}, true, err
 	}
 	return result, true, nil
+}
+
+// verifyAssuranceCheckout proves the checkout's HEAD is the exact recorded
+// commit and tree.
+func verifyAssuranceCheckout(request AssuranceRequest) error {
+	if tree, err := gitOutput(request.CheckoutDir, "rev-parse", "HEAD^{tree}"); err != nil || strings.TrimSpace(tree) != request.Tree {
+		return errors.New("exact candidate tree unavailable")
+	}
+	if commit, err := gitOutput(request.CheckoutDir, "rev-parse", "HEAD"); err != nil || strings.TrimSpace(commit) != request.Commit {
+		return errors.New("exact candidate commit unavailable")
+	}
+	return nil
 }
 
 func shortRevision(revision string) string {
@@ -88,6 +143,7 @@ func (v BaselineGoVerifier) judgedBeforeSandbox(request AssuranceRequest, report
 	return AssuranceResult{
 		ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), Passed: false, FailureClass: FailureVerification,
 		Artifacts: artifacts, ArtifactRef: artifactRef, FailureSignature: signature, Evidence: v.hostEvidenceBinding(request),
+		Checks: []VerificationCheck{fileSizeCheck(request, CheckOutcomeFailed)},
 	}, nil
 }
 

@@ -2442,6 +2442,9 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	if err != nil {
 		return failed(err)
 	}
+	if err := fileSizeBaseRefusal(kernel.Contract, state.pinnedBase()); err != nil {
+		return failed(err)
+	}
 	// THE PHYSICAL BOUND (#640): this attempt may run no longer than what is
 	// left of the run's assurance allowance, whatever the verifier does, and
 	// the confirmation rerun shares the same bound.
@@ -2505,6 +2508,7 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 		// are runtime-composed machine tokens; neither is candidate text.
 		ArtifactRef:      result.ArtifactRef,
 		FailureSignature: result.FailureSignature,
+		Checks:           result.Checks,
 	}
 	if result.Passed {
 		payload.FailureClass = ""
@@ -3349,7 +3353,7 @@ func (r *EngineeringRuntime) evidenceBundles(state *runState, contract domain.En
 		if !automated || claim.EvidenceClass == HumanEvidenceClass || claim.EvidenceClass == SemanticEvidenceClass || !producible[claim.EvidenceClass] {
 			continue
 		}
-		items["evidence-"+claimID] = domain.EvidenceItem{
+		item := domain.EvidenceItem{
 			ClaimID:       claimID,
 			EvidenceClass: claim.EvidenceClass,
 			Producer:      domain.EvidenceProducer{ID: assurance.ProviderID, Type: domain.ProducerAssuranceProvider},
@@ -3362,6 +3366,15 @@ func (r *EngineeringRuntime) evidenceBundles(state *runState, contract domain.En
 				Integrity:  &domain.EvidenceIntegrity{Method: "git-tree-sha", Value: assurance.Tree},
 			},
 		}
+		// A generic passing suite proves what the suite covers, not a
+		// specialised obligation: this claim needs its own recorded check.
+		if claimID == FileSizePolicyClaimID {
+			var proven bool
+			if item, proven = fileSizeEvidenceItem(item, assurance, contract.Subject.Revision, state.pinnedBase()); !proven {
+				continue
+			}
+		}
+		items["evidence-"+claimID] = item
 	}
 	// Semantic items come from the INDEPENDENT semantic observation and carry
 	// its own producer identity, so #7's independence rule sees a producer that

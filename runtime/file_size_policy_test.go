@@ -214,6 +214,7 @@ func TestFileSizeVerdictRefusesWithBoundEvidenceAndFeedback(t *testing.T) {
 	}
 
 	// A clean tree is not this verifier's verdict to give: it carries on to the suite.
+	mustGit(t, dir, "checkout", "-q", "--detach", base)
 	request.Commit, request.Tree = base, mustGit(t, dir, "rev-parse", base+"^{tree}")
 	if _, done, err := verifier.fileSizeVerdict(request); done || err != nil {
 		t.Fatalf("a clean tree was judged: done=%v err=%v", done, err)
