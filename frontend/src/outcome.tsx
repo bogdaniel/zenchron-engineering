@@ -3,7 +3,7 @@ import type { Plan, Stage } from "./api";
 import { Empty, Panel } from "./components";
 import { Facts } from "./runs";
 import * as ops from "./operations-api";
-import { noPullRequestReason, pullRequestURL } from "./outcome-reading";
+import { failedRunLines, heldBehindFailedStage, identifier, noPullRequestReason, pullRequestURL } from "./outcome-reading";
 
 type Loaded = { detail?: ops.RunDetail; error?: string };
 
@@ -11,24 +11,27 @@ type Loaded = { detail?: ops.RunDetail; error?: string };
 // reviews and that were given a run.
 const deliveredBy = (stages: Stage[]) => stages.filter((s) => s.kind === "agent" && !s.review && s.run_id);
 
-function RunOutcome({ stage, loaded }: { stage: Stage; loaded?: Loaded }) {
+function RunOutcome({ stage, stages, loaded }: { stage: Stage; stages: Stage[]; loaded?: Loaded }) {
   const d = loaded?.detail;
+  const label = /reviewer$/.test(stage.role) ? "Reviewer run" : "Producer run";
   if (!d)
     return (
       <Facts
         rows={[
-          ["Producer run", stage.run_id],
+          [label, stage.run_id],
           ["Outcome", loaded?.error ? "Unavailable: " + loaded.error : "Reading run"],
         ]}
       />
     );
   const pr = d.pull_request;
   const url = pr ? pullRequestURL(d.repository, pr.number) : "";
+  const failure = failedRunLines(d);
+  const heldBehind = heldBehindFailedStage(stage.stage_id, stages, d);
   return (
     <>
       <Facts
         rows={[
-          ["Producer run", `${stage.run_id} · ${stage.agent || "agent not recorded"}`],
+          [label, `${stage.run_id} · ${stage.agent || "agent not recorded"}`],
           ["Candidate revision", d.candidate?.revision || "Not recorded"],
           [
             "Assurance",
@@ -39,6 +42,21 @@ function RunOutcome({ stage, loaded }: { stage: Stage; loaded?: Loaded }) {
           ["Publication authority", d.publication_authority?.status || "Not recorded"],
         ]}
       />
+      {failure.length > 0 && (
+        <p role="status">
+          {failure.map((line) => (
+            <span key={line} style={{ display: "block" }}>
+              {line}
+            </span>
+          ))}
+        </p>
+      )}
+      {heldBehind && (
+        <p>
+          The verified candidate {d.candidate?.revision.slice(0, 12)} is held: publication waits for stage {heldBehind},
+          which failed.
+        </p>
+      )}
       <p>
         {pr ? (
           <>
@@ -81,6 +99,7 @@ export function ObjectiveOutcome({ plan, pending }: { plan: Plan; pending: boole
   }, [key, plan.stages]);
   const reviews = plan.stages.filter((s) => s.review);
   const gates = plan.stages.filter((s) => s.kind === "assurance_gate");
+  const failedStages = plan.stages.filter((s) => s.state === "failed");
   const awaiting = Object.values(runs).flatMap((r) =>
     r.detail?.authority_request?.missing.length ? [r.detail.run_id] : [],
   );
@@ -105,11 +124,17 @@ export function ObjectiveOutcome({ plan, pending }: { plan: Plan; pending: boole
             ]}
           />
         ))}
+        {failedStages.map((s) => (
+          <p key={s.stage_id} role="status">
+            The plan is blocked by failed stage {identifier(s.stage_id) || "(name not displayable)"}
+            {s.role ? ` (${s.role})` : ""}.
+          </p>
+        ))}
         {gates.map((s) => (
           <Facts key={s.stage_id} rows={[["Assurance gate", s.state || "Not recorded"]]} />
         ))}
         {producers.map((s) => (
-          <RunOutcome key={s.stage_id} stage={s} loaded={runs[s.run_id]} />
+          <RunOutcome key={s.stage_id} stage={s} stages={plan.stages} loaded={runs[s.run_id]} />
         ))}
         <p>Awaiting a human: {waitingOn.length ? waitingOn.join("; ") : "nothing recorded"}.</p>
       </div>
