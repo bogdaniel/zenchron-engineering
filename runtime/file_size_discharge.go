@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -97,10 +99,22 @@ func fileSizeBindingSuffixFor(policy domain.EngineeringPolicy, checkerRevision, 
 	if err != nil || !fileSizePolicyRequired(contract) {
 		return ""
 	}
-	if len(checkerRevision) > 16 {
-		checkerRevision = checkerRevision[:16]
-	}
-	return "|file-size-policy@" + checkerRevision + "@" + base
+	return "|file-size-policy@" + fileSizeBindingDigest(checkerRevision, base)
+}
+
+// fileSizeBindingDigest is the FULL SHA-256 of the complete binding material, as
+// lowercase hex. The invariant is that a changed checker identity, or a changed
+// base, must change the operation binding, because fileSizeCheckProves compares
+// the complete values: a truncated prefix would let two distinct revisions that
+// share it leave the binding unchanged while earlier evidence is rejected. The
+// digest is used rather than the raw values because the operation binding is
+// also part of operation and event identifiers, and the repository bounds
+// payload fields (maxPayloadFieldBytes); a fixed 64 characters keeps the binding
+// short and its length independent of either input. The two values are joined
+// with a separator neither can contain, so no pair collides with another.
+func fileSizeBindingDigest(checkerRevision, base string) string {
+	sum := sha256.Sum256([]byte(checkerRevision + "\x00" + base))
+	return hex.EncodeToString(sum[:])
 }
 
 // fileSizeBaseRefusal refuses verification of a contract that requires the

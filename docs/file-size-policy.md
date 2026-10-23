@@ -40,8 +40,11 @@ verifier runs the size policy **before** the sandbox starts the Go suite:
   entry: two entries for one path (the later one never silently widens an
   approved limit), a path that is absolute, has a `..`, `.`, empty or trailing
   component, a wrong column count, an empty field, a limit that is not a
-  canonical integer above 1,000, and an exception for a baseline file that does
-  not state a limit above its ceiling. Parity tests run the real script and the
+  canonical integer above 1,000, an exception for a baseline file that does
+  not state a limit above its ceiling, and an entry (in either manifest) that is a
+  symlink. The symlink test uses the pinned candidate tree's own listing (git
+  mode 120000), never a filesystem path a producer could have shaped; not
+  counting a symlink as a source file is a separate rule. Parity tests run the real script and the
   Go verifier on the same manifests and require the same refusal. The script's
   *stale-entry* rules (an entry for a path that is no longer a source file over
   the cap) are repository maintenance, not a property of a candidate, and are
@@ -124,7 +127,12 @@ prerequisite failure, never a verdict.
 
 The `assurance.go` operation binding is `commit | tree | contract revision`. When
 the loaded policy lists the claim and the rebuilt contract requires it, the
-binding gains `| file-size-policy@<checker revision>@<base>`. An assurance that
+binding gains `| file-size-policy@<sha256(checker revision NUL base)>`: the FULL
+SHA-256 of the complete checker revision and base, 64 hex characters. It is a
+digest, not the raw values, so the binding has a fixed length (it also appears in
+operation and event identifiers, and the repository bounds payload fields), and
+it is the full digest, never a prefix, so two distinct revisions that share a
+prefix still change it. An assurance that
 ran before the requirement existed no longer satisfies that binding, and neither
 does one recorded by an older checker: a release that changes the checker's
 revision changes the binding too, because the claim accepts only a record by the

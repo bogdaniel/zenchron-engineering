@@ -191,7 +191,7 @@ func TestARequirementThatAppearsChangesTheAssuranceBinding(t *testing.T) {
 	notRequired := dischargeContract()
 	delete(notRequired.RequiredClaims, FileSizePolicyClaimID)
 
-	if got := fileSizeBindingSuffixFor(listing, "rev-a", dischargeBase, rebuild(required)); got != "|file-size-policy@rev-a@"+dischargeBase {
+	if got := fileSizeBindingSuffixFor(listing, "rev-a", dischargeBase, rebuild(required)); got != "|file-size-policy@"+fileSizeBindingDigest("rev-a", dischargeBase) {
 		t.Fatalf("a newly required check does not change the binding: %q", got)
 	}
 	for name, got := range map[string]string{

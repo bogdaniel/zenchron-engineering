@@ -3,6 +3,7 @@ package runtime
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -79,6 +80,25 @@ func parseFileSizeLimit(text, name string, number int) (int, error) {
 		return 0, fmt.Errorf("%s line %d: limit must be an integer above %d", name, number, fileSizeHardCap)
 	}
 	return limit, nil
+}
+
+// refuseSymlinkedEntries is read_manifest's `Path(name).is_symlink()` test,
+// applied to each entry of one manifest against the PINNED tree's own symlink
+// listing (git mode 120000) rather than a filesystem path a producer could have
+// shaped. Not counting a symlink as a source file is a separate rule; this one
+// refuses the manifest, as the script does, for both manifests.
+func refuseSymlinkedEntries(manifest string, entries map[string]int, symlinks map[string]bool) error {
+	var linked []string
+	for path := range entries {
+		if symlinks[path] {
+			linked = append(linked, path)
+		}
+	}
+	if len(linked) == 0 {
+		return nil
+	}
+	sort.Strings(linked)
+	return fmt.Errorf("%s entry is a symlink: %q", manifest, linked[0])
 }
 
 // validateFileSizeLimits is load_exceptions' cross-check: an exception for a file

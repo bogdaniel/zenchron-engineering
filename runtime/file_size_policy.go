@@ -167,8 +167,15 @@ func CheckFileSizePolicy(dir, base, tree string) ([]FileSizeViolation, error) {
 	if err := validateFileSizeLimits(ceilings, exceptions); err != nil {
 		return nil, err
 	}
-	blobs, err := countedBlobs(dir, tree)
+	blobs, symlinks, err := countedBlobs(dir, tree)
 	if err != nil {
+		return nil, err
+	}
+	// The checker refuses a manifest entry that is a symlink, in either manifest.
+	if err := refuseSymlinkedEntries(fileSizeBaselineFile, ceilings, symlinks); err != nil {
+		return nil, err
+	}
+	if err := refuseSymlinkedEntries(fileSizeExceptionFile, exceptions, symlinks); err != nil {
 		return nil, err
 	}
 	contents, err := readBlobs(dir, blobs)
@@ -200,26 +207,36 @@ func CheckFileSizePolicy(dir, base, tree string) ([]FileSizeViolation, error) {
 	return violations, nil
 }
 
-// countedBlobs lists the regular source files of tree with their sizes.
-// Symlinks, submodules and anything that is not a blob are skipped, as the
-// checker skips them.
-func countedBlobs(dir, tree string) ([]stagedBlob, error) {
+// countedBlobs lists the regular source files of tree with their sizes, and
+// every symlink in it. Symlinks, submodules and anything that is not a blob are
+// not COUNTED, as the checker does not count them; the symlink set is kept
+// because a manifest entry that names one is refused (refuseSymlinkedEntries).
+// Both come from the pinned tree's own listing, never from a filesystem path.
+func countedBlobs(dir, tree string) ([]stagedBlob, map[string]bool, error) {
 	out, err := gitOutput(dir, "ls-tree", "-r", "-l", "-z", "--full-tree", tree)
 	if err != nil {
-		return nil, fmt.Errorf("list tree %s: %w", tree, err)
+		return nil, nil, fmt.Errorf("list tree %s: %w", tree, err)
 	}
 	var blobs []stagedBlob
+	symlinks := map[string]bool{}
 	for _, entry := range strings.Split(out, "\x00") {
 		meta, name, found := strings.Cut(entry, "\t")
 		fields := strings.Fields(meta)
-		if !found || len(fields) != 4 || fields[1] != "blob" || fields[0] == "120000" || !isFileSizeCounted(name) {
+		if !found || len(fields) != 4 {
+			continue
+		}
+		if fields[0] == "120000" {
+			symlinks[name] = true
+			continue
+		}
+		if fields[1] != "blob" || !isFileSizeCounted(name) {
 			continue
 		}
 		size, err := strconv.ParseInt(fields[3], 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("unreadable size for %q: %w", name, err)
+			return nil, nil, fmt.Errorf("unreadable size for %q: %w", name, err)
 		}
 		blobs = append(blobs, stagedBlob{path: name, id: fields[2], size: size})
 	}
-	return blobs, nil
+	return blobs, symlinks, nil
 }

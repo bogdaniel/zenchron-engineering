@@ -105,6 +105,112 @@ func TestADuplicateEntryNamesItsPathAndManifest(t *testing.T) {
 	}
 }
 
+// The canonical checker refuses a manifest entry that is a symlink, in either
+// manifest (read_manifest's Path(name).is_symlink()). The verifier decides it
+// from the pinned tree's own listing (mode 120000), never from a filesystem path,
+// and must refuse the same manifests. This is not the stale-entry maintenance
+// check.
+func TestSymlinkedManifestEntriesAreRefusedLikeTheCanonicalChecker(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not available")
+	}
+	script, err := os.ReadFile(filepath.Join("..", "scripts", "check_file_sizes.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const goodBaseline, goodExceptions = "base.go\t1100\n", "exc.go\t1400\treason\n"
+	canonicalRefuses := func(dir string) bool {
+		command := exec.Command(python, "scripts/check_file_sizes.py")
+		command.Dir = dir
+		var stderr bytes.Buffer
+		command.Stderr = &stderr
+		return command.Run() != nil && strings.Contains(stderr.String(), "FAIL file-size check")
+	}
+	fixture := func(baseline, exceptions string, symlinks ...string) (dir, base, tree string) {
+		dir = t.TempDir()
+		for _, name := range symlinks {
+			if err := os.Symlink("exc.go", filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		base, tree = sizeRepo(t, dir, map[string]string{
+			"scripts/check_file_sizes.py": string(script),
+			"file-size-baseline.tsv":      baseline,
+			"file-size-exceptions.tsv":    exceptions,
+			"exc.go":                      manyLines(1300),
+			"base.go":                     manyLines(1100),
+		}, "fixture")
+		return dir, base, tree
+	}
+	for _, test := range []struct {
+		name, baseline, exceptions string
+		symlinks                   []string
+		refused                    bool
+	}{
+		{"regular file entries", goodBaseline, goodExceptions, nil, false},
+		{"regular entries beside an unrelated symlink", goodBaseline, goodExceptions, []string{"unrelated.go"}, false},
+		{"symlinked exception entry", goodBaseline, "link.go\t1400\treason\n", []string{"link.go"}, true},
+		{"symlinked baseline entry", "link.go\t1100\n", goodExceptions, []string{"link.go"}, true},
+	} {
+		dir, base, tree := fixture(test.baseline, test.exceptions, test.symlinks...)
+		if got := canonicalRefuses(dir); got != test.refused {
+			t.Errorf("%s: the fixture is wrong, the canonical checker refused=%v want %v", test.name, got, test.refused)
+			continue
+		}
+		violations, goErr := CheckFileSizePolicy(dir, base, tree)
+		if test.refused {
+			if goErr == nil || !strings.Contains(goErr.Error(), "entry is a symlink") || !strings.Contains(goErr.Error(), "file-size-") {
+				t.Errorf("%s: the canonical checker refused and the verifier did not, or did not say why: %v %+v", test.name, goErr, violations)
+			}
+			continue
+		}
+		if goErr != nil || len(violations) != 0 {
+			t.Errorf("%s: the canonical checker accepted and the verifier refused or flagged: %v %+v", test.name, goErr, violations)
+		}
+	}
+
+	// The base's manifest names a regular file; the CANDIDATE replaces that file
+	// with a symlink. Both checkers refuse the candidate's tree.
+	dir, base, _ := fixture(goodBaseline, goodExceptions)
+	if err := os.Remove(filepath.Join(dir, "exc.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("base.go", filepath.Join(dir, "exc.go")); err != nil {
+		t.Fatal(err)
+	}
+	_, candidateTree := sizeRepo(t, dir, map[string]string{}, "the candidate swaps a named file for a symlink")
+	if !canonicalRefuses(dir) {
+		t.Fatal("the fixture is wrong: the canonical checker accepted the swapped tree")
+	}
+	if _, err := CheckFileSizePolicy(dir, base, candidateTree); err == nil || !strings.Contains(err.Error(), "entry is a symlink") {
+		t.Fatalf("a candidate that turns a manifest-named file into a symlink was accepted: %v", err)
+	}
+}
+
+// Two DISTINCT checker revisions that share a long prefix must still give
+// different bindings: the claim compares the complete revision, so a binding
+// that did not change would leave earlier evidence rejected and the candidate
+// reading as already assured.
+func TestRevisionsSharingALongPrefixStillChangeTheBinding(t *testing.T) {
+	listing := domain.EngineeringPolicy{Rules: map[string]domain.PolicyRule{"r": {Effect: domain.PolicyEffect{
+		RequiredClaims: &map[string]domain.RequiredClaim{FileSizePolicyClaimID: {EvidenceClass: AssuranceEvidenceClass}},
+	}}}}
+	required := func() (domain.EngineeringWorkContract, error) { return dischargeContract(), nil }
+	first := strings.Repeat("a", 64)
+	for _, shared := range []int{16, 32, 63} {
+		second := first[:shared] + strings.Repeat("b", 64-shared)
+		if first == second || first[:shared] != second[:shared] {
+			t.Fatalf("the fixture does not share exactly %d characters", shared)
+		}
+		a := fileSizeBindingSuffixFor(listing, first, dischargeBase, required)
+		b := fileSizeBindingSuffixFor(listing, second, dischargeBase, required)
+		if a == "" || a == b {
+			t.Errorf("two revisions sharing their first %d characters give the same binding: %q", shared, a)
+		}
+	}
+}
+
 // A release that changes the checker makes every earlier record stale, so the
 // operation binding must change with it or the candidate is stranded; and it
 // must change nothing else, spend the ordinary attempts, and stay stable when
@@ -127,8 +233,13 @@ func TestACheckerRevisionChangeMakesVerificationEligibleWithoutRenewingBudgets(t
 	if suffix(oldChecker) == suffix(newChecker) {
 		t.Fatal("a changed checker revision does not change the binding, so the newer checker would never run")
 	}
-	if !strings.HasSuffix(suffix(newChecker), "@"+dischargeBase) {
-		t.Fatalf("the governing base left the binding: %q", suffix(newChecker))
+	// The base is part of the binding too, and the suffix has a fixed length.
+	otherBase := "e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3"
+	if fileSizeBindingSuffixFor(listing, newChecker, otherBase, required) == suffix(newChecker) {
+		t.Fatal("a changed governing base does not change the binding")
+	}
+	if got := len(suffix(newChecker)); got != len("|file-size-policy@")+64 {
+		t.Fatalf("the binding suffix is not a fixed-length digest: %d", got)
 	}
 
 	// Only the suffix differs: the candidate and the contract are unchanged.
