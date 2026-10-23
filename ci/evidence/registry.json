@@ -415,6 +415,7 @@
       "sources": [
         "runtime/candidate_writer.go",
         "runtime/git*.go",
+        "runtime/repository_target_error.go",
         "runtime/repository_git.go",
         "runtime/source_*.go",
         "runtime/argv_paths.go",
