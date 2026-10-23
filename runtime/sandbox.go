@@ -531,8 +531,8 @@ func (s DockerSandbox) runContainer(ctx context.Context, args []string) (Command
 	if err := writeDockerOperation(path, record); err != nil {
 		return CommandOutput{}, err
 	}
-	if _, err := s.dockerRun(context.Background(), createArgs); err != nil {
-		return CommandOutput{}, err
+	if createOut, err := s.dockerRun(context.Background(), createArgs); err != nil {
+		return CommandOutput{}, s.stepError("create", record, createOut, err)
 	}
 	record.Phase = "created"
 	if err := writeDockerOperation(path, record); err != nil {
@@ -566,7 +566,7 @@ func (s DockerSandbox) runContainer(ctx context.Context, args []string) (Command
 	// A natural exit is not delayed: it is inspected and removed immediately.
 	running, exists, inspectErr := s.inspectRunning(record.ContainerName)
 	if inspectErr != nil {
-		return out, inspectErr
+		return out, s.stepError("inspect", record, CommandOutput{}, inspectErr)
 	}
 	if exists && running {
 		return out, fmt.Errorf("Docker start returned while runtime-owned container remains running")
@@ -575,13 +575,13 @@ func (s DockerSandbox) runContainer(ctx context.Context, args []string) (Command
 	if exists {
 		waited, err := s.dockerRun(context.Background(), []string{"wait", record.ContainerName})
 		if err != nil {
-			return out, err
+			return out, s.stepError("wait", record, waited, err)
 		}
 		if code, err := strconv.Atoi(strings.TrimSpace(string(waited.Stdout))); err == nil {
 			exitCode = code
 		}
 		if err := s.removeExact(record.ContainerName); err != nil {
-			return out, err
+			return out, s.stepError("remove", record, CommandOutput{}, err)
 		}
 	}
 	record.Phase = "removed"
@@ -595,7 +595,7 @@ func (s DockerSandbox) runContainer(ctx context.Context, args []string) (Command
 	if runErr != nil && exitCode >= 1 {
 		return out, &containerExitError{Code: exitCode, err: runErr}
 	}
-	return out, runErr
+	return out, s.stepError("start", record, out, runErr)
 }
 
 // containerExitError is a workload Docker recorded as exiting non-zero. It
