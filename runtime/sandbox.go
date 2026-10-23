@@ -1590,7 +1590,7 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 	if signatureErr != nil {
 		return AssuranceResult{}, signatureErr
 	}
-	result := AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), Passed: runErr == nil && ctx.Err() == nil, Artifacts: artifacts, ArtifactRef: artifactRef, FailureSignature: signature, Evidence: v.evidenceBinding(request)}
+	result := AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), Passed: runErr == nil && ctx.Err() == nil, Artifacts: artifacts, ArtifactRef: artifactRef, FailureSignature: signature, Evidence: v.sandboxEvidenceBinding(request)}
 	// The workload is `gofmt; go vet; go test` under sh -e, which exits 1 or 2
 	// when the candidate fails. Every other code - Docker's own 125, an
 	// unexecutable 126/127, a signal death such as 137 - is not a verdict.

@@ -103,11 +103,37 @@ func countFileLines(data []byte) (int, bool) {
 	return lines, true
 }
 
+// manifestAtBase says whether the base revision has the manifest, and only
+// answers "absent" when git CONFIRMS it. `git cat-file -e rev:path` exits 128
+// for a missing path and for a corrupt or unreadable object alike, so its exit
+// status cannot tell them apart; listing the tree entry can: success with no
+// entry is confirmed absence, and any failure is a failed lookup. A regular
+// file is the only thing a manifest may be (the checker refuses a symlink).
+func manifestAtBase(dir, base, name string) (present bool, err error) {
+	out, err := gitOutput(dir, "ls-tree", "-z", "--full-tree", base, "--", name)
+	if err != nil {
+		return false, fmt.Errorf("the file-size policy could not be read: looking up %s at base revision %s failed (%w); refusing to treat it as absent", name, base, err)
+	}
+	if out == "" {
+		return false, nil
+	}
+	meta, _, _ := strings.Cut(out, "\t")
+	if fields := strings.Fields(meta); len(fields) != 3 || fields[1] != "blob" || fields[0] == "120000" {
+		return false, fmt.Errorf("%s at base revision %s is not a regular file", name, base)
+	}
+	return true, nil
+}
+
 // readFileSizeManifest reads one manifest at the base revision. A manifest the
-// base does not have is empty, as in the checker; one it has but cannot be
-// parsed is an error, never a silently empty policy.
+// base CONFIRMABLY does not have is empty, as in the checker; one it has but
+// that cannot be looked up, read or parsed is an error, never a silently empty
+// policy.
 func readFileSizeManifest(dir, base, name string, columns int) (map[string]int, error) {
-	if _, err := runGit(dir, "cat-file", "-e", base+":"+name); err != nil {
+	present, err := manifestAtBase(dir, base, name)
+	if err != nil {
+		return nil, err
+	}
+	if !present {
 		return map[string]int{}, nil
 	}
 	data, err := gitOutput(dir, "show", base+":"+name)

@@ -65,8 +65,9 @@ func shortRevision(revision string) string {
 }
 
 // judgedBeforeSandbox records a verdict the verifier reached without starting a
-// container, with the same artifacts, failure signature and evidence binding as
-// one it reached inside it.
+// container, with the same artifacts and failure signature as one it reached
+// inside it, and with the HOST binding: the check ran on the controller, so the
+// evidence names that environment and not the sandbox's.
 func (v BaselineGoVerifier) judgedBeforeSandbox(request AssuranceRequest, report []byte) (AssuranceResult, error) {
 	if v.ArtifactStore.Root == "" {
 		return AssuranceResult{}, errors.New("local artifact store required")
@@ -86,12 +87,45 @@ func (v BaselineGoVerifier) judgedBeforeSandbox(request AssuranceRequest, report
 	}
 	return AssuranceResult{
 		ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), Passed: false, FailureClass: FailureVerification,
-		Artifacts: artifacts, ArtifactRef: artifactRef, FailureSignature: signature, Evidence: v.evidenceBinding(request),
+		Artifacts: artifacts, ArtifactRef: artifactRef, FailureSignature: signature, Evidence: v.hostEvidenceBinding(request),
 	}, nil
 }
 
-// evidenceBinding is the provenance every verdict of this verifier carries.
-func (v BaselineGoVerifier) evidenceBinding(request AssuranceRequest) *EvidenceBinding {
+// The two places this verifier can reach a verdict have two different
+// environments, and a binding must name the one that actually ran.
+const (
+	// fileSizeCheckerID and fileSizeHostEnvironmentID identify the size check:
+	// the controller's Go port of the repository's checker, reading the exact
+	// tree from the host-side assurance checkout through read-only git object
+	// access. No container, image or network isolation is involved, so none is
+	// claimed.
+	fileSizeCheckerID          = "file-size-policy-go"
+	fileSizeHostEnvironmentID  = "controller-host-git-readonly"
+	fileSizeHostEnvironmentRev = "git-object-store-read-only"
+)
+
+// fileSizeCheckerRevision identifies the implementation that produced a size
+// verdict, so a change to its rules is a change of identity, as it is for the
+// sandbox verifier's definition.
+func fileSizeCheckerRevision() string {
+	digest, _ := Digest(struct{ Name, Version string }{"file-size-policy", "go-port-of-check_file_sizes.py-v1"})
+	return digest
+}
+
+// hostEvidenceBinding is the provenance of a verdict the controller reached on
+// the host, before any container ran. It must never be read as sandbox
+// evidence: its environment is not the sandbox's.
+func (v BaselineGoVerifier) hostEvidenceBinding(request AssuranceRequest) *EvidenceBinding {
+	return &EvidenceBinding{
+		Commit: request.Commit, Tree: request.Tree, Contract: request.Contract, Policy: request.Policy,
+		Producer:    Ref{ID: fileSizeCheckerID, Revision: fileSizeCheckerRevision()},
+		Environment: Ref{ID: fileSizeHostEnvironmentID, Revision: fileSizeHostEnvironmentRev},
+	}
+}
+
+// sandboxEvidenceBinding is the provenance of a verdict the Go suite reached
+// inside the network-less sandbox.
+func (v BaselineGoVerifier) sandboxEvidenceBinding(request AssuranceRequest) *EvidenceBinding {
 	return &EvidenceBinding{
 		Commit: request.Commit, Tree: request.Tree, Contract: request.Contract, Policy: request.Policy,
 		Producer:    Ref{ID: "baseline-go", Revision: v.Definition()},
