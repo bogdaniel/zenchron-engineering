@@ -131,6 +131,10 @@ type dockerLifecycleExecutor struct {
 	failOnStart int
 	starts      int
 	stderr      string
+	// workloadFailed makes the next `docker wait` report exit code 1, as real
+	// Docker does for a container whose command failed. Without it a failed
+	// start reads as "never reached the workload", which is infrastructure.
+	workloadFailed bool
 }
 
 func (f *dockerLifecycleExecutor) LookPath(string) error { return nil }
@@ -139,8 +143,16 @@ func (f *dockerLifecycleExecutor) Run(_ context.Context, _ string, args []string
 	if len(args) >= 2 && args[0] == "start" && args[1] == "--attach" {
 		f.starts++
 		if f.starts == f.failOnStart {
+			f.workloadFailed = true
 			return CommandOutput{Stderr: []byte(f.stderr)}, errors.New("exit status 1")
 		}
+	}
+	if len(args) >= 2 && args[0] == "wait" {
+		code := "0\n"
+		if f.workloadFailed {
+			code = "1\n"
+		}
+		return CommandOutput{Stdout: []byte(code)}, nil
 	}
 	return CommandOutput{}, nil
 }
