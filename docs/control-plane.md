@@ -78,6 +78,25 @@ The default listener is `127.0.0.1:8787`. `--listen` accepts only literal
 loopback IP addresses (including `::1`). `--controller-root` overrides the
 standard adopted-controller root when necessary.
 
+**One primary per state directory.** The first `control-plane` for a state
+directory claims an exclusive advisory lock (`<state_dir>/locks/control-plane-primary`)
+before it binds or records anything, so two started together cannot both
+become the dashboard. A second one is refused with the live primary's pid and
+address from its process record and the way out. The kernel releases the lock if
+the primary dies, so a crash leaves nothing stale. Only the primary writes or
+removes `control-plane.process.json`, which is what `up`, `down` and `status`
+read.
+
+**Auxiliary instance.** `control-plane --auxiliary --listen 127.0.0.1:PORT` starts
+a READ-ONLY instance beside the primary, for example to inspect the same state
+from another port. It needs an explicit `--listen` that is not the primary's
+address and the token the primary already created (it writes nothing into the
+state directory). It never touches the primary's record, and `up`, `down` and
+`status` ignore it. Read-only is enforced on the server: every method other than
+GET, HEAD and OPTIONS is refused with 403 `auxiliary_read_only`, and its
+controller `Send` path refuses as well, so it is never a second route to a
+governed action.
+
 For an isolated supervisor and Control Plane, set `ZENCHRON_CONTROLLER_ROOT`
 to one absolute, owner-controlled directory for both processes. The variable
 overrides the usual `~/.zenchron-adopted-controller` root for controller
