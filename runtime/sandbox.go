@@ -452,14 +452,14 @@ func (s DockerSandbox) inspectRunning(name string) (bool, bool, error) {
 		if strings.Contains(strings.ToLower(string(out.Stderr)), "no such") {
 			return false, false, nil
 		}
-		return false, false, err
+		return false, false, s.dockerStepError("inspect", name, out, err)
 	}
 	return strings.TrimSpace(string(out.Stdout)) == "true", true, nil
 }
 
 func (s DockerSandbox) removeExact(name string) error {
-	_, err := s.dockerRun(context.Background(), []string{"rm", name})
-	return err
+	out, err := s.dockerRun(context.Background(), []string{"rm", name})
+	return s.dockerStepError("remove", name, out, err)
 }
 
 func (s DockerSandbox) terminateExact(record dockerOperationRecord, path string) error {
@@ -566,7 +566,7 @@ func (s DockerSandbox) runContainer(ctx context.Context, args []string) (Command
 	// A natural exit is not delayed: it is inspected and removed immediately.
 	running, exists, inspectErr := s.inspectRunning(record.ContainerName)
 	if inspectErr != nil {
-		return out, s.stepError("inspect", record, CommandOutput{}, inspectErr)
+		return out, inspectErr // already a typed inspect step error, with Docker's own output
 	}
 	if exists && running {
 		return out, fmt.Errorf("Docker start returned while runtime-owned container remains running")
@@ -581,7 +581,7 @@ func (s DockerSandbox) runContainer(ctx context.Context, args []string) (Command
 			exitCode = code
 		}
 		if err := s.removeExact(record.ContainerName); err != nil {
-			return out, s.stepError("remove", record, CommandOutput{}, err)
+			return out, err // already a typed remove step error, with Docker's own output
 		}
 	}
 	record.Phase = "removed"

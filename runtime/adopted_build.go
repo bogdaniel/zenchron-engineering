@@ -761,6 +761,16 @@ func runAdoptedBuild(ctx context.Context, spec AdoptedBuildSpec) (BuildEnvironme
 
 	sandbox := spec.Sandbox
 	sandbox.OperationID = "adopted-build-" + spec.Revision
+	// EXCLUSIVE OWNERSHIP of this revision's build, for everything below: the
+	// controller's updater and a manual `controller build-adopted` of the same
+	// revision share a deterministic container name, and only the holder may
+	// reconcile a leftover container (#674 review). A build that cannot take it
+	// reports that another is in progress and touches nothing.
+	claim, err := claimAdoptedBuild(sandbox.StateDir, spec.Revision)
+	if err != nil {
+		return BuildEnvironment{}, err
+	}
+	defer claim.Release()
 
 	toolchain, err := adoptedBuildToolchain(ctx, sandbox, spec)
 	if err != nil {

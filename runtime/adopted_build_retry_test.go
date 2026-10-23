@@ -26,6 +26,18 @@ type retryScriptedDocker struct {
 	starts       int
 	workloadFail bool
 	removed      []string
+	// The daemon is "not ready" for the first infoFailures readiness probes
+	// (`docker info`), the way a starting Docker Desktop is.
+	infoFailures int
+	infoCalls    int
+	// After the first container create, the daemon cannot give its identity
+	// for the next identityFailures lookups: container state is ambiguous.
+	identityFailures int
+	// `docker inspect` / `docker rm` fail with their own stderr.
+	inspectFails  bool
+	inspectStderr string
+	rmFails       bool
+	rmStderr      string
 }
 
 func (f *retryScriptedDocker) LookPath(string) error { return nil }
@@ -34,6 +46,12 @@ func (f *retryScriptedDocker) Run(_ context.Context, _ string, args []string, _ 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	switch args[0] {
+	case "info":
+		f.infoCalls++
+		if f.infoFailures > 0 {
+			f.infoFailures--
+			return CommandOutput{Stderr: []byte("Cannot connect to the Docker daemon")}, errors.New("exit status 1")
+		}
 	case "create":
 		f.creates++
 		if f.creates <= f.failCreates {
@@ -52,6 +70,9 @@ func (f *retryScriptedDocker) Run(_ context.Context, _ string, args []string, _ 
 		}
 		return CommandOutput{Stdout: []byte("0\n")}, nil
 	case "rm":
+		if f.rmFails {
+			return CommandOutput{Stderr: []byte(f.rmStderr)}, errors.New("exit status 1")
+		}
 		f.removed = append(f.removed, args[len(args)-1])
 	}
 	return CommandOutput{}, nil
@@ -64,7 +85,14 @@ func (f *retryScriptedDocker) Output(_ context.Context, _ string, args []string,
 		return CommandOutput{Stdout: []byte(args[len(args)-1] + "\n")}, nil
 	}
 	if len(args) >= 4 && args[len(args)-4] == "inspect" && args[len(args)-3] == "--format" && args[len(args)-2] == "{{.State.Running}}" {
+		if f.inspectFails {
+			return CommandOutput{Stderr: []byte(f.inspectStderr)}, errors.New("exit status 1")
+		}
 		return CommandOutput{Stdout: []byte(fmt.Sprintf("%v\n", f.running))}, nil
+	}
+	if len(args) >= 3 && args[0] == "info" && args[len(args)-1] == "{{.ID}}" && f.creates >= 1 && f.identityFailures > 0 {
+		f.identityFailures--
+		return CommandOutput{}, errors.New("exit status 1")
 	}
 	return CommandOutput{Stdout: []byte("daemon-test-id\n")}, nil
 }

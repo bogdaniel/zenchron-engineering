@@ -44,16 +44,20 @@ func (e *SandboxStepError) Error() string {
 
 func (e *SandboxStepError) Unwrap() error { return e.Err }
 
-// stepError labels a failed Docker step, or returns nil for a successful one so
-// a call site can return it unconditionally.
+// stepError labels a failed Docker step of the operation `record` names, or
+// returns nil for a successful one so a call site can return it unconditionally.
 func (s DockerSandbox) stepError(step string, record dockerOperationRecord, out CommandOutput, err error) error {
+	return s.dockerStepError(step, record.ContainerName, out, err)
+}
+
+// dockerStepError is the same for a step that knows only the container's name
+// (inspect, remove): the output Docker produced for THAT command is kept, so a
+// failing `docker inspect` or `docker rm` says why instead of "exit status 1".
+func (s DockerSandbox) dockerStepError(step, container string, out CommandOutput, err error) error {
 	if err == nil {
 		return nil
 	}
-	return &SandboxStepError{
-		Step: step, OperationID: record.OperationID, Container: record.ContainerName,
-		Stderr: sandboxStepDetail(out), Err: err,
-	}
+	return &SandboxStepError{Step: step, OperationID: s.OperationID, Container: container, Stderr: sandboxStepDetail(out), Err: err}
 }
 
 // sandboxStepDetail is the operator-facing account of one Docker step's

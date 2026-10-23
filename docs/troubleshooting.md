@@ -262,10 +262,23 @@ facts as `live.snapshot.update.failure`:
 | `docker operation` / `docker container` | the runtime-owned operation and container the step used, for `docker ps -a` and the record under `<state_dir>/artifacts/docker-operations/` |
 | `stderr` | the last 1,000 bytes of what Docker or the compiler said, control characters removed and credentials redacted |
 
-Before each retry the runtime removes the exact container this operation names
-if it exists and is not running (the leftover of an interrupted attempt, which
-is what `Conflict. The container name ... is already in use` means). A running
-container is a live attempt and is never touched. Retrying changes nothing the
+Before a Docker step runs again the runtime reconciles the exact container
+this operation names: it is removed only if it exists and is not running (the
+leftover of an interrupted attempt, which is what `Conflict. The container name
+... is already in use` means). That is only safe because each build holds an
+exclusive per-revision claim (`<state_dir>/artifacts/docker-operations/adopted-build-<digest>.lock`)
+for its whole duration, taken by the controller's updater and by `controller
+build-adopted` alike; the kernel drops it when the holder dies. A second build
+of the same revision is refused with `another build of this revision is in
+progress` and touches nothing - a container that exists and is not running may
+simply be the other build's, created and about to start. A failure before any
+container existed (the daemon not ready) is retried with a backoff and no
+cleanup. If the daemon cannot answer while the leftover is being reconciled,
+the container's state is unknown, so the step does NOT run again on a guess:
+the reconciliation is what is retried, inside the same bound, and a build that
+cannot reconcile is refused with `could not be reconciled` and the Docker
+step's own stderr (`docker inspect` and `docker rm` keep their output like
+`docker create` does). Retrying changes nothing the
 build is verified against: the revision, the trusted-main evidence, the build
 environment digest and the self-probe are checked exactly as on a first try,
 and no step ever falls back to an unattested `go build`. If the retry is spent
