@@ -1520,7 +1520,10 @@ func (v BaselineGoVerifier) Definition() string {
 	d, _ := Digest(struct{ Name, Version string }{"baseline-go-offline", "gofmt-vet-test-v3"})
 	return d
 }
-func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest) (AssuranceResult, error) {
+
+// assureInSandbox is the Go suite in the network-less sandbox. Assure
+// (file_size_assurance.go) wraps it with the checks that run on the host.
+func (v BaselineGoVerifier) assureInSandbox(ctx context.Context, request AssuranceRequest) (AssuranceResult, error) {
 	if request.Commit == "" || request.Tree == "" || request.CheckoutDir == "" || request.Contract.ID == "" {
 		return AssuranceResult{}, fmt.Errorf("incomplete assurance binding")
 	}
@@ -1587,7 +1590,7 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 	if signatureErr != nil {
 		return AssuranceResult{}, signatureErr
 	}
-	result := AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), Passed: runErr == nil && ctx.Err() == nil, Artifacts: artifacts, ArtifactRef: artifactRef, FailureSignature: signature, Evidence: &EvidenceBinding{Commit: request.Commit, Tree: request.Tree, Contract: request.Contract, Policy: request.Policy, Producer: Ref{ID: "baseline-go", Revision: v.Definition()}, Environment: Ref{ID: "docker-network-none", Revision: v.Sandbox.Image}}}
+	result := AssuranceResult{ProviderID: baselineGoProviderID, VerifierDefinition: v.Definition(), Passed: runErr == nil && ctx.Err() == nil, Artifacts: artifacts, ArtifactRef: artifactRef, FailureSignature: signature, Evidence: v.sandboxEvidenceBinding(request)}
 	// The workload is `gofmt; go vet; go test` under sh -e, which exits 1 or 2
 	// when the candidate fails. Every other code - Docker's own 125, an
 	// unexecutable 126/127, a signal death such as 137 - is not a verdict.

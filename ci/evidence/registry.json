@@ -393,6 +393,7 @@
       "sources": [
         "runtime/verification_*.go",
         "runtime/assurance_evidence.go",
+        "runtime/file_size_*.go",
         "runtime/semantic_assurance.go",
         "runtime/typed_result_capability.go",
         "runtime/reviewer_result.go",
@@ -402,6 +403,7 @@
       "tests": [
         "runtime/verification_*_test.go",
         "runtime/assurance_*_test.go",
+        "runtime/file_size_*_test.go",
         "runtime/semantic_*_test.go",
         "runtime/reviewer_*_test.go",
         "runtime/review_continuation_test.go",

@@ -281,6 +281,25 @@ held candidate, and never satisfies assurance, authority or publication. A run
 frozen without the member (pre-#640) keeps the legacy rule; a negative frozen
 value fails closed.
 
+An `assurance.observed` payload may carry an optional, typed, bounded `checks`
+list (#663): one record per specialised deterministic check the verifier
+COMPLETED, each naming its `kind`, the `checker` and `checker_revision` that ran
+it, its `outcome` (`passed` or `failed`), the exact candidate `commit` and `tree`,
+and the governing `base_revision` whose rules it used. A requirement is satisfied
+only by evidence that proves THAT requirement: the claim `claim-file-size-policy`
+is discharged only from a passing observation whose `checks` hold a successful
+`file_size_policy` record by the current checker, bound to the observation's own
+commit and tree and to the contract's governing base. A generic passing suite
+discharges every other `automated_test` claim it always did and never this one.
+Observations written before the member existed carry none, and absence is never
+read as proof; replay does not synthesize it. A contract that newly requires the
+claim changes the `assurance.go` operation binding (it gains the full SHA-256
+of the checker revision and the governing base, so a changed checker also re-plans), so the existing scheduler
+plans the missing verification for the exact subject within the run's assurance
+attempt and wall budgets (an exhausted budget settles as it always does and is
+never renewed), and a required check with no base revision refuses verification.
+See [file-size-policy.md](../file-size-policy.md).
+
 The physical provider-attempt wall is a last-resort hard fuse (#497), separate
 from provider inactivity and cumulative run active-work authority. An unstated
 `attempt_wall_limit_seconds` remains absent from canonical operator configuration

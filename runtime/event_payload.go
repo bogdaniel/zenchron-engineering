@@ -218,6 +218,7 @@ var eventPayloads = map[string]payloadValidator{
 			required("tree", p.Tree),
 			bounded("artifact_ref", p.ArtifactRef),
 			bounded("failure_signature", p.FailureSignature),
+			validateVerificationChecks(p.Checks),
 			optionalRef("bundle", p.Bundle))
 	})),
 	EventAuthorityEvaluated: payloadSchema(func(p AuthorityEvaluatedPayload) error {
@@ -546,6 +547,11 @@ type AssuranceObservedPayload struct {
 	// than any text a candidate wrote.
 	ArtifactRef      string `json:"artifact_ref,omitempty"`
 	FailureSignature string `json:"failure_signature,omitempty"`
+	// Checks are the specialised, deterministic checks this observation
+	// COMPLETED on its exact commit and tree (see verification_check.go). Absent
+	// on every observation written before the member existed, and absence is
+	// never read as a check having run.
+	Checks []VerificationCheck `json:"checks,omitempty"`
 	// Semantic marks an observation produced by the independent semantic
 	// acceptance verifier rather than the automated one, and ClaimResults is its
 	// per-claim answer. A semantic verdict is claim-specific: one acceptance
