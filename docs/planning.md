@@ -763,6 +763,56 @@ both, as `2<3`: revision 2 governs, revision 3 is waiting for you.
 The shared flags are the ones every `autonomy` command takes: `--repo`,
 `--config`, `--text`, and `--agent` where an agent is being selected.
 
+### A reviewer whose invocation failed
+
+A reviewer whose invocation FAILS has not reviewed anything: it answered in a
+shape the verdict protocol refuses, ran out of provider time, or hit a
+transient provider fault. That is a fact about the invocation, not a verdict
+about the candidate, and it is not remediation - nothing is sent back to the
+producer. The run's own bounded protocol correction (one corrective attempt,
+ending in `execution.invoke_reviewer_protocol_correction_exhausted`) has already
+been spent by the time the run fails.
+
+The stage is then performed ONE more time, automatically, through the same
+execution-generation machinery described above (`runtime/plan_reviewer_recovery.go`).
+The failed run is retired, the generation advances, and the next pass freezes
+the assignment for the new generation and starts a new run.
+
+What is preserved: the retry is frozen from the assignment the failed
+performance already held, so it is the same reviewer, profile, worker,
+independence requirement and obligations reviewing the same exact upstream
+candidate and tree; the structural privilege comparison above still proves that
+before the run exists. The implementer is not rerun and no candidate changes. No
+verdict is invented: the retried reviewer decides, or fails, like any other, and
+nothing lets a person's approval stand in for an independent review.
+
+What bounds it:
+
+- **Which failures qualify** is decided from the failed run's typed failure
+  class, in one place (`reviewerFailureRecoverable`): the classes the runtime
+  already routes to a retry - a protocol failure, a transient provider or
+  infrastructure fault, a provider that made no progress, connectivity. A
+  cancelled run, a passed deadline, a quota or a missing credential, and any
+  verdict about the candidate (a blocking review, an authority refusal) do not
+  qualify. A run that ended on a run-level budget - wall time, lifecycle,
+  continuations, provider invocations, assurance - never qualifies whatever its
+  last class was.
+- **How many:** at most two performances of one reviewer stage against one exact
+  candidate and tree - the original and one retry - counted from the durable
+  assignments and runs, so replay and restart read the same answer and cannot
+  start a second one.
+- **Budget:** the retry is a child run charged to the plan's aggregate envelope
+  and its invocations count against it like any run's. A plan that has spent its
+  child-run or invocation ceiling settles the stage FAILED instead; nothing
+  renews a spent budget. The stage's own per-performance assignment budget
+  applies to the new performance, as it does to any re-performance.
+
+If the retry is exhausted, ineligible, or unaffordable, the stage settles
+`failed` with the failure it actually had, the plan reads `blocked`, and the
+objective page shows the failed stage and the held candidate. There is no manual
+override for it: a manual recovery action, if one is ever added, has to be typed,
+bounded and governed on its own terms.
+
 ## Revision and decomposition
 
 Plans are revisioned immutable artifacts, not mutable conversational state.
