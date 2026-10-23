@@ -51,7 +51,8 @@ func independentReviewEnvelope(r ExecutionRequest) string {
 			"Ask yourself: can this pass its tests while the claimed invariant is still false? What happens on restart or replay? "+
 			"Can a retry duplicate or reset something? Can untrusted input influence authority? Does status or a UI disagree with "+
 			"actual enforcement? Are revisions, trees, evidence and authority bound to the exact subject?\n\n"+
-			"REQUIRED RESULT. Return a JSON document as your final answer; the runtime captures it into its typed result slot, "+
+			"REQUIRED RESULT. Return a JSON document as your final answer, as a bare JSON object with no code fence and no text "+
+			"before or after it; the runtime captures it into its typed result slot, "+
 			"and nothing else decides this review. "+
 			"The document is a JSON object with exactly these members: %s (%q), %s (%q or %q), "+
 			"%s (an array of objects with a %s, an optional %s, and an optional %s of %q or %q - absent or unrecognized reads as %q), "+
