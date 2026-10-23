@@ -20,6 +20,7 @@ type fakeUpHost struct {
 	spawned            [][]string
 	spawnedExecutables []string
 	controllerBinary   string
+	portOf             map[int]string
 	exitAtOnce         bool
 	terminated         []int
 	opened             []string
@@ -33,6 +34,7 @@ func (h *fakeUpHost) DashboardHealthy(a, _ string) bool    { return h.answering[
 func (h *fakeUpHost) Open(url string) error                { h.opened = append(h.opened, url); return nil }
 func (h *fakeUpHost) Terminate(pid int) error {
 	h.terminated = append(h.terminated, pid)
+	delete(h.answering, h.portOf[pid]) // a stopped dashboard frees its port
 	h.alive[pid] = false
 	return nil
 }
@@ -190,5 +192,30 @@ func TestUpRunsTheDashboardAsTheServingControllersBinary(t *testing.T) {
 	}
 	if len(host.spawnedExecutables) != 1 || host.spawnedExecutables[0] != host.controllerBinary {
 		t.Fatalf("dashboard started with %v, want the controller's own binary", host.spawnedExecutables)
+	}
+}
+
+func TestUpReplacesADashboardFromAnEarlierControllerGeneration(t *testing.T) {
+	host, args := newUpFixture(t)
+	host.controllerUp = true
+	host.controllerBinary = "/adopted/main-2/zenchron-engineering"
+	if err := writeProcessRecord(host.stateDir, serviceControlPlane, processRecord{PID: 4242, Listen: "127.0.0.1:8789", Executable: "/adopted/main-1/zenchron-engineering"}); err != nil {
+		t.Fatal(err)
+	}
+	host.alive[4242] = true
+	host.answering["127.0.0.1:8789"] = true
+	host.portOf = map[int]string{4242: "127.0.0.1:8789"}
+	var out bytes.Buffer
+	if _, err := upCommand(append(args, "--no-open"), host, fastTiming, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if len(host.terminated) != 1 || host.terminated[0] != 4242 {
+		t.Fatalf("the old-generation dashboard was not stopped: %v", host.terminated)
+	}
+	if len(host.spawnedExecutables) != 1 || host.spawnedExecutables[0] != host.controllerBinary {
+		t.Fatalf("replacement ran %v, want the new controller's binary", host.spawnedExecutables)
+	}
+	if !strings.Contains(out.String(), "127.0.0.1:8789") {
+		t.Fatalf("the replacement should keep the operator's address:\n%s", out.String())
 	}
 }

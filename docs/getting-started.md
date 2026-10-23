@@ -130,7 +130,7 @@ record is trusted only while the process it names is still the one that wrote it
 same pid, same start time and same executable running that service, so a
 recycled pid is ignored even when it now runs another Zenchron service. The
 dashboard counts as running only when it refuses a wrong token and accepts this
-state directory's own, so a different program on the port is never reused. `down`
+state directory's own, so a different program on the port is never reused. After a controller handover, a dashboard built from the previous generation is replaced on the same address, because the controller would refuse everything it tried to do. `down`
 never kills: `serve` shuts down gracefully and leaves every run as resumable as
 its journal says. A supervisor started by a build older than this feature
 never recorded itself, so `down` names it and leaves it for you to stop.
