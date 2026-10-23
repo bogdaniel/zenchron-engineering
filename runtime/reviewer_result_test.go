@@ -618,3 +618,36 @@ func TestTheReviewerFindingBoundIsTheDurableBound(t *testing.T) {
 		})
 	}
 }
+
+// A reviewer that wraps its otherwise valid verdict in ONE markdown code fence
+// is admitted exactly as a bare one is (run-c9d15e0f, #659). Nothing else about
+// the envelope is relaxed: prose around the fence, a second fence, an unknown
+// member inside it, or a fence that is not a JSON fence are all still refused.
+func TestAFencedVerdictIsReadAndEveryNearMissIsStillRefused(t *testing.T) {
+	const bare = `{"schema_version":"0.1","verdict":"accepted","findings":[],"reason":"checked"}`
+	for name, test := range map[string]struct {
+		document string
+		admitted bool
+	}{
+		"bare":                              {bare, true},
+		"json fence":                        {"```json\n" + bare + "\n```", true},
+		"plain fence":                       {"```\n" + bare + "\n```\n", true},
+		"prose before":                      {"Here is my review:\n```json\n" + bare + "\n```", false},
+		"prose after":                       {"```json\n" + bare + "\n```\nHope that helps.", false},
+		"two fences":                        {"```json\n" + bare + "\n```\n```json\n" + bare + "\n```", false},
+		"another language":                  {"```python\n" + bare + "\n```", false},
+		"unknown member in fence":           {"```json\n" + `{"schema_version":"0.1","verdict":"accepted","findings":[],"approved_by":"me"}` + "\n```", false},
+		"unclosed fence":                    {"```json\n" + bare, false},
+		"closing fence on the value's line": {"```json\n" + bare + "```", false},
+		"opening fence on the value's line": {"```" + bare + "\n```", false},
+	} {
+		path := filepath.Join(t.TempDir(), "reviewer-result.json")
+		if err := os.WriteFile(path, []byte(test.document), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		result, err := ReadReviewerResult(path)
+		if test.admitted != (err == nil && result != nil && result.Verdict == StageReviewAccepted) {
+			t.Errorf("%s: admitted=%v, want %v (err=%v)", name, err == nil && result != nil, test.admitted, err)
+		}
+	}
+}
