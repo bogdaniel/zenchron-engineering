@@ -763,7 +763,14 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		line("next probe", "at "+view.Retry.NotBefore.UTC().Format(time.RFC3339)+" (no earlier, across restarts)")
 	}
 	line("phase", view.Phase)
-	line("active consumed", fmt.Sprintf("%s (execution %s, assurance %s)", view.ActiveElapsed, view.ExecutionElapsed, view.AssuranceElapsed))
+	if view.AccountingMode == "legacy" {
+		line("accounting mode", "legacy")
+		line("active consumed", view.ActiveElapsed)
+		line("execution charge", fmt.Sprintf("%s (authoritative legacy charge)", view.ExecutionElapsed))
+		line("assurance observed", fmt.Sprintf("%s (overlapping execution charge)", view.AssuranceElapsed))
+	} else {
+		line("active consumed", fmt.Sprintf("%s (execution %s, assurance %s)", view.ActiveElapsed, view.ExecutionElapsed, view.AssuranceElapsed))
+	}
 	line("external wait", view.ExternalWaitElapsed)
 	line("lifecycle age", view.Elapsed)
 	line("base", view.Base.ID+"@"+short(view.Base.Revision))

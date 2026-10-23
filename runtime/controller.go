@@ -1178,9 +1178,11 @@ type StatusReport struct {
 	Elapsed             time.Duration `json:"elapsed"`
 	ActiveElapsed       time.Duration `json:"active_elapsed"`
 	ExternalWaitElapsed time.Duration `json:"external_wait_elapsed"`
-	// ActiveElapsed is TOTAL active work (execution + assurance + other charged
-	// work). AssuranceElapsed is the assurance share of it, and
-	// ExecutionElapsed the rest, the amount WallLimit is judged against (#640).
+	// ActiveElapsed always reports total active work, including assurance.
+	// In split mode ExecutionElapsed + AssuranceElapsed == ActiveElapsed.
+	// In legacy mode ExecutionElapsed is the authoritative wall-budget charge;
+	// AssuranceElapsed is observed work overlapping that charge.
+	AccountingMode   string        `json:"accounting_mode"`
 	AssuranceElapsed time.Duration `json:"assurance_elapsed,omitempty"`
 	ExecutionElapsed time.Duration `json:"execution_elapsed,omitempty"`
 
@@ -1263,6 +1265,10 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 	budgets, unverifiable := state.reportedBudgets()
 	policy := state.runPolicy()
 	policy.Unverifiable = unverifiable
+	accountingMode := "split"
+	if state.budgets().AssuranceWallLimit <= 0 {
+		accountingMode = "legacy"
+	}
 	report := StatusReport{
 		SchemaVersion: SchemaVersion,
 		RunID:         state.run.ID,
@@ -1287,6 +1293,7 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		Elapsed:               now.Sub(state.run.CreatedAt),
 		ActiveElapsed:         state.activeElapsed(now),
 		ExternalWaitElapsed:   now.Sub(state.run.CreatedAt) - state.activeElapsed(now),
+		AccountingMode:        accountingMode,
 		AssuranceElapsed:      state.assuranceElapsed(now),
 		ExecutionElapsed:      state.executionElapsed(now),
 		Evidence:              state.projection.EvidenceBundles,
