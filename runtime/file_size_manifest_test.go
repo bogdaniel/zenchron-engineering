@@ -63,8 +63,7 @@ func TestManifestsTheCanonicalCheckerRefusesAreRefusedByTheVerifierToo(t *testin
 			"exc.go":                      manyLines(1300),
 			"base.go":                     manyLines(1100),
 		}, "fixture")
-		command := exec.Command(python, "scripts/check_file_sizes.py")
-		command.Dir = dir
+		command := canonicalSizeChecker(t, python, dir)
 		var stderr bytes.Buffer
 		command.Stderr = &stderr
 		pythonErr := command.Run()
@@ -121,8 +120,7 @@ func TestSymlinkedManifestEntriesAreRefusedLikeTheCanonicalChecker(t *testing.T)
 	}
 	const goodBaseline, goodExceptions = "base.go\t1100\n", "exc.go\t1400\treason\n"
 	canonicalRefuses := func(dir string) bool {
-		command := exec.Command(python, "scripts/check_file_sizes.py")
-		command.Dir = dir
+		command := canonicalSizeChecker(t, python, dir)
 		var stderr bytes.Buffer
 		command.Stderr = &stderr
 		return command.Run() != nil && strings.Contains(stderr.String(), "FAIL file-size check")
