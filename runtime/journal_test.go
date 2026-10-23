@@ -691,13 +691,13 @@ func TestReducersRefuseAnEventWithoutItsHash(t *testing.T) {
 // them, or declares their columns. Replay, ReplayPlan and the reducers are
 // deliberately absent: they must decide from the events alone (#453).
 var stateDigestReaders = map[string]bool{
-	"runtime/journal.go:appendToStream":                true, // allocates both
-	"runtime/journal.go:appendEventWithMutation":       true, // run row insert
-	"runtime/journal.go:queryStreamEventsLimited":      true, // column/document agreement
-	"runtime/journal.go:sqliteEventColumns":            true,
-	"runtime/journal.go:sqlitePlanEventColumns":        true,
-	"runtime/plan_store.go:planStream":                 true, // plan row insert (AppendPlanEvent's stream)
-	"runtime/sqlite_store.go:sqliteMigrations":         true, // DDL
+	"runtime/journal.go:appendToStream":                       true, // allocates both
+	"runtime/journal.go:appendEventWithMutation":              true, // run row insert
+	"runtime/journal.go:queryStreamEventsLimited":             true, // column/document agreement
+	"runtime/journal.go:sqliteEventColumns":                   true,
+	"runtime/journal.go:sqlitePlanEventColumns":               true,
+	"runtime/plan_store.go:planStream":                        true, // plan row insert (AppendPlanEvent's stream)
+	"runtime/sqlite_store.go:sqliteMigrations":                true, // DDL
 	"cmd/zenchron-engineering/operator_events.go:renderEvent": true, // display
 }
 
