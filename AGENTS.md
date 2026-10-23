@@ -425,7 +425,7 @@ Before you say a task is complete:
 - Fast validation: `test -z "$(gofmt -l .)"` and `go vet ./...`
 - Focused tests: `go test ./<package> -run '<TestPattern>'`
 - Build: `go build ./...`, plus `GOOS=windows GOARCH=amd64 go build ./...` when touching build-tagged files
-- Full test suite (GitHub CI only): `go test -timeout 30m ./...`
+- Full test suite (GitHub CI only): `go test -timeout 45m ./...`
 - Lint / format: `gofmt -l .`, `go vet ./...`, and `GOOS=windows GOARCH=amd64 go vet ./...` for build-tagged files
 - Focused race / concurrency tests: `go test -race ./<package> -run '<TestPattern>'`
 - Focused acceptance checks: not applicable; there is no separate acceptance command
