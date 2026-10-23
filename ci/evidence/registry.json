@@ -88,6 +88,7 @@
       "sources": [
         "runtime/supervisor*.go",
         "runtime/control_endpoint*.go",
+        "runtime/control_plane_primary.go",
         "runtime/new_issue.go",
         "runtime/control_session.go",
         "runtime/doctor.go",
