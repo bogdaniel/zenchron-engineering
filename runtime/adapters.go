@@ -150,6 +150,11 @@ type AssuranceRequest struct {
 	Policy             Ref
 	Producer           Ref
 	VerifierDefinition string
+	// FileSizePolicyBase, when set, makes the baseline verifier enforce the
+	// repository's file-size policy on Tree first, with the ceilings and
+	// exceptions of this base revision (see file_size_policy.go). Empty when
+	// the contract does not require it.
+	FileSizePolicyBase string
 	// The fields below are used by the semantic verifier. They are bounded,
 	// read-only context: identity, the exact base the diff is taken against, the
 	// changed-path inventory, a summary of the automated result, and the exact
@@ -174,6 +179,10 @@ type AssuranceResult struct {
 	// runtime/assurance_evidence.go.
 	ArtifactRef      string
 	FailureSignature string
+	// Checks are the specialised deterministic checks this verifier completed
+	// on the exact commit and tree (verification_check.go). They are recorded
+	// on the observation; a claim that needs one is discharged only from them.
+	Checks []VerificationCheck
 	// Model and Tokens are recorded only when the producer actually reports
 	// them. Nothing here is invented when a provider does not expose usage.
 	Model  string

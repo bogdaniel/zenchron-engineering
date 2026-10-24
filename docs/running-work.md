@@ -137,7 +137,9 @@ parses.
 
 Timing in status separates `active consumed` (`active_elapsed` in JSON),
 `external wait` (`external_wait_elapsed`), and `lifecycle age` (`elapsed`).
-Only active consumed time spends the run wall budget. An optional lifecycle
+For split accounting, execution elapsed spends the run wall budget and
+assurance has its own allowance. Legacy accounting charges all active consumed
+time to the run wall budget; observed assurance overlaps the execution charge. An optional lifecycle
 deadline bounds calendar age independently. A completed operation's active
 consumption is fixed at its journalled completion; it does not grow while the
 run waits for review. Polling during an external wait adds only the observation

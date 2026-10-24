@@ -269,7 +269,8 @@ waits are excluded exactly as in total active work) and charged to
 `RunBudgets.assurance_wall_limit`, not to `wall_limit`. Total active work remains
 execution + assurance + other charged work: it is what status reports as
 `active_elapsed` and what a plan's aggregate wall ceiling is judged by, while
-`execution_elapsed` and `assurance_elapsed` report the split. Each assurance
+`execution_elapsed` and `assurance_elapsed` report the split for
+`accounting_mode: split`. Each assurance
 attempt is bounded by the remaining assurance allowance (durable operation
 deadline, `deadline_bound: assurance_work`, applied to the verifier's context),
 so retries, `AssuranceRerun`, restarts and crashed workers can never reset it. The
@@ -278,8 +279,30 @@ default allowance (3600s) leaves headroom over one long verification but does
 not promise a complete second pass. An
 exhausted allowance fails the run `run_assurance_budget_exhausted`, retains the
 held candidate, and never satisfies assurance, authority or publication. A run
-frozen without the member (pre-#640) keeps the legacy rule; a negative frozen
+frozen without the member (pre-#640) reports `accounting_mode: legacy`:
+`execution_elapsed` is the authoritative legacy charge and `assurance_elapsed`
+is observed and overlapping, rather than an additive share. Plan aggregates
+still count total active work. Such runs keep the legacy rule; a negative frozen
 value fails closed.
+
+An `assurance.observed` payload may carry an optional, typed, bounded `checks`
+list (#663): one record per specialised deterministic check the verifier
+COMPLETED, each naming its `kind`, the `checker` and `checker_revision` that ran
+it, its `outcome` (`passed` or `failed`), the exact candidate `commit` and `tree`,
+and the governing `base_revision` whose rules it used. A requirement is satisfied
+only by evidence that proves THAT requirement: the claim `claim-file-size-policy`
+is discharged only from a passing observation whose `checks` hold a successful
+`file_size_policy` record by the current checker, bound to the observation's own
+commit and tree and to the contract's governing base. A generic passing suite
+discharges every other `automated_test` claim it always did and never this one.
+Observations written before the member existed carry none, and absence is never
+read as proof; replay does not synthesize it. A contract that newly requires the
+claim changes the `assurance.go` operation binding (it gains the full SHA-256
+of the checker revision and the governing base, so a changed checker also re-plans), so the existing scheduler
+plans the missing verification for the exact subject within the run's assurance
+attempt and wall budgets (an exhausted budget settles as it always does and is
+never renewed), and a required check with no base revision refuses verification.
+See [file-size-policy.md](../file-size-policy.md).
 
 The physical provider-attempt wall is a last-resort hard fuse (#497), separate
 from provider inactivity and cumulative run active-work authority. An unstated
