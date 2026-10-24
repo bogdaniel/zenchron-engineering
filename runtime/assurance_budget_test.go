@@ -219,3 +219,43 @@ func TestRunsWithoutAnAssuranceCeilingKeepTheLegacyRuleAndNegativeFailsClosed(t 
 		t.Fatal("a negative frozen assurance ceiling was accepted")
 	}
 }
+
+// Status must describe persisted legacy counters without changing their charge.
+func TestStatusAssuranceAccountingModes(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(map[bool]string{false: "split", true: "legacy"}[legacy], func(t *testing.T) {
+			budgets := RunBudgets{WallLimit: 30 * time.Minute, AttemptWallLimit: 30 * time.Minute, AssuranceWallLimit: time.Hour, MaxExecutionAttempts: 2}
+			fixture, provider, _ := assuranceFixture(t, budgets, 10*time.Minute, wallStep{mutate: true, complete: true, spend: time.Minute})
+			runID := fixture.start()
+			drive(fixture, provider, runID)
+			if legacy {
+				run := fixture.state(runID).run
+				frozen := *run.Budgets
+				frozen.AssuranceWallLimit = 0
+				run.Budgets = &frozen
+				if err := fixture.store.PutRun(run); err != nil {
+					t.Fatal(err)
+				}
+				// Today's configuration must not determine the persisted mode.
+			}
+			report, err := fixture.runtime.Status(runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.AssuranceElapsed < 10*time.Minute {
+				t.Fatalf("missing observed assurance: %+v", report)
+			}
+			if legacy {
+				if report.AccountingMode != "legacy" || report.ExecutionElapsed != report.ActiveElapsed {
+					t.Fatalf("legacy charge misrepresented: %+v", report)
+				}
+			} else if report.AccountingMode != "split" || report.ExecutionElapsed+report.AssuranceElapsed != report.ActiveElapsed {
+				t.Fatalf("split accounting misrepresented: %+v", report)
+			}
+			state := fixture.state(runID)
+			if got := ActiveElapsed(state.run, state.events, report.Now); got != report.ActiveElapsed {
+				t.Fatalf("plan active work %s != status %s", got, report.ActiveElapsed)
+			}
+		})
+	}
+}

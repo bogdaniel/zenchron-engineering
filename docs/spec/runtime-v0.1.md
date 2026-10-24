@@ -269,7 +269,8 @@ waits are excluded exactly as in total active work) and charged to
 `RunBudgets.assurance_wall_limit`, not to `wall_limit`. Total active work remains
 execution + assurance + other charged work: it is what status reports as
 `active_elapsed` and what a plan's aggregate wall ceiling is judged by, while
-`execution_elapsed` and `assurance_elapsed` report the split. Each assurance
+`execution_elapsed` and `assurance_elapsed` report the split for
+`accounting_mode: split`. Each assurance
 attempt is bounded by the remaining assurance allowance (durable operation
 deadline, `deadline_bound: assurance_work`, applied to the verifier's context),
 so retries, `AssuranceRerun`, restarts and crashed workers can never reset it. The
@@ -278,7 +279,10 @@ default allowance (3600s) leaves headroom over one long verification but does
 not promise a complete second pass. An
 exhausted allowance fails the run `run_assurance_budget_exhausted`, retains the
 held candidate, and never satisfies assurance, authority or publication. A run
-frozen without the member (pre-#640) keeps the legacy rule; a negative frozen
+frozen without the member (pre-#640) reports `accounting_mode: legacy`:
+`execution_elapsed` is the authoritative legacy charge and `assurance_elapsed`
+is observed and overlapping, rather than an additive share. Plan aggregates
+still count total active work. Such runs keep the legacy rule; a negative frozen
 value fails closed.
 
 An `assurance.observed` payload may carry an optional, typed, bounded `checks`
