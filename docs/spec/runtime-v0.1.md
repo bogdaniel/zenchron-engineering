@@ -763,6 +763,21 @@ records that workload's own exit status, and the verifier reads it as follows:
 
 Cancellation keeps its error and its owner's class.
 
+Every Docker lifecycle step `runContainer` performs (`create`, `start`, `inspect`,
+`wait`, `remove`) reports its own failure as a `SandboxStepError` naming the
+step, the runtime-owned operation, the container and the sanitised, bounded
+stderr tail, because the Docker CLI reports most infrastructure refusals as a
+bare `exit status 1` with the reason on stderr. The error wraps the original, so
+the classification above is unchanged. The adopted-controller build is the one
+caller that retries: a step that failed on the Docker lifecycle (never one whose
+workload ran and failed) is retried at most twice with a short backoff. The
+build holds an exclusive per-revision claim for its whole duration, so a
+not-running container of its operation is a leftover and is reconciled before
+the step runs again; state that cannot be reconciled refuses the build rather
+than being guessed at. A refusal
+carries an `AdoptedBuildFailure` (`step`, `attempts`, `transient`, operation,
+container, stderr) into `controller status`.
+
 Known ceilings, accepted deliberately:
 
 - **Signal deaths are infrastructure.** Docker's OOM record is not inspected.

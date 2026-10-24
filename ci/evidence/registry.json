@@ -524,6 +524,7 @@
       "sources": [
         "runtime/tool_*.go",
         "runtime/sandbox.go",
+        "runtime/sandbox_step_error.go",
         "runtime/toolchain_probe.go",
         "runtime/go_assurance_environment.go"
       ],

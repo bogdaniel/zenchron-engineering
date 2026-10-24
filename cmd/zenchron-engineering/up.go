@@ -160,7 +160,15 @@ func ensureControlPlane(host upHost, timing upTiming, stateDir, requested string
 	if err != nil {
 		return "", err
 	}
-	if recorded && host.Alive(record, serviceControlPlane) && host.DashboardHealthy(record.Listen, stateDir) {
+	if recorded && host.Alive(record, serviceControlPlane) {
+		// A live recorded dashboard that does not answer yet is starting or busy
+		// (a single probe is only seconds long and a loaded machine misses it).
+		// Starting a second one beside it would only be refused by its primary
+		// lock and moved to another port, so wait for it instead.
+		if !pollUntil(timing, func() bool { return host.DashboardHealthy(record.Listen, stateDir) }) {
+			return "", fmt.Errorf("the dashboard (pid %d) is running on %s but does not answer; see %s, then `down` and `up` again",
+				record.PID, record.Listen, controlPlaneLogPath(stateDir))
+		}
 		// A controller handover changes the generation the dashboard must
 		// match. One built from the previous generation still answers, but the
 		// controller would refuse everything it tried to do, so it is replaced

@@ -85,10 +85,12 @@ type ControllerUpdate struct {
 	// Trust is the trusted-main observation behind this attempt, as an
 	// operator needs it: floor, resolved trusted main, main_head, and why
 	// newer commits are not trusted (ADR-0007 §5).
-	Trust     *TrustReport `json:"trust,omitempty"`
-	Detail    string       `json:"detail,omitempty"`
-	StartedAt time.Time    `json:"started_at,omitempty"`
-	EndedAt   time.Time    `json:"ended_at,omitempty"`
+	Trust  *TrustReport `json:"trust,omitempty"`
+	Detail string       `json:"detail,omitempty"`
+	// Failure says which build step a refusal came from, when it came from one.
+	Failure   *UpdateFailure `json:"failure,omitempty"`
+	StartedAt time.Time      `json:"started_at,omitempty"`
+	EndedAt   time.Time      `json:"ended_at,omitempty"`
 }
 
 // ControllerUpdaterPorts are the effects, each of which already exists.
@@ -345,7 +347,7 @@ func (u *ControllerUpdater) finish(ctx context.Context, subject RevisionRecord, 
 	base := ControllerUpdate{Subject: subject, StartedAt: startedAt, EndedAt: now}
 
 	if buildErr != nil {
-		base.State, base.Detail = UpdateRefused, buildErr.Error()
+		base.State, base.Detail, base.Failure = UpdateRefused, buildErr.Error(), updateFailureOf(buildErr)
 		settle(base)
 		return
 	}

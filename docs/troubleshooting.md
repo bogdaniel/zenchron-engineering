@@ -246,6 +246,46 @@ enrolled, so there is nothing to watch`.** `autonomy watch` needs enrolment.
 `serve` does not: with no enrolment it governs the repository the invocation
 targets and takes explicit submissions only.
 
+**`refused for <sha>: the adopted build failed, so no binary was produced: …`**
+on the `upgrade` line of `controller status`. The controller built trusted main
+in the pinned container and the build did not finish; it keeps serving, and it
+rebuilds the same revision after ten minutes. `controller status` prints the
+failing step under the line, and `controller status --json` carries the same
+facts as `live.snapshot.update.failure`:
+
+| Field | Meaning |
+| --- | --- |
+| `upgrade step` / `step` | `toolchain` (the pinned image's `go version` probe) or `build` (the compile container) |
+| `attempts` | how many times the step ran, the first try included |
+| `infrastructure` / `transient` | the Docker lifecycle itself failed (create, start, inspect, wait, remove, or a daemon that did not answer). Only these are retried, at most twice more, after 2s and 8s |
+| `deterministic (not retried)` | the compiler or the probe ran and failed. It is never retried; the compiler's own stderr is in the refusal text |
+| `docker operation` / `docker container` | the runtime-owned operation and container the step used, for `docker ps -a` and the record under `<state_dir>/artifacts/docker-operations/` |
+| `stderr` | the last 1,000 bytes of what Docker or the compiler said, control characters removed and credentials redacted |
+
+Before a Docker step runs again the runtime reconciles the exact container
+this operation names: it is removed only if it exists and is not running (the
+leftover of an interrupted attempt, which is what `Conflict. The container name
+... is already in use` means). That is only safe because each build holds an
+exclusive per-revision claim (`<state_dir>/artifacts/docker-operations/adopted-build-<digest>.lock`)
+for its whole duration, taken by the controller's updater and by `controller
+build-adopted` alike; the kernel drops it when the holder dies. A second build
+of the same revision is refused with `another build of this revision is in
+progress` and touches nothing - a container that exists and is not running may
+simply be the other build's, created and about to start. A failure before any
+container existed (the daemon not ready) is retried with a backoff and no
+cleanup. If the daemon cannot answer while the leftover is being reconciled,
+the container's state is unknown, so the step does NOT run again on a guess:
+the reconciliation is what is retried, inside the same bound, and a build that
+cannot reconcile is refused with `could not be reconciled` and the Docker
+step's own stderr (`docker inspect` and `docker rm` keep their output like
+`docker create` does). Retrying changes nothing the
+build is verified against: the revision, the trusted-main evidence, the build
+environment digest and the self-probe are checked exactly as on a first try,
+and no step ever falls back to an unattested `go build`. If the retry is spent
+and the refusal persists, `controller build-adopted --repo <owner/name>
+--revision <sha>` runs the same governed build by hand and prints the real
+error.
+
 **`held at <sha>: …`** on the `serve` upgrade line, the `upgrade` line of
 `controller status`, and the `controller.trusted_main` WARN in `autonomy doctor`. The controller will not
 build or adopt a successor, and it keeps serving everything else (ADR-0007 §5).
