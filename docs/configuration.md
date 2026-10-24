@@ -211,10 +211,12 @@ headroom over one 43 minute full-suite verification; it does NOT fit two full
 assurance never satisfies assurance, authority or publication. Total active
 work is still reported: status shows `active consumed` (execution + assurance +
 other charged work, the figure a plan's aggregate ceiling is judged by) with its
-execution and assurance parts alongside. The value is frozen per run at
+execution and assurance parts alongside for new-format runs (`accounting_mode: split`). The value is frozen per run at
 creation, so configuration digests do not move. A run frozen before #640 has no such
 ceiling and keeps the legacy rule exactly: its assurance time is charged to
-`wall_limit_seconds`. Nothing is backfilled, and a negative frozen value is
+`wall_limit_seconds`. Status marks these runs `accounting_mode: legacy`: execution
+elapsed is the authoritative legacy charge, and assurance elapsed is observed
+and overlapping, not an additive share. Nothing is backfilled, and a negative frozen value is
 refused as corrupt state.
 
 `attempt_wall_limit_seconds` bounds ONE physical provider attempt, and it is a
