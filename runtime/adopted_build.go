@@ -761,6 +761,16 @@ func runAdoptedBuild(ctx context.Context, spec AdoptedBuildSpec) (BuildEnvironme
 
 	sandbox := spec.Sandbox
 	sandbox.OperationID = "adopted-build-" + spec.Revision
+	// EXCLUSIVE OWNERSHIP of this revision's build, for everything below: the
+	// controller's updater and a manual `controller build-adopted` of the same
+	// revision share a deterministic container name, and only the holder may
+	// reconcile a leftover container (#674 review). A build that cannot take it
+	// reports that another is in progress and touches nothing.
+	claim, err := claimAdoptedBuild(sandbox.StateDir, spec.Revision)
+	if err != nil {
+		return BuildEnvironment{}, err
+	}
+	defer claim.Release()
 
 	toolchain, err := adoptedBuildToolchain(ctx, sandbox, spec)
 	if err != nil {
@@ -770,14 +780,13 @@ func runAdoptedBuild(ctx context.Context, spec AdoptedBuildSpec) (BuildEnvironme
 	// The container's own stderr is the only account of WHY the compiler
 	// refused - a read-only --output, a module missing from the offline
 	// cache, an image that cannot run - and the caller has no run journal to
-	// fall back on, since none exists yet. It is captured bounded (the
-	// executor already ran it through boundedBuffer) and sanitised the same
-	// way an assurance transcript is before it reaches an operator.
-	out, err := sandbox.run(ctx, adoptedBuildArgs(spec))
-	if err != nil {
-		if detail := sanitizedDetail(compilerFailureDetail(out)); detail != "" {
-			return BuildEnvironment{}, fmt.Errorf("%w: %s", err, detail)
-		}
+	// fall back on, since none exists yet. runAdoptedStep returns it as an
+	// AdoptedBuildFailure naming the step, the attempts and the Docker
+	// operation, and retries only an infrastructure failure of the Docker
+	// lifecycle itself (#674), never a compile error.
+	if _, err := runAdoptedStep(ctx, sandbox, "build", func() (CommandOutput, error) {
+		return sandbox.run(ctx, adoptedBuildArgs(spec))
+	}); err != nil {
 		return BuildEnvironment{}, err
 	}
 
@@ -846,16 +855,13 @@ func adoptedBuildToolchain(ctx context.Context, sandbox DockerSandbox, spec Adop
 	args = append(args, sandbox.Image, "go", "version")
 	probe := sandbox
 	probe.OperationID = "adopted-build-toolchain-" + spec.Revision
-	out, err := probe.run(ctx, args)
+	// THE SAME LAW AS THE BUILD ITSELF. This phase's failure determines the
+	// sandbox result too - an image that cannot run, a platform mismatch, a
+	// daemon that refused - and "exit status 125" tells an operator none of
+	// it. There is no run journal to fall back on here either.
+	out, err := runAdoptedStep(ctx, probe, "toolchain", func() (CommandOutput, error) { return probe.run(ctx, args) })
 	if err != nil {
-		// THE SAME LAW AS THE BUILD ITSELF. This phase's failure determines the
-		// sandbox result too - an image that cannot run, a platform mismatch, a
-		// daemon that refused - and "exit status 125" tells an operator none of
-		// it. There is no run journal to fall back on here either.
-		if detail := sanitizedDetail(compilerFailureDetail(out)); detail != "" {
-			return "", fmt.Errorf("the pinned build toolchain could not be identified: %w: %s", err, detail)
-		}
-		return "", fmt.Errorf("the pinned build toolchain could not be identified: %w", err)
+		return "", err
 	}
 	return strings.TrimSpace(string(out.Stdout)), nil
 }

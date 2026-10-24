@@ -21,6 +21,8 @@ type fakeUpHost struct {
 	spawnedExecutables []string
 	controllerBinary   string
 	portOf             map[int]string
+	slowToAnswer       int // health probes that miss before the dashboard answers
+	healthChecks       int
 	exitAtOnce         bool
 	terminated         []int
 	opened             []string
@@ -30,8 +32,11 @@ type fakeUpHost struct {
 func (h *fakeUpHost) ControllerAnswers(string) bool        { return h.controllerUp }
 func (h *fakeUpHost) Alive(r processRecord, _ string) bool { return h.alive[r.PID] }
 func (h *fakeUpHost) PortFree(a string) bool               { return !h.busyPorts[a] && !h.answering[a] }
-func (h *fakeUpHost) DashboardHealthy(a, _ string) bool    { return h.answering[a] }
-func (h *fakeUpHost) Open(url string) error                { h.opened = append(h.opened, url); return nil }
+func (h *fakeUpHost) DashboardHealthy(a, _ string) bool {
+	h.healthChecks++
+	return h.answering[a] && h.healthChecks > h.slowToAnswer
+}
+func (h *fakeUpHost) Open(url string) error { h.opened = append(h.opened, url); return nil }
 func (h *fakeUpHost) Terminate(pid int) error {
 	h.terminated = append(h.terminated, pid)
 	delete(h.answering, h.portOf[pid]) // a stopped dashboard frees its port
@@ -217,5 +222,43 @@ func TestUpReplacesADashboardFromAnEarlierControllerGeneration(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "127.0.0.1:8789") {
 		t.Fatalf("the replacement should keep the operator's address:\n%s", out.String())
+	}
+}
+
+// A live recorded dashboard that misses a health probe (a loaded machine, a slow
+// start) is waited for, never replaced by a second instance on another port.
+func TestUpWaitsForALiveDashboardThatIsSlowToAnswer(t *testing.T) {
+	host, args := newUpFixture(t)
+	host.controllerUp = true
+	if err := writeProcessRecord(host.stateDir, serviceControlPlane, processRecord{PID: 4242, Listen: "127.0.0.1:8789"}); err != nil {
+		t.Fatal(err)
+	}
+	host.alive[4242], host.answering["127.0.0.1:8789"], host.slowToAnswer = true, true, 3
+	var out bytes.Buffer
+	if _, err := upCommand(append(args, "--no-open"), host, upTiming{Ready: time.Second, Poll: time.Millisecond}, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if len(host.spawned) != 0 || len(host.terminated) != 0 {
+		t.Fatalf("a slow but live dashboard was replaced: spawned=%v terminated=%v", host.spawned, host.terminated)
+	}
+	if !strings.Contains(out.String(), "127.0.0.1:8789") {
+		t.Fatalf("the operator must be told the existing address:\n%s", out.String())
+	}
+}
+
+func TestUpNamesALiveDashboardThatNeverAnswersInsteadOfStartingASecond(t *testing.T) {
+	host, args := newUpFixture(t)
+	host.controllerUp = true
+	if err := writeProcessRecord(host.stateDir, serviceControlPlane, processRecord{PID: 4242, Listen: "127.0.0.1:8789"}); err != nil {
+		t.Fatal(err)
+	}
+	host.alive[4242], host.answering["127.0.0.1:8789"] = true, true
+	host.slowToAnswer = 1 << 30
+	_, err := upCommand(append(args, "--no-open"), host, fastTiming, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "pid 4242") || !strings.Contains(err.Error(), "does not answer") {
+		t.Fatalf("err = %v, want one naming the live dashboard that does not answer", err)
+	}
+	if len(host.spawned) != 0 {
+		t.Fatalf("a second dashboard was started beside a live one: %v", host.spawned)
 	}
 }
