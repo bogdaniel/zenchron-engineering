@@ -261,8 +261,9 @@ const guardGrace = time.Second
 // is still cleaning up a live tool. The interval ends at the guard's grace
 // expiry, so a test goroutine stalled past it (a loaded runner, -race) observes
 // a finished cleanup and not a violation (#689). The scenario therefore
-// reports whether its window was missed, and a missed window is rerun - a
-// failure observed INSIDE the window is never retried or relaxed.
+// reports whether its window was missed, and a missed window is rerun. A window
+// is missed only when the tool is observed to have exited; a tool still alive
+// after a failed assertion is a violation, however late the goroutine ran.
 func TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup(t *testing.T) {
 	const attempts = 5
 	for attempt := 1; attempt <= attempts; attempt++ {
@@ -341,8 +342,13 @@ func retainsCapacityThroughGuardCleanup(t *testing.T) (windowMissed bool) {
 		t.Fatal("fixture did not reach the guard cleanup interval")
 	}
 	if saturated, err := s.VerificationSaturated("other"); !saturated || err != nil {
-		if err == nil && !insideInterval() {
-			t.Logf("the guard's cleanup interval had ended %s after the kill; rerunning the scenario", time.Since(killedAt))
+		// Elapsed time never classifies the failure: a stalled goroutine can be
+		// late while the tool is still alive. A tool alive after the read was
+		// alive throughout it (it was alive before, and a process does not come
+		// back), so capacity released then is the violation. Only a tool that
+		// exited by now, which this read may not have seen alive, is a missed window.
+		if err == nil && !processFromFileAlive(marker) {
+			t.Logf("the tool had exited %s after the kill, before the read could be established; rerunning the scenario", time.Since(killedAt))
 			return true
 		}
 		t.Fatal("restart released capacity while the death guard was still cleaning up a live tool")
