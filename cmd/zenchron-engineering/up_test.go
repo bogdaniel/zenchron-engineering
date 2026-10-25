@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -306,5 +308,106 @@ func TestStatusCommandExecutableGeneration(t *testing.T) {
 				t.Fatalf("status changed the process lifecycle: %+v", host)
 			}
 		})
+	}
+}
+
+func TestStatusJSON(t *testing.T) {
+	for _, tt := range []struct {
+		name, controller, dashboard, generation string
+		running, recorded, answers              bool
+	}{
+		{"current", "/current", "/current", "current", true, true, true},
+		{"earlier", "/current", "/old", "earlier", true, true, true},
+		{"unknown controller", "", "/old", "unknown", true, true, true},
+		{"unknown dashboard", "/current", "", "unknown", true, true, true},
+		{"both unknown", "", "", "unknown", true, true, true},
+		{"unavailable controller", "/current", "/old", "unknown", true, true, false},
+		{"not running", "", "", "unknown", false, false, false},
+		{"stale records", "/current", "/old", "unknown", false, true, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			host, args := newUpFixture(t)
+			host.controllerUp, host.controllerBinary = tt.answers, tt.controller
+			if tt.recorded {
+				for service, record := range map[string]processRecord{
+					serviceServe:        {PID: 41, Executable: "/stale"},
+					serviceControlPlane: {PID: 42, Listen: "127.0.0.1:8787", Executable: tt.dashboard},
+				} {
+					if err := writeProcessRecord(host.stateDir, service, record); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			host.alive[42], host.answering["127.0.0.1:8787"] = tt.running, tt.running
+			var out bytes.Buffer
+			code, err := statusCommand(append(args, "--json"), host, &out)
+			if err != nil || code != runtime.ExitCompleted {
+				t.Fatalf("status = %d, %v", code, err)
+			}
+			decoder := json.NewDecoder(&out)
+			var got map[string]map[string]any
+			if err := decoder.Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if err := decoder.Decode(new(any)); err != io.EOF {
+				t.Fatalf("extra output: %v", err)
+			}
+			supervisor, dashboard := got["supervisor"], got["dashboard"]
+			if supervisor["running"] != tt.answers || dashboard["running"] != tt.running || dashboard["generation"] != tt.generation {
+				t.Fatalf("status: %#v", got)
+			}
+			var pid, executable, address, dashboardPID any
+			if tt.answers && tt.recorded {
+				pid = float64(41)
+			}
+			if tt.answers && tt.controller != "" {
+				executable = tt.controller
+			}
+			if tt.running {
+				address, dashboardPID = "127.0.0.1:8787", float64(42)
+			}
+			for _, check := range []struct {
+				object map[string]any
+				key    string
+				want   any
+			}{
+				{supervisor, "pid", pid}, {supervisor, "executable", executable},
+				{dashboard, "address", address}, {dashboard, "pid", dashboardPID},
+			} {
+				value, exists := check.object[check.key]
+				if !exists || value != check.want {
+					t.Errorf("%s = %#v (exists %v), want %#v", check.key, value, exists, check.want)
+				}
+			}
+			if len(host.spawned)+len(host.terminated)+len(host.opened) != 0 {
+				t.Fatal("status changed lifecycle")
+			}
+		})
+	}
+}
+
+func TestJSONFlagIsStatusOnly(t *testing.T) {
+	host, args := newUpFixture(t)
+	if code, err := upCommand(append(args, "--json"), host, fastTiming, io.Discard); err == nil || code != runtime.ExitInvalid {
+		t.Fatalf("up: %d, %v", code, err)
+	}
+	if code, err := downCommand(append(args, "--json"), host, fastTiming, io.Discard); err == nil || code != runtime.ExitInvalid {
+		t.Fatalf("down: %d, %v", code, err)
+	}
+}
+
+func TestStatusJSONRunningSupervisorWithoutRecord(t *testing.T) {
+	host, args := newUpFixture(t)
+	host.controllerUp = true
+	var out bytes.Buffer
+	if code, err := statusCommand(append(args, "--json"), host, &out); err != nil || code != runtime.ExitCompleted {
+		t.Fatalf("status = %d, %v", code, err)
+	}
+	var got map[string]map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["supervisor"]["running"] != true || got["supervisor"]["pid"] != nil || got["supervisor"]["executable"] != nil {
+		t.Fatalf("unknown supervisor details must be null: %s", out.String())
 	}
 }
