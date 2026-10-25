@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,7 +72,7 @@ func TestNestedVerificationNativeToolCancellationFuseAndShutdown(t *testing.T) {
 				_, err := RunVerificationTool(ctx, descriptor, "probe", []string{marker, fifo})
 				finished <- err
 			}()
-			if err := waitForFile(marker, 2*time.Second); err != nil {
+			if err := waitForFile(marker, toolStartBound); err != nil {
 				t.Fatal(err)
 			}
 			if occupied, err := s.VerificationSaturated("other"); !occupied || err != nil {
@@ -208,7 +209,7 @@ func TestNestedVerificationDescendantOwnershipSurvivesWrapperDeath(t *testing.T)
 		t.Fatal(err)
 	}
 	defer func() { cancel(); _ = child.Wait() }()
-	if err := waitForFile(marker, 2*time.Second); err != nil {
+	if err := waitForFile(marker, toolStartBound); err != nil {
 		t.Fatal(err)
 	}
 	// The wrapper's descriptor is gone, as after process death. The child
@@ -246,7 +247,38 @@ func TestNestedVerificationDescendantOwnershipSurvivesWrapperDeath(t *testing.T)
 	}
 }
 
+// toolStartBound bounds how long a fixture waits for its tool to write the
+// marker that says it started. It only matters when the tool never starts, so it
+// is generous: a loaded runner starts a process late, and a start that is merely
+// slow is not what these tests are about (#689).
+const toolStartBound = 20 * time.Second
+
+// guardGrace is the grace RunVerificationTool gives a tool it terminates: the
+// fixture's tool ignores TERM, so the death guard cannot finish before it.
+const guardGrace = time.Second
+
+// The scenario below asserts a property of the INTERVAL in which the death guard
+// is still cleaning up a live tool. The interval ends at the guard's grace
+// expiry, so a test goroutine stalled past it (a loaded runner, -race) observes
+// a finished cleanup and not a violation (#689). The scenario therefore
+// reports whether its window was missed, and a missed window is rerun. A window
+// is missed only when the tool is observed to have exited; a tool still alive
+// after a failed assertion is a violation, however late the goroutine ran.
 func TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup(t *testing.T) {
+	const attempts = 5
+	for attempt := 1; attempt <= attempts; attempt++ {
+		var missed bool
+		t.Run(fmt.Sprintf("attempt-%d", attempt), func(t *testing.T) { missed = retainsCapacityThroughGuardCleanup(t) })
+		if !missed {
+			return
+		}
+	}
+	t.Fatalf("the guard's %s cleanup interval was missed on all %d attempts; the machine is too loaded to observe it", guardGrace, attempts)
+}
+
+// retainsCapacityThroughGuardCleanup runs the scenario once and reports whether
+// the guard's cleanup interval had already ended before it could be observed.
+func retainsCapacityThroughGuardCleanup(t *testing.T) (windowMissed bool) {
 	dir, store, s := toolFixture(t, 1)
 	s.LeaseDuration = 100 * time.Millisecond
 	parent := nestedParent(t, store, s, "producer")
@@ -276,29 +308,49 @@ func TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup(t *te
 		t.Fatal(err)
 	}
 	defer func() { _ = wrapper.Process.Kill(); _ = wrapper.Wait() }()
-	if err := waitForFile(marker, 2*time.Second); err != nil {
+	if err := waitForFile(marker, toolStartBound); err != nil {
 		t.Fatal(err)
 	}
+	// The second handle is opened first so that nothing slow sits between the
+	// wrapper's death and the observations the interval is about.
+	reopened, err := OpenSQLiteOperationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	killedAt := time.Now()
 	if err := wrapper.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
 	if err := wrapper.Wait(); err == nil {
 		t.Fatal("killed wrapper succeeded")
 	}
-	reopened, err := OpenSQLiteOperationStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
 	s.Store = reopened
 	s.Clock = &fakeClock{now: time.Now().Add(2 * time.Minute)}
 	if err := s.reclaimVerificationPermits(); err != nil {
 		t.Fatal(err)
 	}
+	// The guard cannot finish before killedAt+guardGrace, so a state read that
+	// ended before three quarters of it is inside the interval; later reads
+	// may legitimately see a finished cleanup.
+	insideInterval := func() bool { return time.Since(killedAt) < guardGrace*3/4 }
 	if !processFromFileAlive(marker) {
+		if !insideInterval() {
+			t.Logf("the guard's cleanup interval had ended %s after the kill; rerunning the scenario", time.Since(killedAt))
+			return true
+		}
 		t.Fatal("fixture did not reach the guard cleanup interval")
 	}
 	if saturated, err := s.VerificationSaturated("other"); !saturated || err != nil {
+		// Elapsed time never classifies the failure: a stalled goroutine can be
+		// late while the tool is still alive. A tool alive after the read was
+		// alive throughout it (it was alive before, and a process does not come
+		// back), so capacity released then is the violation. Only a tool that
+		// exited by now, which this read may not have seen alive, is a missed window.
+		if err == nil && !processFromFileAlive(marker) {
+			t.Logf("the tool had exited %s after the kill, before the read could be established; rerunning the scenario", time.Since(killedAt))
+			return true
+		}
 		t.Fatal("restart released capacity while the death guard was still cleaning up a live tool")
 	}
 	// No further Scheduler.Next, acquisition, release request, or service stop:
@@ -365,6 +417,7 @@ func TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup(t *te
 	if len(operations) != 1 || operations[0].AttemptIdentity != parent.AttemptIdentity {
 		t.Fatal("orphan recovery duplicated the parent attempt")
 	}
+	return false
 }
 
 func TestNestedVerificationToolLockOverridesTheSchedulerProcessProbe(t *testing.T) {

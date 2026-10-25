@@ -77,8 +77,13 @@ func TestAShortToolClearsItsSuspensionWithoutWaitingForTheSlot(t *testing.T) {
 // says so. With precede, an ordinary write has just started when the tool
 // opens, so the OPEN edge is the one that must not wait for the slot.
 func longTool(t *testing.T, precede bool) {
-	const limit = 800 * time.Millisecond // a 200ms interval, a ~3ms edge spacing
-	const prompt = 100 * time.Millisecond
+	// The property is RELATIVE: an edge must reach status well before the next
+	// ordinary slot, never at it. prompt is therefore half the interval, and the
+	// absolute scale is what a loaded machine can miss - at 800ms (a 200ms
+	// interval, a 100ms bound) a stalled scheduler failed the post-merge run
+	// (#689). A 3.2s limit keeps the same ratio with four times the margin.
+	const limit = 3200 * time.Millisecond // an 800ms interval, a ~13ms edge spacing
+	const prompt = 400 * time.Millisecond
 	duringInvocation(t, func(f *phase8Fixture, runID string, journal RunOperation) {
 		defer ownerLiveness(f, true)()
 		stream, ctx, stop := edgeStream(limit, func(p ProviderProgress) {
