@@ -317,8 +317,10 @@ func statusCommand(args []string, host upHost, stdout io.Writer) (int, error) {
 		return runtime.ExitInvalid, err
 	}
 	supervisor := "not running"
+	controllerExecutable := ""
 	if host.ControllerAnswers(stateDir) {
 		supervisor = "running"
+		controllerExecutable = host.ControllerExecutable(stateDir)
 	}
 	if record, ok, err := readProcessRecord(stateDir, serviceServe); err != nil {
 		return runtime.ExitFailed, err
@@ -326,6 +328,9 @@ func statusCommand(args []string, host upHost, stdout io.Writer) (int, error) {
 		supervisor += fmt.Sprintf(" (pid %d)", record.PID)
 	} else if ok && !host.Alive(record, serviceServe) {
 		supervisor += " (stale record from pid " + strconv.Itoa(record.PID) + "; `up` will replace it)"
+	}
+	if controllerExecutable != "" {
+		supervisor += fmt.Sprintf(" (executable %s)", controllerExecutable)
 	}
 	fmt.Fprintf(stdout, "%-14s %s\n", "supervisor", supervisor)
 
@@ -337,6 +342,9 @@ func statusCommand(args []string, host upHost, stdout io.Writer) (int, error) {
 	switch {
 	case ok && host.Alive(record, serviceControlPlane) && host.DashboardHealthy(record.Listen, stateDir):
 		dashboard = fmt.Sprintf("http://%s/ (pid %d)", record.Listen, record.PID)
+		if controllerExecutable != "" && record.Executable != "" && record.Executable != controllerExecutable {
+			dashboard += " (built for an earlier generation; `up` will replace it)"
+		}
 	case ok:
 		dashboard = "not running (stale record; `up` will replace it)"
 	}
