@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 
 // fakeUpHost is the machine boundary of `up`: processes, ports, the browser.
 type fakeUpHost struct {
+	terminateErr       error
+	stayAlive          bool
 	controllerUp       bool
 	alive              map[int]bool
 	busyPorts          map[string]bool
@@ -41,6 +44,12 @@ func (h *fakeUpHost) DashboardHealthy(a, _ string) bool {
 func (h *fakeUpHost) Open(url string) error { h.opened = append(h.opened, url); return nil }
 func (h *fakeUpHost) Terminate(pid int) error {
 	h.terminated = append(h.terminated, pid)
+	if h.terminateErr != nil {
+		return h.terminateErr
+	}
+	if h.stayAlive {
+		return nil
+	}
 	delete(h.answering, h.portOf[pid]) // a stopped dashboard frees its port
 	h.alive[pid] = false
 	return nil
@@ -306,6 +315,90 @@ func TestStatusCommandExecutableGeneration(t *testing.T) {
 			}
 			if len(host.spawned) != 0 || len(host.terminated) != 0 || len(host.opened) != 0 {
 				t.Fatalf("status changed the process lifecycle: %+v", host)
+			}
+		})
+	}
+}
+
+func TestDownOutcomeSummary(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		live         []string
+		stale        bool
+		unrecorded   bool
+		terminateErr error
+		stayAlive    bool
+		corrupt      bool
+		want         string
+		wantErr      string
+	}{
+		{name: "stopped", live: []string{serviceControlPlane, serviceServe}, want: "stopped: control-plane, serve; left running: none; not running: none"},
+		{name: "absent", want: "stopped: none; left running: none; not running: control-plane, serve"},
+		{name: "stale", stale: true, want: "stopped: none; left running: none; not running: control-plane, serve"},
+		{name: "terminate failure", live: []string{serviceControlPlane, serviceServe}, terminateErr: errors.New("denied"), want: "stopped: none; left running: control-plane, serve; not running: none", wantErr: "stop control-plane (pid 10): denied\nstop serve (pid 11): denied"},
+		{name: "timeout", live: []string{serviceControlPlane, serviceServe}, stayAlive: true, want: "stopped: none; left running: control-plane, serve; not running: none", wantErr: "control-plane (pid 10) is still shutting down; it is finishing in-flight work, run `down` again shortly\nserve (pid 11) is still shutting down; it is finishing in-flight work, run `down` again shortly"},
+		{name: "unrecorded", unrecorded: true, want: "stopped: none; left running: serve; not running: control-plane", wantErr: "unrecorded"},
+		{name: "mixed", live: []string{serviceControlPlane}, unrecorded: true, want: "stopped: control-plane; left running: serve; not running: none", wantErr: "unrecorded"},
+		{name: "stopped and absent", live: []string{serviceControlPlane}, want: "stopped: control-plane; left running: none; not running: serve"},
+		{name: "unknown all none", corrupt: true, want: "stopped: none; left running: none; not running: none", wantErr: "corrupt"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			host, args := newUpFixture(t)
+			host.controllerUp, host.terminateErr, host.stayAlive = tt.unrecorded, tt.terminateErr, tt.stayAlive
+			for i, service := range []string{serviceControlPlane, serviceServe} {
+				if tt.corrupt {
+					if err := os.WriteFile(processRecordPath(host.stateDir, service), []byte("{"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					continue
+				}
+				live := false
+				for _, name := range tt.live {
+					if name == service {
+						live = true
+					}
+				}
+				if live || tt.stale {
+					if err := writeProcessRecord(host.stateDir, service, processRecord{PID: 10 + i}); err != nil {
+						t.Fatal(err)
+					}
+					host.alive[10+i] = live
+				}
+			}
+			var out bytes.Buffer
+			code, err := downCommand(args, host, fastTiming, &out)
+			wantCode := runtime.ExitCompleted
+			wantErr := tt.wantErr
+			if wantErr != "" {
+				wantCode = runtime.ExitFailed
+			}
+			if wantErr == "unrecorded" {
+				wantErr = "a supervisor answers on " + host.stateDir + " but did not record itself, so it was started by an older build; stop it with Ctrl-C in its terminal"
+			}
+			if code != wantCode || (err != nil) != (wantErr != "") {
+				t.Fatalf("down = %d, %v", code, err)
+			}
+			if wantErr != "" && wantErr != "corrupt" && err.Error() != wantErr {
+				t.Fatalf("error = %q, want %q", err, wantErr)
+			}
+			if !strings.HasSuffix(out.String(), tt.want+"\n") {
+				t.Fatalf("output = %q, want final line %q", out.String(), tt.want)
+			}
+			if tt.wantErr == "" {
+				for i, service := range []string{serviceControlPlane, serviceServe} {
+					line := service + strings.Repeat(" ", 14-len(service)) + " not running\n"
+					if host.alive[10+i] {
+						t.Fatalf("%s still alive", service)
+					}
+					for _, live := range tt.live {
+						if live == service {
+							line = service + strings.Repeat(" ", 14-len(service)) + " stopped (pid " + []string{"10", "11"}[i] + ")\n"
+						}
+					}
+					if !strings.Contains(out.String(), line) {
+						t.Fatalf("missing per-service line %q in %q", line, out.String())
+					}
+				}
 			}
 		})
 	}

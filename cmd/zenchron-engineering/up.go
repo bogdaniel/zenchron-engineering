@@ -175,7 +175,7 @@ func ensureControlPlane(host upHost, timing upTiming, stateDir, requested string
 		// controller would refuse everything it tried to do, so it is replaced
 		// on the same address rather than reused.
 		if serving := host.ControllerExecutable(stateDir); serving != "" && record.Executable != "" && record.Executable != serving {
-			if err := stopService(host, timing, stateDir, serviceControlPlane, stdout); err != nil {
+			if _, err := stopService(host, timing, stateDir, serviceControlPlane, stdout); err != nil {
 				return "", err
 			}
 			if requested == "" {
@@ -271,41 +271,56 @@ func downCommand(args []string, host upHost, timing upTiming, stdout io.Writer) 
 		return runtime.ExitInvalid, err
 	}
 	var failures []string
+	outcomes := map[string][]string{}
 	// The dashboard first: it only reads, so nothing waits on it.
 	for _, service := range []string{serviceControlPlane, serviceServe} {
-		if err := stopService(host, timing, stateDir, service, stdout); err != nil {
+		outcome, err := stopService(host, timing, stateDir, service, stdout)
+		if outcome != "" {
+			outcomes[outcome] = append(outcomes[outcome], service)
+		}
+		if err != nil {
 			failures = append(failures, err.Error())
 		}
 	}
+	fmt.Fprintf(stdout, "stopped: %s; left running: %s; not running: %s\n",
+		downServices(outcomes["stopped"]), downServices(outcomes["left running"]), downServices(outcomes["not running"]))
 	if len(failures) > 0 {
 		return runtime.ExitFailed, errors.New(strings.Join(failures, "\n"))
 	}
 	return runtime.ExitCompleted, nil
 }
 
-func stopService(host upHost, timing upTiming, stateDir, service string, stdout io.Writer) error {
+func downServices(services []string) string {
+	if len(services) == 0 {
+		return "none"
+	}
+	return strings.Join(services, ", ")
+}
+
+// An empty outcome means the process state could not be observed.
+func stopService(host upHost, timing upTiming, stateDir, service string, stdout io.Writer) (string, error) {
 	record, recorded, err := readProcessRecord(stateDir, service)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !recorded || !host.Alive(record, service) {
 		if recorded {
 			_ = os.Remove(processRecordPath(stateDir, service))
 		}
 		if service == serviceServe && host.ControllerAnswers(stateDir) {
-			return fmt.Errorf("a supervisor answers on %s but did not record itself, so it was started by an older build; stop it with Ctrl-C in its terminal", stateDir)
+			return "left running", fmt.Errorf("a supervisor answers on %s but did not record itself, so it was started by an older build; stop it with Ctrl-C in its terminal", stateDir)
 		}
 		fmt.Fprintf(stdout, "%-14s not running\n", service)
-		return nil
+		return "not running", nil
 	}
 	if err := host.Terminate(record.PID); err != nil {
-		return fmt.Errorf("stop %s (pid %d): %w", service, record.PID, err)
+		return "left running", fmt.Errorf("stop %s (pid %d): %w", service, record.PID, err)
 	}
 	if !pollUntil(timing, func() bool { return !host.Alive(record, service) }) {
-		return fmt.Errorf("%s (pid %d) is still shutting down; it is finishing in-flight work, run `down` again shortly", service, record.PID)
+		return "left running", fmt.Errorf("%s (pid %d) is still shutting down; it is finishing in-flight work, run `down` again shortly", service, record.PID)
 	}
 	fmt.Fprintf(stdout, "%-14s stopped (pid %d)\n", service, record.PID)
-	return nil
+	return "stopped", nil
 }
 
 // Pointers preserve unknown values as JSON null.

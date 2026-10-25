@@ -145,6 +145,11 @@ state directory's own, so a different program on the port is never reused. After
 never kills: `serve` shuts down gracefully and leaves every run as resumable as
 its journal says. A supervisor started by a build older than this feature
 never recorded itself, so `down` names it and leaves it for you to stop.
+The final `stopped: <services>; left running: <services>; not running: <services>`
+line summarizes what `down` observed, using `none` for empty buckets. A service
+is stopped only once its process is confirmed gone; a live service that could
+not be stopped, including an unrecorded supervisor, is left running. Services
+with nothing to stop are not running.
 
 There is one primary dashboard per state directory. Starting a second
 `control-plane` (or an `up` racing a hand-started one) is refused, naming the
