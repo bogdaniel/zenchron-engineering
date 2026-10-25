@@ -262,3 +262,49 @@ func TestUpNamesALiveDashboardThatNeverAnswersInsteadOfStartingASecond(t *testin
 		t.Fatalf("a second dashboard was started beside a live one: %v", host.spawned)
 	}
 }
+
+func TestStatusCommandExecutableGeneration(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		controller string
+		dashboard  string
+		answers    bool
+		wantOlder  bool
+	}{
+		{"same generation", "/build/current", "/build/current", true, false},
+		{"different generation", "/build/current", "/build/previous", true, true},
+		{"unknown controller", "", "/build/previous", true, false},
+		{"unknown dashboard", "/build/current", "", true, false},
+		{"both unknown", "", "", true, false},
+		{"controller unavailable", "/build/current", "/build/previous", false, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			host, args := newUpFixture(t)
+			host.controllerUp = tt.answers
+			host.controllerBinary = tt.controller
+			host.alive[42] = true
+			host.answering["127.0.0.1:8787"] = true
+			if err := writeProcessRecord(host.stateDir, serviceControlPlane, processRecord{
+				PID: 42, Listen: "127.0.0.1:8787", Executable: tt.dashboard,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if code, err := statusCommand(args, host, &out); err != nil || code != runtime.ExitCompleted {
+				t.Fatalf("status = %d, %v\n%s", code, err, out.String())
+			}
+			if got := strings.Contains(out.String(), "(executable "); got != (tt.answers && tt.controller != "") {
+				t.Fatalf("controller generation visibility = %v:\n%s", got, out.String())
+			}
+			if tt.answers && tt.controller != "" && !strings.Contains(out.String(), "(executable "+tt.controller+")") {
+				t.Fatalf("missing serving controller executable:\n%s", out.String())
+			}
+			if got := strings.Contains(out.String(), "built for an earlier generation; `up` will replace it"); got != tt.wantOlder {
+				t.Fatalf("earlier generation claim = %v, want %v:\n%s", got, tt.wantOlder, out.String())
+			}
+			if len(host.spawned) != 0 || len(host.terminated) != 0 || len(host.opened) != 0 {
+				t.Fatalf("status changed the process lifecycle: %+v", host)
+			}
+		})
+	}
+}
