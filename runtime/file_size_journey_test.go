@@ -52,27 +52,100 @@ func (a *sizeAssurance) Assure(ctx context.Context, request AssuranceRequest) (A
 
 // withFileSizeClaim is the operator's policy change (docs/file-size-policy.md):
 // the claim is required, and publication is conditioned on it.
+//
+// It is policy.withFileSizeObligation (policy/file_size_claim_test.go) applied
+// rule for rule, because that helper lives in the external policy_test package
+// and cannot be imported, and the runtime must not be given a production export
+// for a test's sake. The additions are exactly the ones docs/file-size-policy.md
+// lists, on every rule, keeping every existing member: the required claim, a
+// MATERIAL obligation backed by it, the claim appended to each authority
+// condition, and the claim appended to the acceptance-discharge claims.
 func withFileSizeClaim(policy domain.EngineeringPolicy) domain.EngineeringPolicy {
-	rules := map[string]domain.PolicyRule{}
+	out := policy
+	out.Revision = "2"
+	out.Rules = map[string]domain.PolicyRule{}
 	for id, rule := range policy.Rules {
 		effect := rule.Effect
 		claims := map[string]domain.RequiredClaim{}
-		for name, claim := range *effect.RequiredClaims {
-			claims[name] = claim
+		if effect.RequiredClaims != nil {
+			for name, claim := range *effect.RequiredClaims {
+				claims[name] = claim
+			}
 		}
 		claims[FileSizePolicyClaimID] = domain.RequiredClaim{EvidenceClass: AssuranceEvidenceClass, IndependentFromChangeProducer: true}
 		effect.RequiredClaims = &claims
-		conditions := make([]domain.AuthorityCondition, 0, len(*effect.AuthorityConditions))
-		for _, condition := range *effect.AuthorityConditions {
-			condition.RequiredClaims = append(append([]string(nil), condition.RequiredClaims...), FileSizePolicyClaimID)
-			conditions = append(conditions, condition)
+		obligations := map[string]domain.PolicyRequirement{}
+		if effect.Obligations != nil {
+			for name, obligation := range *effect.Obligations {
+				obligations[name] = obligation
+			}
 		}
-		effect.AuthorityConditions = &conditions
-		rules[id] = domain.PolicyRule{When: rule.When, Effect: effect}
+		obligations[fileSizeObligationID] = domain.PolicyRequirement{
+			Statement:      "The repository's file-size policy must hold on the exact candidate tree.",
+			RequiredClaims: &[]string{FileSizePolicyClaimID},
+			Material:       true,
+		}
+		effect.Obligations = &obligations
+		if effect.AuthorityConditions != nil {
+			conditions := make([]domain.AuthorityCondition, 0, len(*effect.AuthorityConditions))
+			for _, condition := range *effect.AuthorityConditions {
+				condition.RequiredClaims = append(append([]string(nil), condition.RequiredClaims...), FileSizePolicyClaimID)
+				conditions = append(conditions, condition)
+			}
+			effect.AuthorityConditions = &conditions
+		}
+		discharge := []string{FileSizePolicyClaimID}
+		if effect.AcceptanceDischargeClaims != nil {
+			discharge = append(append([]string(nil), *effect.AcceptanceDischargeClaims...), FileSizePolicyClaimID)
+		}
+		effect.AcceptanceDischargeClaims = &discharge
+		out.Rules[id] = domain.PolicyRule{When: rule.When, Effect: effect}
 	}
-	policy.Rules = rules
-	policy.Revision = "2"
-	return policy
+	return out
+}
+
+const fileSizeObligationID = "file-size-policy"
+
+// requireCompleteFileSizeConfiguration asserts the whole operator configuration
+// reached what the run is governed by: the rebuilt contract requires the claim,
+// carries the MATERIAL obligation it backs, gates publication on it, and the
+// policy the contract was compiled from lists the claim among the claims that
+// discharge acceptance.
+func (f *phase8Fixture) requireCompleteFileSizeConfiguration(state *runState) domain.EngineeringWorkContract {
+	f.t.Helper()
+	kernel, err := f.runtime.buildKernel(state)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	contract := kernel.Contract
+	if claim, ok := contract.RequiredClaims[FileSizePolicyClaimID]; !ok || claim.EvidenceClass != AssuranceEvidenceClass {
+		f.t.Fatalf("the contract does not require the claim: %+v", contract.RequiredClaims)
+	}
+	obligation, ok := contract.Obligations[fileSizeObligationID]
+	if !ok || !obligation.Material {
+		f.t.Fatalf("the contract does not carry the file-size obligation as material: %+v", contract.Obligations)
+	}
+	var gated bool
+	for _, condition := range contract.AuthorityConditions {
+		for _, id := range condition.RequiredClaims {
+			gated = gated || id == FileSizePolicyClaimID
+		}
+	}
+	if !gated {
+		f.t.Fatalf("no protected action waits on the claim: %+v", contract.AuthorityConditions)
+	}
+	for id, rule := range f.deps.Policy.Rules {
+		var discharges bool
+		if rule.Effect.AcceptanceDischargeClaims != nil {
+			for _, claim := range *rule.Effect.AcceptanceDischargeClaims {
+				discharges = discharges || claim == FileSizePolicyClaimID
+			}
+		}
+		if !discharges {
+			f.t.Fatalf("the policy the contract was compiled from does not list the claim among rule %q's acceptance-discharge claims", id)
+		}
+	}
+	return contract
 }
 
 // newSizeJourney is the standard governed-run fixture over a base that carries
@@ -257,11 +330,8 @@ func TestAnOversizedCandidateCannotReachAuthorityUntilItsFileSizeCheckPasses(t *
 		}
 	}
 	state := fixture.state(runID)
-	kernel, err := fixture.runtime.buildKernel(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bundles, err := fixture.runtime.evidenceBundles(state, kernel.Contract)
+	contract := fixture.requireCompleteFileSizeConfiguration(state)
+	bundles, err := fixture.runtime.evidenceBundles(state, contract)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,14 +387,8 @@ func TestARunAssuredBeforeTheRequirementExistedIsVerifiedAgainWhenItDoes(t *test
 	if !strings.Contains(newKey, "|file-size-policy@") || newKey == oldKey || state.satisfied(OpAssuranceGo, newKey) {
 		t.Fatalf("the requirement did not make verification eligible again: old %q new %q", oldKey, newKey)
 	}
-	kernel, err := fixture.runtime.buildKernel(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, required := kernel.Contract.RequiredClaims[FileSizePolicyClaimID]; !required {
-		t.Fatalf("the contract the new controller weighs does not require the claim: %+v", kernel.Contract.RequiredClaims)
-	}
-	bundles, err := fixture.runtime.evidenceBundles(state, kernel.Contract)
+	contract := fixture.requireCompleteFileSizeConfiguration(state)
+	bundles, err := fixture.runtime.evidenceBundles(state, contract)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,11 +418,8 @@ func TestARunAssuredBeforeTheRequirementExistedIsVerifiedAgainWhenItDoes(t *test
 		t.Fatalf("the fresh verification is not an exact-subject check record: %+v", fresh.Checks)
 	}
 	state = fixture.state(runID)
-	kernel, err = fixture.runtime.buildKernel(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bundles, err = fixture.runtime.evidenceBundles(state, kernel.Contract)
+	contract = fixture.requireCompleteFileSizeConfiguration(state)
+	bundles, err = fixture.runtime.evidenceBundles(state, contract)
 	if err != nil {
 		t.Fatal(err)
 	}
