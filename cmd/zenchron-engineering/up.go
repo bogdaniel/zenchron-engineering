@@ -14,6 +14,7 @@ package main
 // leaves every run exactly as resumable as its journal says.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -322,7 +323,34 @@ func stopService(host upHost, timing upTiming, stateDir, service string, stdout 
 	return "stopped", nil
 }
 
+// Pointers preserve unknown values as JSON null.
+type lifecycleStatus struct {
+	Supervisor struct {
+		Running    bool    `json:"running"`
+		PID        *int    `json:"pid"`
+		Executable *string `json:"executable"`
+	} `json:"supervisor"`
+	Dashboard struct {
+		Running    bool    `json:"running"`
+		Address    *string `json:"address"`
+		PID        *int    `json:"pid"`
+		Generation string  `json:"generation"`
+	} `json:"dashboard"`
+}
+
 func statusCommand(args []string, host upHost, stdout io.Writer) (int, error) {
+	jsonOutput := false
+	var rest []string
+	for _, arg := range args {
+		if arg == "--json" {
+			jsonOutput = true
+		} else {
+			rest = append(rest, arg)
+		}
+	}
+	args = rest
+	var report lifecycleStatus
+	report.Dashboard.Generation = "unknown"
 	flags, err := parseUpFlags(args)
 	if err != nil {
 		return runtime.ExitInvalid, err
@@ -335,19 +363,26 @@ func statusCommand(args []string, host upHost, stdout io.Writer) (int, error) {
 	controllerExecutable := ""
 	if host.ControllerAnswers(stateDir) {
 		supervisor = "running"
+		report.Supervisor.Running = true
 		controllerExecutable = host.ControllerExecutable(stateDir)
 	}
 	if record, ok, err := readProcessRecord(stateDir, serviceServe); err != nil {
 		return runtime.ExitFailed, err
 	} else if ok && supervisor == "running" {
 		supervisor += fmt.Sprintf(" (pid %d)", record.PID)
+		if record.PID > 0 {
+			report.Supervisor.PID = &record.PID
+		}
 	} else if ok && !host.Alive(record, serviceServe) {
 		supervisor += " (stale record from pid " + strconv.Itoa(record.PID) + "; `up` will replace it)"
 	}
 	if controllerExecutable != "" {
+		report.Supervisor.Executable = &controllerExecutable
 		supervisor += fmt.Sprintf(" (executable %s)", controllerExecutable)
 	}
-	fmt.Fprintf(stdout, "%-14s %s\n", "supervisor", supervisor)
+	if !jsonOutput {
+		fmt.Fprintf(stdout, "%-14s %s\n", "supervisor", supervisor)
+	}
 
 	dashboard := "not running"
 	record, ok, err := readProcessRecord(stateDir, serviceControlPlane)
@@ -356,6 +391,19 @@ func statusCommand(args []string, host upHost, stdout io.Writer) (int, error) {
 	}
 	switch {
 	case ok && host.Alive(record, serviceControlPlane) && host.DashboardHealthy(record.Listen, stateDir):
+		report.Dashboard.Running = true
+		if record.Listen != "" {
+			report.Dashboard.Address = &record.Listen
+		}
+		if record.PID > 0 {
+			report.Dashboard.PID = &record.PID
+		}
+		if controllerExecutable != "" && record.Executable != "" {
+			report.Dashboard.Generation = "current"
+			if record.Executable != controllerExecutable {
+				report.Dashboard.Generation = "earlier"
+			}
+		}
 		dashboard = fmt.Sprintf("http://%s/ (pid %d)", record.Listen, record.PID)
 		if controllerExecutable != "" && record.Executable != "" && record.Executable != controllerExecutable {
 			dashboard += " (built for an earlier generation; `up` will replace it)"
@@ -363,6 +411,12 @@ func statusCommand(args []string, host upHost, stdout io.Writer) (int, error) {
 	case ok:
 		dashboard = "not running (stale record; `up` will replace it)"
 	}
-	fmt.Fprintf(stdout, "%-14s %s\n", "dashboard", dashboard)
+	if jsonOutput {
+		if err := json.NewEncoder(stdout).Encode(report); err != nil {
+			return runtime.ExitFailed, err
+		}
+	} else {
+		fmt.Fprintf(stdout, "%-14s %s\n", "dashboard", dashboard)
+	}
 	return runtime.ExitCompleted, nil
 }
