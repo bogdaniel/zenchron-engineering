@@ -200,8 +200,21 @@ func (s *SQLiteOperationStore) TransitionVerificationPermit(p VerificationPermit
 	if errors.Is(err, errVerificationNotAcquired) {
 		return false, nil
 	}
+	if err != nil && lostPermitTransitionRace(err) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("persist verification permit: %w", err)
 	}
 	return true, nil
+}
+
+// The event id is <permit>/<state> and each permit makes each transition once,
+// so a duplicate id means another actor already committed this very transition
+// and this one lost the compare-and-swap it never reached, because the event
+// insert runs first (#690). Any other constraint failure stays an error.
+func lostPermitTransitionRace(err error) bool {
+	var coded interface{ Code() int }
+	// 1555 and 2067 are SQLITE_CONSTRAINT_PRIMARYKEY and _UNIQUE.
+	return errors.As(err, &coded) && (coded.Code() == 1555 || coded.Code() == 2067) && strings.Contains(err.Error(), "events.id")
 }
