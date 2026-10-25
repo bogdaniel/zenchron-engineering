@@ -109,7 +109,7 @@ worked examples of both. Every member is explained in
 
 ```bash
 bin/zenchron-engineering up      # supervisor + dashboard, then opens the dashboard
-bin/zenchron-engineering status  # what is running, and where the dashboard is
+bin/zenchron-engineering status  # what is running, its generation, and where the dashboard is
 bin/zenchron-engineering down    # graceful stop of what `up` started
 ```
 
@@ -122,6 +122,11 @@ dashboard port (8787) is held by another program, the dashboard moves to the
 next free port and `up` prints where. An explicit `--listen` that is busy is a
 refusal. Sign in to the dashboard with the contents of
 `<state_dir>/control-plane.token`. Logs are under `<state_dir>/logs/`.
+
+`status` shows the serving controller's executable generation when known. If a
+running dashboard records a different executable, it marks the dashboard as built
+for an earlier generation and says that `up` will replace it. It makes no generation
+comparison when the controller does not answer or either executable is unknown.
 
 Each service writes `<state_dir>/serve.process.json` or
 `control-plane.process.json` about itself, so `status` and `down` find a
