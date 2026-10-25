@@ -127,6 +127,12 @@ refusal. Sign in to the dashboard with the contents of
 running dashboard records a different executable, it marks the dashboard as built
 for an earlier generation and says that `up` will replace it. It makes no generation
 comparison when the controller does not answer or either executable is unknown.
+Use `status --json` for one JSON object with `supervisor` (`running`, `pid`,
+`executable`) and `dashboard` (`running`, `address`, `pid`, `generation`). The
+address is the listen address (host:port). Generation is `current` when both
+executables are known and equal, `earlier` when they are known and differ, and
+`unknown` otherwise. Unknown values are `null`. This flag is available only on
+`status`.
 
 Each service writes `<state_dir>/serve.process.json` or
 `control-plane.process.json` about itself, so `status` and `down` find a
