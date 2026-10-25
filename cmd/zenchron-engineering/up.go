@@ -354,9 +354,16 @@ func statusCommand(args []string, host upHost, stdout io.Writer) (int, error) {
 	if record, ok, err := readProcessRecord(stateDir, serviceServe); err != nil {
 		return runtime.ExitFailed, err
 	} else if ok && supervisor == "running" {
-		supervisor += fmt.Sprintf(" (pid %d)", record.PID)
-		if record.PID > 0 {
-			report.Supervisor.PID = &record.PID
+		// The controller answering says nothing about WHICH process the record
+		// names. A pid is claimed only for a record that still identifies a live
+		// supervisor; a stale one is reported as stale, never as the answerer.
+		if host.Alive(record, serviceServe) {
+			supervisor += fmt.Sprintf(" (pid %d)", record.PID)
+			if record.PID > 0 {
+				report.Supervisor.PID = &record.PID
+			}
+		} else {
+			supervisor += " (pid unknown: the recorded pid " + strconv.Itoa(record.PID) + " is not the answering controller)"
 		}
 	} else if ok && !host.Alive(record, serviceServe) {
 		supervisor += " (stale record from pid " + strconv.Itoa(record.PID) + "; `up` will replace it)"

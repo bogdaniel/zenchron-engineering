@@ -338,6 +338,7 @@ func TestStatusJSON(t *testing.T) {
 					}
 				}
 			}
+			host.alive[41] = tt.answers && tt.recorded // the recorded supervisor is the live one
 			host.alive[42], host.answering["127.0.0.1:8787"] = tt.running, tt.running
 			var out bytes.Buffer
 			code, err := statusCommand(append(args, "--json"), host, &out)
@@ -409,5 +410,38 @@ func TestStatusJSONRunningSupervisorWithoutRecord(t *testing.T) {
 	}
 	if got["supervisor"]["running"] != true || got["supervisor"]["pid"] != nil || got["supervisor"]["executable"] != nil {
 		t.Fatalf("unknown supervisor details must be null: %s", out.String())
+	}
+}
+
+// A controller that answers does not prove the recorded pid is the one answering.
+// A stale record is reported as stale (pid null), never presented as the supervisor.
+func TestStatusDoesNotClaimAStaleRecordedPidForTheAnsweringSupervisor(t *testing.T) {
+	for name, alive := range map[string]bool{"stale record": false, "live record": true} {
+		t.Run(name, func(t *testing.T) {
+			host, args := newUpFixture(t)
+			host.controllerUp = true
+			if err := writeProcessRecord(host.stateDir, serviceServe, processRecord{PID: 41}); err != nil {
+				t.Fatal(err)
+			}
+			host.alive[41] = alive
+			var text, jsonOut bytes.Buffer
+			if _, err := statusCommand(args, host, &text); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := statusCommand(append(args, "--json"), host, &jsonOut); err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]map[string]any
+			if err := json.Unmarshal(jsonOut.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			claimed := strings.Contains(text.String(), "(pid 41)")
+			if claimed != alive || (got["supervisor"]["pid"] != nil) != alive {
+				t.Fatalf("alive=%v: text claims pid=%v, json pid=%v\n%s", alive, claimed, got["supervisor"]["pid"], text.String())
+			}
+			if !alive && !strings.Contains(text.String(), "pid unknown") {
+				t.Fatalf("a stale record must be named as such:\n%s", text.String())
+			}
+		})
 	}
 }
