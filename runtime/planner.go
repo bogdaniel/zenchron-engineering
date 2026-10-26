@@ -518,9 +518,13 @@ stage to make the work smaller.
 	if defined := contractClaimIDs(input.Contract); len(defined) > 0 {
 		classes := make([]string, 0, len(defined))
 		for _, id := range defined {
-			classes = append(classes, fmt.Sprintf("%s [%s]", id, input.Contract.RequiredClaims[id].EvidenceClass))
+			classes = append(classes, fmt.Sprintf("%q (evidence class %s)", id, input.Contract.RequiredClaims[id].EvidenceClass))
 		}
-		claims = "claim ids and their evidence classes (class is metadata, not part of the id); choose a subset: " + strings.Join(classes, ", ")
+		// The ids are listed outside the JSON example, with the class apart from
+		// the id: a bracketed suffix was copied into the id by the model, and every
+		// such plan was refused (#694). The example itself holds no quoted id, so it
+		// stays valid JSON.
+		claims = "choose a subset of these exact claim ids; the evidence class in parentheses is never part of an id: " + strings.Join(classes, ", ")
 	}
 	contract := fmt.Sprintf(`%s%s
 For divergent material producers, propose an integrator agent stage with explicit
@@ -535,7 +539,7 @@ Answer with ONE JSON object, in a fenced json code block, drawn from this shape:
   "action": {"type": "exact protected-action type", "target": "exact protected-action target"},
   "depends_on": ["ids of stages that must finish first"],
   "requires_capabilities": ["subset of: {{capabilities}}"],
-  "required_claims": ["%s"],
+  "required_claims": ["a claim id from the vocabulary stated below"],
   "independence": {"dimension": "agent_profile|execution_agent|provider_kind|vendor_family", "different_from": ["stage ids"]},
   "rationale": "why this stage exists"}],
  "notes": "one short paragraph an operator will read"}
@@ -543,6 +547,8 @@ Answer with ONE JSON object, in a fenced json code block, drawn from this shape:
 No member other than the ones shown may appear, at any level: an unrecognized
 member makes the whole answer invalid and it is refused rather than partially
 read. Put anything you want to say in "notes".
+
+Claims a gate may reference in "required_claims": %s.
 
 The members shown are NOT all required, and the shape above is a menu rather
 than a template. Required: "stages"; and on each stage "id" and "kind", plus
