@@ -12,6 +12,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -77,10 +78,17 @@ func TestTheOutputContractDoesNotDemandEveryMemberItShows(t *testing.T) {
 	if !strings.Contains(contract, "claim-validation") {
 		t.Fatalf("the contract does not state the claim vocabulary a gate may reference:\n%s", contract)
 	}
-	// The id is shown exactly as a gate must write it, with the class apart from
-	// it, because a bracketed class suffix was copied into the id (#694).
+	// The vocabulary quotes each id outside the example, apart from its class
+	// (a bracketed class suffix was copied into the id, #694), and that quoting
+	// must not reach the JSON example the answer is modelled on.
 	if !strings.Contains(contract, `"claim-validation" (evidence class automated_test)`) || strings.Contains(contract, "claim-validation [") {
 		t.Fatalf("the contract does not show the claim id apart from its evidence class:\n%s", contract)
+	}
+	const open, closing = "drawn from this shape:\n\n", "\n\nNo member other"
+	start := strings.Index(contract, open)
+	end := strings.Index(contract, closing)
+	if start < 0 || end < start || !json.Valid([]byte(contract[start+len(open):end])) {
+		t.Fatalf("the answer shape in the contract is not valid JSON:\n%s", contract)
 	}
 	// The capability list is substituted rather than left as a format verb.
 	if strings.Contains(contract, "{{capabilities}}") || strings.Contains(contract, "%!") {
