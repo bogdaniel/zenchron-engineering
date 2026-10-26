@@ -518,9 +518,12 @@ stage to make the work smaller.
 	if defined := contractClaimIDs(input.Contract); len(defined) > 0 {
 		classes := make([]string, 0, len(defined))
 		for _, id := range defined {
-			classes = append(classes, fmt.Sprintf("%s [%s]", id, input.Contract.RequiredClaims[id].EvidenceClass))
+			classes = append(classes, fmt.Sprintf("%q (evidence class %s)", id, input.Contract.RequiredClaims[id].EvidenceClass))
 		}
-		claims = "claim ids and their evidence classes (class is metadata, not part of the id); choose a subset: " + strings.Join(classes, ", ")
+		// The id is quoted exactly as it must appear in "required_claims" and the
+		// class sits outside the quotes: a bracketed suffix was copied into the id
+		// by the model, and every such plan was refused (#694).
+		claims = "choose a subset of these exact claim ids, copied without the parenthesised evidence class: " + strings.Join(classes, ", ")
 	}
 	contract := fmt.Sprintf(`%s%s
 For divergent material producers, propose an integrator agent stage with explicit

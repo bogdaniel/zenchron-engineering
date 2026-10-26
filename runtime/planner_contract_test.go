@@ -77,6 +77,11 @@ func TestTheOutputContractDoesNotDemandEveryMemberItShows(t *testing.T) {
 	if !strings.Contains(contract, "claim-validation") {
 		t.Fatalf("the contract does not state the claim vocabulary a gate may reference:\n%s", contract)
 	}
+	// The id is shown exactly as a gate must write it, with the class apart from
+	// it, because a bracketed class suffix was copied into the id (#694).
+	if !strings.Contains(contract, `"claim-validation" (evidence class automated_test)`) || strings.Contains(contract, "claim-validation [") {
+		t.Fatalf("the contract does not show the claim id apart from its evidence class:\n%s", contract)
+	}
 	// The capability list is substituted rather than left as a format verb.
 	if strings.Contains(contract, "{{capabilities}}") || strings.Contains(contract, "%!") {
 		t.Fatalf("the contract did not render cleanly:\n%s", contract)
