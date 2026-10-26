@@ -591,6 +591,7 @@ Rules for your answer, all of which the runtime enforces afterwards:
 	// verb. The template is already a format string carrying operator-supplied
 	// vocabulary, and one more verb in it is one more thing that shifts if any
 	// interpolated value ever contains a percent sign.
+	contract += publicationGateGuidance(input.Contract)
 	return strings.ReplaceAll(contract, "{{capabilities}}", strings.Join(capabilities, ", "))
 }
 
