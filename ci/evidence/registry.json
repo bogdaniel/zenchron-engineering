@@ -332,7 +332,8 @@
         "runtime/plan_*.go",
         "runtime/planner.go",
         "planning/*.go",
-        "runtime/planner_proposal.go"
+        "runtime/planner_proposal.go",
+        "runtime/planner_publication_gate.go"
       ],
       "tests": [
         "runtime/plan_*_test.go",
