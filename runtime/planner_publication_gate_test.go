@@ -64,3 +64,21 @@ func TestAHumanApprovalClaimUnrelatedToPublicationDoesNotJustifyAGate(t *testing
 		})
 	}
 }
+
+// One human_approval claim shared by two publication actions is bound by the
+// validator to the first only, so the planner is offered that gate alone.
+func TestASharedHumanApprovalClaimIsOfferedForTheActionTheValidatorBindsItTo(t *testing.T) {
+	update := domain.Action{Type: "git.pull_request.update", Target: "main"}
+	contract := publicationContractPrompt(t,
+		map[string]domain.RequiredClaim{"claim-publication-approval": {EvidenceClass: "human_approval"}},
+		[]domain.AuthorityCondition{
+			{Action: publishMain, RequiredClaims: []string{"claim-publication-approval"}},
+			{Action: update, RequiredClaims: []string{"claim-publication-approval"}},
+		})
+	if !strings.Contains(contract, "action git.pull_request.create:main with required_claims chosen from claim-publication-approval.") {
+		t.Fatalf("the validator-accepted gate is not offered:\n%s", contract)
+	}
+	if strings.Contains(contract, "git.pull_request.update:main with required_claims") {
+		t.Fatalf("a gate the validator refuses is offered:\n%s", contract)
+	}
+}

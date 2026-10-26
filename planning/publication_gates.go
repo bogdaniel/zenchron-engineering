@@ -10,9 +10,9 @@ type PublicationGate struct {
 	Claims []string
 }
 
-// PublicationGates lists the publication gates a contract makes satisfiable, in
-// authority-condition order. A contract that binds no human_approval claim to a
-// publication action offers none, and a gate for it would be refused.
+// PublicationGates lists exactly the publication gates Validate accepts for a
+// contract, in authority-condition order. A contract that binds no usable
+// human_approval claim to a publication action offers none.
 func PublicationGates(contract domain.EngineeringWorkContract) []PublicationGate {
 	var gates []PublicationGate
 	for _, condition := range contract.AuthorityConditions {
@@ -21,7 +21,15 @@ func PublicationGates(contract domain.EngineeringWorkContract) []PublicationGate
 		}
 		var claims []string
 		for _, id := range condition.RequiredClaims {
-			if definition, ok := contract.RequiredClaims[id]; ok && definition.EvidenceClass == "human_approval" {
+			definition, ok := contract.RequiredClaims[id]
+			if !ok || definition.EvidenceClass != "human_approval" {
+				continue
+			}
+			// Validate binds a claim to the FIRST publication action that
+			// requires it, so a claim shared by two actions is acceptable on
+			// that one only; advertising it for the other would offer a gate
+			// Validate refuses.
+			if bound, _ := publicationConditionForClaim(contract, id); bound == condition.Action {
 				claims = append(claims, id)
 			}
 		}
