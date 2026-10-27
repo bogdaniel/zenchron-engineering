@@ -59,6 +59,9 @@ var browserEnvironment = []string{
 	"ZENCHRON_PLAYWRIGHT_MODULE=" + browserPlaywrightPath,
 	"ZENCHRON_CHROME_EXECUTABLE=" + browserChromePath,
 	"ZENCHRON_E2E_CHROME=" + browserChromePath,
+	// The only place the raw-Chrome runner may start Chrome without its own
+	// sandbox: this container, whose isolation is the boundary.
+	"ZENCHRON_E2E_NO_SANDBOX=1",
 }
 
 // readBrowserSelection reads the selected test names from the base revision. A
@@ -99,7 +102,7 @@ func browserSelectionDigest(names []string) string {
 // browserCheckerRevision identifies the implementation that produced a record,
 // so a change to how the run is made invalidates earlier records.
 func browserCheckerRevision() string {
-	digest, _ := Digest(struct{ Name, Version string }{"browser-acceptance", "go-test-json-playwright-v2-base-pinned-tests"})
+	digest, _ := Digest(struct{ Name, Version string }{"browser-acceptance", "go-test-json-playwright-v3-base-pinned-tests-container-no-sandbox"})
 	return digest
 }
 

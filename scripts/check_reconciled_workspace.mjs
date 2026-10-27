@@ -23,6 +23,16 @@ page.on("pageerror", (e) => errors.push(e.message));
 page.on("request", (r) => {
   if (r.method() === "POST") writes.push({ path: new URL(r.url()).pathname, body: r.postDataJSON() });
 });
+// The route heading can render before the state-dependent text of the same
+// page, so a page-text assertion waits, bounded, for it. A pattern that never
+// appears still fails after the timeout, with the text the page actually held.
+const expectMain = async (pattern, timeout = 10_000) => {
+  try {
+    await page.locator("main").filter({ hasText: pattern }).waitFor({ timeout });
+  } catch {
+    assert.match(await page.locator("main").innerText(), pattern);
+  }
+};
 const check = async (name, run) => {
   await run();
   results.push(name);
@@ -62,7 +72,7 @@ const recoverAfterNavigation = async (destination, label, captureName) => {
     await page.getByText("Original delivery reference", { exact: true }).click();
     const original = page.getByRole("heading", { name: "Unresolved original operation", exact: true }).locator("..");
     assert.match(await original.innerText(), /revision: 1\b/);
-    assert.match(await page.locator("main").innerText(), /plan r2/);
+    await expectMain(/plan r2/);
     await page.setViewportSize({ width: 390, height: 844 });
     await capture("unresolved-revision-390-expanded");
     await page.getByText("Original delivery reference", { exact: true }).click();
@@ -120,7 +130,7 @@ try {
   await check("Controller-owned installed agents, profiles and templates", async () => {
     await visit("agents");
     await page.getByRole("region", { name: "Installed agent inventory", exact: true }).waitFor();
-    assert.match(await page.locator("main").innerText(), /browser-implementer/);
+    await expectMain(/browser-implementer/);
   });
   await check(
     "Lost objective response survives navigation/reload; exact receipt recovers one unapproved proposal",
@@ -147,7 +157,7 @@ try {
       await recoverAfterNavigation("intake", "Review objective proposal", "recovered-objective");
       await page.unroute("**/v1/objectives");
       await page.getByRole("heading", { name: "Plan dependency inspection", exact: true }).waitFor();
-      assert.match(await page.locator("main").innerText(), /unapproved/);
+      await expectMain(/unapproved/);
       assert.equal(writes.filter((r) => r.path === "/v1/objectives").length, 1);
     },
   );
@@ -176,7 +186,7 @@ try {
         .locator("main")
         .getByText(/^Plan approved · r1$/)
         .waitFor();
-      assert.match(await page.locator("main").innerText(), /Plan approved/);
+      await expectMain(/Plan approved/);
     },
   );
   await check("Lost revision response retains the original revision across navigation to the latest plan", async () => {
@@ -193,7 +203,7 @@ try {
     );
     await page.unroute("**/v1/plans/*/revise");
     await page.getByRole("heading", { name: /plan r2/ }).waitFor();
-    assert.match(await page.locator("main").innerText(), /unapproved|proposed/);
+    await expectMain(/unapproved|proposed/);
   });
   await check("Typed graph decision resolves through the controller and retains historical context/focus", async () => {
     await page.setViewportSize({ width: 390, height: 844 });

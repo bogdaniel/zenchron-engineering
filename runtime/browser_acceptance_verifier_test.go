@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -348,5 +349,78 @@ func TestEveryBrowserSkipGateIsSatisfiedByTheVerifierEnvironment(t *testing.T) {
 	}
 	if found == 0 {
 		t.Fatal("found no skip gates; the scan is looking in the wrong place")
+	}
+}
+
+// Chrome's own sandbox stays on everywhere except the network-less assurance
+// container: the opt-in variable is set for the browser run only, not for the
+// preparation or the Go suite, and the container's isolation is not widened to
+// get there.
+func TestTheNoSandboxOptInReachesOnlyTheBrowserContainer(t *testing.T) {
+	docker := newBrowserDocker(map[int][]byte{3: goTestJSON(allBrowserTests("pass"))}, nil, writeArtifactsForEveryTest)
+	_, _, docker = browserRun(t, docker, true)
+	if len(docker.creates) != 3 {
+		t.Fatalf("expected preparation, suite and browser containers, saw %d", len(docker.creates))
+	}
+	for index, create := range docker.creates {
+		text := strings.Join(create, " ")
+		has := strings.Contains(text, "ZENCHRON_E2E_NO_SANDBOX=1")
+		if (index == 2) != has {
+			t.Errorf("container %d: no-sandbox opt-in present=%v\n%s", index, has, text)
+		}
+	}
+	browser := strings.Join(docker.creates[2], " ")
+	for _, want := range []string{"--network none", "--read-only", "--cap-drop ALL", "no-new-privileges", "dst=/candidate,readonly"} {
+		if !strings.Contains(browser, want) {
+			t.Errorf("the browser container lost %q:\n%s", want, browser)
+		}
+	}
+	for _, widened := range []string{"--privileged", "--cap-add", "seccomp=unconfined", "seccomp:unconfined", "--security-opt apparmor", "--userns", "--network host", "--pid host"} {
+		if strings.Contains(browser, widened) {
+			t.Errorf("the browser container widened the isolation with %q:\n%s", widened, browser)
+		}
+	}
+}
+
+// The raw Chrome runner starts Chrome with its own sandbox unless the opt-in is
+// set. This runs the real script against a stand-in Chrome that records its
+// arguments.
+func TestTheRawChromeRunnerKeepsItsSandboxUnlessOptedIn(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	root := t.TempDir()
+	recorded := filepath.Join(root, "argv")
+	chrome := filepath.Join(root, "chrome")
+	if err := os.WriteFile(chrome, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+recorded+"\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script, err := filepath.Abs("../scripts/browser_e2e.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := func(extra ...string) string {
+		_ = os.Remove(recorded)
+		command := exec.Command(node, script)
+		command.Env = append([]string{
+			"PATH=" + os.Getenv("PATH"), "ZENCHRON_E2E_URL=http://127.0.0.1:1", "ZENCHRON_E2E_CHROME=" + chrome,
+			"ZENCHRON_E2E_ARTIFACTS=" + filepath.Join(root, "artifacts"), "TMPDIR=" + root,
+		}, extra...)
+		_ = command.Run() // the stand-in exits at once; only its arguments matter
+		data, err := os.ReadFile(recorded)
+		if err != nil {
+			t.Fatalf("the runner never started Chrome: %v", err)
+		}
+		return string(data)
+	}
+	if got := argv(); strings.Contains(got, "--no-sandbox") || !strings.Contains(got, "--headless=new") {
+		t.Fatalf("Chrome lost its sandbox by default:\n%s", got)
+	}
+	if got := argv("ZENCHRON_E2E_NO_SANDBOX=0"); strings.Contains(got, "--no-sandbox") {
+		t.Fatalf("a value other than 1 turned the sandbox off:\n%s", got)
+	}
+	if got := argv("ZENCHRON_E2E_NO_SANDBOX=1"); !strings.Contains(got, "--no-sandbox") {
+		t.Fatalf("the opt-in did not reach Chrome:\n%s", got)
 	}
 }
