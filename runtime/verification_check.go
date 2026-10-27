@@ -47,13 +47,16 @@ type VerificationCheck struct {
 	// BaseRevision is the governing base revision whose rules the check used.
 	BaseRevision string `json:"base_revision,omitempty"`
 	// The members below are recorded by the browser check: the digest of the
-	// exact tests it was asked to run, what happened to each, the environment it
-	// ran in and the immutable transcript of the run. They are absent on a
-	// check that does not run tests.
-	Selection   string        `json:"selection,omitempty"`
-	Results     *CheckResults `json:"results,omitempty"`
-	Environment string        `json:"environment,omitempty"`
-	Artifact    string        `json:"artifact,omitempty"`
+	// exact tests it was asked to run, the digest of the base-revision test
+	// sources that ran, what happened to each test, the environment it ran in,
+	// the immutable transcript and the digest of the artifacts the tests wrote.
+	// They are absent on a check that does not run tests.
+	Selection       string        `json:"selection,omitempty"`
+	Surface         string        `json:"surface,omitempty"`
+	Results         *CheckResults `json:"results,omitempty"`
+	Environment     string        `json:"environment,omitempty"`
+	Artifact        string        `json:"artifact,omitempty"`
+	ArtifactsSHA256 string        `json:"artifacts_sha256,omitempty"`
 }
 
 // CheckResults counts what happened to the tests a check selected. A selected
@@ -86,9 +89,11 @@ func validateVerificationChecks(checks []VerificationCheck) error {
 		if check.Outcome != CheckOutcomePassed && check.Outcome != CheckOutcomeFailed {
 			errs = append(errs, fmt.Errorf("%soutcome %q is neither %q nor %q", prefix, check.Outcome, CheckOutcomePassed, CheckOutcomeFailed))
 		}
-		errs = append(errs, bounded(prefix+"selection", check.Selection), bounded(prefix+"environment", check.Environment), bounded(prefix+"artifact", check.Artifact))
+		errs = append(errs, bounded(prefix+"selection", check.Selection), bounded(prefix+"surface", check.Surface), bounded(prefix+"environment", check.Environment),
+			bounded(prefix+"artifact", check.Artifact), bounded(prefix+"artifacts_sha256", check.ArtifactsSHA256))
 		if check.Kind == CheckKindBrowserAcceptance {
-			errs = append(errs, required(prefix+"selection", check.Selection), required(prefix+"environment", check.Environment), required(prefix+"artifact", check.Artifact))
+			errs = append(errs, required(prefix+"selection", check.Selection), required(prefix+"surface", check.Surface), required(prefix+"environment", check.Environment),
+				required(prefix+"artifact", check.Artifact), required(prefix+"base_revision", check.BaseRevision))
 			if check.Results == nil {
 				errs = append(errs, fmt.Errorf("%sresults is required for a browser acceptance record", prefix))
 			}

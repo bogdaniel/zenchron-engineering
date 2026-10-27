@@ -2445,6 +2445,9 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	if err := fileSizeBaseRefusal(kernel.Contract, state.pinnedBase()); err != nil {
 		return failed(err)
 	}
+	if err := browserBaseRefusal(kernel.Contract, state.pinnedBase()); err != nil {
+		return failed(err)
+	}
 	// THE PHYSICAL BOUND (#640): this attempt may run no longer than what is
 	// left of the run's assurance allowance, whatever the verifier does, and
 	// the confirmation rerun shares the same bound.
@@ -2463,8 +2466,8 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 		Policy:   Ref{ID: r.deps.Policy.ID, Revision: r.deps.Policy.Revision},
 		Producer: Ref{ID: r.deps.ControllerID, Revision: r.controller},
 		// Present only when the compiled contract requires the file-size claim.
-		FileSizePolicyBase: fileSizePolicyBase(kernel.Contract, state.pinnedBase()),
-		BrowserAcceptance:  browserAcceptanceRequired(kernel.Contract),
+		FileSizePolicyBase:    fileSizePolicyBase(kernel.Contract, state.pinnedBase()),
+		BrowserAcceptanceBase: browserAcceptanceBase(kernel.Contract, state.pinnedBase()),
 	})
 	if err := assuranceCutOff(parent, ctx); err != nil {
 		return failed(err)
@@ -3377,7 +3380,7 @@ func (r *EngineeringRuntime) evidenceBundles(state *runState, contract domain.En
 		}
 		if claimID == BrowserAcceptanceClaimID {
 			var proven bool
-			if item, proven = browserEvidenceItem(item, assurance, contract.Subject.Revision); !proven {
+			if item, proven = browserEvidenceItem(item, assurance, contract.Subject.Revision, state.pinnedBase()); !proven {
 				continue
 			}
 		}

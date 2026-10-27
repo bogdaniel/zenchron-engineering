@@ -1,0 +1,9 @@
+# The Go tests whose real-browser run discharges claim-browser-acceptance.
+# One test name per line. The verifier reads this file from the BASE revision of
+# the run, never from the candidate, so a change cannot narrow what counts; a
+# test added here counts for work based on a revision that already contains it.
+# See docs/browser-acceptance.md.
+TestBrowserWorkspace
+TestDashboardDescribedObjective
+TestDashboardFeatureWalkthrough
+TestReactEngineeringOSGovernedWorkspace

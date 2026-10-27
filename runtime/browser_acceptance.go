@@ -20,6 +20,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -32,46 +34,87 @@ const (
 	// automated_test) is what turns the check on for a contract.
 	BrowserAcceptanceClaimID = "claim-browser-acceptance"
 
-	browserCheckerID        = "browser-acceptance-playwright"
-	browserProviderID       = "baseline-go-browser"
-	browserPackage          = "./cmd/zenchron-engineering"
+	browserCheckerID  = "browser-acceptance-playwright"
+	browserProviderID = "baseline-go-browser"
+	browserPackage    = "./cmd/zenchron-engineering"
+	// browserManifestFile lists the selected tests. It is read from the BASE
+	// revision (see browserWorkspace), like the file-size manifests.
+	browserManifestFile     = "browser-acceptance-tests.txt"
 	browserPlaywrightPath   = "/opt/zenchron-browser/playwright/index.mjs"
 	browserChromePath       = "/opt/zenchron-browser/chrome/chrome"
+	browserArtifactsPath    = "/artifacts"
 	browserPrerequisiteExit = 3
+	maxBrowserSelection     = 16
 )
 
-// browserSelection is the closed set of tests that drive a real browser through
-// a real, isolated controller. It is owned by the runtime, so a candidate cannot
-// narrow what counts; the digest of it is part of every record.
-var browserSelection = []string{
-	"TestBrowserWorkspace",
-	"TestDashboardDescribedObjective",
-	"TestDashboardFeatureWalkthrough",
-	"TestReactEngineeringOSGovernedWorkspace",
+var browserTestName = regexp.MustCompile(`^Test[A-Za-z0-9_]{1,80}$`)
+
+// browserEnvironment is everything the selected tests need to run instead of
+// skipping: the two skip gates, the browser and the Playwright module. Which
+// variable a test reads is a property of the test, so a source-scan test keeps
+// this list in step with the gates in the tests themselves.
+var browserEnvironment = []string{
+	"ZENCHRON_BROWSER_E2E=1",
+	"ZENCHRON_REACT_BROWSER_E2E=1",
+	"ZENCHRON_PLAYWRIGHT_MODULE=" + browserPlaywrightPath,
+	"ZENCHRON_CHROME_EXECUTABLE=" + browserChromePath,
+	"ZENCHRON_E2E_CHROME=" + browserChromePath,
+}
+
+// readBrowserSelection reads the selected test names from the base revision. A
+// manifest that is missing, empty, oversized or holds anything but a plain test
+// name refuses verification: a required check that cannot be defined is not
+// skipped, and a name is never interpolated into a command unvalidated.
+func readBrowserSelection(dir, base string) ([]string, error) {
+	text, err := gitOutput(dir, "show", base+":"+browserManifestFile)
+	if err != nil {
+		return nil, fmt.Errorf("the base revision has no %s: %w", browserManifestFile, err)
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !browserTestName.MatchString(line) || seen[line] {
+			return nil, fmt.Errorf("%s names %q, which is not a unique test name", browserManifestFile, line)
+		}
+		seen[line] = true
+		names = append(names, line)
+	}
+	if len(names) == 0 || len(names) > maxBrowserSelection {
+		return nil, fmt.Errorf("%s names %d tests, outside 1..%d", browserManifestFile, len(names), maxBrowserSelection)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // browserSelectionDigest identifies the selection and the way it is run.
-func browserSelectionDigest() string {
-	names := append([]string(nil), browserSelection...)
-	sort.Strings(names)
+func browserSelectionDigest(names []string) string {
 	sum := sha256.Sum256([]byte(browserPackage + "\x00" + strings.Join(names, "\n")))
 	return hex.EncodeToString(sum[:])
 }
 
-// browserCheckerRevision identifies the implementation and the selection that
-// produced a record, so a change to either invalidates earlier records.
+// browserCheckerRevision identifies the implementation that produced a record,
+// so a change to how the run is made invalidates earlier records.
 func browserCheckerRevision() string {
-	digest, _ := Digest(struct{ Name, Version, Selection string }{"browser-acceptance", "go-test-json-playwright-v1", browserSelectionDigest()})
+	digest, _ := Digest(struct{ Name, Version string }{"browser-acceptance", "go-test-json-playwright-v2-base-pinned-tests"})
 	return digest
 }
 
-// browserAcceptanceCommand is the workload. Exit 3 means the image cannot run a
-// browser at all, which is a prerequisite fault and never a verdict.
-func browserAcceptanceCommand() string {
+// browserAcceptanceCommand is the workload: each selected test runs alone,
+// writing its artifacts into its own writable directory, so a test that wrote
+// nothing is visible. Exit 3 means the image cannot run a browser at all, which
+// is a prerequisite fault and never a verdict.
+func browserAcceptanceCommand(names []string) string {
 	return "test -f \"$ZENCHRON_PLAYWRIGHT_MODULE\" || exit 3\n" +
 		"test -x \"$ZENCHRON_CHROME_EXECUTABLE\" || exit 3\n" +
 		"command -v node >/dev/null || exit 3\n" +
-		"go test -json -count=1 -run '^(" + strings.Join(browserSelection, "|") + ")$' " + browserPackage
+		"status=0\nfor name in " + strings.Join(names, " ") + "; do\n" +
+		"  mkdir -p " + browserArtifactsPath + "/$name\n" +
+		"  ZENCHRON_E2E_ARTIFACTS=" + browserArtifactsPath + "/$name go test -json -count=1 -run \"^$name\\$\" " + browserPackage + " || status=1\n" +
+		"done\nexit $status"
 }
 
 // browserOutcome is how a browser run ended.
@@ -93,10 +136,10 @@ const (
 // only exit codes 1 and 2 (the Go tool's own failure codes) are a judgment of
 // the candidate, so a missing browser (exit 3), a killed container or anything
 // unrecognized stays inconclusive.
-func classifyBrowserRun(stdout []byte, exitCode int, ran bool) (browserOutcome, CheckResults) {
-	results := CheckResults{Total: len(browserSelection)}
+func classifyBrowserRun(selection []string, stdout []byte, exitCode int, ran bool) (browserOutcome, CheckResults) {
+	results := CheckResults{Total: len(selection)}
 	selected := map[string]bool{}
-	for _, name := range browserSelection {
+	for _, name := range selection {
 		selected[name] = true
 	}
 	final := map[string]string{}

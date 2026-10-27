@@ -9,6 +9,10 @@ import (
 	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
+// browserSelection is the selection the fixtures use; the real one is read from
+// the base revision's browser-acceptance-tests.txt.
+var browserSelection = []string{"TestBrowserWorkspace", "TestDashboardDescribedObjective", "TestDashboardFeatureWalkthrough", "TestReactEngineeringOSGovernedWorkspace"}
+
 // goTestJSON renders a `go test -json` stream in which each named test ended
 // with the given action.
 func goTestJSON(actions map[string]string) []byte {
@@ -57,7 +61,7 @@ func TestOnlyACompleteRunOfEverySelectedTestIsBrowserEvidence(t *testing.T) {
 		"the sandbox could not run":        {nil, 0, false, browserInconclusive, 0, 0, 0},
 		"passes but a nonzero exit":        {goTestJSON(allBrowserTests("pass")), 1, true, browserFailed, 4, 0, 0},
 	} {
-		outcome, results := classifyBrowserRun(tc.stdout, tc.exit, tc.ran)
+		outcome, results := classifyBrowserRun(browserSelection, tc.stdout, tc.exit, tc.ran)
 		if outcome != tc.want || results.Passed != tc.passed || results.Skipped != tc.skipped || results.Failed != tc.failedTs {
 			t.Errorf("%s: outcome=%d results=%+v", name, outcome, results)
 		}
@@ -77,7 +81,8 @@ func browserContract() domain.EngineeringWorkContract {
 func goodBrowserCheck() VerificationCheck {
 	return VerificationCheck{
 		Kind: CheckKindBrowserAcceptance, Checker: browserCheckerID, CheckerRevision: browserCheckerRevision(),
-		Outcome: CheckOutcomePassed, Commit: dischargeCommit, Tree: dischargeTree, Selection: browserSelectionDigest(),
+		Outcome: CheckOutcomePassed, Commit: dischargeCommit, Tree: dischargeTree, BaseRevision: dischargeBase,
+		Selection: browserSelectionDigest(browserSelection), Surface: strings.Repeat("5", 64), ArtifactsSHA256: strings.Repeat("6", 64),
 		Results: &CheckResults{Total: 4, Passed: 4}, Environment: "docker-network-none@sha256:img", Artifact: "baseline-go-browser/attempt-1",
 	}
 }
@@ -109,7 +114,10 @@ func TestOnlyACurrentCompletePassingBrowserRecordProvesTheClaim(t *testing.T) {
 		"another tree":             mutate(func(c *VerificationCheck) { c.Tree = "8888888888888888888888888888888888888888" }),
 		"another checker":          mutate(func(c *VerificationCheck) { c.Checker = "other" }),
 		"a stale checker revision": mutate(func(c *VerificationCheck) { c.CheckerRevision = "old" }),
-		"another test selection":   mutate(func(c *VerificationCheck) { c.Selection = strings.Repeat("0", 64) }),
+		"another base revision":    mutate(func(c *VerificationCheck) { c.BaseRevision = "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3" }),
+		"no test selection":        mutate(func(c *VerificationCheck) { c.Selection = "" }),
+		"no test surface":          mutate(func(c *VerificationCheck) { c.Surface = "" }),
+		"no artifacts":             mutate(func(c *VerificationCheck) { c.ArtifactsSHA256 = "" }),
 		"a skipped test":           mutate(func(c *VerificationCheck) { c.Results = &CheckResults{Total: 4, Passed: 3, Skipped: 1} }),
 		"a failed test":            mutate(func(c *VerificationCheck) { c.Results = &CheckResults{Total: 4, Passed: 3, Failed: 1} }),
 		"a test that never ran":    mutate(func(c *VerificationCheck) { c.Results = &CheckResults{Total: 4, Passed: 3} }),
@@ -131,6 +139,8 @@ func TestABrowserRecordMustBeCompleteToBeStored(t *testing.T) {
 	}
 	for name, change := range map[string]func(*VerificationCheck){
 		"no selection":   func(c *VerificationCheck) { c.Selection = "" },
+		"no surface":     func(c *VerificationCheck) { c.Surface = "" },
+		"no base":        func(c *VerificationCheck) { c.BaseRevision = "" },
 		"no results":     func(c *VerificationCheck) { c.Results = nil },
 		"no environment": func(c *VerificationCheck) { c.Environment = "" },
 		"no artifact":    func(c *VerificationCheck) { c.Artifact = "" },
@@ -150,15 +160,15 @@ func TestABrowserRequirementThatAppearsChangesTheAssuranceBinding(t *testing.T) 
 	rebuild := func(contract domain.EngineeringWorkContract) func() (domain.EngineeringWorkContract, error) {
 		return func() (domain.EngineeringWorkContract, error) { return contract, nil }
 	}
-	want := "|browser-acceptance@" + browserCheckerRevision()
-	if got := browserBindingSuffixFor(listing, rebuild(browserContract())); got != want {
+	want := "|browser-acceptance@" + fileSizeBindingDigest(browserCheckerRevision(), dischargeBase)
+	if got := browserBindingSuffixFor(listing, dischargeBase, rebuild(browserContract())); got != want {
 		t.Fatalf("a newly required check does not change the binding: %q", got)
 	}
 	for name, got := range map[string]string{
-		"a policy that never lists the claim": browserBindingSuffixFor(domain.EngineeringPolicy{}, rebuild(browserContract())),
-		"a contract compiled without it":      browserBindingSuffixFor(listing, rebuild(dischargeContract())),
+		"a policy that never lists the claim": browserBindingSuffixFor(domain.EngineeringPolicy{}, dischargeBase, rebuild(browserContract())),
+		"a contract compiled without it":      browserBindingSuffixFor(listing, dischargeBase, rebuild(dischargeContract())),
 		"a run with no runtime attached":      (&runState{}).browserBindingSuffix(),
-		"a contract that cannot be rebuilt": browserBindingSuffixFor(listing, func() (domain.EngineeringWorkContract, error) {
+		"a contract that cannot be rebuilt": browserBindingSuffixFor(listing, dischargeBase, func() (domain.EngineeringWorkContract, error) {
 			return domain.EngineeringWorkContract{}, context.Canceled
 		}),
 	} {
