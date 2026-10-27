@@ -1,177 +1,97 @@
 package runtime
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-// browserRepo builds a repository whose BASE commit carries the browser
-// manifest, a trusted browser test and a trusted script, and whose CANDIDATE
-// commit weakens the test and the script and adds a test of its own.
-func browserRepo(t *testing.T) (dir, base, commit, tree string) {
-	t.Helper()
-	dir = filepath.Join(t.TempDir(), "checkout")
-	write := func(path, content string) {
-		t.Helper()
-		full := filepath.Join(dir, path)
-		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(full, []byte(content), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	base = initFixtureRepo(t, dir, "go.mod", "module x\n")
-	write(browserManifestFile, "# trusted\n"+strings.Join(browserSelection, "\n")+"\n")
-	write("cmd/zenchron-engineering/browser_e2e_test.go", "package main\n// TRUSTED TEST\n")
-	write("scripts/browser_e2e.mjs", "// TRUSTED SCRIPT\n")
-	write("app/app.go", "package app\n// base app\n")
-	mustGit(t, dir, "add", ".")
-	mustGit(t, dir, "commit", "-q", "-m", "base with trusted browser tests")
-	baseCommit, err := gitOutput(dir, "rev-parse", "HEAD")
-	if err != nil {
-		t.Fatal(err)
-	}
-	write("cmd/zenchron-engineering/browser_e2e_test.go", "package main\n// WEAKENED: always passes\n")
-	write("cmd/zenchron-engineering/extra_test.go", "package main\n// candidate-added test\n")
-	write("scripts/browser_e2e.mjs", "// WEAKENED SCRIPT: process.exit(0)\n")
-	write("app/app.go", "package app\n// candidate app change\n")
-	mustGit(t, dir, "add", ".")
-	mustGit(t, dir, "commit", "-q", "-m", "candidate weakens the browser tests")
-	head, _ := gitOutput(dir, "rev-parse", "HEAD")
-	candidateTree, err := gitOutput(dir, "rev-parse", "HEAD^{tree}")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return dir, strings.TrimSpace(baseCommit), strings.TrimSpace(head), strings.TrimSpace(candidateTree)
-}
-
-// A candidate that weakens, empties or adds browser tests cannot change what
-// runs: the workspace holds the candidate's application and the BASE's tests.
-func TestACandidateCannotWeakenTheBrowserTestsItIsVerifiedBy(t *testing.T) {
-	dir, base, _, tree := browserRepo(t)
-	workspace := filepath.Join(t.TempDir(), "workspace")
-	surface, err := browserWorkspace(dir, base, tree, workspace)
-	if err != nil || surface == "" {
-		t.Fatalf("surface=%q err=%v", surface, err)
-	}
-	read := func(path string) string {
-		data, err := os.ReadFile(filepath.Join(workspace, path))
-		if err != nil {
-			return "<absent>"
-		}
-		return string(data)
-	}
-	if got := read("cmd/zenchron-engineering/browser_e2e_test.go"); !strings.Contains(got, "TRUSTED TEST") {
-		t.Fatalf("the candidate's weakened test ran: %q", got)
-	}
-	if got := read("scripts/browser_e2e.mjs"); !strings.Contains(got, "TRUSTED SCRIPT") {
-		t.Fatalf("the candidate's weakened script ran: %q", got)
-	}
-	if got := read("cmd/zenchron-engineering/extra_test.go"); got != "<absent>" {
-		t.Fatalf("a test the candidate added joined the run: %q", got)
-	}
-	if info, err := os.Stat(filepath.Join(workspace, ".git")); err != nil || !info.IsDir() {
-		t.Fatalf("the workspace has no mountpoint for the masked .git directory: %v", err)
-	}
-	if entries, _ := os.ReadDir(filepath.Join(workspace, ".git")); len(entries) != 0 {
-		t.Fatalf("repository metadata reached the browser workspace: %v", entries)
-	}
-	if got := read("app/app.go"); !strings.Contains(got, "candidate app change") {
-		t.Fatalf("the application under test is not the candidate's: %q", got)
-	}
-	// The record names exactly which test sources ran, and it does not move when
-	// only the candidate's own test files change.
-	again, err := browserWorkspace(dir, base, tree, filepath.Join(t.TempDir(), "again"))
-	if err != nil || again != surface {
-		t.Fatalf("the surface digest is not stable: %q %q %v", surface, again, err)
-	}
-}
-
-func TestTheBrowserManifestComesFromTheBaseAndMustBeWellFormed(t *testing.T) {
-	dir, base, commit, _ := browserRepo(t)
-	if names, err := readBrowserSelection(dir, base); err != nil || len(names) != len(browserSelection) {
-		t.Fatalf("names=%v err=%v", names, err)
-	}
-	// A revision with no manifest refuses; it is never an empty, permissive list.
-	if _, err := readBrowserSelection(dir, strings.TrimSpace(mustGitOutput(t, dir, "rev-list", "--max-parents=0", commit))); err == nil {
-		t.Fatal("a base without a manifest was accepted")
-	}
-	for name, content := range map[string]string{
-		"a command injected through a name": "TestOK; rm -rf /\n",
-		"a path":                            "../TestOK\n",
-		"a duplicate":                       "TestOK\nTestOK\n",
-		"an empty manifest":                 "# nothing\n",
-	} {
-		if err := os.WriteFile(filepath.Join(dir, browserManifestFile), []byte(content), 0600); err != nil {
-			t.Fatal(err)
-		}
-		mustGit(t, dir, "add", ".")
-		mustGit(t, dir, "commit", "-q", "-m", name)
-		head := strings.TrimSpace(mustGitOutput(t, dir, "rev-parse", "HEAD"))
-		if _, err := readBrowserSelection(dir, head); err == nil {
-			t.Errorf("%s was accepted", name)
-		}
-	}
-}
-
-func mustGitOutput(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	out, err := gitOutput(dir, args...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return out
-}
-
-// recordingBrowserDocker is a scripted Docker that also remembers the container
-// it was asked to create and, on the browser run, lets a test act as the
-// container writing into the artifact mount.
+// recordingBrowserDocker is a scripted Docker that remembers every container it
+// was asked to create.
 type recordingBrowserDocker struct {
 	*scriptedDocker
 	creates [][]string
 	starts  int
-	// onBrowserStart runs as the browser container, given the host directory the
-	// runtime mounted at /artifacts.
-	onBrowserStart func(artifacts string)
 }
 
 func (d *recordingBrowserDocker) Run(ctx context.Context, name string, args []string, dir string, env []string, grace time.Duration) (CommandOutput, error) {
 	return d.Output(ctx, name, args, dir, env, grace)
 }
-
 func (d *recordingBrowserDocker) Output(ctx context.Context, name string, args []string, dir string, env []string, grace time.Duration) (CommandOutput, error) {
 	if len(args) > 0 && args[0] == "create" {
 		d.creates = append(d.creates, append([]string(nil), args...))
 	}
 	if len(args) > 0 && args[0] == "start" {
 		d.starts++
-		if d.starts == 3 && d.onBrowserStart != nil && len(d.creates) > 0 {
-			for i, arg := range d.creates[len(d.creates)-1] {
-				if arg == "--mount" && strings.Contains(d.creates[len(d.creates)-1][i+1], "dst="+browserArtifactsPath) {
-					src := strings.TrimPrefix(strings.Split(d.creates[len(d.creates)-1][i+1], ",")[1], "src=")
-					d.onBrowserStart(src)
-				}
-			}
-		}
 	}
 	return d.scriptedDocker.Output(ctx, name, args, dir, env, grace)
 }
 
-func writeArtifactsForEveryTest(artifacts string) {
-	for _, name := range browserSelection {
-		_ = os.MkdirAll(filepath.Join(artifacts, name), 0700)
-		_ = os.WriteFile(filepath.Join(artifacts, name, "screenshot.png"), []byte("png "+name), 0600)
+// exportedTree is what the workload streams out for these files: the manifest of
+// everything written, then the retained files as a tar.
+func exportedTree(t *testing.T, files map[string][]byte) []byte {
+	t.Helper()
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+	var manifest bytes.Buffer
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	for _, name := range names {
+		sum := sha256.Sum256(files[name])
+		manifest.WriteString(hex.EncodeToString(sum[:]) + "  ./" + name + "\n")
+		if err := writer.WriteHeader(&tar.Header{Name: "./" + name, Mode: 0o644, Size: int64(len(files[name])), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write(files[name]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return exportedSections(manifest.String()+browserManifestCount+" "+strconv.Itoa(len(names))+"\n", base64.StdEncoding.EncodeToString(archive.Bytes()))
 }
 
+// exportedSections frames a manifest and an encoded archive as the workload does.
+func exportedSections(manifest, encoded string) []byte {
+	var out bytes.Buffer
+	out.WriteString("\n" + browserManifestBegin + "\n" + manifest + browserManifestEnd + "\n")
+	out.WriteString(browserArtifactsBegin + "\n")
+	for len(encoded) > 76 {
+		out.WriteString(encoded[:76] + "\n")
+		encoded = encoded[76:]
+	}
+	out.WriteString(encoded + "\n" + browserArtifactsEnd + "\n")
+	return out.Bytes()
+}
+func screenshotsForEveryTest() map[string][]byte {
+	files := map[string][]byte{}
+	for _, name := range browserSelection {
+		files[name+"/screenshot.png"] = []byte("png " + name)
+	}
+	return files
+}
+
+// browserStdout is what the workload prints: the test events, then the export.
+func browserStdout(t *testing.T, actions map[string]string, files map[string][]byte) []byte {
+	t.Helper()
+	return append(goTestJSON(actions), exportedTree(t, files)...)
+}
 func browserRun(t *testing.T, docker *recordingBrowserDocker, withClaim bool) (AssuranceResult, error, *recordingBrowserDocker) {
 	t.Helper()
 	dir, base, commit, tree := browserRepo(t)
@@ -187,7 +107,6 @@ func browserRun(t *testing.T, docker *recordingBrowserDocker, withClaim bool) (A
 	result, err := verifier.Assure(context.Background(), request)
 	return result, err, docker
 }
-
 func browserChecks(result AssuranceResult) []VerificationCheck {
 	var checks []VerificationCheck
 	for _, check := range result.Checks {
@@ -197,14 +116,14 @@ func browserChecks(result AssuranceResult) []VerificationCheck {
 	}
 	return checks
 }
-
-func newBrowserDocker(starts map[int][]byte, exits map[int]int, onStart func(string)) *recordingBrowserDocker {
-	return &recordingBrowserDocker{scriptedDocker: &scriptedDocker{startOutputs: starts, startExits: exits}, onBrowserStart: onStart}
+func newBrowserDocker(starts, failed map[int][]byte, exits map[int]int) *recordingBrowserDocker {
+	return &recordingBrowserDocker{scriptedDocker: &scriptedDocker{startOutputs: starts, failedOutputs: failed, startExits: exits}}
 }
-
+func passingBrowserDocker(t *testing.T) *recordingBrowserDocker {
+	return newBrowserDocker(map[int][]byte{3: browserStdout(t, allBrowserTests("pass"), screenshotsForEveryTest())}, nil, nil)
+}
 func TestAPassingBrowserRunRecordsExactBoundEvidence(t *testing.T) {
-	docker := newBrowserDocker(map[int][]byte{3: goTestJSON(allBrowserTests("pass"))}, nil, writeArtifactsForEveryTest)
-	result, err, _ := browserRun(t, docker, true)
+	result, err, _ := browserRun(t, passingBrowserDocker(t), true)
 	if err != nil || !result.Passed {
 		t.Fatalf("a fully passing browser run failed: passed=%v err=%v", result.Passed, err)
 	}
@@ -224,10 +143,10 @@ func TestAPassingBrowserRunRecordsExactBoundEvidence(t *testing.T) {
 
 // The container is handed what the tests actually need, and nothing that widens
 // the existing boundary: both skip gates, the browser under both names the
-// runners read, a per-test writable artifact path, a read-only candidate.
-func TestTheBrowserContainerGetsTheEnvironmentAndArtifactMountTheTestsNeed(t *testing.T) {
-	docker := newBrowserDocker(map[int][]byte{3: goTestJSON(allBrowserTests("pass"))}, nil, writeArtifactsForEveryTest)
-	_, _, docker = browserRun(t, docker, true)
+// runners read, a per-test artifact path on a bounded in-container tmpfs, and a
+// read-only candidate. No host path is writable.
+func TestTheBrowserContainerGetsTheEnvironmentAndBoundedArtifactSpaceTheTestsNeed(t *testing.T) {
+	_, _, docker := browserRun(t, passingBrowserDocker(t), true)
 	if len(docker.creates) < 3 {
 		t.Fatalf("expected preparation, suite and browser containers, saw %d", len(docker.creates))
 	}
@@ -235,7 +154,7 @@ func TestTheBrowserContainerGetsTheEnvironmentAndArtifactMountTheTestsNeed(t *te
 	for _, want := range []string{
 		"ZENCHRON_BROWSER_E2E=1", "ZENCHRON_REACT_BROWSER_E2E=1",
 		"ZENCHRON_PLAYWRIGHT_MODULE=" + browserPlaywrightPath, "ZENCHRON_CHROME_EXECUTABLE=" + browserChromePath, "ZENCHRON_E2E_CHROME=" + browserChromePath,
-		"dst=" + browserArtifactsPath, "--network none", "--read-only", "--cap-drop ALL", "no-new-privileges",
+		"--tmpfs " + browserArtifactsTmpfs, "--network none", "--read-only", "--cap-drop ALL", "no-new-privileges",
 		"ZENCHRON_E2E_ARTIFACTS=" + browserArtifactsPath + "/$name",
 	} {
 		if !strings.Contains(create, want) {
@@ -245,27 +164,28 @@ func TestTheBrowserContainerGetsTheEnvironmentAndArtifactMountTheTestsNeed(t *te
 	if !strings.Contains(create, "dst=/candidate,readonly") {
 		t.Errorf("the candidate is not read-only in the browser container:\n%s", create)
 	}
-	if strings.Contains(create, "--privileged") || strings.Contains(create, "--cap-add") || strings.Contains(create, "--network host") {
-		t.Errorf("the browser container widened the boundary:\n%s", create)
+	if strings.Contains(create, "dst="+browserArtifactsPath) || strings.Contains(create, "--privileged") || strings.Contains(create, "--cap-add") || strings.Contains(create, "--network host") {
+		t.Errorf("the browser container gained a host mount or widened the boundary:\n%s", create)
 	}
 }
-
 func TestAMissingBrowserFailsClosed(t *testing.T) {
-	docker := newBrowserDocker(nil, map[int]int{3: browserPrerequisiteExit}, writeArtifactsForEveryTest)
+	docker := newBrowserDocker(nil, nil, map[int]int{3: browserPrerequisiteExit})
 	result, err, _ := browserRun(t, docker, true)
 	if err == nil || result.Passed || result.FailureClass != FailureAssurancePrerequisite || len(browserChecks(result)) != 0 {
 		t.Fatalf("an image without Chrome or Playwright produced evidence: passed=%v class=%v err=%v checks=%+v", result.Passed, result.FailureClass, err, result.Checks)
 	}
 }
-
 func TestASkippedOrSilentBrowserRunNeverPasses(t *testing.T) {
 	skipped := allBrowserTests("pass")
 	skipped[browserSelection[0]] = "skip"
 	silent := allBrowserTests("pass")
 	delete(silent, browserSelection[3])
-	for name, output := range map[string][]byte{"a skipped test": goTestJSON(skipped), "a test that reported nothing": goTestJSON(silent), "no tests at all": []byte("ok\n")} {
-		docker := newBrowserDocker(map[int][]byte{3: output}, nil, writeArtifactsForEveryTest)
-		result, err, _ := browserRun(t, docker, true)
+	for name, output := range map[string][]byte{
+		"a skipped test":               browserStdout(t, skipped, screenshotsForEveryTest()),
+		"a test that reported nothing": browserStdout(t, silent, screenshotsForEveryTest()),
+		"no tests at all":              append([]byte("ok\n"), exportedTree(t, screenshotsForEveryTest())...),
+	} {
+		result, err, _ := browserRun(t, newBrowserDocker(map[int][]byte{3: output}, nil, nil), true)
 		if err == nil || result.Passed || len(browserChecks(result)) != 0 {
 			t.Errorf("%s became evidence: passed=%v err=%v checks=%+v", name, result.Passed, err, result.Checks)
 		}
@@ -274,15 +194,20 @@ func TestASkippedOrSilentBrowserRunNeverPasses(t *testing.T) {
 
 // Passing tests that left no artifacts did not demonstrably drive a browser.
 func TestAPassingRunWithoutArtifactsIsNotEvidence(t *testing.T) {
-	docker := newBrowserDocker(map[int][]byte{3: goTestJSON(allBrowserTests("pass"))}, nil, nil)
-	result, err, _ := browserRun(t, docker, true)
-	if err == nil || result.Passed || len(browserChecks(result)) != 0 || !strings.Contains(err.Error(), "no artifacts") {
-		t.Fatalf("tests that wrote no artifacts became evidence: passed=%v err=%v checks=%+v", result.Passed, err, result.Checks)
+	partial := screenshotsForEveryTest()
+	delete(partial, browserSelection[1]+"/screenshot.png")
+	for name, files := range map[string]map[string][]byte{"no files at all": {}, "one test with none": partial} {
+		docker := newBrowserDocker(map[int][]byte{3: browserStdout(t, allBrowserTests("pass"), files)}, nil, nil)
+		result, err, _ := browserRun(t, docker, true)
+		if err == nil || result.Passed || len(browserChecks(result)) != 0 || !strings.Contains(err.Error(), "no artifacts") {
+			t.Errorf("%s: tests that wrote no artifacts became evidence: passed=%v err=%v checks=%+v", name, result.Passed, err, result.Checks)
+		}
 	}
 }
-
 func TestAFailedBrowserRunBlocksTheCandidate(t *testing.T) {
-	docker := newBrowserDocker(nil, map[int]int{3: 1}, writeArtifactsForEveryTest)
+	failing := allBrowserTests("pass")
+	failing[browserSelection[2]] = "fail"
+	docker := newBrowserDocker(nil, map[int][]byte{3: browserStdout(t, failing, screenshotsForEveryTest())}, map[int]int{3: 1})
 	result, err, _ := browserRun(t, docker, true)
 	checks := browserChecks(result)
 	if err != nil || result.Passed || result.FailureClass != FailureVerification || len(checks) != 1 || checks[0].Outcome != CheckOutcomeFailed {
@@ -292,20 +217,16 @@ func TestAFailedBrowserRunBlocksTheCandidate(t *testing.T) {
 		t.Fatalf("the failure carries no transcript for remediation: %+v", result)
 	}
 }
-
 func TestBrowserAcceptanceIsNotRunWhenTheSuiteFailsOrIsNotRequired(t *testing.T) {
-	failing := newBrowserDocker(nil, map[int]int{2: 1}, nil)
-	result, _, docker := browserRun(t, failing, true)
+	result, _, docker := browserRun(t, newBrowserDocker(nil, nil, map[int]int{2: 1}), true)
 	if result.Passed || len(browserChecks(result)) != 0 || docker.starts != 2 {
 		t.Fatalf("a candidate whose suite failed was sent to the browser: starts=%d %+v", docker.starts, result.Checks)
 	}
-	goOnly := newBrowserDocker(nil, nil, nil)
-	result, err, docker := browserRun(t, goOnly, false)
+	result, err, docker := browserRun(t, newBrowserDocker(nil, nil, nil), false)
 	if err != nil || !result.Passed || len(result.Checks) != 0 || docker.starts != 2 {
 		t.Fatalf("work with no browser obligation changed behavior: starts=%d err=%v %+v", docker.starts, err, result.Checks)
 	}
 }
-
 func TestARequiredBrowserCheckWithNoBaseRefusesVerification(t *testing.T) {
 	if err := browserBaseRefusal(browserContract(), ""); err == nil {
 		t.Fatal("a required browser check with no base revision was skipped")
@@ -358,8 +279,7 @@ func TestEveryBrowserSkipGateIsSatisfiedByTheVerifierEnvironment(t *testing.T) {
 // preparation or the Go suite, and the container's isolation is not widened to
 // get there.
 func TestTheNoSandboxOptInReachesOnlyTheBrowserContainer(t *testing.T) {
-	docker := newBrowserDocker(map[int][]byte{3: goTestJSON(allBrowserTests("pass"))}, nil, writeArtifactsForEveryTest)
-	_, _, docker = browserRun(t, docker, true)
+	_, _, docker := browserRun(t, passingBrowserDocker(t), true)
 	if len(docker.creates) != 3 {
 		t.Fatalf("expected preparation, suite and browser containers, saw %d", len(docker.creates))
 	}
@@ -480,5 +400,4 @@ console.log("text", await fail(() => expectText(stuck, /walkthrough-product/, 30
 		t.Fatalf("a wait hid a failure, ran unbounded or lost the page's own value:\n%s", text)
 	}
 }
-
 func strconvQuote(s string) string { return strconv.Quote(s) }

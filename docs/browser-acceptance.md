@@ -22,17 +22,37 @@ skipping and a private writable artifact directory:
 | `ZENCHRON_PLAYWRIGHT_MODULE` | `/opt/zenchron-browser/playwright/index.mjs` |
 | `ZENCHRON_CHROME_EXECUTABLE`, `ZENCHRON_E2E_CHROME` | `/opt/zenchron-browser/chrome/chrome` (the two names different runners read) |
 | `ZENCHRON_E2E_NO_SANDBOX` | `1`, read only by `scripts/browser_e2e.mjs`, which then adds `--no-sandbox` to the Chrome it starts itself (see below) |
-| `ZENCHRON_E2E_ARTIFACTS` | `/artifacts/<test name>`, a runtime-owned directory bind-mounted writable |
+| `ZENCHRON_E2E_ARTIFACTS` | `/artifacts/<test name>`, on a size- and inode-limited tmpfs inside the container (no host path is writable) |
 
 `/candidate` stays read-only. A selected test that passes but wrote no artifact
-did not demonstrably drive a browser and is inconclusive. The record names the
-candidate commit and tree, the **base** revision whose manifest and tests ran, the
-checker and its revision, the digest of the selection, the digest of the base test
-sources that ran (`surface`), the per-test results, the environment
-(`docker-network-none@<image digest>`), the transcript and the digest of every
-artifact the tests wrote. The browser run is part of the same assurance operation,
-so it spends the same assurance attempts, wall allowance and confirmation rerun as
-any other verification; observing again never adds attempts or resets a limit.
+did not demonstrably drive a browser and is inconclusive.
+
+**Artifacts are bounded where they are written and where they are read.** Code the
+candidate influences runs in the container, so `/artifacts` is a tmpfs capped at
+32 MiB and 1024 inodes: the kernel refuses the write that would exceed it, and the
+test that made it fails. No host path is writable. A real run writes more
+screenshots than the output channel (8 MiB) can carry, so the runtime-owned end of
+the workload exports two tiers on stdout (the image needs GNU `find`, `sha256sum`,
+`awk`, `tar` and `base64`):
+
+- a **manifest** of every regular file the tests wrote, path and SHA-256, with a
+  count of everything that is not a directory so that a file the manifest cannot
+  name is visible. At most 512 files, plain names only, every one under
+  `<selected test>/`. The record's `artifacts_sha256` is the digest of the manifest,
+  and "every selected test wrote something" is read from it;
+- a **bounded set of the files themselves** for review: each test's share of 64
+  files and 3 MiB, at most 1 MiB per file, as a tar.
+
+The controller turns these into host state itself: regular files only, no
+duplicates, no links or devices, every retained file listed in the manifest and
+hashing to the manifest's value, each created exclusively under directories checked
+to be real and hashed as it is copied. The full manifest is kept beside the
+retained files (`MANIFEST.sha256`). A set that breaks a bound or a rule (an unnamed
+file, a link, an over-limit or mismatched file) is refused as a whole; because that
+is something the exercised code did, it is a **judged failure** with a failed record,
+never a pass, whatever the tests reported. An export that cannot be read at all
+(missing, cut off, undecodable) concludes nothing and is inconclusive. In a
+representative run the tests wrote 83 files and 31 of them (2.7 MB) were retained.
 
 ## Candidate-controlled tests
 
@@ -47,6 +67,16 @@ them and still look verified. They are therefore **not the candidate's**:
   everything under `scripts/`. The candidate's versions of those files, and any
   test file it adds there, are discarded; the application under test (the Go
   packages and the embedded frontend bundle) stays the candidate's;
+- the workspace is built on the controller host from candidate-controlled content,
+  so it is built the way the adopted builder builds a tree: from Git **objects**
+  (`ls-tree -z` and `cat-file`, each blob verified against its object id), never from
+  an archive or a checkout, so `.gitattributes` (`export-ignore`, `export-subst`,
+  `eol`) changes nothing. The final file set is composed first - the candidate's
+  entries minus the surface and minus any entry that stands where a surface
+  directory belongs, plus the base's surface - and written once into an empty
+  directory with every parent checked to be a real directory, so a candidate
+  symlink or file at `cmd/zenchron-engineering`, `scripts` or `cmd` cannot redirect
+  a write or a delete out of the scratch workspace;
 - a base test that no longer compiles against the candidate is a judged failure.
   Change the tests in their own reviewed change first, then the work that needs
   them.
@@ -76,8 +106,8 @@ acceptance for **that** feature as well, and the candidate cannot supply it
 ## What the image must provide
 
 The pinned `assurance.image` must contain Node, Playwright and Chrome at the paths
-above. The operator builds the image; the runtime assumes nothing else. The
-workload checks them and exits 3 if any is missing, a prerequisite failure and never
+above, plus `tar` and `base64`. The operator builds the image; the runtime assumes
+nothing else. The workload checks them and exits 3 if any is missing, a prerequisite failure and never
 a verdict.
 
 **Node.** The scripts use the global `WebSocket`, so the image needs Node 22 or later.

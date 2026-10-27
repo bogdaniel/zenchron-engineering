@@ -44,8 +44,9 @@ var subjectContentReaders = map[string]string{
 	// The browser step reads the same proven checkout: withBrowserAcceptance
 	// calls verifyAssuranceCheckout (exact commit and tree) before either reader
 	// runs, and re-proves the tree after the container.
-	"runtime/browser_acceptance.go:readBrowserSelection":       "reads the base manifest from the proven assurance checkout, which was cloned from the subject store",
-	"runtime/browser_acceptance_workspace.go:browserWorkspace": "exports the exact tree and the base test surface from the proven assurance checkout, which was cloned from the subject store",
+	"runtime/browser_acceptance.go:readBrowserSelection":         "reads the base manifest from the proven assurance checkout, which was cloned from the subject store",
+	"runtime/browser_acceptance_workspace.go:browserTreeEntries": "lists the exact tree and the base test surface in the proven assurance checkout, which was cloned from the subject store",
+	"runtime/browser_acceptance_workspace.go:materializeEntries": "reads each blob of the composed tree from the proven assurance checkout and verifies it against its object id",
 }
 
 // TestPostCommitReadersUseTheSubjectStore is #437's search guard: in runtime

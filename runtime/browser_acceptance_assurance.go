@@ -77,7 +77,7 @@ func (v BaselineGoVerifier) withBrowserAcceptance(ctx context.Context, request A
 	}
 
 	args := dockerBase(workspace, true)
-	args = append(args, goModuleCacheMount(v.DependencyCacheDir), "--mount", "type=bind,src="+artifactsDir+",dst="+browserArtifactsPath, "--workdir", "/candidate")
+	args = append(args, goModuleCacheMount(v.DependencyCacheDir), "--tmpfs", browserArtifactsTmpfs, "--workdir", "/candidate")
 	env := append([]string{"GOMODCACHE=/cache", "GONOSUMDB=*", "TMPDIR=" + sandboxBuildDir}, browserEnvironment...)
 	args = append(args, envArgs(append(env, sandboxGoEnv...)...)...)
 	args = append(args, v.Sandbox.Image, "sh", "-c", browserAcceptanceCommand(selection))
@@ -94,8 +94,14 @@ func (v BaselineGoVerifier) withBrowserAcceptance(ctx context.Context, request A
 	if exited != nil {
 		exitCode = exited.Code
 	}
+	// What the tests wrote is read back before the transcript is stored, so the
+	// stored transcript omits the encoded archive and says what was exported.
+	stdout, exported, exportErr := collectBrowserArtifacts(out.Stdout, artifactsDir, selection)
+	if exportErr != nil {
+		out.Stderr = append(append([]byte{}, out.Stderr...), []byte("\n"+exportErr.Error()+"\n")...)
+	}
 	attempt := request.AttemptRef()
-	artifacts, err := v.ArtifactStore.StoreExecutionAttemptTranscript(browserProviderID, attempt, out.Stdout, out.Stderr)
+	artifacts, err := v.ArtifactStore.StoreExecutionAttemptTranscript(browserProviderID, attempt, stdout, out.Stderr)
 	if err != nil {
 		return AssuranceResult{}, err
 	}
@@ -103,7 +109,7 @@ func (v BaselineGoVerifier) withBrowserAcceptance(ctx context.Context, request A
 	if err != nil {
 		return AssuranceResult{}, err
 	}
-	signature, err := AssuranceFailureSignature(redactTranscript(append(append([]byte{}, out.Stdout...), out.Stderr...)))
+	signature, err := AssuranceFailureSignature(redactTranscript(append(append([]byte{}, stdout...), out.Stderr...)))
 	if err != nil {
 		return AssuranceResult{}, err
 	}
@@ -111,11 +117,16 @@ func (v BaselineGoVerifier) withBrowserAcceptance(ctx context.Context, request A
 		return AssuranceResult{}, fmt.Errorf("verifier input changed during browser acceptance")
 	}
 
-	outcome, counts := classifyBrowserRun(selection, out.Stdout, exitCode, ran && ctx.Err() == nil)
-	artifactsDigest, silent, err := browserArtifacts(artifactsDir, selection)
-	if err != nil {
-		return AssuranceResult{}, err
+	outcome, counts := classifyBrowserRun(selection, stdout, exitCode, ran && ctx.Err() == nil)
+	// An artifact tree that broke a bound is something the exercised code did:
+	// judged, never passing, whatever the tests reported. One that could not be
+	// read at all concludes nothing.
+	if errors.Is(exportErr, errBrowserArtifactsRefused) && outcome != browserInconclusive {
+		outcome = browserFailed
+	} else if exportErr != nil {
+		outcome = browserInconclusive
 	}
+	artifactsDigest, silent := exported.digest, exported.silent
 	result.Artifacts = append(result.Artifacts, artifacts...)
 	record := func(outcome string) VerificationCheck {
 		return VerificationCheck{

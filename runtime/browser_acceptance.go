@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -102,7 +103,7 @@ func browserSelectionDigest(names []string) string {
 // browserCheckerRevision identifies the implementation that produced a record,
 // so a change to how the run is made invalidates earlier records.
 func browserCheckerRevision() string {
-	digest, _ := Digest(struct{ Name, Version string }{"browser-acceptance", "go-test-json-playwright-v3-base-pinned-tests-container-no-sandbox"})
+	digest, _ := Digest(struct{ Name, Version string }{"browser-acceptance", "go-test-json-playwright-v5-git-object-workspace-manifest-and-retained-artifacts"})
 	return digest
 }
 
@@ -114,10 +115,30 @@ func browserAcceptanceCommand(names []string) string {
 	return "test -f \"$ZENCHRON_PLAYWRIGHT_MODULE\" || exit 3\n" +
 		"test -x \"$ZENCHRON_CHROME_EXECUTABLE\" || exit 3\n" +
 		"command -v node >/dev/null || exit 3\n" +
+		"for tool in tar base64 sha256sum awk find sort; do command -v $tool >/dev/null || exit 3; done\n" +
 		"status=0\nfor name in " + strings.Join(names, " ") + "; do\n" +
 		"  mkdir -p " + browserArtifactsPath + "/$name\n" +
 		"  ZENCHRON_E2E_ARTIFACTS=" + browserArtifactsPath + "/$name go test -json -count=1 -run \"^$name\\$\" " + browserPackage + " || status=1\n" +
-		"done\nexit $status"
+		"done\n" + browserExportCommand(len(names))
+}
+
+// browserExportCommand is the runtime-owned end of the workload: the manifest of
+// everything the tests wrote, then, for each test, the name-ordered plain files
+// that fit its share of the retention bounds, as a tar. It needs GNU find, sha256sum, awk, tar and
+// base64 in the image.
+func browserExportCommand(tests int) string {
+	return "cd " + browserArtifactsPath + "\n" +
+		"echo " + browserManifestBegin + "\n" +
+		"find . -type f -exec sha256sum {} +\n" +
+		"echo \"" + browserManifestCount + " $(find . ! -type d | wc -l | tr -d ' ')\"\n" +
+		"echo " + browserManifestEnd + "\n" +
+		"find . -type f -size -" + strconv.Itoa(browserRetainedMaxFileBytes/1024+1) + "k -printf '%s\\t%p\\n' | sort -t \"$(printf '\\t')\" -k2 | " +
+		"awk -F '\\t' -v cap=" + strconv.Itoa(browserRetainedMaxBytes/tests) + " -v max=" + strconv.Itoa(browserRetainedMaxFiles/tests) +
+		" '{ split($2, p, \"/\"); k = p[2]; if (n[k] < max && total[k] + $1 <= cap) { print $2; total[k] += $1; n[k]++ } }' > /tmp/retain\n" +
+		"echo " + browserArtifactsBegin + "\n" +
+		"tar -cf - -T /tmp/retain | base64\n" +
+		"echo " + browserArtifactsEnd + "\n" +
+		"exit $status"
 }
 
 // browserOutcome is how a browser run ended.
