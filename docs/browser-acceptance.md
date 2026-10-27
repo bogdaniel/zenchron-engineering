@@ -21,6 +21,7 @@ skipping and a private writable artifact directory:
 | `ZENCHRON_BROWSER_E2E`, `ZENCHRON_REACT_BROWSER_E2E` | `1` (the skip gates of the selected tests; a source-scan test keeps this list in step with them) |
 | `ZENCHRON_PLAYWRIGHT_MODULE` | `/opt/zenchron-browser/playwright/index.mjs` |
 | `ZENCHRON_CHROME_EXECUTABLE`, `ZENCHRON_E2E_CHROME` | `/opt/zenchron-browser/chrome/chrome` (the two names different runners read) |
+| `ZENCHRON_E2E_NO_SANDBOX` | `1`, read only by `scripts/browser_e2e.mjs`, which then adds `--no-sandbox` to the Chrome it starts itself (see below) |
 | `ZENCHRON_E2E_ARTIFACTS` | `/artifacts/<test name>`, a runtime-owned directory bind-mounted writable |
 
 `/candidate` stays read-only. A selected test that passes but wrote no artifact
@@ -79,34 +80,33 @@ above. The operator builds the image; the runtime assumes nothing else. The
 workload checks them and exits 3 if any is missing, a prerequisite failure and never
 a verdict.
 
-**Observed in a representative container** (Debian-based `golang:1.25` plus Node 20,
-`playwright-core` and Debian Chromium at the paths above, run through the verifier
-in the unchanged isolation: no network, read-only root, all capabilities dropped,
-`no-new-privileges`, default seccomp; `TestBrowserAcceptanceInARealContainer` is the
-opt-in test):
+**Node.** The scripts use the global `WebSocket`, so the image needs Node 22 or later.
+Node 20 fails `TestBrowserWorkspace` with `WebSocket is not defined`.
 
-- All four selected tests execute and none skips; every one writes its artifacts
-  through the writable `/artifacts` mount while `/candidate` stays read-only; the
-  record carries the exact commit, tree, base, surface and artifact digests.
-- Chrome cannot start with its own sandbox in that boundary: it can create neither
-  its setuid nor its user-namespace sandbox ("No usable sandbox!", and as root
-  "Running as root without --no-sandbox is not supported"). The Playwright-driven
-  tests (`TestDashboardDescribedObjective`, `TestDashboardFeatureWalkthrough`,
-  `TestReactEngineeringOSGovernedWorkspace`) nevertheless run, because Playwright
-  launches Chromium with `--no-sandbox` unless asked not to. `TestBrowserWorkspace`
-  starts Chrome itself (`scripts/browser_e2e.mjs`) without that flag and fails with
-  the root-sandbox error. It therefore cannot pass in this boundary as written.
-- `TestReactEngineeringOSGovernedWorkspace` failed once in three runs on a timing
-  assertion (`Reading runtime state…` still on screen), and passed in the others.
-  An intermittently failing selected test makes the claim intermittently
-  undischargeable and spends assurance attempts.
+**Chrome's own sandbox.** Chrome cannot start its sandbox inside the existing
+isolation (no network, read-only root, all capabilities dropped, `no-new-privileges`,
+default seccomp): it reports "No usable sandbox!", and as root "Running as root
+without --no-sandbox is not supported". Two kinds of test meet this differently:
 
-The runtime adds no browser flag and does not wrap the image's browser. Whether to
-change `TestBrowserWorkspace`'s launch, drop it from the manifest, give the browser
-container a different profile, or accept the browser's own sandbox being off while
-the container stays the boundary, is an operator decision that needs its own
-authorization. Until then the claim cannot be discharged with the current
-manifest, and it fails closed.
+- The Playwright-driven tests launch Chromium with `--no-sandbox` by default, so
+  they run in the boundary as it is.
+- `scripts/browser_e2e.mjs` starts Chrome itself. It adds `--no-sandbox` **only**
+  when `ZENCHRON_E2E_NO_SANDBOX=1`, and the verifier sets that variable **only** in
+  the browser-assurance container. Every other launch keeps Chrome's sandbox. The
+  container, which is the boundary, is unchanged: network off, `/candidate` and the
+  root read-only, capabilities dropped, `no-new-privileges`, default seccomp, and the
+  only writable mounts are the runtime-owned artifact directory and the tmpfs the
+  base already provides. Nothing widens it (`--privileged`, `--cap-add`, a seccomp
+  profile, a host namespace).
+
+The tests that assert this: the opt-in variable is present in the browser container
+and absent from the dependency-preparation and Go-suite containers; the container
+keeps every restriction and gains no widening flag; and the real script is run
+against a stand-in Chrome to show it keeps the sandbox by default, with
+`ZENCHRON_E2E_NO_SANDBOX=0`, and adds the flag only with `1`.
+
+`TestBrowserAcceptanceInARealContainer` is the opt-in end-to-end run (it needs Docker,
+an image with the three paths above, and an operator module cache).
 
 ## What is, and is not, evidence
 

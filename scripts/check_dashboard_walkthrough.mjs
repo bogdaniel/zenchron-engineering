@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { expectText, eventually } from "./browser_waits.mjs";
 
 const { chromium } = await import(pathToFileURL(process.env.ZENCHRON_PLAYWRIGHT_MODULE).href);
 const base = process.env.ZENCHRON_E2E_URL,
@@ -62,10 +63,10 @@ try {
   await page.getByLabel("Repositories", { exact: true }).fill("zenchron/seeded");
   await page.getByRole("button", { name: "Review & create", exact: true }).click();
   await page.getByRole("dialog").waitFor();
-  assert.match(await page.getByRole("dialog").innerText(), /walkthrough-product/);
+  await expectText(page.getByRole("dialog"), /walkthrough-product/);
   await confirm("product propose");
   await page.waitForURL(/#\/products\/product-/);
-  assert.match(await page.locator("main").innerText(), /walkthrough-product/);
+  await expectText(page.locator("main"), /walkthrough-product/);
   const products = await durable("/v1/products");
   assert(products.products.some((p) => p.name === "walkthrough-product"), "the product never reached durable state");
   await capture("02-product-created");
@@ -79,7 +80,7 @@ try {
   await page.getByLabel("Trust requirement", { exact: true }).selectOption("protected");
   await page.getByRole("button", { name: "Review & create", exact: true }).nth(0).click();
   await page.getByRole("dialog").waitFor();
-  assert.match(await page.getByRole("dialog").innerText(), /walkthrough-implementer/);
+  await expectText(page.getByRole("dialog"), /walkthrough-implementer/);
   await confirm("planning artifact propose");
   await receiptFor("planning-artifact-propose", "walkthrough-implementer");
   await capture("03-profile-created");
@@ -113,7 +114,7 @@ try {
   await stage(2).getByLabel("implementation", { exact: true }).check();
   await page.getByRole("button", { name: "Review & create", exact: true }).nth(1).click();
   await page.getByRole("dialog").waitFor();
-  assert.match(await page.getByRole("dialog").innerText(), /walkthrough-feature/);
+  await expectText(page.getByRole("dialog"), /walkthrough-feature/);
   await confirm("planning artifact propose");
   await receiptFor("planning-artifact-propose", "walkthrough-feature");
   await capture("04-template-created");
@@ -129,7 +130,7 @@ try {
   // repository choice to it.
   await visit("intake");
   await page.getByLabel("Product", { exact: true }).selectOption({ label: "walkthrough-product" });
-  assert.equal(await page.getByLabel("Repository", { exact: true }).inputValue(), "zenchron/seeded");
+  await eventually(page, () => page.getByLabel("Repository", { exact: true }).inputValue(), "zenchron/seeded", "the repository field holds the seeded repository");
   await page.getByLabel("Existing issue", { exact: true }).fill("41");
   await page.getByLabel("Plan template", { exact: true }).selectOption("walkthrough-feature");
   await page.getByLabel("Use deterministic planning", { exact: true }).check();
@@ -146,8 +147,8 @@ try {
 
   // 7. Review the compiled plan and approve it.
   await visit(`objectives/${planID}`);
-  assert.match(await page.locator("main").innerText(), /implementation/);
-  assert.match(await page.locator("main").innerText(), /verification/);
+  await expectText(page.locator("main"), /implementation/);
+  await expectText(page.locator("main"), /verification/);
   await capture("07-plan-detail-before-approval");
   await page.getByRole("button", { name: "Review & approve", exact: true }).click();
   await page.getByRole("dialog").waitFor();

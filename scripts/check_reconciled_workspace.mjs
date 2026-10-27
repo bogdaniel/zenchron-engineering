@@ -4,6 +4,7 @@ import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { accessibilityIssues } from "./browser_accessibility.mjs";
+import { expectText, eventually as waitUntil } from "./browser_waits.mjs";
 const { chromium } = await import(pathToFileURL(process.env.ZENCHRON_PLAYWRIGHT_MODULE).href);
 const base = process.env.ZENCHRON_E2E_URL,
   out = process.env.ZENCHRON_E2E_ARTIFACTS || "/private/tmp/zenchron-reconciliation-live";
@@ -23,28 +24,8 @@ page.on("pageerror", (e) => errors.push(e.message));
 page.on("request", (r) => {
   if (r.method() === "POST") writes.push({ path: new URL(r.url()).pathname, body: r.postDataJSON() });
 });
-// Focus and disabled state settle after the render that announces them, so the
-// assertions that expect them wait, bounded, for the expected value and still
-// fail with the value the page actually held.
-const eventually = async (read, expected, what, timeout = 10_000) => {
-  const deadline = Date.now() + timeout;
-  let actual = await read();
-  while (actual !== expected && Date.now() < deadline) {
-    await page.waitForTimeout(100);
-    actual = await read();
-  }
-  assert.equal(actual, expected, what);
-};
-// The route heading can render before the state-dependent text of the same
-// page, so a page-text assertion waits, bounded, for it. A pattern that never
-// appears still fails after the timeout, with the text the page actually held.
-const expectMain = async (pattern, timeout = 10_000) => {
-  try {
-    await page.locator("main").filter({ hasText: pattern }).waitFor({ timeout });
-  } catch {
-    assert.match(await page.locator("main").innerText(), pattern);
-  }
-};
+const expectMain = (pattern) => expectText(page.locator("main"), pattern);
+const eventually = (read, expected, what) => waitUntil(page, read, expected, what);
 const check = async (name, run) => {
   await run();
   results.push(name);

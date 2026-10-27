@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -429,15 +430,55 @@ func TestTheRawChromeRunnerKeepsItsSandboxUnlessOptedIn(t *testing.T) {
 // exact candidate; a checkout at any other commit is not read and starts no
 // container.
 func TestABrowserCheckoutThatIsNotTheExactCandidateIsNotRead(t *testing.T) {
-	dir, base, commit, _ := browserRepo(t)
+	dir, base, commit, tree := browserRepo(t)
+	// Every object the request names exists, but the checkout's HEAD is not the
+	// exact candidate, so it is not the verified checkout.
+	mustGit(t, dir, "checkout", "-q", "--detach", base)
 	docker := newBrowserDocker(nil, nil, nil)
 	verifier := scriptedVerifier(t, docker.scriptedDocker, t.TempDir())
 	verifier.Sandbox.Executor = docker
 	result, err := verifier.withBrowserAcceptance(context.Background(), AssuranceRequest{
-		RunID: "run-1", Attempt: 1, Commit: commit, Tree: "9999999999999999999999999999999999999999", CheckoutDir: dir,
+		RunID: "run-1", Attempt: 1, Commit: commit, Tree: tree, CheckoutDir: dir,
 		Contract: Ref{ID: "contract", Revision: "1"}, BrowserAcceptanceBase: base,
 	}, AssuranceResult{Passed: true})
 	if err == nil || result.Passed || result.FailureClass != FailureAssurancePrerequisite || len(docker.creates) != 0 || len(browserChecks(result)) != 0 {
 		t.Fatalf("a checkout that is not the exact candidate was used: passed=%v class=%v err=%v creates=%d", result.Passed, result.FailureClass, err, len(docker.creates))
 	}
 }
+
+// The page-state waits are bounded and still fail: a state that settles late
+// passes, a state that never arrives fails after the bound with the value the
+// page held, so waiting cannot hide a genuine failure.
+func TestTheBrowserWaitsSettleLateStateAndStillFailWhenItNeverArrives(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	helper, err := filepath.Abs("../scripts/browser_waits.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(t.TempDir(), "probe.mjs")
+	body := `import { eventually, expectText } from ` + strconvQuote("file://"+helper) + `;
+const page = { waitForTimeout: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) };
+let reads = 0;
+await eventually(page, async () => ++reads >= 3, true, "late state", 2000);
+const fail = async (run) => { const started = Date.now(); try { await run(); return "passed"; } catch (e) { return (Date.now() - started < 3000 ? "failed-bounded:" : "failed-slow:") + e.message.replace(/\s+/g, " ").slice(0, 120); } };
+console.log("never", await fail(() => eventually(page, async () => false, true, "never arrives", 300)));
+const stuck = { filter: () => ({ waitFor: async () => { throw new Error("timeout"); } }), innerText: async () => "Reading runtime state…" };
+console.log("text", await fail(() => expectText(stuck, /walkthrough-product/, 300)));
+`
+	if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "never failed-bounded:") || !strings.Contains(text, "text failed-bounded:") || !strings.Contains(text, "Reading runtime state") {
+		t.Fatalf("a wait hid a failure, ran unbounded or lost the page's own value:\n%s", text)
+	}
+}
+
+func strconvQuote(s string) string { return strconv.Quote(s) }
