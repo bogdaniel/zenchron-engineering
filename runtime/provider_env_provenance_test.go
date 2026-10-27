@@ -19,12 +19,12 @@ import (
 // process ACTUALLY received, restricted to a non-secret allowlist, with an
 // unpassed variable recorded as absent rather than empty.
 func TestInvocationProvenanceRecordsTheEffectiveProviderEnvironment(t *testing.T) {
-	common := []string{"PATH", "HOME", "GOENV", "GIT_DIR", "GOMODCACHE", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GOFLAGS", "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH"}
+	common := []string{"PATH", "HOME", "GOENV", "GIT_DIR", "GOMODCACHE", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GOFLAGS", "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH", "NPM_CONFIG_USERCONFIG", "NPM_CONFIG_GLOBALCONFIG"}
 	want := map[string][]string{
 		AgentKindCodexCLI:   append(slices.Clone(common), "CODEX_HOME"),
 		AgentKindClaudeCode: append(slices.Clone(common), "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"),
 	}
-	hashed := []string{"PATH", "HOME", "GIT_DIR", "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH", "GOMODCACHE", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
+	hashed := []string{"PATH", "HOME", "GIT_DIR", "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH", "GOMODCACHE", "NPM_CONFIG_USERCONFIG", "NPM_CONFIG_GLOBALCONFIG", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
 	// Assembled at run time so this source file is not itself credential
 	// material to candidate admission.
 	secret := "gh" + "p_" + strings.Repeat("0a", 20)

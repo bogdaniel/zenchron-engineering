@@ -219,6 +219,10 @@ func TestAgentLayerNamesItsOneUnsafeOverride(t *testing.T) {
 		"credential_path",
 		"endpoint",
 		"allow_permission_bypass",
+		// frontend_cache_dir grants nothing: it names an operator-owned,
+		// read-only source the runtime copies from, and is refused for
+		// brokered provider agents.
+		"frontend_cache_dir",
 		"unattended",
 	})
 	// Standing permission is not a grant. An agent an operator allowed the
