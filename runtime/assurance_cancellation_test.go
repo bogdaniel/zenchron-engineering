@@ -32,7 +32,10 @@ type scriptedDocker struct {
 	// one is a start that failed before any workload ran.
 	startExits   map[int]int
 	startOutputs map[int][]byte
-	exited       int
+	// failedOutputs is the stdout of the nth start when it scripts a non-zero
+	// exit, as a workload that reports and then fails prints it.
+	failedOutputs map[int][]byte
+	exited        int
 }
 
 func (d *scriptedDocker) LookPath(string) error { return nil }
@@ -50,9 +53,13 @@ func (d *scriptedDocker) Output(ctx context.Context, _ string, args []string, _ 
 	code := 0
 	var output []byte
 	hasOutput := false
+	failed := []byte("--- FAIL: TestCandidate\nFAIL\n")
 	if verb == "start" {
 		code = d.startExits[d.seen[verb]]
 		output, hasOutput = d.startOutputs[d.seen[verb]]
+		if scripted, ok := d.failedOutputs[d.seen[verb]]; ok {
+			failed = scripted
+		}
 	}
 	block := d.blockOn != "" && strings.HasPrefix(joined, d.blockOn) && d.seen[verb] == d.blockNth
 	if block {
@@ -74,7 +81,7 @@ func (d *scriptedDocker) Output(ctx context.Context, _ string, args []string, _ 
 		d.mu.Lock()
 		d.exited = code
 		d.mu.Unlock()
-		return CommandOutput{ExitCode: code, Stdout: []byte("--- FAIL: TestCandidate\nFAIL\n")}, fmt.Errorf("exit status %d", code)
+		return CommandOutput{ExitCode: code, Stdout: failed}, fmt.Errorf("exit status %d", code)
 	case verb == "start" && hasOutput:
 		return CommandOutput{Stdout: output}, nil
 	case strings.HasPrefix(joined, "inspect") && d.exitedCode() != 0:

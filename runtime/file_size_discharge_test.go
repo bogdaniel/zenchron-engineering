@@ -59,6 +59,12 @@ func journalFor(t *testing.T, checks []VerificationCheck) []EngineeringEvent {
 // the evidence bundle discharges, the way a restarted controller would.
 func bundleClaims(t *testing.T, events []EngineeringEvent, base string) map[string]domain.EvidenceItem {
 	t.Helper()
+	return bundleClaimsFor(t, events, base, dischargeContract())
+}
+
+// bundleClaimsFor is bundleClaims for a given compiled contract.
+func bundleClaimsFor(t *testing.T, events []EngineeringEvent, base string, contract domain.EngineeringWorkContract) map[string]domain.EvidenceItem {
+	t.Helper()
 	projection, err := Project(events)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +74,7 @@ func bundleClaims(t *testing.T, events []EngineeringEvent, base string) map[stri
 		state.sources = []sourceRecord{{BaseRevision: base}}
 	}
 	runtime := &EngineeringRuntime{deps: Dependencies{Assurance: BaselineGoVerifier{}}}
-	bundles, err := runtime.evidenceBundles(state, dischargeContract())
+	bundles, err := runtime.evidenceBundles(state, contract)
 	if err != nil {
 		t.Fatal(err)
 	}

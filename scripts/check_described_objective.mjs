@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { expectText, eventually } from "./browser_waits.mjs";
 
 const { chromium } = await import(pathToFileURL(process.env.ZENCHRON_PLAYWRIGHT_MODULE).href);
 const base = process.env.ZENCHRON_E2E_URL,
@@ -57,13 +58,13 @@ try {
 
   await review.click();
   await page.getByRole("dialog").waitFor();
-  assert.match(await page.getByRole("dialog").innerText(), /writes a new issue to GitHub/);
+  await expectText(page.getByRole("dialog"), /writes a new issue to GitHub/);
   const createResponse = page.waitForResponse((r) => r.url().endsWith("/v1/issues") && r.request().method() === "POST");
   await confirm("issue create");
   const created = await (await createResponse).json();
   assert.equal(created.outcome, "applied", JSON.stringify(created));
   await page.getByRole("status").filter({ hasText: /Created/ }).waitFor();
-  assert.equal(await page.getByLabel("Existing issue", { exact: true }).inputValue(), "42");
+  await eventually(page, () => page.getByLabel("Existing issue", { exact: true }).inputValue(), "42", "the new issue number flows into the proposal step");
   await capture("02-issue-created");
 
   await page.getByLabel("Use deterministic planning", { exact: true }).check();

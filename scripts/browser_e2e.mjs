@@ -13,9 +13,14 @@ const chromePath = process.env.ZENCHRON_E2E_CHROME || '/Applications/Google Chro
 const artifacts = process.env.ZENCHRON_E2E_ARTIFACTS || '/private/tmp/zenchron-browser-evidence';
 await mkdir(artifacts, { recursive: true });
 const profile = await mkdtemp(path.join(tmpdir(), 'zenchron-chrome-'));
+// Chrome refuses to start its own sandbox as root inside the network-less
+// assurance container (no capabilities, no-new-privileges), where the container
+// is the isolation boundary. Only that container opts in; every other launch
+// keeps Chrome's sandbox.
+const noSandbox = process.env.ZENCHRON_E2E_NO_SANDBOX === '1';
 const browser = spawn(chromePath, ['--headless=new', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
   '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-sync',
-  '--disable-component-update', '--user-data-dir=' + profile, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  '--disable-component-update', '--user-data-dir=' + profile, ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
 let chromeLog = '';
 browser.stderr.on('data', chunk => { chromeLog = (chromeLog + chunk).slice(-10000); });
 let cdp;

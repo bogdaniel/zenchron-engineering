@@ -41,6 +41,12 @@ var subjectContentReaders = map[string]string{
 	"runtime/file_size_policy.go:readFileSizeManifest": "reads the proven assurance checkout, which was cloned from the subject store",
 	"runtime/file_size_policy.go:CheckFileSizePolicy":  "reads the proven assurance checkout, which was cloned from the subject store",
 	"runtime/file_size_policy.go:countedBlobs":         "reads the proven assurance checkout, which was cloned from the subject store",
+	// The browser step reads the same proven checkout: withBrowserAcceptance
+	// calls verifyAssuranceCheckout (exact commit and tree) before either reader
+	// runs, and re-proves the tree after the container.
+	"runtime/browser_acceptance.go:readBrowserSelection":         "reads the base manifest from the proven assurance checkout, which was cloned from the subject store",
+	"runtime/browser_acceptance_workspace.go:browserTreeEntries": "lists the exact tree and the base test surface in the proven assurance checkout, which was cloned from the subject store",
+	"runtime/browser_acceptance_workspace.go:materializeEntries": "reads each blob of the composed tree from the proven assurance checkout and verifies it against its object id",
 }
 
 // TestPostCommitReadersUseTheSubjectStore is #437's search guard: in runtime

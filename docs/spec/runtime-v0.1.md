@@ -294,7 +294,12 @@ only by evidence that proves THAT requirement: the claim `claim-file-size-policy
 is discharged only from a passing observation whose `checks` hold a successful
 `file_size_policy` record by the current checker, bound to the observation's own
 commit and tree and to the contract's governing base. A generic passing suite
-discharges every other `automated_test` claim it always did and never this one.
+discharges every other `automated_test` claim it always did and never this one. The
+same list also carries the `browser_acceptance` record (`claim-browser-acceptance`,
+see `docs/browser-acceptance.md`), which additionally names the `selection`
+digest of the tests it ran, their `results` (`total`, `passed`, `failed`,
+`skipped`), the `environment` it ran in and the `artifact` transcript. It proves
+the claim only when every selected test passed and none failed or skipped.
 Observations written before the member existed carry none, and absence is never
 read as proof; replay does not synthesize it. A contract that newly requires the
 claim changes the `assurance.go` operation binding (it gains the full SHA-256

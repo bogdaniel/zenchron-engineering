@@ -4,6 +4,7 @@ import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { accessibilityIssues } from "./browser_accessibility.mjs";
+import { expectText, eventually as waitUntil } from "./browser_waits.mjs";
 const { chromium } = await import(pathToFileURL(process.env.ZENCHRON_PLAYWRIGHT_MODULE).href);
 const base = process.env.ZENCHRON_E2E_URL,
   out = process.env.ZENCHRON_E2E_ARTIFACTS || "/private/tmp/zenchron-reconciliation-live";
@@ -23,6 +24,8 @@ page.on("pageerror", (e) => errors.push(e.message));
 page.on("request", (r) => {
   if (r.method() === "POST") writes.push({ path: new URL(r.url()).pathname, body: r.postDataJSON() });
 });
+const expectMain = (pattern) => expectText(page.locator("main"), pattern);
+const eventually = (read, expected, what) => waitUntil(page, read, expected, what);
 const check = async (name, run) => {
   await run();
   results.push(name);
@@ -57,12 +60,12 @@ const recoverAfterNavigation = async (destination, label, captureName) => {
   await visit(destination);
   await page.reload();
   await page.getByRole("heading", { name: "Unresolved original operation", exact: true }).waitFor();
-  assert.equal(await page.getByRole("button", { name: label, exact: true }).isDisabled(), true);
+  await eventually(() => page.getByRole("button", { name: label, exact: true }).isDisabled(), true, "the original action stays disabled");
   if (captureName === "recovered-revision") {
     await page.getByText("Original delivery reference", { exact: true }).click();
     const original = page.getByRole("heading", { name: "Unresolved original operation", exact: true }).locator("..");
     assert.match(await original.innerText(), /revision: 1\b/);
-    assert.match(await page.locator("main").innerText(), /plan r2/);
+    await expectMain(/plan r2/);
     await page.setViewportSize({ width: 390, height: 844 });
     await capture("unresolved-revision-390-expanded");
     await page.getByText("Original delivery reference", { exact: true }).click();
@@ -79,7 +82,7 @@ const recoverAfterNavigation = async (destination, label, captureName) => {
   await page
     .getByText("Reconciliation unavailable. Outcome remains unknown; no request was resent.", { exact: true })
     .waitFor();
-  assert.equal(await page.getByRole("button", { name: label, exact: true }).isDisabled(), true);
+  await eventually(() => page.getByRole("button", { name: label, exact: true }).isDisabled(), true, "the original action stays disabled");
   await page.unroute("**/v1/operator-action-receipts/**");
   await page.route("**/v1/operator-action-receipts/**", async (route) => {
     const url = new URL(route.request().url());
@@ -93,10 +96,10 @@ const recoverAfterNavigation = async (destination, label, captureName) => {
   await page.unroute("**/v1/operator-action-receipts/**");
   await page.reload();
   await page.getByRole("heading", { name: "Unresolved original operation", exact: true }).waitFor();
-  assert.equal(await page.getByRole("button", { name: label, exact: true }).isDisabled(), true);
+  await eventually(() => page.getByRole("button", { name: label, exact: true }).isDisabled(), true, "the original action stays disabled");
   await page.getByRole("button", { name: "Re-read exact receipt", exact: true }).click();
   await page.getByRole("heading", { name: "Historical operator action receipt", exact: true }).waitFor();
-  assert.equal(await page.locator(".governed-feedback[tabindex]").evaluate((n) => n === document.activeElement), true);
+  await eventually(() => page.locator(".governed-feedback[tabindex]").evaluate((n) => n === document.activeElement), true, "focus moves to the feedback region");
   await capture(captureName);
   await page.getByRole("link", { name: "Inspect recorded result", exact: true }).click();
 };
@@ -120,7 +123,7 @@ try {
   await check("Controller-owned installed agents, profiles and templates", async () => {
     await visit("agents");
     await page.getByRole("region", { name: "Installed agent inventory", exact: true }).waitFor();
-    assert.match(await page.locator("main").innerText(), /browser-implementer/);
+    await expectMain(/browser-implementer/);
   });
   await check(
     "Lost objective response survives navigation/reload; exact receipt recovers one unapproved proposal",
@@ -147,7 +150,7 @@ try {
       await recoverAfterNavigation("intake", "Review objective proposal", "recovered-objective");
       await page.unroute("**/v1/objectives");
       await page.getByRole("heading", { name: "Plan dependency inspection", exact: true }).waitFor();
-      assert.match(await page.locator("main").innerText(), /unapproved/);
+      await expectMain(/unapproved/);
       assert.equal(writes.filter((r) => r.path === "/v1/objectives").length, 1);
     },
   );
@@ -176,7 +179,7 @@ try {
         .locator("main")
         .getByText(/^Plan approved · r1$/)
         .waitFor();
-      assert.match(await page.locator("main").innerText(), /Plan approved/);
+      await expectMain(/Plan approved/);
     },
   );
   await check("Lost revision response retains the original revision across navigation to the latest plan", async () => {
@@ -193,7 +196,7 @@ try {
     );
     await page.unroute("**/v1/plans/*/revise");
     await page.getByRole("heading", { name: /plan r2/ }).waitFor();
-    assert.match(await page.locator("main").innerText(), /unapproved|proposed/);
+    await expectMain(/unapproved|proposed/);
   });
   await check("Typed graph decision resolves through the controller and retains historical context/focus", async () => {
     await page.setViewportSize({ width: 390, height: 844 });
@@ -220,7 +223,7 @@ try {
     await capture("decision-confirmation-390-expanded");
     await confirm("decision resolve");
     await page.getByRole("heading", { name: "Historical decision receipt", exact: true }).waitFor();
-    assert.equal(await page.locator(".governed-feedback").evaluate((n) => n === document.activeElement), true);
+    await eventually(() => page.locator(".governed-feedback").evaluate((n) => n === document.activeElement), true, "focus moves to the feedback region");
     await capture("resolved-decision-390-dark");
     await page.setViewportSize({ width: 1440, height: 1080 });
   });
@@ -239,7 +242,7 @@ try {
       });
       await confirm("authorize");
       await page.getByText(/Outcome unresolved/).waitFor();
-      assert.equal(await page.getByRole("button", { name: "Reject publication", exact: true }).isDisabled(), true);
+      await eventually(() => page.getByRole("button", { name: "Reject publication", exact: true }).isDisabled(), true, "Reject publication stays disabled");
       await page.unroute("**/v1/runs/*/authorize");
       await page.getByRole("button", { name: "Re-read exact receipt", exact: true }).click();
       await page.getByRole("heading", { name: "Historical publication decision receipt", exact: true }).waitFor();
