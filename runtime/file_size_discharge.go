@@ -45,14 +45,14 @@ func fileSizeEvidenceItem(item domain.EvidenceItem, observation *AssuranceObserv
 	return item, true
 }
 
-// policyListsFileSizeClaim is a cheap test of the policy the controller loaded:
-// can any contract compiled under it require the claim?
-func policyListsFileSizeClaim(policy domain.EngineeringPolicy) bool {
+// policyListsClaim is a cheap test of the policy the controller loaded: can
+// any contract compiled under it require this claim?
+func policyListsClaim(policy domain.EngineeringPolicy, claimID string) bool {
 	for _, rule := range policy.Rules {
 		if rule.Effect.RequiredClaims == nil {
 			continue
 		}
-		if _, listed := (*rule.Effect.RequiredClaims)[FileSizePolicyClaimID]; listed {
+		if _, listed := (*rule.Effect.RequiredClaims)[claimID]; listed {
 			return true
 		}
 	}
@@ -92,7 +92,7 @@ func (s *runState) fileSizeBindingSuffix() string {
 // counted per operation kind, not per binding), so nothing is renewed. An
 // unchanged revision leaves the binding byte-for-byte stable.
 func fileSizeBindingSuffixFor(policy domain.EngineeringPolicy, checkerRevision, base string, rebuild func() (domain.EngineeringWorkContract, error)) string {
-	if !policyListsFileSizeClaim(policy) {
+	if !policyListsClaim(policy, FileSizePolicyClaimID) {
 		return ""
 	}
 	contract, err := rebuild()

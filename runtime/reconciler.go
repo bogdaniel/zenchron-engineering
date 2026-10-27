@@ -1368,7 +1368,7 @@ func bindAssuranceGo(s *runState) (string, bool) {
 	if !s.projection.CandidateComplete {
 		return "", false
 	}
-	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree + "|" + s.contractRevision() + s.fileSizeBindingSuffix(), true
+	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree + "|" + s.contractRevision() + s.fileSizeBindingSuffix() + s.browserBindingSuffix(), true
 }
 
 // bindIntegrationHandoffAdmit is the deferred handoff-report step for a

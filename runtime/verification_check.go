@@ -20,6 +20,9 @@ const (
 	// CheckKindFileSizePolicy is the repository's file-size policy
 	// (AGENTS.md section 4) checked on the exact candidate tree.
 	CheckKindFileSizePolicy = "file_size_policy"
+	// CheckKindBrowserAcceptance is the real-browser acceptance run against the
+	// exact candidate, in the network-less sandbox (browser_acceptance.go).
+	CheckKindBrowserAcceptance = "browser_acceptance"
 
 	CheckOutcomePassed = "passed"
 	CheckOutcomeFailed = "failed"
@@ -43,6 +46,24 @@ type VerificationCheck struct {
 	Tree   string `json:"tree"`
 	// BaseRevision is the governing base revision whose rules the check used.
 	BaseRevision string `json:"base_revision,omitempty"`
+	// The members below are recorded by the browser check: the digest of the
+	// exact tests it was asked to run, what happened to each, the environment it
+	// ran in and the immutable transcript of the run. They are absent on a
+	// check that does not run tests.
+	Selection   string        `json:"selection,omitempty"`
+	Results     *CheckResults `json:"results,omitempty"`
+	Environment string        `json:"environment,omitempty"`
+	Artifact    string        `json:"artifact,omitempty"`
+}
+
+// CheckResults counts what happened to the tests a check selected. A selected
+// test that produced no result is neither passed nor failed nor skipped, so
+// Passed == Total is the only count that proves everything ran and passed.
+type CheckResults struct {
+	Total   int `json:"total"`
+	Passed  int `json:"passed"`
+	Failed  int `json:"failed"`
+	Skipped int `json:"skipped"`
 }
 
 // validateVerificationChecks bounds the optional list and requires each record
@@ -64,6 +85,13 @@ func validateVerificationChecks(checks []VerificationCheck) error {
 			bounded(prefix+"base_revision", check.BaseRevision))
 		if check.Outcome != CheckOutcomePassed && check.Outcome != CheckOutcomeFailed {
 			errs = append(errs, fmt.Errorf("%soutcome %q is neither %q nor %q", prefix, check.Outcome, CheckOutcomePassed, CheckOutcomeFailed))
+		}
+		errs = append(errs, bounded(prefix+"selection", check.Selection), bounded(prefix+"environment", check.Environment), bounded(prefix+"artifact", check.Artifact))
+		if check.Kind == CheckKindBrowserAcceptance {
+			errs = append(errs, required(prefix+"selection", check.Selection), required(prefix+"environment", check.Environment), required(prefix+"artifact", check.Artifact))
+			if check.Results == nil {
+				errs = append(errs, fmt.Errorf("%sresults is required for a browser acceptance record", prefix))
+			}
 		}
 	}
 	return errors.Join(errs...)

@@ -37,14 +37,19 @@ func fileSizePolicyRequired(contract domain.EngineeringWorkContract) bool {
 // that record - not a passing suite - is what proves the file-size claim.
 func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest) (AssuranceResult, error) {
 	incomplete := request.Commit == "" || request.Tree == "" || request.CheckoutDir == "" || request.Contract.ID == ""
-	if request.FileSizePolicyBase == "" || incomplete {
+	if (request.FileSizePolicyBase == "" && !request.BrowserAcceptance) || incomplete {
 		return v.assureInSandbox(ctx, request)
 	}
 	if result, done, err := v.fileSizeVerdict(request); done {
 		return result, err
 	}
 	result, err := v.assureInSandbox(ctx, request)
-	result.Checks = append(result.Checks, fileSizeCheck(request, CheckOutcomePassed))
+	if request.FileSizePolicyBase != "" {
+		result.Checks = append(result.Checks, fileSizeCheck(request, CheckOutcomePassed))
+	}
+	if request.BrowserAcceptance && err == nil && result.Passed {
+		return v.withBrowserAcceptance(ctx, request, result)
+	}
 	return result, err
 }
 

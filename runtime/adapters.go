@@ -155,6 +155,10 @@ type AssuranceRequest struct {
 	// exceptions of this base revision (see file_size_policy.go). Empty when
 	// the contract does not require it.
 	FileSizePolicyBase string
+	// BrowserAcceptance, when set, makes the baseline verifier run the real
+	// browser tests after the suite and record the check that proves the
+	// browser-acceptance claim (browser_acceptance.go).
+	BrowserAcceptance bool
 	// The fields below are used by the semantic verifier. They are bounded,
 	// read-only context: identity, the exact base the diff is taken against, the
 	// changed-path inventory, a summary of the automated result, and the exact

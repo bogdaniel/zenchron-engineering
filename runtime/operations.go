@@ -2464,6 +2464,7 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 		Producer: Ref{ID: r.deps.ControllerID, Revision: r.controller},
 		// Present only when the compiled contract requires the file-size claim.
 		FileSizePolicyBase: fileSizePolicyBase(kernel.Contract, state.pinnedBase()),
+		BrowserAcceptance:  browserAcceptanceRequired(kernel.Contract),
 	})
 	if err := assuranceCutOff(parent, ctx); err != nil {
 		return failed(err)
@@ -3371,6 +3372,12 @@ func (r *EngineeringRuntime) evidenceBundles(state *runState, contract domain.En
 		if claimID == FileSizePolicyClaimID {
 			var proven bool
 			if item, proven = fileSizeEvidenceItem(item, assurance, contract.Subject.Revision, state.pinnedBase()); !proven {
+				continue
+			}
+		}
+		if claimID == BrowserAcceptanceClaimID {
+			var proven bool
+			if item, proven = browserEvidenceItem(item, assurance, contract.Subject.Revision); !proven {
 				continue
 			}
 		}
