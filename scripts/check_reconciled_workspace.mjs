@@ -23,6 +23,18 @@ page.on("pageerror", (e) => errors.push(e.message));
 page.on("request", (r) => {
   if (r.method() === "POST") writes.push({ path: new URL(r.url()).pathname, body: r.postDataJSON() });
 });
+// Focus and disabled state settle after the render that announces them, so the
+// assertions that expect them wait, bounded, for the expected value and still
+// fail with the value the page actually held.
+const eventually = async (read, expected, what, timeout = 10_000) => {
+  const deadline = Date.now() + timeout;
+  let actual = await read();
+  while (actual !== expected && Date.now() < deadline) {
+    await page.waitForTimeout(100);
+    actual = await read();
+  }
+  assert.equal(actual, expected, what);
+};
 // The route heading can render before the state-dependent text of the same
 // page, so a page-text assertion waits, bounded, for it. A pattern that never
 // appears still fails after the timeout, with the text the page actually held.
@@ -67,7 +79,7 @@ const recoverAfterNavigation = async (destination, label, captureName) => {
   await visit(destination);
   await page.reload();
   await page.getByRole("heading", { name: "Unresolved original operation", exact: true }).waitFor();
-  assert.equal(await page.getByRole("button", { name: label, exact: true }).isDisabled(), true);
+  await eventually(() => page.getByRole("button", { name: label, exact: true }).isDisabled(), true, "the original action stays disabled");
   if (captureName === "recovered-revision") {
     await page.getByText("Original delivery reference", { exact: true }).click();
     const original = page.getByRole("heading", { name: "Unresolved original operation", exact: true }).locator("..");
@@ -89,7 +101,7 @@ const recoverAfterNavigation = async (destination, label, captureName) => {
   await page
     .getByText("Reconciliation unavailable. Outcome remains unknown; no request was resent.", { exact: true })
     .waitFor();
-  assert.equal(await page.getByRole("button", { name: label, exact: true }).isDisabled(), true);
+  await eventually(() => page.getByRole("button", { name: label, exact: true }).isDisabled(), true, "the original action stays disabled");
   await page.unroute("**/v1/operator-action-receipts/**");
   await page.route("**/v1/operator-action-receipts/**", async (route) => {
     const url = new URL(route.request().url());
@@ -103,10 +115,10 @@ const recoverAfterNavigation = async (destination, label, captureName) => {
   await page.unroute("**/v1/operator-action-receipts/**");
   await page.reload();
   await page.getByRole("heading", { name: "Unresolved original operation", exact: true }).waitFor();
-  assert.equal(await page.getByRole("button", { name: label, exact: true }).isDisabled(), true);
+  await eventually(() => page.getByRole("button", { name: label, exact: true }).isDisabled(), true, "the original action stays disabled");
   await page.getByRole("button", { name: "Re-read exact receipt", exact: true }).click();
   await page.getByRole("heading", { name: "Historical operator action receipt", exact: true }).waitFor();
-  assert.equal(await page.locator(".governed-feedback[tabindex]").evaluate((n) => n === document.activeElement), true);
+  await eventually(() => page.locator(".governed-feedback[tabindex]").evaluate((n) => n === document.activeElement), true, "focus moves to the feedback region");
   await capture(captureName);
   await page.getByRole("link", { name: "Inspect recorded result", exact: true }).click();
 };
@@ -230,7 +242,7 @@ try {
     await capture("decision-confirmation-390-expanded");
     await confirm("decision resolve");
     await page.getByRole("heading", { name: "Historical decision receipt", exact: true }).waitFor();
-    assert.equal(await page.locator(".governed-feedback").evaluate((n) => n === document.activeElement), true);
+    await eventually(() => page.locator(".governed-feedback").evaluate((n) => n === document.activeElement), true, "focus moves to the feedback region");
     await capture("resolved-decision-390-dark");
     await page.setViewportSize({ width: 1440, height: 1080 });
   });
@@ -249,7 +261,7 @@ try {
       });
       await confirm("authorize");
       await page.getByText(/Outcome unresolved/).waitFor();
-      assert.equal(await page.getByRole("button", { name: "Reject publication", exact: true }).isDisabled(), true);
+      await eventually(() => page.getByRole("button", { name: "Reject publication", exact: true }).isDisabled(), true, "Reject publication stays disabled");
       await page.unroute("**/v1/runs/*/authorize");
       await page.getByRole("button", { name: "Re-read exact receipt", exact: true }).click();
       await page.getByRole("heading", { name: "Historical publication decision receipt", exact: true }).waitFor();

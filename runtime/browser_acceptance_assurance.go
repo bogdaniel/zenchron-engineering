@@ -52,6 +52,11 @@ func (v BaselineGoVerifier) withBrowserAcceptance(ctx context.Context, request A
 		result.Passed, result.FailureClass = false, class
 		return result, err
 	}
+	// The checkout is proven to BE the exact candidate before anything is read
+	// from it, as the file-size check proves it (verifyAssuranceCheckout).
+	if err := verifyAssuranceCheckout(request); err != nil {
+		return inconclusive(FailureAssurancePrerequisite, err)
+	}
 	selection, err := readBrowserSelection(request.CheckoutDir, request.BrowserAcceptanceBase)
 	if err != nil {
 		return inconclusive(FailureAssurancePrerequisite, err)

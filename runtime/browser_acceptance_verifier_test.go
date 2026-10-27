@@ -424,3 +424,20 @@ func TestTheRawChromeRunnerKeepsItsSandboxUnlessOptedIn(t *testing.T) {
 		t.Fatalf("the opt-in did not reach Chrome:\n%s", got)
 	}
 }
+
+// The browser step reads the assurance checkout only after proving it is the
+// exact candidate; a checkout at any other commit is not read and starts no
+// container.
+func TestABrowserCheckoutThatIsNotTheExactCandidateIsNotRead(t *testing.T) {
+	dir, base, commit, _ := browserRepo(t)
+	docker := newBrowserDocker(nil, nil, nil)
+	verifier := scriptedVerifier(t, docker.scriptedDocker, t.TempDir())
+	verifier.Sandbox.Executor = docker
+	result, err := verifier.withBrowserAcceptance(context.Background(), AssuranceRequest{
+		RunID: "run-1", Attempt: 1, Commit: commit, Tree: "9999999999999999999999999999999999999999", CheckoutDir: dir,
+		Contract: Ref{ID: "contract", Revision: "1"}, BrowserAcceptanceBase: base,
+	}, AssuranceResult{Passed: true})
+	if err == nil || result.Passed || result.FailureClass != FailureAssurancePrerequisite || len(docker.creates) != 0 || len(browserChecks(result)) != 0 {
+		t.Fatalf("a checkout that is not the exact candidate was used: passed=%v class=%v err=%v creates=%d", result.Passed, result.FailureClass, err, len(docker.creates))
+	}
+}
