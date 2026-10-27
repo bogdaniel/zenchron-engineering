@@ -115,6 +115,7 @@ characters of `a-z`, `0-9`, `-` or `_`, and may not start with a separator.
 | `credential_path` | `openai_responses` only, absolute. A path to an operator-held credential, never a token value. Naming it on a native CLI agent is refused: the CLI authenticates itself and Zenchron holds no credential for it. | required for `openai_responses` |
 | `endpoint` | `openai_responses` only. Overrides the provider's API endpoint. Refused on a native CLI agent. | provider default |
 | `allow_permission_bypass` | Native CLI only. Standing operator permission for that provider's unsafe mode. It grants nothing alone: an invocation must also pass `--dangerous-permission-bypass`, and the resulting attempt provenance records it forever. Refused on `openai_responses`, whose boundary is proven rather than bypassable. | `false` |
+| `frontend_cache_dir` | Native CLI only. Absolute path to a directory of offline npm caches, one per lockfile, named by the SHA-256 of `frontend/package-lock.json`. For an invocation whose candidate has that lockfile, the runtime copies the matching cache into the invocation's own scratch and runs npm offline against the copy, with scripts and audit off. The operator's cache is only read, nothing enters the candidate, and no cache for the lockfile means npm fails offline rather than reaching a registry. It grants no permission and does not enable Chrome or Playwright. Refused on `openai_responses`. See [Frontend dependency cache](#frontend-dependency-cache). | unset: no npm environment |
 | `unattended` | Whether the supervisor's automatic discovery may start work on this agent. Explicit `false` keeps it to explicit operator commands. | `true` |
 
 `default_agent` names the agent `autonomy run issue N` uses when no `--agent` is
@@ -465,3 +466,22 @@ and which member produced it.
 - [troubleshooting.md](troubleshooting.md) — configuration refusals by message
 - [agents.md](agents.md), [supervisor.md](supervisor.md), [product-architecture.md](product-architecture.md)
 - [architecture.md](architecture.md), [spec/runtime-v0.1.md](spec/runtime-v0.1.md), [../README.md](../README.md), [../ROADMAP.md](../ROADMAP.md)
+
+## Frontend dependency cache
+
+A worker runs with network access denied, so `npm ci` in `frontend/` needs a cache that already holds the locked packages. Prepare one per lockfile on the operator host, from the official registry, with no credentials or host npm configuration:
+
+```sh
+LOCK=$(shasum -a 256 frontend/package-lock.json | cut -d' ' -f1)
+CACHE="$HOME/.zenchron-npm-cache/$LOCK"
+mkdir -p -m 700 "$CACHE"
+(cd frontend && env -i PATH="$PATH" HOME="$(mktemp -d)" \
+  NPM_CONFIG_USERCONFIG="$(mktemp)" NPM_CONFIG_GLOBALCONFIG="$(mktemp)" \
+  npm ci --ignore-scripts --registry=https://registry.npmjs.org/ --cache "$CACHE")
+```
+
+Then set `agents.<id>.frontend_cache_dir` to `$HOME/.zenchron-npm-cache`. A change to `package-lock.json` changes the directory name, so a stale cache is never used for a new lockfile; prepare a new one.
+
+Each invocation records `frontend_cache` in its provenance: the lockfile hash, whether the cache was `provisioned`, `cache_missing` or `scratch_unavailable`, and the node and npm versions found on the worker's search path (absent when unreadable). Absence of the record means the agent has no cache source or the workspace has no frontend lockfile.
+
+Provisioning dependencies does not let a worker run a browser. Browser acceptance remains a separate step run on the operator host and attributed to it.

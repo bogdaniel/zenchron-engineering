@@ -360,6 +360,10 @@ type CLIAgentProvider struct {
 	// provider builds - including the ones it builds while probing - has to
 	// agree about it. A nil guard is a no-op at every call site it reaches.
 	gitGuard *GitGuard
+	// frontendEnv and frontendCache are the offline npm environment and its
+	// provenance for the invocation in flight, set by Execute like gitGuard.
+	frontendEnv   []string
+	frontendCache *domain.FrontendCacheObservation
 }
 
 func (p CLIAgentProvider) spec() (cliAgentSpec, error) { return specForKind(p.Agent.Kind) }
@@ -500,6 +504,7 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 	}
 	env = append(env, p.gitGuard.Env()...)
 	env = append(env, p.toolchainEnv()...)
+	env = append(env, p.frontendEnv...)
 	// GOENV IS THE NULL DEVICE FOR EVERY WORKER, toolchain or not, scratch or
 	// not (#430). Unset, Go reads and `go env -w` WRITES the operator's own
 	// os.UserConfigDir()/go/env under the HOME below. GOENV=off did not stop
@@ -547,6 +552,7 @@ var providerControlNames = []string{
 	"PATH", "HOME", "GOENV", brokeredGitDirEnv,
 	"GOMODCACHE", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GOFLAGS",
 	"TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH",
+	"NPM_CONFIG_USERCONFIG", "NPM_CONFIG_GLOBALCONFIG",
 }
 
 // providerEnvNotRecorded is what env() passes and provenance deliberately
@@ -575,7 +581,7 @@ func recordedEnvName(name string) bool {
 }
 
 // hashedProviderEnvNames are the common host-path names hashedEnvName covers.
-var hashedProviderEnvNames = []string{"PATH", "HOME", brokeredGitDirEnv, "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH", "GOMODCACHE"}
+var hashedProviderEnvNames = []string{"PATH", "HOME", brokeredGitDirEnv, "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH", "GOMODCACHE", "NPM_CONFIG_USERCONFIG", "NPM_CONFIG_GLOBALCONFIG"}
 
 // hashedEnvName reports the names whose value is recorded only as an
 // identity: every variable whose value is a host path - PATH, HOME, the Git
@@ -939,6 +945,11 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		}
 		p.ExecScratchDir = scratch
 	}
+	frontendEnv, frontendCache, err := provisionFrontendCache(p.Agent.FrontendCacheDir, request.CandidateDir, p.ExecScratchDir)
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	p.frontendEnv, p.frontendCache = frontendEnv, frontendCache
 	// THE GUARD IS PREPARED BEFORE THE CAPABILITY PROBE, so that even the
 	// probe runs under the same brokered Git environment the invocation will.
 	// A boundary that only covered the main command would be a boundary with a
@@ -1135,6 +1146,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	}
 	// Read from the exact slice handed to the process, after every addition.
 	provenance.ProviderEnvironment = providerEnvironment(env, spec)
+	provenance.FrontendCache = p.withToolVersions(ctx, env)
 	startedAt := time.Now()
 	output, runErr := p.executor().Run(withCandidateWriter(ctx, writer), p.command(), args, request.CandidateDir, env, p.grace())
 	completedAt := time.Now()

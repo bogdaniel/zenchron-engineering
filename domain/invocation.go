@@ -92,11 +92,40 @@ type InvocationObservation struct {
 	// GitGuarded reports that this invocation ran under the brokered Git
 	// boundary of #241. Its ABSENCE is the durable fact that matters.
 	GitGuarded bool `json:"git_guarded,omitempty"`
+	// FrontendCache is how the offline npm dependency cache was provisioned for
+	// this invocation. It is absent when the agent has no cache source or the
+	// workspace has no frontend lockfile, so absence says "not applicable", never
+	// "provisioned".
+	FrontendCache *FrontendCacheObservation `json:"frontend_cache,omitempty"`
 	// Truncated marks a MINIMAL record: the full observation could not fit
 	// the durable payload ceiling, so only its fixed-size facts - bounds,
 	// times, counters, termination cause - were kept. It is never set on an
 	// ordinary invocation.
 	Truncated bool `json:"provenance_truncated,omitempty"`
+}
+
+// Frontend cache provisioning outcomes. Anything but provisioned means npm ran
+// offline against an empty cache and will report ENOTCACHED.
+const (
+	FrontendCacheProvisioned     = "provisioned"
+	FrontendCacheMissing         = "cache_missing"
+	FrontendCacheScratchRequired = "scratch_unavailable"
+)
+
+// IsFrontendCacheStatus reports whether status is a recorded provisioning outcome.
+func IsFrontendCacheStatus(status string) bool {
+	return status == FrontendCacheProvisioned || status == FrontendCacheMissing || status == FrontendCacheScratchRequired
+}
+
+// FrontendCacheObservation records the lockfile the offline cache was bound to
+// and whether the matching cache was copied into the invocation's scratch.
+// Versions are those resolved on the worker's own search path and are absent
+// when they could not be read, never guessed.
+type FrontendCacheObservation struct {
+	LockSHA256  string `json:"lock_sha256"`
+	Status      string `json:"status"`
+	NodeVersion string `json:"node_version,omitempty"`
+	NpmVersion  string `json:"npm_version,omitempty"`
 }
 
 // EnvironmentEntry is one allowlisted provider-control variable. Value and

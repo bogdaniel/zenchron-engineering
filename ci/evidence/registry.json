@@ -359,6 +359,7 @@
         "runtime/transport_chatter.go",
         "runtime/execution_aliases.go",
         "runtime/execution_scratch.go",
+        "runtime/frontend_cache.go",
         "runtime/toolchain_probe.go"
       ],
       "tests": [
@@ -368,6 +369,7 @@
         "runtime/openai_*_test.go",
         "runtime/agent_*_test.go",
         "runtime/agents_test.go",
+        "runtime/frontend_cache_test.go",
         "runtime/transport_chatter*_test.go",
         "runtime/worker_toolchain_test.go"
       ]

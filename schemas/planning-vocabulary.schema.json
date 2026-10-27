@@ -88,7 +88,7 @@
           "pattern": "^[0-9a-f]{64}$"
         },
         "provider_environment": {
-          "description": "The effective provider-control environment passed to the process, restricted to the adapter's explicit non-secret allowlist (#391). An entry with neither value nor sha256 means the variable was not passed; otherwise exactly one is present, even for an empty value. Host paths (PATH, HOME, GIT_DIR, TMPDIR, GOTMPDIR, GOCACHE, GOPATH, GOMODCACHE and provider state homes) carry only sha256; every other name carries only value, the domain-separated identity SHA-256(\"zenchron/provider-env/<NAME>/v1\" NUL value).",
+          "description": "The effective provider-control environment passed to the process, restricted to the adapter's explicit non-secret allowlist (#391). An entry with neither value nor sha256 means the variable was not passed; otherwise exactly one is present, even for an empty value. Host paths (PATH, HOME, GIT_DIR, TMPDIR, GOTMPDIR, GOCACHE, GOPATH, GOMODCACHE, NPM_CONFIG_USERCONFIG, NPM_CONFIG_GLOBALCONFIG and provider state homes) carry only sha256; every other name carries only value, the domain-separated identity SHA-256(\"zenchron/provider-env/<NAME>/v1\" NUL value).",
           "type": "array",
           "maxItems": 24,
           "items": {
@@ -113,6 +113,8 @@
                   "GOTMPDIR",
                   "GOCACHE",
                   "GOPATH",
+                  "NPM_CONFIG_USERCONFIG",
+                  "NPM_CONFIG_GLOBALCONFIG",
                   "CODEX_HOME",
                   "CLAUDE_CONFIG_DIR",
                   "QWEN_HOME",
@@ -145,6 +147,8 @@
                     "GOCACHE",
                     "GOPATH",
                     "GOMODCACHE",
+                    "NPM_CONFIG_USERCONFIG",
+                    "NPM_CONFIG_GLOBALCONFIG",
                     "CODEX_HOME",
                     "CLAUDE_CONFIG_DIR",
                     "QWEN_HOME"
@@ -247,6 +251,18 @@
         },
         "git_guarded": {
           "type": "boolean"
+        },
+        "frontend_cache": {
+          "description": "How the offline npm dependency cache was provisioned for this invocation. Absent means not applicable, never provisioned. Versions are those resolved on the worker's own search path and are absent when unreadable.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["lock_sha256", "status"],
+          "properties": {
+            "lock_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "status": {"enum": ["provisioned", "cache_missing", "scratch_unavailable"]},
+            "node_version": {"type": "string", "pattern": "^[0-9A-Za-z.+-]{1,32}$"},
+            "npm_version": {"type": "string", "pattern": "^[0-9A-Za-z.+-]{1,32}$"}
+          }
         },
         "provenance_truncated": {
           "type": "boolean",

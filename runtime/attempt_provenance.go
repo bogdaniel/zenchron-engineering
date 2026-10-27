@@ -163,6 +163,15 @@ func validateInvocationObservation(o domain.InvocationObservation) error {
 			errs = append(errs, fmt.Errorf("invocation argv[%d] is a raw host path; record its logical reference", n))
 		}
 	}
+	if cache := o.FrontendCache; cache != nil {
+		switch {
+		case !isSHA256Hex(cache.LockSHA256):
+			errs = append(errs, errors.New("invocation frontend cache lockfile identity is not a SHA-256"))
+		case !domain.IsFrontendCacheStatus(cache.Status):
+			errs = append(errs, fmt.Errorf("invocation frontend cache status %q is not recognized", cache.Status))
+		}
+		errs = append(errs, bounded("invocation.frontend_cache.node_version", cache.NodeVersion), bounded("invocation.frontend_cache.npm_version", cache.NpmVersion))
+	}
 	for _, tool := range o.PermissionDeniedTools {
 		if !domain.IsInvocationIdentifier(tool) {
 			errs = append(errs, fmt.Errorf("invocation denied tool %q is not a tool identifier", tool))
