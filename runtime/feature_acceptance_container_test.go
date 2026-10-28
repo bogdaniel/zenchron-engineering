@@ -178,7 +178,7 @@ func TestFeatureAcceptanceInARealContainer(t *testing.T) {
 	if len(transcript) == 0 {
 		t.Fatal("the failure keeps no transcript to show a remediation")
 	}
-	if !strings.Contains(strings.ToLower(string(transcript)), "no templates configured") {
+	if !strings.Contains(string(transcript), "FAIL agent configuration exposes profiles and template empty states: empty template configuration must be explicit") {
 		t.Errorf("the failure transcript does not show the assertion the candidate broke:\n%.2000s", transcript)
 	}
 }
