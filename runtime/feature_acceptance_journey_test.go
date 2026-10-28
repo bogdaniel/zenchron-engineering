@@ -40,6 +40,9 @@ type featureJourneyWorker struct {
 	// noFix makes a producer's remediation epoch change nothing, so the
 	// integrator recomposes to the identical tree.
 	noFix bool
+	// alwaysFix makes every producer carry the correction from its first run, so
+	// the first integration already passes the feature.
+	alwaysFix bool
 }
 
 func (w *featureJourneyWorker) WritesTypedResults() bool { return true }
@@ -63,8 +66,8 @@ func (w *featureJourneyWorker) Execute(_ context.Context, request ExecutionReque
 		original := w.firstRun[marker] == request.RunID
 		w.mu.Unlock()
 		files := map[string]string{marker + "-part.go": "package candidate\nconst Part = \"" + marker + "\"\n"}
-		if !original && !w.noFix {
-			files[journeyFixFile] = "package candidate\n// corrected by " + request.RunID + "\n"
+		if (!original && !w.noFix) || w.alwaysFix {
+			files[journeyFixFile] = "package candidate\n// corrected\n"
 		}
 		for name, content := range files {
 			if err := os.WriteFile(filepath.Join(request.CandidateDir, name), []byte(content), 0o600); err != nil {
@@ -95,6 +98,22 @@ type featureAssurance struct {
 	// ignoreFeature makes the verifier a provider that never heard of the
 	// feature request: it passes the Go suite and returns no feature record.
 	ignoreFeature bool
+	// mutate corrupts the passing feature record into a structurally valid but
+	// mismatched one.
+	mutate func(*VerificationCheck)
+}
+
+// journeyManifest is the feature's manifest on the trusted base of the journey.
+var journeyManifest = []string{"TestDeliveryReportExports", "TestDeliveryReportRenders"} // byte-sorted, as the verifier reads it
+
+func journeySeed(origin string) {
+	dir := filepath.Join(origin, featureManifestDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, journeyFeature+".txt"), []byte(strings.Join(journeyManifest, "\n")+"\n"), 0o644); err != nil {
+		panic(err)
+	}
 }
 
 func (a *featureAssurance) ProducedEvidenceClasses() []domain.EvidenceClass {
@@ -126,11 +145,14 @@ func (a *featureAssurance) Assure(_ context.Context, request AssuranceRequest) (
 	record := VerificationCheck{
 		Kind: CheckKindFeatureAcceptance, Checker: featureCheckerID, CheckerRevision: featureCheckerRevision(), Feature: request.FeatureAcceptance,
 		Outcome: CheckOutcomePassed, Commit: request.Commit, Tree: request.Tree, BaseRevision: request.FeatureAcceptanceBase,
-		Selection: strings.Repeat("1", 64), Surface: strings.Repeat("2", 64), ArtifactsSHA256: strings.Repeat("3", 64),
-		Environment: "docker-network-none@sha256:journey", Artifact: "baseline-go-feature/journey", Results: &CheckResults{Total: 2, Passed: 2},
+		Selection: browserSelectionDigest(journeyManifest), Surface: strings.Repeat("2", 64), ArtifactsSHA256: strings.Repeat("3", 64),
+		Environment: "docker-network-none@sha256:journey", Artifact: "baseline-go-feature/journey", Results: &CheckResults{Total: len(journeyManifest), Passed: len(journeyManifest)},
+	}
+	if passed && a.mutate != nil {
+		a.mutate(&record)
 	}
 	if !passed {
-		record.Outcome, record.Results = CheckOutcomeFailed, &CheckResults{Total: 2, Passed: 1, Failed: 1}
+		record.Outcome, record.Results = CheckOutcomeFailed, &CheckResults{Total: len(journeyManifest), Passed: 1, Failed: 1}
 		result.Passed, result.FailureClass = false, FailureFeatureAcceptance
 		result.ArtifactRef, result.FailureSignature = "baseline-go-feature/journey", "journey-failure"
 	}
@@ -152,13 +174,16 @@ func newFeatureJourney(t *testing.T, worker *featureJourneyWorker) *featureJourn
 	return newFeatureJourneyWith(t, worker, featureJourneyOptions{})
 }
 
-type featureJourneyOptions struct{ ignoreFeature, withoutRule bool }
+type featureJourneyOptions struct {
+	ignoreFeature, withoutRule bool
+	mutate                     func(*VerificationCheck)
+}
 
 func newFeatureJourneyWith(t *testing.T, worker *featureJourneyWorker, options featureJourneyOptions) *featureJourney {
-	fleet := newFleetFixture(t, 4)
+	fleet := newFleetFixture(t, 4, journeySeed)
 	fleet.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
 	fleet.deps.Provider = worker
-	assurance := &featureAssurance{ignoreFeature: options.ignoreFeature}
+	assurance := &featureAssurance{ignoreFeature: options.ignoreFeature, mutate: options.mutate}
 	fleet.deps.Assurance = assurance
 	// The operator-activated rule: the runtime-derived fact requires the claim.
 	rules := map[string]domain.PolicyRule{}
@@ -462,7 +487,7 @@ func TestAFailedFeatureHoldsIsAttributedByTheOperatorAndReintegratesAfterGoverne
 	if a == nil || !a.Passed || a.Tree == failedTree {
 		t.Fatalf("the reintegrated candidate's assurance is %+v (failed tree %s)", a, failedTree)
 	}
-	if !featureCheckProves(a, final.projection.CandidateRevision, final.pinnedBase(), journeyFeature) {
+	if !featureCheckProves(a, final.projection.CandidateRevision, final.pinnedBase(), journeyFeature, featureExpectation{}) {
 		t.Fatalf("the passing observation does not prove the feature for the exact candidate: %+v", a.Checks)
 	}
 	contract, err := j.fleet.runtime.contractFor(final)
@@ -621,6 +646,52 @@ func TestADeclaredFeatureNothingEnforcesNeverReleasesTheIntegrator(t *testing.T)
 			state := j.fleet.state(unit.RunID)
 			if a := state.projection.Assurance; a != nil && a.Passed {
 				t.Fatalf("a passing assurance was recorded for a candidate that never proved its feature: %+v", a)
+			}
+		})
+	}
+}
+
+// A verifier that returns Passed with a structurally valid but mismatched
+// feature record must not admit an integration handoff: every field of the
+// current binding is individually load-bearing.
+func TestAMismatchedFeatureRecordNeverAdmitsAnIntegrationHandoff(t *testing.T) {
+	other := strings.Repeat("e", 40)
+	// The control: the same fixture with an exact record IS admitted, so a refusal
+	// below is the mismatch's and nothing else's.
+	t.Run("an exact record", func(t *testing.T) {
+		j := newFeatureJourneyWith(t, &featureJourneyWorker{alwaysFix: true}, featureJourneyOptions{})
+		j.until("the exact record releases the integrator", func() bool {
+			return j.fleet.graph(j.graphID).unit(t, "integrate").Output != nil
+		})
+	})
+	for name, mutate := range map[string]func(*VerificationCheck){
+		"the wrong base":           func(c *VerificationCheck) { c.BaseRevision = other },
+		"a stale checker revision": func(c *VerificationCheck) { c.CheckerRevision = "stale-checker-revision" },
+		"another commit":           func(c *VerificationCheck) { c.Commit = other },
+		"another tree":             func(c *VerificationCheck) { c.Tree = other },
+		"another selection":        func(c *VerificationCheck) { c.Selection = strings.Repeat("9", 64) },
+		"a skipped test":           func(c *VerificationCheck) { c.Results = &CheckResults{Total: 2, Passed: 1, Skipped: 1} },
+		"fewer tests than the manifest": func(c *VerificationCheck) {
+			c.Results = &CheckResults{Total: 1, Passed: 1}
+		},
+		"another feature":     func(c *VerificationCheck) { c.Feature = "another-feature" },
+		"another record kind": func(c *VerificationCheck) { c.Kind, c.Checker = CheckKindBrowserAcceptance, browserCheckerID },
+		"no artifacts":        func(c *VerificationCheck) { c.ArtifactsSHA256 = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			j := newFeatureJourneyWith(t, &featureJourneyWorker{alwaysFix: true}, featureJourneyOptions{mutate: mutate})
+			// The corrected tree is the one that passes, so drive until the
+			// integrator has been verified at least once.
+			j.until("the integrator was verified", func() bool { return len(j.assurance.featureRequests()) > 0 })
+			for range 30 {
+				j.tick()
+			}
+			unit := j.fleet.graph(j.graphID).unit(t, "integrate")
+			if unit.Output != nil {
+				t.Fatalf("the integrator handed off on %s: %+v", name, unit.Output)
+			}
+			if a := j.fleet.state(unit.RunID).projection.Assurance; a != nil && a.Passed {
+				t.Fatalf("a passing observation was journalled on %s: %+v", name, a)
 			}
 		})
 	}

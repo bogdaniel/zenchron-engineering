@@ -99,13 +99,25 @@ func featureSpec(request AssuranceRequest) browserCheckSpec {
 	}
 }
 
-// featureCheckProves reports whether the observation PROVES feature acceptance
-// for this exact integrated candidate: a completed, passing feature record by
-// the current checker for this declared feature, bound to the observation's own
-// commit and tree and to the base whose manifest and tests ran, in which every
-// selected test passed, none failed or skipped, and the tests left artifacts.
-// An ordinary browser record is a different kind and never qualifies.
-func featureCheckProves(observation *AssuranceObservation, commit, base, feature string) bool {
+// featureExpectation is what the verifying code can know about a feature
+// record that the record cannot vouch for itself: the digest and size of the
+// selection the base's manifest names. The zero value checks neither. It is
+// supplied where the manifest can be read (at the verifier boundary, where the
+// observation is written); a journalled observation is judged by the same
+// predicate without it, because it was only ever written after that check.
+type featureExpectation struct {
+	Selection string
+	Total     int
+}
+
+// featureCheckProves is the ONE definition of successful feature acceptance. It
+// reports whether the observation PROVES the feature for this exact integrated
+// candidate: a completed, passing feature record by the current checker for this
+// declared feature, bound to the observation's own commit and tree and to the
+// base whose manifest and tests ran, in which every selected test passed, none
+// failed or skipped, and the tests left artifacts. An ordinary browser record is
+// a different kind and never qualifies.
+func featureCheckProves(observation *AssuranceObservation, commit, base, feature string, expected featureExpectation) bool {
 	if observation == nil || commit == "" || base == "" || feature == "" {
 		return false
 	}
@@ -117,7 +129,8 @@ func featureCheckProves(observation *AssuranceObservation, commit, base, feature
 			check.BaseRevision == base && check.Selection != "" && check.Surface != "" && check.ArtifactsSHA256 != "" &&
 			check.Environment != "" && check.Artifact != "" &&
 			check.Commit == commit && check.Commit == observation.Commit && check.Tree != "" && check.Tree == observation.Tree &&
-			results != nil && results.Total > 0 && results.Passed == results.Total && results.Failed == 0 && results.Skipped == 0 {
+			results != nil && results.Total > 0 && results.Passed == results.Total && results.Failed == 0 && results.Skipped == 0 &&
+			(expected.Selection == "" || check.Selection == expected.Selection) && (expected.Total == 0 || results.Total == expected.Total) {
 			return true
 		}
 	}
@@ -128,7 +141,7 @@ func featureCheckProves(observation *AssuranceObservation, commit, base, feature
 // claim into the evidence that actually proves it, or reports that none can be
 // produced.
 func featureEvidenceItem(item domain.EvidenceItem, observation *AssuranceObservation, commit, base, feature string) (domain.EvidenceItem, bool) {
-	if !featureCheckProves(observation, commit, base, feature) {
+	if !featureCheckProves(observation, commit, base, feature, featureExpectation{}) {
 		return domain.EvidenceItem{}, false
 	}
 	for _, check := range observation.Checks {
@@ -206,13 +219,17 @@ func featureAcceptanceBase(contract domain.EngineeringWorkContract, base string)
 	return base
 }
 
-// featureRecordPassed reports whether a verifier result carries a passing
-// feature_acceptance record for the declared feature.
-func featureRecordPassed(checks []VerificationCheck, feature string) bool {
-	for _, check := range checks {
-		if check.Kind == CheckKindFeatureAcceptance && check.Feature == feature && check.Outcome == CheckOutcomePassed {
-			return true
-		}
+// provesFeatureAcceptance refuses a passing verifier result that does not carry
+// the complete current feature-verification binding: the selection and size the
+// trusted base's manifest names, and every field featureCheckProves requires.
+func provesFeatureAcceptance(checkout, base, feature, commit, tree string, checks []VerificationCheck) error {
+	names, err := readManifestSelection(checkout, base, featureManifestFile(feature))
+	if err != nil {
+		return err
 	}
-	return false
+	observation := &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{Passed: true, Commit: commit, Tree: tree, Checks: checks}}
+	if !featureCheckProves(observation, commit, base, feature, featureExpectation{Selection: browserSelectionDigest(names), Total: len(names)}) {
+		return fmt.Errorf("the verifier passed a candidate whose contract requires feature acceptance %q without a passing feature record bound to this commit, tree, base, checker and selection", feature)
+	}
+	return nil
 }

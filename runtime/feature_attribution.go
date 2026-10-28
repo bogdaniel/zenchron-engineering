@@ -227,23 +227,28 @@ func (r *EngineeringRuntime) priorFailedFeatureVerdict(state *runState, tree str
 	if origin == nil || origin.AcceptanceFeature == "" || tree == "" {
 		return "", false, nil
 	}
-	runs, err := r.deps.Store.Runs()
+	// Only this unit's own recorded executions are read: its epochs and its
+	// first activation. The store is never scanned.
+	epochs, err := r.deps.Store.WorkUnitRemediationEpochs(origin.GraphID, origin.UnitID)
 	if err != nil {
 		return "", false, err
 	}
-	for _, run := range runs {
-		if run.ID == state.run.ID || run.Goal != state.run.Goal || run.Orchestration == nil {
+	activations, err := r.deps.Store.WorkUnitActivations(origin.GraphID)
+	if err != nil {
+		return "", false, err
+	}
+	candidates := make([]string, 0, len(epochs)+1)
+	if activation, found := activations[origin.UnitID]; found {
+		candidates = append(candidates, activation.RunID)
+	}
+	for _, epoch := range epochs {
+		candidates = append(candidates, epoch.RunID)
+	}
+	for _, runID := range candidates {
+		if runID == state.run.ID {
 			continue
 		}
-		batch, found, err := r.deps.Store.OrchestrationBatch(run.Orchestration.BatchID)
-		if err != nil {
-			return "", false, err
-		}
-		if !found || batch.Origin == nil || batch.Origin.GraphID != origin.GraphID || batch.Origin.UnitID != origin.UnitID ||
-			batch.Origin.AcceptanceFeature != origin.AcceptanceFeature {
-			continue
-		}
-		events, err := r.deps.Store.Events(run.ID)
+		events, err := r.deps.Store.Events(runID)
 		if err != nil {
 			return "", false, err
 		}
@@ -252,7 +257,7 @@ func (r *EngineeringRuntime) priorFailedFeatureVerdict(state *runState, tree str
 			return "", false, err
 		}
 		if a := projection.Assurance; a != nil && !a.Passed && a.FailureClass == FailureFeatureAcceptance && a.Tree == tree && featureVerdictBase(a, state.pinnedBase()) {
-			return run.ID, true, nil
+			return runID, true, nil
 		}
 	}
 	return "", false, nil

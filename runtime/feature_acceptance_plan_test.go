@@ -72,3 +72,45 @@ func TestTheOperatorsDeclarationSurvivesTheRealPlanServiceAndPinsTheUnitOrigin(t
 		t.Fatal("a declaration with no final integration stage was accepted")
 	}
 }
+
+// A re-proposal cannot change the topology under a declared feature: the
+// declaration is inherited and the revised plan is judged against it again.
+func TestAReproposalCannotMoveMaterialPastTheDeclaredIntegration(t *testing.T) {
+	fleet := newFleetFixture(t, 4)
+	fleet.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
+	fleet.runtime = fleet.newRuntime(fleet.deps)
+	harness := newPlanRunHarnessWith(fleet.phase8Fixture, fleet.deps.ConfigDigest, defaultPlanFixtureEnvelope)
+	subject := domain.Subject{Repository: "acme/repo", Revision: fleet.base}
+	propose := func(feature string, reasoned []domain.PlanStage) (domain.EngineeringPlan, error) {
+		return harness.service.Propose(context.Background(), ProposeInput{
+			PlanID: "plan-fixture", Objective: "Make the widget idempotent.", Subject: subject,
+			Contract: planFixtureContract(fleet.phase8Fixture), Issue: fleet.issue,
+			Model:    domain.ProjectModel{SchemaVersion: domain.SchemaVersion, ID: "project", Revision: "1", Subject: subject},
+			Reasoned: reasoned, AcceptanceFeature: feature,
+		})
+	}
+	valid := []domain.PlanStage{producerStage("backend", "a"), producerStage("frontend", "b"), integratorStage("backend", "frontend")}
+	if _, err := propose(journeyFeature, valid); err != nil {
+		t.Fatal(err)
+	}
+	for name, extra := range map[string]domain.PlanStage{
+		"a parallel producer": producerStage("docs", "c"),
+		"a downstream producer": func() domain.PlanStage {
+			stage := producerStage("polish", "d")
+			stage.DependsOn = []string{"integrate"}
+			return stage
+		}(),
+	} {
+		if _, err := propose("", append(append([]domain.PlanStage{}, valid...), extra)); err == nil || !strings.Contains(err.Error(), "feature tests would not see it") {
+			t.Errorf("%s: the revision was accepted under the inherited declaration: %v", name, err)
+		}
+	}
+	latest, found, err := fleet.store.Plan("plan-fixture")
+	if err != nil || !found || latest.Revision != 1 {
+		t.Fatalf("a refused revision changed the stored plan: %+v %v", latest, err)
+	}
+	// With the feature, the unchanged topology is still accepted as revision 2.
+	if second, err := propose("", valid); err != nil || second.Revision != 2 {
+		t.Fatalf("the unchanged topology was refused: %v", err)
+	}
+}

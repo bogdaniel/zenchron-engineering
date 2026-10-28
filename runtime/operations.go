@@ -2495,8 +2495,10 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	// A verifier that ignored the feature request and passed proves nothing
 	// about it: fail the operation rather than let a generic pass release the
 	// integrator and leave only the authority step to notice.
-	if result.Passed && featureAcceptanceFeature(kernel.Contract, state.declaredFeature()) != "" && !featureRecordPassed(result.Checks, state.declaredFeature()) {
-		return failed(fmt.Errorf("the verifier passed a candidate whose contract requires feature acceptance %q without a passing feature record", state.declaredFeature()))
+	if feature := featureAcceptanceFeature(kernel.Contract, state.declaredFeature()); result.Passed && feature != "" {
+		if err := provesFeatureAcceptance(checkout, state.pinnedBase(), feature, commit, tree, result.Checks); err != nil {
+			return failed(err)
+		}
 	}
 	if assureErr != nil && result.VerifierDefinition == "" {
 		return failed(assureErr)

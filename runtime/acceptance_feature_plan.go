@@ -45,6 +45,48 @@ func validateAcceptanceFeaturePlan(plan domain.EngineeringPlan) error {
 				return fmt.Errorf("stage %q declares acceptance feature %q and consumes a unit named %q, which is reserved for the attribution decision", stage.ID, stage.AcceptanceFeature, attributionNone)
 			}
 		}
+		if err := requireFinalMaterialIntegration(plan, stage); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// requireFinalMaterialIntegration refuses a declaration whose integration is not
+// where all the objective's material ends up. Over the EFFECTIVE objective graph
+// (the units compileObjectiveGraph builds, not the literal depends_on), every
+// other material-producing stage must be in the integration's consumed ancestry:
+// a producer downstream of it, or one it never consumes, would ship material the
+// feature tests never saw. Reviewers, typed gates and approvals produce no
+// material, are not units, and remain allowed after it.
+func requireFinalMaterialIntegration(plan domain.EngineeringPlan, final domain.PlanStage) error {
+	byID := make(map[string]domain.PlanStage, len(plan.Stages))
+	for _, stage := range plan.Stages {
+		byID[stage.ID] = stage
+	}
+	ancestry := func(id string) map[string]bool {
+		seen := map[string]bool{}
+		var walk func(string)
+		walk = func(current string) {
+			for _, dependency := range objectiveDependencies(plan, byID[current]) {
+				if !seen[dependency] {
+					seen[dependency] = true
+					walk(dependency)
+				}
+			}
+		}
+		walk(id)
+		return seen
+	}
+	consumed := ancestry(final.ID)
+	for _, stage := range plan.Stages {
+		if stage.ID == final.ID || !objectiveCandidateStage(stage) || consumed[stage.ID] {
+			continue
+		}
+		if ancestry(stage.ID)[final.ID] {
+			return fmt.Errorf("stage %q produces material downstream of %q, which declares acceptance feature %q: the feature tests would not see it", stage.ID, final.ID, final.AcceptanceFeature)
+		}
+		return fmt.Errorf("stage %q produces material outside the ancestry %q consumes, and %q declares acceptance feature %q: the feature tests would not see it", stage.ID, final.ID, final.ID, final.AcceptanceFeature)
 	}
 	return nil
 }

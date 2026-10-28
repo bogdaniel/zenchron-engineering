@@ -372,3 +372,50 @@ func TestAFeatureFailureIsConfirmedByOneRerunBeforeItIsAHold(t *testing.T) {
 		t.Error("a flaky feature verdict no longer stops the run")
 	}
 }
+
+func topologyPlan(extra ...domain.PlanStage) domain.EngineeringPlan {
+	stages := []domain.PlanStage{
+		{ID: "backend", Kind: domain.StageAgent, Role: domain.RoleImplementer, Objective: "b", InvocationMode: domain.InvocationModeMutating},
+		{ID: "frontend", Kind: domain.StageAgent, Role: domain.RoleImplementer, Objective: "f", InvocationMode: domain.InvocationModeMutating},
+		{ID: "integrate", Kind: domain.StageAgent, Role: domain.RoleIntegrator, Objective: "compose", InvocationMode: domain.InvocationModeMutating,
+			ExecutionKind: string(orchestration.ExecutionKindIntegrationCompose), DependsOn: []string{"backend", "frontend"}, AcceptanceFeature: testFeature},
+	}
+	return domain.EngineeringPlan{Stages: append(stages, extra...)}
+}
+
+// The declared integration must be where all the objective's material ends up.
+// Reviewers, gates and approvals produce none and stay allowed after it.
+func TestADeclaredIntegrationMustBeWhereAllMaterialEnds(t *testing.T) {
+	review := domain.PlanStage{ID: "review", Kind: domain.StageAgent, Role: domain.RoleReviewer, Objective: "r", DependsOn: []string{"integrate"}}
+	gate := domain.PlanStage{ID: "assurance", Kind: domain.StageAssuranceGate, DependsOn: []string{"review"}, RequiredClaims: []string{"verification"}}
+	approval := domain.PlanStage{ID: "release", Kind: domain.StageHumanDecisionGate, DependsOn: []string{"assurance"}, RequiredClaims: []string{"human-approval"}}
+	if err := validateAcceptanceFeaturePlan(topologyPlan(review, gate, approval)); err != nil {
+		t.Fatalf("an ordinary reviewer, gate and approval after the final integration were refused: %v", err)
+	}
+	producer := func(id string, deps ...string) domain.PlanStage {
+		return domain.PlanStage{ID: id, Kind: domain.StageAgent, Role: domain.RoleImplementer, Objective: id, DependsOn: deps, InvocationMode: domain.InvocationModeMutating}
+	}
+	for name, tc := range map[string]struct {
+		extra []domain.PlanStage
+		want  string
+	}{
+		"an implementer directly downstream":        {[]domain.PlanStage{producer("polish", "integrate")}, "downstream"},
+		"an implementer behind a reviewer":          {[]domain.PlanStage{review, producer("polish", "review")}, "downstream"},
+		"an implementer behind a gate":              {[]domain.PlanStage{review, gate, producer("polish", "assurance")}, "downstream"},
+		"an independent parallel producer":          {[]domain.PlanStage{producer("docs")}, "outside"},
+		"a producer feeding only a reviewer":        {[]domain.PlanStage{producer("docs"), {ID: "docs-review", Kind: domain.StageAgent, Role: domain.RoleReviewer, Objective: "r", DependsOn: []string{"docs"}}}, "outside"},
+		"a producer the integration never consumes": {[]domain.PlanStage{producer("extra", "backend")}, "outside"},
+	} {
+		err := validateAcceptanceFeaturePlan(topologyPlan(tc.extra...))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: refusal = %v, want one naming %q", name, err, tc.want)
+		}
+	}
+	// A deeper consumed ancestry is still the integration's own.
+	chain := topologyPlan()
+	chain.Stages = append([]domain.PlanStage{producer("core")}, chain.Stages...)
+	chain.Stages[1].DependsOn = []string{"core"}
+	if err := validateAcceptanceFeaturePlan(chain); err != nil {
+		t.Fatalf("a producer consumed through another producer was refused: %v", err)
+	}
+}
