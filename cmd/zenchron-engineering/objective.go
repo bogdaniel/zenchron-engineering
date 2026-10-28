@@ -63,7 +63,7 @@ func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Superv
 		Template: request.Template, Profile: request.Profile, Deterministic: request.Deterministic,
 		Agent:           request.Agent,
 		SubstituteHuman: request.SubstituteHuman, Note: request.Note,
-		ProductID: request.ProductID,
+		ProductID: request.ProductID, AcceptanceFeature: request.AcceptanceFeature,
 	}
 	// A first proposal has no id yet. It is derived exactly as the local path
 	// derives it - from the issue, deterministically - so the view returned

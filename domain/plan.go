@@ -24,6 +24,8 @@ package domain
 // anything, or knows a provider's name: the compiler, the resolver and the plan
 // reconciler are separate, and the kernel stays free of both.
 
+import "regexp"
+
 // EngineeringRole is a semantic responsibility in a plan. It is not a provider,
 // an executable, or a permanent AI persona: a plan may omit a role, combine two
 // of them into one stage, or instantiate one role several times.
@@ -578,8 +580,15 @@ type PlanStage struct {
 	Kind StageKind `json:"kind"`
 	// Role is required for an agent stage and absent for a gate: a gate is not
 	// performed by anybody, which is exactly why it creates no run.
-	Role                 EngineeringRole          `json:"role,omitempty"`
-	ExecutionKind        string                   `json:"execution_kind,omitempty"`
+	Role          EngineeringRole `json:"role,omitempty"`
+	ExecutionKind string          `json:"execution_kind,omitempty"`
+	// AcceptanceFeature names the final-integration feature acceptance this
+	// stage's integrated candidate must pass (browser-acceptance/<feature>.txt
+	// read from the trusted base). The OPERATOR's planning request declares it;
+	// the compiler stamps it on the one terminal integration_compose stage, so a
+	// planner can neither invent, remove nor replace it. Absent for every plan
+	// that declares none, which keeps those plans' documents and digests exact.
+	AcceptanceFeature    string                   `json:"acceptance_feature,omitempty"`
 	Objective            string                   `json:"objective,omitempty"`
 	DependsOn            []string                 `json:"depends_on,omitempty"`
 	RequiresCapabilities []EngineeringCapability  `json:"requires_capabilities,omitempty"`
@@ -686,6 +695,23 @@ type EngineeringPlan struct {
 }
 
 // Stage returns one stage by id.
+// DeclaredAcceptanceFeature is the operator-declared feature acceptance this
+// plan carries, or "" when it carries none.
+func (p EngineeringPlan) DeclaredAcceptanceFeature() string {
+	for _, stage := range p.Stages {
+		if stage.AcceptanceFeature != "" {
+			return stage.AcceptanceFeature
+		}
+	}
+	return ""
+}
+
+var acceptanceFeaturePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
+
+// ValidAcceptanceFeature reports whether id is usable as a feature name and as
+// the file name browser-acceptance/<id>.txt.
+func ValidAcceptanceFeature(id string) bool { return acceptanceFeaturePattern.MatchString(id) }
+
 func (p EngineeringPlan) Stage(id string) (PlanStage, bool) {
 	for _, stage := range p.Stages {
 		if stage.ID == id {

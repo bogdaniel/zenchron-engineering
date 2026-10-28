@@ -303,6 +303,9 @@ func (r *EngineeringRuntime) workUnitOrigin(run EngineeringRun) (*orchestration.
 	if err != nil || !found {
 		return nil, err
 	}
+	if err := verifyAcceptanceFeatureOrigin(r.deps.Store, batch.Origin); err != nil {
+		return nil, deterministicRefusal("origin.acceptance_feature", err)
+	}
 	return batch.Origin, nil
 }
 

@@ -70,8 +70,12 @@ func (s *Supervisor) activateRemediationEpoch(graph WorkGraphView, unit WorkGrap
 	// same unit): same graph, same unit, same exact input set, DIFFERENT
 	// epoch, DIFFERENT WorkUnitBatchID - never a second claim on epoch 1's
 	// own identity, and never collapsed onto it.
+	feature, err := declaredAcceptanceFeature(s.deps.Store, graph.GraphID, unit.UnitID)
+	if err != nil {
+		return err
+	}
 	origin := orchestration.BatchOrigin{GraphID: graph.GraphID, UnitID: unit.UnitID, Inputs: unit.Inputs,
-		ExecutionKind: unit.ExecutionKind, Epoch: authorization.ProposedEpoch}
+		ExecutionKind: unit.ExecutionKind, Epoch: authorization.ProposedEpoch, AcceptanceFeature: feature}
 	batchID, err := orchestration.WorkUnitBatchID(graph.Repository, graph.AgentID, unit.Issue, origin)
 	if err != nil {
 		return err

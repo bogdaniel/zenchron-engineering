@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // CompilerVersion identifies this v0.1 plan compiler. It is recorded in plan
@@ -83,6 +84,10 @@ type CompileInput struct {
 	// here is what makes that refusal reachable rather than theoretical.
 	Consumed   domain.PlanConsumption
 	ProposalID string
+	// AcceptanceFeature is the OPERATOR's declared final-integration feature
+	// acceptance, from the governed planning request - never from a proposal.
+	// Empty declares none.
+	AcceptanceFeature string
 }
 
 // Compile produces a validated plan revision.
@@ -110,6 +115,10 @@ func Compile(input CompileInput) (domain.EngineeringPlan, error) {
 		return domain.EngineeringPlan{}, err
 	}
 	stages = canonicalOrder(stages)
+	stages, err = bindAcceptanceFeature(stages, input.AcceptanceFeature)
+	if err != nil {
+		return domain.EngineeringPlan{}, err
+	}
 
 	envelope, err := resolveEnvelope(input, stages)
 	if err != nil {
@@ -196,6 +205,11 @@ func (input CompileInput) validate() error {
 // an architect or a security reviewer that no obligation asked for would be the
 // rigid workflow #64 exists to avoid.
 func (input CompileInput) baseStages() ([]domain.PlanStage, error) {
+	for _, stage := range input.Proposed {
+		if stage.AcceptanceFeature != "" {
+			return nil, fmt.Errorf("stage %q declares an acceptance feature: only the operator's planning request may, and a proposal cannot invent, remove or replace it", stage.ID)
+		}
+	}
 	switch {
 	case len(input.Proposed) > 0:
 		return append([]domain.PlanStage{}, input.Proposed...), nil
@@ -997,4 +1011,43 @@ func sameAction(left, right *domain.Action) bool {
 	default:
 		return *left == *right
 	}
+}
+
+// bindAcceptanceFeature stamps the operator's declared feature on the one
+// terminal deterministic integration stage. A plan with none, or with several
+// terminal integrations, is refused before approval: the declaration is a
+// requirement, and a requirement with no stage to carry it is not silently
+// dropped.
+func bindAcceptanceFeature(stages []domain.PlanStage, feature string) ([]domain.PlanStage, error) {
+	if feature == "" {
+		return stages, nil
+	}
+	if !domain.ValidAcceptanceFeature(feature) {
+		return nil, fmt.Errorf("acceptance feature %q is not a valid feature name", feature)
+	}
+	views := make([]stageView, 0, len(stages))
+	byID := make(map[string]stageView, len(stages))
+	for _, stage := range stages {
+		view := stageView{ID: stage.ID, Kind: stage.Kind, ExecutionKind: stage.ExecutionKind, DependsOn: stage.DependsOn}
+		views, byID[stage.ID] = append(views, view), view
+	}
+	final := -1
+	for i, stage := range stages {
+		if stage.Kind != domain.StageAgent || orchestration.WorkUnitExecutionKind(stage.ExecutionKind) != orchestration.ExecutionKindIntegrationCompose {
+			continue
+		}
+		if downstreamIntegration(stage.ID, views, byID) {
+			continue
+		}
+		if final >= 0 {
+			return nil, fmt.Errorf("acceptance feature %q is ambiguous: stages %q and %q are both final deterministic integrations", feature, stages[final].ID, stage.ID)
+		}
+		final = i
+	}
+	if final < 0 {
+		return nil, fmt.Errorf("acceptance feature %q needs a final deterministic integration stage, and the plan has none", feature)
+	}
+	stages = append([]domain.PlanStage{}, stages...)
+	stages[final].AcceptanceFeature = feature
+	return stages, nil
 }

@@ -24,6 +24,9 @@ type stageView struct {
 	Kind          domain.StageKind
 	Role          domain.EngineeringRole
 	ExecutionKind string
+	// AcceptanceFeature is the operator-declared feature acceptance, only ever on
+	// the one terminal deterministic integration stage.
+	AcceptanceFeature string
 	// SubstitutesRole is the role a human decision gate stands in for.
 	SubstitutesRole      domain.EngineeringRole
 	DependsOn            []string
@@ -60,7 +63,10 @@ func validateStageGraph(stages []stageView) error {
 			return err
 		}
 	}
-	return refuseCycles(stages, byID)
+	if err := refuseCycles(stages, byID); err != nil {
+		return err
+	}
+	return validateAcceptanceFeature(stages, byID)
 }
 
 func validateStage(stage stageView, byID map[string]stageView) error {
@@ -275,4 +281,58 @@ func validateExecutionKind(stage stageView) error {
 		return fmt.Errorf("stage %q deterministic integration requires an integrator and at least two dependencies", stage.ID)
 	}
 	return nil
+}
+
+// validateAcceptanceFeature holds the one rule of operator-declared feature
+// acceptance: at most one stage carries it, it names a valid feature, and that
+// stage is a terminal deterministic integration - no other deterministic
+// integration consumes its output, because acceptance of the FINAL integrated
+// candidate is the only thing the declaration may ask for.
+func validateAcceptanceFeature(stages []stageView, byID map[string]stageView) error {
+	carriers := 0
+	for _, stage := range stages {
+		if stage.AcceptanceFeature == "" {
+			continue
+		}
+		carriers++
+		switch {
+		case !domain.ValidAcceptanceFeature(stage.AcceptanceFeature):
+			return fmt.Errorf("stage %q declares acceptance feature %q, which is not a valid feature name", stage.ID, stage.AcceptanceFeature)
+		case stage.Kind != domain.StageAgent || orchestration.WorkUnitExecutionKind(stage.ExecutionKind) != orchestration.ExecutionKindIntegrationCompose:
+			return fmt.Errorf("stage %q declares an acceptance feature and is not a deterministic integration stage", stage.ID)
+		case downstreamIntegration(stage.ID, stages, byID):
+			return fmt.Errorf("stage %q declares an acceptance feature and another deterministic integration consumes it: only the final integration may", stage.ID)
+		}
+	}
+	if carriers > 1 {
+		return fmt.Errorf("%d stages declare an acceptance feature; exactly one final integration may", carriers)
+	}
+	return nil
+}
+
+// downstreamIntegration reports whether any deterministic integration stage
+// depends, directly or transitively, on stageID.
+func downstreamIntegration(stageID string, stages []stageView, byID map[string]stageView) bool {
+	for _, candidate := range stages {
+		if candidate.ID == stageID || orchestration.WorkUnitExecutionKind(candidate.ExecutionKind) != orchestration.ExecutionKindIntegrationCompose {
+			continue
+		}
+		if dependsOnStage(candidate.ID, stageID, byID, map[string]bool{}) {
+			return true
+		}
+	}
+	return false
+}
+
+func dependsOnStage(id, ancestor string, byID map[string]stageView, seen map[string]bool) bool {
+	if seen[id] {
+		return false
+	}
+	seen[id] = true
+	for _, dependency := range byID[id].DependsOn {
+		if dependency == ancestor || dependsOnStage(dependency, ancestor, byID, seen) {
+			return true
+		}
+	}
+	return false
 }

@@ -218,6 +218,9 @@ type autonomyFlags struct {
 	// only used to associate the compiled WorkGraph, through the existing #476
 	// store boundary.
 	ProductID string
+	// AcceptanceFeature is the operator's declared final-integration feature
+	// acceptance; see ControlRequest.AcceptanceFeature.
+	AcceptanceFeature string
 	// Revision and Digest name the EXACT plan revision a decision is about.
 	// They are what an operator read: without them the CLI would decide
 	// whatever the highest revision happened to be at decide time, which can
@@ -1232,6 +1235,8 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.Reason = args[1]
 		case "--template":
 			flags.Template = args[1]
+		case "--acceptance-feature":
+			flags.AcceptanceFeature = args[1]
 		case "--substitute-human":
 			flags.SubstituteHuman = args[1]
 		case "--digest":
