@@ -31,8 +31,14 @@ dpkg-query -W -f="\${Package}=\${Version}\n" $(cut -d= -f1 /expected-packages.tx
 '
 
 if [ -n "$reference" ]; then
-  env_of() { confined "$1" -c 'go env GOROOT GOTOOLCHAIN GOPATH GOFLAGS GOPROXY GONOSUMDB GOTOOLDIR; go version; printf "%s\n" "$PATH"'; }
-  [ "$(env_of "$image")" = "$(env_of "$reference")" ] || { echo "the Go environment differs from the reference image"; exit 1; }
+  # The whole Go environment, so GOOS, GOARCH, CGO_ENABLED and whatever else it
+  # reports are compared. GOGCCFLAGS embeds a per-process temporary directory, and
+  # GOCACHE is pointed at the writable tmpfs because the root is read-only.
+  env_of() { confined "$1" -c 'set -eu; goenv=$(GOCACHE=/tmp/gocache go env); printf "%s\n" "$goenv" | grep -v "^GOGCCFLAGS="; go version; printf "%s\n" "$PATH"'; }
+  # A failed read must not compare equal to another failed read.
+  actual=$(env_of "$image") || { echo "could not read the Go environment of $image"; exit 1; }
+  expected=$(env_of "$reference") || { echo "could not read the Go environment of $reference"; exit 1; }
+  [ "$actual" = "$expected" ] || { echo "the Go environment differs from the reference image"; exit 1; }
   echo "Go environment identical to the reference image"
 fi
 echo "image prerequisites hold"

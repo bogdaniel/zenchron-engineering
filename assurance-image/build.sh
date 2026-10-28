@@ -29,6 +29,7 @@ probe() { docker run --rm --network none --entrypoint sh "$id" -c "$1"; }
   printf '  "npm": "%s",\n' "$(probe 'npm -v')"
   printf '  "chromium": "%s",\n' "$(probe '/opt/zenchron-browser/chrome/chrome --version')"
   printf '  "playwright_core": "%s",\n' "$(probe 'node -p "require(\"/opt/zenchron-browser/playwright/node_modules/playwright-core/package.json\").version"')"
+  printf '  "package_json_sha256": "%s",\n' "$(shasum -a 256 "$here/package.json" | cut -d' ' -f1)"
   printf '  "lockfile_sha256": "%s",\n' "$(shasum -a 256 "$here/package-lock.json" | cut -d' ' -f1)"
   printf '  "packages_sha256": "%s",\n' "$(shasum -a 256 "$here/chromium-packages.txt" | cut -d' ' -f1)"
   printf '  "snapshot_sha256": "%s",\n' "$(shasum -a 256 "$here/debian-snapshot.sources" | cut -d' ' -f1)"

@@ -39,9 +39,12 @@ image ID, the architecture and the versions of Go, Node, npm, Chromium and
 Playwright, and the hashes of the five input files.
 
 Changing the Chromium set is deliberate and reviewable: change the timestamp in
-`debian-snapshot.sources`, run `resolve-packages.sh > chromium-packages.txt`,
-review the diff, rebuild. `resolve-packages.sh` is deterministic for a given
-snapshot: regenerating it reproduces the committed list.
+`debian-snapshot.sources`, run, from the repository root,
+`assurance-image/resolve-packages.sh > resolved.txt && mv resolved.txt assurance-image/chromium-packages.txt`,
+review the diff, rebuild. A failed apt simulation exits non-zero and prints
+nothing, so the `mv` does not run and the committed list is never replaced by a
+partial one. `resolve-packages.sh` is deterministic for a given snapshot:
+regenerating it reproduces the committed list.
 
 ## What "repeatable" means here
 
