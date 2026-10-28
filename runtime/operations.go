@@ -2448,6 +2448,27 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	if err := browserBaseRefusal(kernel.Contract, state.pinnedBase()); err != nil {
 		return failed(err)
 	}
+	if err := featureBaseRefusal(kernel.Contract, state.declaredFeature(), state.pinnedBase()); err != nil {
+		return failed(err)
+	}
+	// An identical integrated tree that already failed the declared feature is
+	// not verified again: the verdict is in the journal, and re-running it
+	// would spend assurance to learn nothing.
+	if featureAcceptanceRequired(kernel.Contract) {
+		priorRun, priorRecord, identical, err := r.priorFailedFeatureVerdict(state, tree)
+		if err != nil {
+			return failed(err)
+		}
+		if identical {
+			return effect{state: Succeeded, result: struct{}{}, events: []journalEntry{{Type: EventAssuranceObserved, Payload: AssuranceObservedPayload{
+				ProviderID: "feature-acceptance-prior-verdict", VerifierDefinition: "journalled-feature-verdict", Passed: false,
+				FailureClass: FailureFeatureAcceptance, Commit: commit, Tree: tree, FailureSignature: "identical_failed_candidate:" + priorRun,
+				// The ORIGINAL judged record travels with the carry-forward, so a
+				// later lookup resolves to it and a checker change stales it.
+				Checks: []VerificationCheck{priorRecord},
+			}}}}
+		}
+	}
 	// THE PHYSICAL BOUND (#640): this attempt may run no longer than what is
 	// left of the run's assurance allowance, whatever the verifier does, and
 	// the confirmation rerun shares the same bound.
@@ -2468,9 +2489,19 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 		// Present only when the compiled contract requires the file-size claim.
 		FileSizePolicyBase:    fileSizePolicyBase(kernel.Contract, state.pinnedBase()),
 		BrowserAcceptanceBase: browserAcceptanceBase(kernel.Contract, state.pinnedBase()),
+		FeatureAcceptance:     featureAcceptanceFeature(kernel.Contract, state.declaredFeature()),
+		FeatureAcceptanceBase: featureAcceptanceBase(kernel.Contract, state.pinnedBase()),
 	})
 	if err := assuranceCutOff(parent, ctx); err != nil {
 		return failed(err)
+	}
+	// A verifier that ignored the feature request and passed proves nothing
+	// about it: fail the operation rather than let a generic pass release the
+	// integrator and leave only the authority step to notice.
+	if feature := featureAcceptanceFeature(kernel.Contract, state.declaredFeature()); result.Passed && feature != "" {
+		if err := provesFeatureAcceptance(checkout, state.pinnedBase(), feature, commit, tree, result.Checks); err != nil {
+			return failed(err)
+		}
 	}
 	if assureErr != nil && result.VerifierDefinition == "" {
 		return failed(assureErr)
@@ -3237,7 +3268,8 @@ func (r *EngineeringRuntime) buildKernelAt(state *runState, workspaceDir, commit
 		revision += "-" + commit
 	}
 	model := r.projectModel(state)
-	kernel, err := r.flow.Compile(SourceSnapshot{
+	flow := r.flowFor(state)
+	kernel, err := flow.Compile(SourceSnapshot{
 		ID:               sourceSnapshotID(state),
 		Objective:        untrustedObjective(*state.source, text),
 		AcceptanceIntent: runtimeAcceptanceIntent,
@@ -3252,7 +3284,7 @@ func (r *EngineeringRuntime) buildKernelAt(state *runState, workspaceDir, commit
 		if err != nil {
 			return KernelState{}, err
 		}
-		kernel, err = r.flow.ObserveCandidate(kernel, model, r.deps.Policy,
+		kernel, err = flow.ObserveCandidate(kernel, model, r.deps.Policy,
 			domain.Subject{Repository: r.deps.Repository.Identity, Revision: commit}, paths)
 		if err != nil {
 			return KernelState{}, err
@@ -3381,6 +3413,12 @@ func (r *EngineeringRuntime) evidenceBundles(state *runState, contract domain.En
 		if claimID == BrowserAcceptanceClaimID {
 			var proven bool
 			if item, proven = browserEvidenceItem(item, assurance, contract.Subject.Revision, state.pinnedBase()); !proven {
+				continue
+			}
+		}
+		if claimID == FeatureAcceptanceClaimID {
+			var proven bool
+			if item, proven = featureEvidenceItem(item, assurance, contract.Subject.Revision, state.pinnedBase(), state.declaredFeature()); !proven {
 				continue
 			}
 		}

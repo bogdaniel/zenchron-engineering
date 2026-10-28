@@ -131,6 +131,10 @@ type ProposeInput struct {
 	References []PlanSourceReferencePayload
 	// Origin states where the proposal came from, for the durable record.
 	Origin string
+	// AcceptanceFeature is the operator's declared final-integration feature
+	// acceptance. A revision that states none inherits the previous revision's,
+	// so a re-proposal cannot drop what the operator declared.
+	AcceptanceFeature string
 }
 
 // PlanAttemptRefusedError is the typed refusal for a proposal that deterministic
@@ -298,13 +302,20 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	// evidence exactly like a refused decomposition.
 	var plan domain.EngineeringPlan
 	compileErr := unauthorizedRebind(input, previous)
+	if previous != nil && input.AcceptanceFeature == "" {
+		input.AcceptanceFeature = previous.DeclaredAcceptanceFeature()
+	}
 	if compileErr == nil {
 		plan, compileErr = planning.Compile(planning.CompileInput{
 			PlanID: input.PlanID, Revision: revision, Objective: input.Objective,
 			Subject: input.Subject, Contract: input.Contract, Model: input.Model, Facts: input.Facts,
 			Template: template, PreferredProfile: input.Profile, Envelope: s.Envelope, Proposed: input.Reasoned,
 			Reasoning: input.Reasoning, Previous: previous, RatchetBaseline: ratchetBaseline, Consumed: consumed,
+			AcceptanceFeature: input.AcceptanceFeature,
 		})
+	}
+	if compileErr == nil {
+		compileErr = validateAcceptanceFeaturePlan(plan)
 	}
 	if compileErr == nil && input.Issue > 0 && !hasObjectiveCandidate(plan) {
 		compileErr = errors.New("an issue objective plan requires at least one material-producing agent stage")

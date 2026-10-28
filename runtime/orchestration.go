@@ -175,6 +175,9 @@ func (s *Supervisor) reconcileOrchestration(ctx context.Context) []string {
 	// above; this delivers it into the producer's batch too, over the SAME
 	// freshly reloaded batch list, so a producer activated earlier in this
 	// very pass is already visible to it.
+	// An operator's attribution of a failed feature acceptance becomes a Finding
+	// in the integrator's scope before delivery, so the same pass can deliver it.
+	problems = append(problems, reconcileFeatureAttribution(s.deps.Store, batches, now)...)
 	problems = append(problems, deliverIntegrationConflicts(s.deps.Store, batches)...)
 	// #581: the governed Finding -> request -> authorization bridge, over
 	// the SAME freshly reloaded batch list, after delivery - a request is

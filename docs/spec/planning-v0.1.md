@@ -269,6 +269,13 @@ and at least two dependencies. Gates and planner-role stages cannot select an
 execution algorithm. Role never implies composition. The field is planning
 input until validated and approved; it grants no additional authority.
 
+`PlanStage` also optionally carries `acceptance_feature`: the operator's declared
+final-integration feature acceptance (`docs/feature-acceptance.md`). Only the
+planning request sets it, the compiler stamps it on the one final
+`integration_compose` stage, a planner proposal cannot carry it, and the stage's
+effective input set is at most 19 units. It is part of the plan digest and grants no
+authority: policy still decides what the declaration requires.
+
 These optional JSON fields preserve existing artifacts when absent. New
 objective graph bindings and explicit algorithms require a compatible build;
 older controllers must not adopt their persisted state. There is no new

@@ -98,7 +98,12 @@ acceptance for **that** feature as well, and the candidate cannot supply it
 2. Work based on that revision runs the new test as part of the claim, against the
    final integrated candidate (the exact tree being published, because the
    container runs the candidate's tree), with the base's test sources.
-3. If the feature's test cannot exist before the feature, the generic claim does
+3. To require the feature's tests of the final integrated candidate **only**, and
+   not of the early units that cannot pass them yet, keep the test out of the global
+   manifest and declare the feature in the planning request instead
+   (`docs/feature-acceptance.md`): its own manifest, the same base-pinned machinery,
+   a claim only the feature's record can discharge.
+4. If the feature's test cannot exist before the feature, the generic claim does
    not cover it. The browser run on the integrated candidate is then supervisor
    evidence, recorded as such and reviewed by a person; it is never presented as
    the automated claim.

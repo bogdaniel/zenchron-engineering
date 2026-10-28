@@ -124,6 +124,7 @@
         "runtime/driver_leases.go",
         "runtime/capacity*.go",
         "runtime/reconciler.go",
+        "runtime/failure_routing.go",
         "runtime/execution_continuation_budget.go",
         "runtime/external_wait_reasons.go",
         "runtime/run_policy.go",
@@ -284,7 +285,8 @@
         "runtime/remediation_eligibility.go",
         "runtime/remediation_facts.go",
         "runtime/remediation_schema.go",
-        "runtime/remediation_store.go"
+        "runtime/remediation_store.go",
+        "runtime/feature_attribution.go"
       ],
       "tests": [
         "runtime/remediation_store_test.go",
@@ -333,7 +335,8 @@
         "runtime/planner.go",
         "planning/*.go",
         "runtime/planner_proposal.go",
-        "runtime/planner_publication_gate.go"
+        "runtime/planner_publication_gate.go",
+        "runtime/acceptance_feature_plan.go"
       ],
       "tests": [
         "runtime/plan_*_test.go",
@@ -398,6 +401,7 @@
         "runtime/assurance_evidence.go",
         "runtime/file_size_*.go",
         "runtime/browser_acceptance*.go",
+        "runtime/feature_acceptance*.go",
         "runtime/semantic_assurance.go",
         "runtime/typed_result_capability.go",
         "runtime/reviewer_result.go",
@@ -409,6 +413,7 @@
         "runtime/assurance_*_test.go",
         "runtime/file_size_*_test.go",
         "runtime/browser_acceptance*_test.go",
+        "runtime/feature_acceptance*_test.go",
         "runtime/semantic_*_test.go",
         "runtime/reviewer_*_test.go",
         "runtime/review_continuation_test.go",

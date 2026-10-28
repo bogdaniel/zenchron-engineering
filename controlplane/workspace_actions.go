@@ -210,8 +210,13 @@ func (a *API) propose(w http.ResponseWriter, r *http.Request) {
 		Digest            string `json:"digest"`
 		Note              string `json:"note"`
 		ProductID         string `json:"product_id"`
+		AcceptanceFeature string `json:"acceptance_feature"`
 	}
 	if !decodeAction(w, r, &body) {
+		return
+	}
+	if body.AcceptanceFeature != "" && !domain.ValidAcceptanceFeature(body.AcceptanceFeature) {
+		fail(w, 400, "invalid_request")
 		return
 	}
 	id := r.PathValue("id")
@@ -254,7 +259,7 @@ func (a *API) propose(w http.ResponseWriter, r *http.Request) {
 	// act's Send contract is shared by every mutation; the response is sanitized
 	// here rather than returning raw PlanView context and instruction payloads.
 	a.actResponse(w, r, ActionResult{Action: rt.ControlPlanRevise, Target: ActionTarget{PlanID: id, Revision: body.Revision, Digest: body.Digest}}, body.ControllerBinding,
-		rt.ControlRequest{Command: rt.ControlPlanRevise, PlanID: id, Repository: body.Repository, Issue: body.Issue, Agent: body.Agent, Profile: body.Profile, Template: body.Template, Deterministic: body.Deterministic, Revision: body.Revision, Digest: body.Digest, Note: rt.BoundedNote(body.Note), ProductID: body.ProductID}, effect, precheck, func(response rt.ControlResponse) error {
+		rt.ControlRequest{Command: rt.ControlPlanRevise, PlanID: id, Repository: body.Repository, Issue: body.Issue, Agent: body.Agent, Profile: body.Profile, Template: body.Template, Deterministic: body.Deterministic, Revision: body.Revision, Digest: body.Digest, Note: rt.BoundedNote(body.Note), ProductID: body.ProductID, AcceptanceFeature: body.AcceptanceFeature}, effect, precheck, func(response rt.ControlResponse) error {
 			var view rt.PlanView
 			if err := json.Unmarshal(response.Payload, &view); err != nil {
 				return err

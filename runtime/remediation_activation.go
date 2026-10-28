@@ -70,8 +70,12 @@ func (s *Supervisor) activateRemediationEpoch(graph WorkGraphView, unit WorkGrap
 	// same unit): same graph, same unit, same exact input set, DIFFERENT
 	// epoch, DIFFERENT WorkUnitBatchID - never a second claim on epoch 1's
 	// own identity, and never collapsed onto it.
+	feature, err := declaredAcceptanceFeature(s.deps.Store, graph.GraphID, unit.UnitID)
+	if err != nil {
+		return err
+	}
 	origin := orchestration.BatchOrigin{GraphID: graph.GraphID, UnitID: unit.UnitID, Inputs: unit.Inputs,
-		ExecutionKind: unit.ExecutionKind, Epoch: authorization.ProposedEpoch}
+		ExecutionKind: unit.ExecutionKind, Epoch: authorization.ProposedEpoch, AcceptanceFeature: feature}
 	batchID, err := orchestration.WorkUnitBatchID(graph.Repository, graph.AgentID, unit.Issue, origin)
 	if err != nil {
 		return err
@@ -205,7 +209,7 @@ func (r *EngineeringRuntime) planRemediationEpochBatch(id string, issue int, req
 	}
 	goal := issueGoal(r.deps.Repository.Identity, issue)
 	for _, run := range live {
-		if run.Goal == goal && !goalSettled(run) {
+		if run.Goal == goal && !r.epochRunSettled(run) {
 			return orchestration.Batch{}, &OrchestrationConflictError{Issue: issue, RunID: run.ID}
 		}
 	}
@@ -246,9 +250,31 @@ func (r *EngineeringRuntime) freeRemediationEpochRunID(issue int, goal string) (
 		if existing.Repository != r.deps.Repository.Identity || existing.Goal != goal {
 			return "", &RunConflictError{RunID: runID, Detail: "durable run describes different work"}
 		}
-		if !goalSettled(existing) {
+		if !r.epochRunSettled(existing) {
 			return "", &OrchestrationConflictError{Issue: issue, RunID: runID}
 		}
 	}
 	return "", fmt.Errorf("issue %d has exhausted %d run generations", issue, maxRunGenerations)
+}
+
+// epochRunSettled is goalSettled plus the one other resting state that only a new
+// input set can move: an integration run holding a judged feature-acceptance
+// failure. The hold is AUTHENTICATED from the run's own durable state - its
+// disposition and reason, its verified origin declaring an integration with a
+// feature, and a current, unstale feature-failure observation - because the
+// reason string alone is not proof of anything. Any other waiting run keeps
+// blocking a new epoch, and an unreadable run blocks too.
+func (r *EngineeringRuntime) epochRunSettled(run EngineeringRun) bool {
+	if goalSettled(run) {
+		return true
+	}
+	if run.Disposition != Waiting || run.Reason != ReasonFeatureAcceptanceFailed {
+		return false
+	}
+	state, err := r.load(run.ID)
+	if err != nil || state.origin == nil || state.origin.ExecutionKind != orchestration.ExecutionKindIntegrationCompose || state.origin.AcceptanceFeature == "" {
+		return false
+	}
+	class, failing := state.currentHeadFailure()
+	return failing && class == FailureFeatureAcceptance
 }

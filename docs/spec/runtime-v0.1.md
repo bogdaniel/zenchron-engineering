@@ -299,7 +299,11 @@ same list also carries the `browser_acceptance` record (`claim-browser-acceptanc
 see `docs/browser-acceptance.md`), which additionally names the `selection`
 digest of the tests it ran, their `results` (`total`, `passed`, `failed`,
 `skipped`), the `environment` it ran in and the `artifact` transcript. It proves
-the claim only when every selected test passed and none failed or skipped.
+the claim only when every selected test passed and none failed or skipped. A third
+kind, `feature_acceptance`, additionally names the operator-declared `feature`
+and discharges only `claim-feature-acceptance` for the run whose verified origin
+declares that feature (`docs/feature-acceptance.md`); a judged failure of it is the
+failure class `feature_acceptance_failed`, routed `hold`, never a wait or a retry.
 Observations written before the member existed carry none, and absence is never
 read as proof; replay does not synthesize it. A contract that newly requires the
 claim changes the `assurance.go` operation binding (it gains the full SHA-256

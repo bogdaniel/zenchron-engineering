@@ -47,7 +47,31 @@ func browserBaseRefusal(contract domain.EngineeringWorkContract, base string) er
 // an unavailable sandbox - is an error with no passing record, so it can never
 // become evidence, and it spends the same assurance attempts every other
 // verification does.
+// browserCheckSpec is what distinguishes the two checks that share this
+// machinery: the ordinary browser acceptance (the global manifest) and the
+// operator-declared feature acceptance (a feature's own manifest). Everything
+// else - the sandbox, the Git-object workspace, the bounded artifacts, the
+// classification of judged and inconclusive runs - is one implementation.
+type browserCheckSpec struct {
+	base, manifest, feature        string
+	kind, checker, checkerRevision string
+	provider, workDir              string
+	failureClass                   FailureClass
+}
+
+func browserSpec(request AssuranceRequest) browserCheckSpec {
+	return browserCheckSpec{
+		base: request.BrowserAcceptanceBase, manifest: browserManifestFile,
+		kind: CheckKindBrowserAcceptance, checker: browserCheckerID, checkerRevision: browserCheckerRevision(),
+		provider: browserProviderID, workDir: "browser", failureClass: FailureVerification,
+	}
+}
+
 func (v BaselineGoVerifier) withBrowserAcceptance(ctx context.Context, request AssuranceRequest, result AssuranceResult) (AssuranceResult, error) {
+	return v.runBrowserCheck(ctx, request, result, browserSpec(request))
+}
+
+func (v BaselineGoVerifier) runBrowserCheck(ctx context.Context, request AssuranceRequest, result AssuranceResult, spec browserCheckSpec) (AssuranceResult, error) {
 	inconclusive := func(class FailureClass, err error) (AssuranceResult, error) {
 		result.Passed, result.FailureClass = false, class
 		return result, err
@@ -57,12 +81,12 @@ func (v BaselineGoVerifier) withBrowserAcceptance(ctx context.Context, request A
 	if err := verifyAssuranceCheckout(request); err != nil {
 		return inconclusive(FailureAssurancePrerequisite, err)
 	}
-	selection, err := readBrowserSelection(request.CheckoutDir, request.BrowserAcceptanceBase)
+	selection, err := readManifestSelection(request.CheckoutDir, spec.base, spec.manifest)
 	if err != nil {
 		return inconclusive(FailureAssurancePrerequisite, err)
 	}
 	name := request.RunID + "-" + request.Commit + "-" + strconv.Itoa(request.Attempt) + "-" + strconv.FormatBool(request.Confirmation)
-	work := filepath.Join(v.ArtifactStore.Root, "browser", name)
+	work := filepath.Join(v.ArtifactStore.Root, spec.workDir, name)
 	workspace, artifactsDir := filepath.Join(work, "candidate"), filepath.Join(work, "artifacts")
 	if err := os.RemoveAll(work); err != nil {
 		return AssuranceResult{}, err
@@ -71,7 +95,7 @@ func (v BaselineGoVerifier) withBrowserAcceptance(ctx context.Context, request A
 		return AssuranceResult{}, err
 	}
 	defer os.RemoveAll(workspace)
-	surface, err := browserWorkspace(request.CheckoutDir, request.BrowserAcceptanceBase, request.Tree, workspace)
+	surface, err := browserWorkspace(request.CheckoutDir, spec.base, request.Tree, workspace)
 	if err != nil {
 		return inconclusive(FailureAssurancePrerequisite, err)
 	}
@@ -82,7 +106,7 @@ func (v BaselineGoVerifier) withBrowserAcceptance(ctx context.Context, request A
 	args = append(args, envArgs(append(env, sandboxGoEnv...)...)...)
 	args = append(args, v.Sandbox.Image, "sh", "-c", browserAcceptanceCommand(selection))
 	sandbox := v.Sandbox
-	sandbox.OperationID = "browser-assurance-" + request.RunID + "-" + request.Commit
+	sandbox.OperationID = spec.workDir + "-assurance-" + request.RunID + "-" + request.Commit
 	if sandbox.StateDir == "" {
 		sandbox.StateDir = filepath.Join(v.ArtifactStore.Root, "docker-operations")
 	}
@@ -101,11 +125,11 @@ func (v BaselineGoVerifier) withBrowserAcceptance(ctx context.Context, request A
 		out.Stderr = append(append([]byte{}, out.Stderr...), []byte("\n"+exportErr.Error()+"\n")...)
 	}
 	attempt := request.AttemptRef()
-	artifacts, err := v.ArtifactStore.StoreExecutionAttemptTranscript(browserProviderID, attempt, stdout, out.Stderr)
+	artifacts, err := v.ArtifactStore.StoreExecutionAttemptTranscript(spec.provider, attempt, stdout, out.Stderr)
 	if err != nil {
 		return AssuranceResult{}, err
 	}
-	artifactRef, err := attemptTranscriptPrefix(browserProviderID, attempt)
+	artifactRef, err := attemptTranscriptPrefix(spec.provider, attempt)
 	if err != nil {
 		return AssuranceResult{}, err
 	}
@@ -130,8 +154,8 @@ func (v BaselineGoVerifier) withBrowserAcceptance(ctx context.Context, request A
 	result.Artifacts = append(result.Artifacts, artifacts...)
 	record := func(outcome string) VerificationCheck {
 		return VerificationCheck{
-			Kind: CheckKindBrowserAcceptance, Checker: browserCheckerID, CheckerRevision: browserCheckerRevision(),
-			Outcome: outcome, Commit: request.Commit, Tree: request.Tree, BaseRevision: request.BrowserAcceptanceBase,
+			Kind: spec.kind, Checker: spec.checker, CheckerRevision: spec.checkerRevision, Feature: spec.feature,
+			Outcome: outcome, Commit: request.Commit, Tree: request.Tree, BaseRevision: spec.base,
 			Selection: browserSelectionDigest(selection), Surface: surface, Results: &counts,
 			Environment: "docker-network-none@" + v.Sandbox.Image, Artifact: artifactRef, ArtifactsSHA256: artifactsDigest,
 		}
@@ -141,7 +165,7 @@ func (v BaselineGoVerifier) withBrowserAcceptance(ctx context.Context, request A
 		result.Checks = append(result.Checks, record(CheckOutcomePassed))
 		return result, nil
 	case outcome == browserFailed:
-		result.Passed, result.FailureClass = false, FailureVerification
+		result.Passed, result.FailureClass = false, spec.failureClass
 		result.ArtifactRef, result.FailureSignature = artifactRef, signature
 		result.Checks = append(result.Checks, record(CheckOutcomeFailed))
 		return result, nil
