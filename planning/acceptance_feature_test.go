@@ -111,6 +111,14 @@ func TestValidationRefusesADeclarationOnTheWrongStage(t *testing.T) {
 				p.Stages[i].AcceptanceFeature = "delivery-report"
 			}
 		},
+		"on a terminal stage that is no integration": func(p *domain.EngineeringPlan) {
+			p.Stages[2].AcceptanceFeature = ""
+			p.Stages = append(p.Stages, domain.PlanStage{ID: "lonely", Kind: domain.StageAgent, Role: domain.RoleImplementer, Objective: "x", AcceptanceFeature: "delivery-report"})
+		},
+		"on two final integrations": func(p *domain.EngineeringPlan) {
+			p.Stages = append(p.Stages, domain.PlanStage{ID: "compose2", Kind: domain.StageAgent, Role: domain.RoleIntegrator, Objective: "c2",
+				DependsOn: []string{"a", "b"}, ExecutionKind: "integration_compose", AcceptanceFeature: "delivery-report"})
+		},
 		"an invalid name": func(p *domain.EngineeringPlan) {
 			for i := range p.Stages {
 				if p.Stages[i].AcceptanceFeature != "" {

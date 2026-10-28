@@ -2,10 +2,12 @@ package runtime
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -276,4 +278,69 @@ func activationFixtures(t *testing.T) (domain.ProjectModel, domain.EngineeringPo
 		t.Fatal(err)
 	}
 	return model, policy
+}
+
+// The attribution decision fails closed and says why: a scope with no room, an
+// integration that consumed too many inputs, or none, asks nothing and writes
+// nothing.
+func TestTheAttributionDecisionRefusesWhenItCannotBeAskedCompletely(t *testing.T) {
+	inputs := func(n int) orchestration.WorkUnitInputs {
+		out := make(orchestration.WorkUnitInputs, n)
+		for i := range out {
+			out[i] = orchestration.WorkUnitInput{UnitID: "unit-" + string(rune('a'+i))}
+		}
+		return out
+	}
+	batch := orchestration.Batch{ID: "batch-1", Items: []orchestration.BatchItem{{Issue: 7, RunID: "run-1"}}}
+	for name, tc := range map[string]struct {
+		inputs orchestration.WorkUnitInputs
+		scope  int
+	}{
+		"no inputs":          {inputs(0), 0},
+		"too many inputs":    {inputs(maxAttributedInputs + 1), 0},
+		"a full message cap": {inputs(2), orchestration.MaxScopeMessages},
+	} {
+		origin := orchestration.BatchOrigin{GraphID: "g", UnitID: "integrate", AcceptanceFeature: testFeature, Inputs: tc.inputs}
+		// A nil store proves nothing was written: the refusal precedes any write.
+		if err := admitFeatureAttributionRequest(nil, batch, origin, "run-1", "request", "c", "t", tc.scope, time.Now()); err == nil {
+			t.Errorf("%s: the decision was asked", name)
+		}
+	}
+}
+
+func TestPlanApprovalRefusesAnIntegrationTheAttributionCannotName(t *testing.T) {
+	stage := func(id string, deps ...string) domain.PlanStage {
+		return domain.PlanStage{ID: id, Kind: domain.StageAgent, Role: domain.RoleImplementer, Objective: id,
+			InvocationMode: domain.InvocationModeMutating, DependsOn: deps}
+	}
+	plan := func(producers int, producerID string) domain.EngineeringPlan {
+		var stages []domain.PlanStage
+		var deps []string
+		for i := 0; i < producers; i++ {
+			id := fmt.Sprintf("unit-%02d", i)
+			if i == 0 && producerID != "" {
+				id = producerID
+			}
+			stages = append(stages, stage(id))
+			deps = append(deps, id)
+		}
+		stages = append(stages, domain.PlanStage{ID: "integrate", Kind: domain.StageAgent, Role: domain.RoleIntegrator, Objective: "compose",
+			ExecutionKind: string(orchestration.ExecutionKindIntegrationCompose), DependsOn: deps, AcceptanceFeature: testFeature, InvocationMode: domain.InvocationModeMutating})
+		return domain.EngineeringPlan{Stages: stages}
+	}
+	if err := validateAcceptanceFeaturePlan(plan(maxAttributedInputs, "")); err != nil {
+		t.Fatalf("exactly %d inputs were refused: %v", maxAttributedInputs, err)
+	}
+	if err := validateAcceptanceFeaturePlan(plan(maxAttributedInputs+1, "")); err == nil {
+		t.Errorf("%d inputs were accepted", maxAttributedInputs+1)
+	}
+	if err := validateAcceptanceFeaturePlan(plan(2, attributionNone)); err == nil {
+		t.Error("an input named with the reserved word was accepted")
+	}
+	// The ordinary WorkGraph capacity is not what bounds an undeclared plan.
+	undeclared := plan(maxAttributedInputs+1, "")
+	undeclared.Stages[len(undeclared.Stages)-1].AcceptanceFeature = ""
+	if err := validateAcceptanceFeaturePlan(undeclared); err != nil {
+		t.Errorf("an undeclared plan was held to the attribution bound: %v", err)
+	}
 }
