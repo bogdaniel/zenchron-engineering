@@ -401,15 +401,15 @@ func TestAFailedFeatureHoldsIsAttributedByTheOperatorAndReintegratesAfterGoverne
 	// tree, or a different base, is not covered by it.
 	sibling := &runState{rt: j.fleet.runtime, run: EngineeringRun{ID: "sibling", Goal: held.run.Goal}, origin: held.origin,
 		sources: []sourceRecord{{BaseRevision: held.pinnedBase()}}}
-	if prior, identical, err := j.fleet.runtime.priorFailedFeatureVerdict(sibling, failedTree); err != nil || !identical || prior != heldRunID {
+	if prior, _, identical, err := j.fleet.runtime.priorFailedFeatureVerdict(sibling, failedTree); err != nil || !identical || prior != heldRunID {
 		t.Fatalf("the identical failed tree was not recognised: %q %t %v", prior, identical, err)
 	}
-	if _, identical, _ := j.fleet.runtime.priorFailedFeatureVerdict(sibling, "9999999999999999999999999999999999999999"); identical {
+	if _, _, identical, _ := j.fleet.runtime.priorFailedFeatureVerdict(sibling, "9999999999999999999999999999999999999999"); identical {
 		t.Fatal("a different tree was treated as already failed")
 	}
 	moved := *sibling
 	moved.sources = []sourceRecord{{BaseRevision: "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3"}}
-	if _, identical, _ := j.fleet.runtime.priorFailedFeatureVerdict(&moved, failedTree); identical {
+	if _, _, identical, _ := j.fleet.runtime.priorFailedFeatureVerdict(&moved, failedTree); identical {
 		t.Fatal("a verdict made against another base was reused")
 	}
 
@@ -596,6 +596,20 @@ func TestAnIdenticalFailedIntegrationIsHeldAgainWithoutVerifyingItAgain(t *testi
 	}
 	if !strings.HasPrefix(second.FailureSignature, "identical_failed_candidate:") || !strings.HasSuffix(second.FailureSignature, firstRunID) {
 		t.Fatalf("the repeated failure does not name the verdict it repeats: %q", second.FailureSignature)
+	}
+	// The carry-forward is tied to the ORIGINAL judged record, copied verbatim, so
+	// a later lookup chains through it and a checker change stales it.
+	original := failedFeatureObservation(j.fleet.state(firstRunID).projection)
+	if len(second.Checks) != 1 || len(original.Checks) != 1 || second.Checks[0].Outcome != CheckOutcomeFailed || second.Checks[0].Commit != original.Checks[0].Commit {
+		t.Fatalf("the carry-forward does not carry the original record: %+v vs %+v", second.Checks, original.Checks)
+	}
+	secondState := j.fleet.state(secondRunID)
+	base := secondState.pinnedBase()
+	if _, ok := reusableFeatureFailure(secondState.projection.Assurance, journeyFeature, base, failedTree, featureCheckerRevision()); !ok {
+		t.Fatal("the carried-forward verdict does not chain under the same checker revision")
+	}
+	if _, ok := reusableFeatureFailure(secondState.projection.Assurance, journeyFeature, base, failedTree, "checker-v2"); ok {
+		t.Fatal("the carried-forward verdict survived a checker revision change")
 	}
 	for range 6 {
 		j.tick()

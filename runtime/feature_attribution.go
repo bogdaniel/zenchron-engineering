@@ -222,20 +222,20 @@ func admitAttributedFinding(store *SQLiteOperationStore, batch orchestration.Bat
 // and verifying it again would spend a full browser run to learn the answer the
 // journal already holds. The verdict it returns is only ever a failure: nothing
 // here can produce a pass.
-func (r *EngineeringRuntime) priorFailedFeatureVerdict(state *runState, tree string) (string, bool, error) {
+func (r *EngineeringRuntime) priorFailedFeatureVerdict(state *runState, tree string) (string, VerificationCheck, bool, error) {
 	origin := state.origin
 	if origin == nil || origin.AcceptanceFeature == "" || tree == "" {
-		return "", false, nil
+		return "", VerificationCheck{}, false, nil
 	}
 	// Only this unit's own recorded executions are read: its epochs and its
 	// first activation. The store is never scanned.
 	epochs, err := r.deps.Store.WorkUnitRemediationEpochs(origin.GraphID, origin.UnitID)
 	if err != nil {
-		return "", false, err
+		return "", VerificationCheck{}, false, err
 	}
 	activations, err := r.deps.Store.WorkUnitActivations(origin.GraphID)
 	if err != nil {
-		return "", false, err
+		return "", VerificationCheck{}, false, err
 	}
 	candidates := make([]string, 0, len(epochs)+1)
 	if activation, found := activations[origin.UnitID]; found {
@@ -250,27 +250,37 @@ func (r *EngineeringRuntime) priorFailedFeatureVerdict(state *runState, tree str
 		}
 		events, err := r.deps.Store.Events(runID)
 		if err != nil {
-			return "", false, err
+			return "", VerificationCheck{}, false, err
 		}
 		projection, err := Project(events)
 		if err != nil {
-			return "", false, err
+			return "", VerificationCheck{}, false, err
 		}
-		if a := projection.Assurance; a != nil && !a.Passed && a.FailureClass == FailureFeatureAcceptance && a.Tree == tree && featureVerdictBase(a, state.pinnedBase()) {
-			return runID, true, nil
+		if record, found := reusableFeatureFailure(projection.Assurance, origin.AcceptanceFeature, state.pinnedBase(), tree, featureCheckerRevision()); found {
+			return runID, record, true, nil
 		}
 	}
-	return "", false, nil
+	return "", VerificationCheck{}, false, nil
 }
 
-// featureVerdictBase reports whether a failed observation's feature record, when
-// it has one, was made against the base the current run pins. An observation
-// that carries no record is itself a carried-forward prior verdict.
-func featureVerdictBase(observation *AssuranceObservation, base string) bool {
+// reusableFeatureFailure returns the ORIGINAL judged failed feature record that
+// makes a prior observation reusable for this tree, or false. An observation can
+// establish a reusable failure only by carrying such a record: for the declared
+// feature, this base, this tree and the given (current) checker revision, with at
+// least one failed test. A carried-forward observation copies the original record
+// verbatim, so reuse chains across epochs while staying tied to the version that
+// judged it; one that carries no record (a legacy carry-forward) establishes
+// nothing, and a checker revision change makes every earlier verdict stale.
+func reusableFeatureFailure(observation *AssuranceObservation, feature, base, tree, checkerRevision string) (VerificationCheck, bool) {
+	if observation == nil || observation.Passed || observation.FailureClass != FailureFeatureAcceptance || observation.Tree != tree {
+		return VerificationCheck{}, false
+	}
 	for _, check := range observation.Checks {
-		if check.Kind == CheckKindFeatureAcceptance {
-			return check.BaseRevision == base && check.CheckerRevision == featureCheckerRevision()
+		if check.Kind == CheckKindFeatureAcceptance && check.Outcome == CheckOutcomeFailed && check.Feature == feature &&
+			check.Checker == featureCheckerID && check.CheckerRevision == checkerRevision && check.BaseRevision == base &&
+			check.Tree == tree && check.Results != nil && check.Results.Failed > 0 {
+			return check, true
 		}
 	}
-	return true
+	return VerificationCheck{}, false
 }

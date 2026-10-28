@@ -2455,7 +2455,7 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 	// not verified again: the verdict is in the journal, and re-running it
 	// would spend assurance to learn nothing.
 	if featureAcceptanceRequired(kernel.Contract) {
-		priorRun, identical, err := r.priorFailedFeatureVerdict(state, tree)
+		priorRun, priorRecord, identical, err := r.priorFailedFeatureVerdict(state, tree)
 		if err != nil {
 			return failed(err)
 		}
@@ -2463,6 +2463,9 @@ func (r *EngineeringRuntime) assureCandidate(ctx context.Context, state *runStat
 			return effect{state: Succeeded, result: struct{}{}, events: []journalEntry{{Type: EventAssuranceObserved, Payload: AssuranceObservedPayload{
 				ProviderID: "feature-acceptance-prior-verdict", VerifierDefinition: "journalled-feature-verdict", Passed: false,
 				FailureClass: FailureFeatureAcceptance, Commit: commit, Tree: tree, FailureSignature: "identical_failed_candidate:" + priorRun,
+				// The ORIGINAL judged record travels with the carry-forward, so a
+				// later lookup resolves to it and a checker change stales it.
+				Checks: []VerificationCheck{priorRecord},
 			}}}}
 		}
 	}

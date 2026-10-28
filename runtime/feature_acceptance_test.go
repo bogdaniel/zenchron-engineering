@@ -419,3 +419,92 @@ func TestADeclaredIntegrationMustBeWhereAllMaterialEnds(t *testing.T) {
 		t.Fatalf("a producer consumed through another producer was refused: %v", err)
 	}
 }
+
+func failedFeatureRecord() VerificationCheck {
+	check := goodFeatureCheck()
+	check.Outcome, check.Results = CheckOutcomeFailed, &CheckResults{Total: 2, Passed: 1, Failed: 1}
+	return check
+}
+
+// A prior failure can be reused only through the ORIGINAL judged record, tied to
+// the checker version that judged it. A carry-forward copies that record, so it
+// chains; one without a record, or under another checker revision, establishes
+// nothing, so a changed checker always verifies afresh.
+func TestAPriorFeatureFailureIsReusableOnlyThroughItsOriginalRecord(t *testing.T) {
+	record := failedFeatureRecord()
+	revision := featureCheckerRevision()
+	genuine := &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{
+		FailureClass: FailureFeatureAcceptance, Commit: dischargeCommit, Tree: dischargeTree, Checks: []VerificationCheck{record}}}
+	carried := &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{
+		FailureClass: FailureFeatureAcceptance, Commit: "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2", Tree: dischargeTree,
+		FailureSignature: "identical_failed_candidate:run-1", Checks: []VerificationCheck{record}}}
+	legacy := &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{
+		FailureClass: FailureFeatureAcceptance, Commit: "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2", Tree: dischargeTree,
+		FailureSignature: "identical_failed_candidate:run-1"}}
+	reusable := func(o *AssuranceObservation, base, tree, checker string) bool {
+		_, ok := reusableFeatureFailure(o, testFeature, base, tree, checker)
+		return ok
+	}
+	for name, observation := range map[string]*AssuranceObservation{"a genuine failure": genuine, "a carry-forward of it": carried} {
+		if !reusable(observation, dischargeBase, dischargeTree, revision) {
+			t.Errorf("%s was not reusable under the version that judged it", name)
+		}
+		if reusable(observation, dischargeBase, dischargeTree, "checker-v2") {
+			t.Errorf("%s survived a checker revision change", name)
+		}
+		if reusable(observation, "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3", dischargeTree, revision) {
+			t.Errorf("%s was reused against another base", name)
+		}
+		if reusable(observation, dischargeBase, "9999999999999999999999999999999999999999", revision) {
+			t.Errorf("%s was reused for another tree", name)
+		}
+	}
+	if reusable(legacy, dischargeBase, dischargeTree, revision) {
+		t.Error("a carry-forward with no original record independently established a reusable failure")
+	}
+	for name, mutate := range map[string]func(*VerificationCheck){
+		"another feature":     func(c *VerificationCheck) { c.Feature = "another-feature" },
+		"a passed record":     func(c *VerificationCheck) { c.Outcome = CheckOutcomePassed },
+		"no failed test":      func(c *VerificationCheck) { c.Results = &CheckResults{Total: 2, Passed: 2} },
+		"another checker":     func(c *VerificationCheck) { c.Checker = browserCheckerID },
+		"another record tree": func(c *VerificationCheck) { c.Tree = "8888888888888888888888888888888888888888" },
+	} {
+		bad := failedFeatureRecord()
+		mutate(&bad)
+		o := &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{FailureClass: FailureFeatureAcceptance, Tree: dischargeTree, Checks: []VerificationCheck{bad}}}
+		if reusable(o, dischargeBase, dischargeTree, revision) {
+			t.Errorf("a record with %s made a failure reusable", name)
+		}
+	}
+	// Duplicate records: a mismatched one listed first does not hide the original.
+	wrong := failedFeatureRecord()
+	wrong.BaseRevision = "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3"
+	both := &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{FailureClass: FailureFeatureAcceptance, Tree: dischargeTree, Checks: []VerificationCheck{wrong, record}}}
+	if !reusable(both, dischargeBase, dischargeTree, revision) {
+		t.Error("a mismatched record listed first hid the original judged record")
+	}
+	// A passing observation is never a reusable failure.
+	passing := &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{Passed: true, Tree: dischargeTree, Checks: []VerificationCheck{record}}}
+	if reusable(passing, dischargeBase, dischargeTree, revision) {
+		t.Error("a passing observation was treated as a failure")
+	}
+}
+
+// The evidence names the environment of the record that PROVED the claim, not of
+// whichever passing-looking record is listed first.
+func TestFeatureEvidenceSourcesItsEnvironmentFromTheProvingRecord(t *testing.T) {
+	mismatched := goodFeatureCheck()
+	mismatched.BaseRevision, mismatched.Environment = "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3", "environment-of-the-mismatched-record"
+	valid := goodFeatureCheck()
+	valid.Environment = "environment-of-the-proving-record"
+	observation := func(checks ...VerificationCheck) *AssuranceObservation {
+		return &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{Passed: true, Commit: dischargeCommit, Tree: dischargeTree, Checks: checks}}
+	}
+	item, ok := featureEvidenceItem(domain.EvidenceItem{}, observation(mismatched, valid), dischargeCommit, dischargeBase, testFeature)
+	if !ok || item.Environment.Identifier != "environment-of-the-proving-record" {
+		t.Fatalf("the evidence took its environment from %q (proved=%t)", item.Environment.Identifier, ok)
+	}
+	if _, ok := featureEvidenceItem(domain.EvidenceItem{}, observation(mismatched), dischargeCommit, dischargeBase, testFeature); ok {
+		t.Fatal("a mismatched record alone produced evidence")
+	}
+}

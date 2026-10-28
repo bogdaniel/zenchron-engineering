@@ -118,8 +118,16 @@ type featureExpectation struct {
 // failed or skipped, and the tests left artifacts. An ordinary browser record is
 // a different kind and never qualifies.
 func featureCheckProves(observation *AssuranceObservation, commit, base, feature string, expected featureExpectation) bool {
+	_, proved := provingFeatureCheck(observation, commit, base, feature, expected)
+	return proved
+}
+
+// provingFeatureCheck is featureCheckProves returning the exact record that
+// proved it, so anything derived from the proof (the evidence's environment) comes
+// from that record and never from another one that happens to be listed first.
+func provingFeatureCheck(observation *AssuranceObservation, commit, base, feature string, expected featureExpectation) (VerificationCheck, bool) {
 	if observation == nil || commit == "" || base == "" || feature == "" {
-		return false
+		return VerificationCheck{}, false
 	}
 	for _, check := range observation.Checks {
 		results := check.Results
@@ -131,27 +139,23 @@ func featureCheckProves(observation *AssuranceObservation, commit, base, feature
 			check.Commit == commit && check.Commit == observation.Commit && check.Tree != "" && check.Tree == observation.Tree &&
 			results != nil && results.Total > 0 && results.Passed == results.Total && results.Failed == 0 && results.Skipped == 0 &&
 			(expected.Selection == "" || check.Selection == expected.Selection) && (expected.Total == 0 || results.Total == expected.Total) {
-			return true
+			return check, true
 		}
 	}
-	return false
+	return VerificationCheck{}, false
 }
 
 // featureEvidenceItem turns the generic passing-assurance item for the feature
 // claim into the evidence that actually proves it, or reports that none can be
 // produced.
 func featureEvidenceItem(item domain.EvidenceItem, observation *AssuranceObservation, commit, base, feature string) (domain.EvidenceItem, bool) {
-	if !featureCheckProves(observation, commit, base, feature, featureExpectation{}) {
+	check, proved := provingFeatureCheck(observation, commit, base, feature, featureExpectation{})
+	if !proved {
 		return domain.EvidenceItem{}, false
 	}
-	for _, check := range observation.Checks {
-		if check.Kind == CheckKindFeatureAcceptance && check.Outcome == CheckOutcomePassed && check.Feature == feature {
-			item.Producer = domain.EvidenceProducer{ID: featureCheckerID, Type: domain.ProducerDeterministicTool}
-			item.Environment = domain.EvidenceEnvironment{Type: "assurance_provider", Identifier: check.Environment}
-			return item, true
-		}
-	}
-	return domain.EvidenceItem{}, false
+	item.Producer = domain.EvidenceProducer{ID: featureCheckerID, Type: domain.ProducerDeterministicTool}
+	item.Environment = domain.EvidenceEnvironment{Type: "assurance_provider", Identifier: check.Environment}
+	return item, true
 }
 
 // featureBindingSuffix extends the assurance operation binding when, and only
