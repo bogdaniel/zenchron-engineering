@@ -191,3 +191,58 @@ func TestAGoOnlyChangeIsNotHeldForBrowserEvidence(t *testing.T) {
 		t.Fatalf("publication waits on a claim the contract does not require: %+v", decision)
 	}
 }
+
+// The whole path once, as a run lives it: a predicted contract that cannot know
+// the paths, the observed candidate that touches the interface, the reassessment
+// that creates the material browser obligation, the assurance binding that
+// changes with it, and publication that is refused until current evidence exists.
+func TestAPredictedUnknownChangeBecomesABrowserObligationOnceTheInterfaceIsObserved(t *testing.T) {
+	model, activated := activationInputs(t)
+	flow := KernelFlow{}
+	state, err := flow.Compile(SourceSnapshot{ID: "src", Objective: "Change the dashboard.", AcceptanceIntent: []string{"Works."}, PredictedPaths: []string{predictedScopePlaceholder}}, model, activated, "contract-run-d", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, required := state.Contract.RequiredClaims[BrowserAcceptanceClaimID]; required || state.Contract.Obligations["browser-acceptance"].Material {
+		t.Fatalf("an unknown predicted path required browser acceptance: %+v", state.Contract)
+	}
+	listing := activated
+	rebuilt := func(contract domain.EngineeringWorkContract) func() (domain.EngineeringWorkContract, error) {
+		return func() (domain.EngineeringWorkContract, error) { return contract, nil }
+	}
+	if suffix := browserBindingSuffixFor(listing, dischargeBase, rebuilt(state.Contract)); suffix != "" {
+		t.Fatalf("the predicted contract already changed the assurance binding: %q", suffix)
+	}
+
+	candidate := domain.Subject{Repository: model.Subject.Repository, Revision: dischargeCommit}
+	observed, err := flow.ObserveCandidate(state, model, activated, candidate, []string{"frontend/src/app.tsx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observed.Reassessment.Material || observed.Contract.Revision == state.Contract.Revision {
+		t.Fatalf("observing the interface did not reassess the contract: %+v", observed.Reassessment)
+	}
+	if _, required := observed.Contract.RequiredClaims[BrowserAcceptanceClaimID]; !required || !observed.Contract.Obligations["browser-acceptance"].Material {
+		t.Fatalf("the reassessed contract lacks the material browser obligation: %+v", observed.Contract)
+	}
+	if suffix := browserBindingSuffixFor(listing, dischargeBase, rebuilt(observed.Contract)); suffix == "" {
+		t.Fatal("the observed requirement did not rebind the assurance, so earlier green evidence would stand")
+	}
+
+	for name, events := range map[string][]EngineeringEvent{
+		"no browser record":          journalFor(t, nil),
+		"a head that moved after it": headMovedAfter(t, journalFor(t, []VerificationCheck{goodBrowserCheck()})),
+		"a record for another base": journalFor(t, []VerificationCheck{func() VerificationCheck {
+			c := goodBrowserCheck()
+			c.BaseRevision = "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3"
+			return c
+		}()}),
+	} {
+		if decision := publicationDecision(t, observed.Contract, events); decision.Status == domain.AuthorityAuthorized || !slices.Contains(decision.Missing, BrowserAcceptanceClaimID) {
+			t.Errorf("%s did not refuse publication on the browser claim: %+v", name, decision)
+		}
+	}
+	if decision := publicationDecision(t, observed.Contract, journalFor(t, []VerificationCheck{goodBrowserCheck()})); !slices.Contains(decision.Satisfied, BrowserAcceptanceClaimID) {
+		t.Fatalf("current evidence did not satisfy the reassessed contract: %+v", decision)
+	}
+}
