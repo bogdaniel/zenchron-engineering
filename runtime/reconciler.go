@@ -1371,7 +1371,7 @@ func bindAssuranceGo(s *runState) (string, bool) {
 	if !s.projection.CandidateComplete {
 		return "", false
 	}
-	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree + "|" + s.contractRevision() + s.fileSizeBindingSuffix() + s.browserBindingSuffix(), true
+	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree + "|" + s.contractRevision() + s.fileSizeBindingSuffix() + s.browserBindingSuffix() + s.featureBindingSuffix(), true
 }
 
 // bindIntegrationHandoffAdmit is the deferred handoff-report step for a
@@ -1772,6 +1772,10 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		if !wanted {
 			if class, failing := state.currentHeadFailure(); failing && RouteFailure(class) == RouteProviderRemediation {
 				return r.settle(state, Failed, "no_progress")
+			}
+			// A judged failure that waits for an operator is not a goal reached.
+			if class, failing := state.currentHeadFailure(); failing && RouteFailure(class) == RouteHold {
+				return r.settle(state, waitingOr(live, Waiting), ReasonFeatureAcceptanceFailed)
 			}
 			return r.settle(state, waitingOr(live, Waiting), waitingReason(reason, ReasonGoalStateReached))
 		}
