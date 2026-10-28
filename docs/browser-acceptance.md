@@ -106,8 +106,8 @@ acceptance for **that** feature as well, and the candidate cannot supply it
 ## What the image must provide
 
 The pinned `assurance.image` must contain Node, Playwright and Chrome at the paths
-above, plus `tar` and `base64`. The operator builds the image; the runtime assumes
-nothing else. The workload checks them and exits 3 if any is missing, a prerequisite failure and never
+above, plus `tar` and `base64`. The operator builds the image (`docs/assurance-image.md`
+and `assurance-image/` pin and verify one); the runtime assumes nothing else. The workload checks them and exits 3 if any is missing, a prerequisite failure and never
 a verdict.
 
 **Node.** The scripts use the global `WebSocket`, so the image needs Node 22 or later.
