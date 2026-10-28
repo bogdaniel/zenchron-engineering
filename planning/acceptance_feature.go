@@ -45,3 +45,22 @@ func bindAcceptanceFeature(stages []domain.PlanStage, feature string) ([]domain.
 	stages[final].AcceptanceFeature = feature
 	return stages, nil
 }
+
+// withoutEchoedAcceptanceFeature copies a proposal, dropping a stage's
+// acceptance_feature when it merely echoes the operator's own declaration (a
+// revision such as a human substitution carries untouched stages back verbatim)
+// and refusing any other value: a proposal cannot invent or replace one. The
+// compiler then stamps the operator's declaration on the stage it belongs to.
+func withoutEchoedAcceptanceFeature(proposed []domain.PlanStage, declared string) ([]domain.PlanStage, error) {
+	out := append([]domain.PlanStage{}, proposed...)
+	for i, stage := range out {
+		switch {
+		case stage.AcceptanceFeature == "":
+		case stage.AcceptanceFeature == declared:
+			out[i].AcceptanceFeature = ""
+		default:
+			return nil, fmt.Errorf("stage %q declares acceptance feature %q: only the operator's planning request may, and a proposal cannot invent, remove or replace it", stage.ID, stage.AcceptanceFeature)
+		}
+	}
+	return out, nil
+}

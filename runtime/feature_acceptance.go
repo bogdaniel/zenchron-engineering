@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -76,6 +77,9 @@ func featureAcceptanceFeature(contract domain.EngineeringWorkContract, feature s
 
 func featureBaseRefusal(contract domain.EngineeringWorkContract, feature, base string) error {
 	if !featureAcceptanceRequired(contract) {
+		if feature != "" {
+			return fmt.Errorf("this run declares feature acceptance %q but its contract does not require %s; the policy rule on %s that activates the requirement is missing, and refusing to verify without it", feature, FeatureAcceptanceClaimID, FinalIntegrationFactKey)
+		}
 		return nil
 	}
 	if feature == "" {
@@ -200,4 +204,15 @@ func featureAcceptanceBase(contract domain.EngineeringWorkContract, base string)
 		return ""
 	}
 	return base
+}
+
+// featureRecordPassed reports whether a verifier result carries a passing
+// feature_acceptance record for the declared feature.
+func featureRecordPassed(checks []VerificationCheck, feature string) bool {
+	for _, check := range checks {
+		if check.Kind == CheckKindFeatureAcceptance && check.Feature == feature && check.Outcome == CheckOutcomePassed {
+			return true
+		}
+	}
+	return false
 }

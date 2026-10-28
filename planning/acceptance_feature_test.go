@@ -135,3 +135,35 @@ func TestValidationRefusesADeclarationOnTheWrongStage(t *testing.T) {
 		}
 	}
 }
+
+// A revision that carries untouched stages back verbatim (a human substitution)
+// keeps the operator's declaration; a proposal naming any other feature is
+// still refused.
+func TestARevisionEchoingTheOperatorsDeclarationIsStrippedAndRestamped(t *testing.T) {
+	input := planInput(t, "trivial.engineering-fact.json", nil)
+	input.Proposed = integrationStages()
+	input.AcceptanceFeature = "delivery-report"
+	first, err := planning.Compile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Proposed = first.Stages // the declaration travels back on the final integration
+	again, err := planning.Compile(input)
+	if err != nil {
+		t.Fatalf("an echoed declaration was refused: %v", err)
+	}
+	if stage, _ := again.Stage("compose"); stage.AcceptanceFeature != "delivery-report" {
+		t.Errorf("the echoed declaration was lost: %q", stage.AcceptanceFeature)
+	}
+	input.Proposed = append([]domain.PlanStage{}, first.Stages...)
+	input.Proposed[2].AcceptanceFeature = "another-feature"
+	if _, err := planning.Compile(input); err == nil {
+		t.Error("a proposal replacing the operator's declaration was accepted")
+	}
+	// Echoing a value when the operator declared nothing is an invention.
+	input.AcceptanceFeature = ""
+	input.Proposed = first.Stages
+	if _, err := planning.Compile(input); err == nil {
+		t.Error("a proposal carrying a declaration the operator never made was accepted")
+	}
+}

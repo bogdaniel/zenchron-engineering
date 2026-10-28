@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -149,6 +150,7 @@ func TestAContractThatRequiresFeatureAcceptanceRefusesARunThatCannotProveItsDecl
 		"required but nothing declared": {required, "", dischargeBase, true},
 		"required but no base":          {required, testFeature, "", true},
 		"not required":                  {plain, "", "", false},
+		"declared but not required":     {plain, testFeature, dischargeBase, true},
 	} {
 		if err := featureBaseRefusal(tc.contract, tc.feature, tc.base); (err != nil) != tc.refused {
 			t.Errorf("%s: refusal = %v", name, err)
@@ -342,5 +344,31 @@ func TestPlanApprovalRefusesAnIntegrationTheAttributionCannotName(t *testing.T) 
 	undeclared.Stages[len(undeclared.Stages)-1].AcceptanceFeature = ""
 	if err := validateAcceptanceFeaturePlan(undeclared); err != nil {
 		t.Errorf("an undeclared plan was held to the attribution bound: %v", err)
+	}
+}
+
+// The confirmation pass is the existing flake law, applied to a feature verdict
+// like any other: a failure that does not repeat is flaky_verification and
+// stops, and one that repeats is the judged hold.
+func TestAFeatureFailureIsConfirmedByOneRerunBeforeItIsAHold(t *testing.T) {
+	failure := AssuranceResult{ProviderID: "v", VerifierDefinition: "v1", FailureClass: FailureFeatureAcceptance}
+	pass := AssuranceResult{ProviderID: "v", VerifierDefinition: "v1", Passed: true}
+	for name, tc := range map[string]struct {
+		results []AssuranceResult
+		want    FailureClass
+		runs    int
+	}{
+		"repeats":         {[]AssuranceResult{failure, failure}, FailureFeatureAcceptance, 2},
+		"does not repeat": {[]AssuranceResult{failure, pass}, FailureFlaky, 2},
+		"passes":          {[]AssuranceResult{pass}, "", 1},
+	} {
+		provider := &FakeAssuranceProvider{Results: tc.results}
+		_, class, err := AssuranceRerun(context.Background(), provider, AssuranceRequest{})
+		if err != nil || class != tc.want || len(provider.Requests) != tc.runs {
+			t.Errorf("%s: class %q after %d verifications (%v), want %q after %d", name, class, len(provider.Requests), err, tc.want, tc.runs)
+		}
+	}
+	if RouteFailure(FailureFlaky) != RouteStop {
+		t.Error("a flaky feature verdict no longer stops the run")
 	}
 }

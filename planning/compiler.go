@@ -204,14 +204,13 @@ func (input CompileInput) validate() error {
 // an architect or a security reviewer that no obligation asked for would be the
 // rigid workflow #64 exists to avoid.
 func (input CompileInput) baseStages() ([]domain.PlanStage, error) {
-	for _, stage := range input.Proposed {
-		if stage.AcceptanceFeature != "" {
-			return nil, fmt.Errorf("stage %q declares an acceptance feature: only the operator's planning request may, and a proposal cannot invent, remove or replace it", stage.ID)
-		}
+	proposed, err := withoutEchoedAcceptanceFeature(input.Proposed, input.AcceptanceFeature)
+	if err != nil {
+		return nil, err
 	}
 	switch {
-	case len(input.Proposed) > 0:
-		return append([]domain.PlanStage{}, input.Proposed...), nil
+	case len(proposed) > 0:
+		return proposed, nil
 	case input.Template != nil:
 		return templateStages(*input.Template, input.Facts), nil
 	}

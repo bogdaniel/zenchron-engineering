@@ -66,9 +66,20 @@ func featureAttributionBody(origin orchestration.BatchOrigin, commit, tree strin
 
 func reconcileFeatureAttribution(store *SQLiteOperationStore, batches []orchestration.Batch, now time.Time) []string {
 	var problems []string
+	latest := map[string]int{}
+	for _, batch := range batches {
+		if origin := batch.Origin; origin != nil && origin.AcceptanceFeature != "" {
+			key := origin.GraphID + "\x00" + origin.UnitID
+			latest[key] = max(latest[key], origin.Epoch)
+		}
+	}
 	for _, batch := range batches {
 		origin := batch.Origin
 		if origin == nil || origin.ExecutionKind != orchestration.ExecutionKindIntegrationCompose || origin.AcceptanceFeature == "" || len(batch.Items) != 1 {
+			continue
+		}
+		// A superseded epoch is history: only the unit's newest execution is asked about.
+		if origin.Epoch < latest[origin.GraphID+"\x00"+origin.UnitID] {
 			continue
 		}
 		if err := reconcileBatchAttribution(store, batch, *origin, now); err != nil {
@@ -150,7 +161,10 @@ func admitFeatureAttributionRequest(store *SQLiteOperationStore, batch orchestra
 		DocumentSHA256:      epochAuthorizationDocumentDigest(requestID, body),
 		AdmittedAt:          now,
 	}
-	return store.AdmitMessages([]orchestration.EngineeringMessage{message})
+	// The bound is enforced in the same transaction as the insert, so a
+	// concurrent delivery into this scope cannot overshoot it.
+	_, err := store.AdmitDeliveredFinding(message)
+	return err
 }
 
 func admitAttributedFinding(store *SQLiteOperationStore, batch orchestration.Batch, origin orchestration.BatchOrigin,
@@ -198,7 +212,8 @@ func admitAttributedFinding(store *SQLiteOperationStore, batch orchestration.Bat
 		DocumentSHA256: epochAuthorizationDocumentDigest(id, request.ID),
 		AdmittedAt:     now,
 	}
-	return store.AdmitMessages([]orchestration.EngineeringMessage{message})
+	_, err = store.AdmitDeliveredFinding(message)
+	return err
 }
 
 // priorFailedFeatureVerdict finds an earlier execution of this same unit that

@@ -38,6 +38,12 @@ rule the operator adds (below) is what makes a contract require the claim.
    against the plan the graph pins; a disagreement stops the run
    (`origin.acceptance_feature`).
 
+A declaration with nothing enforcing it fails closed: if a run declares a feature
+but its contract does not require `claim-feature-acceptance` (the policy rule below
+was never activated), or a verifier passes the candidate without a passing
+`feature_acceptance` record, verification is refused and the integrator is never
+released on a generic pass.
+
 ## The fact, the claim and the rule
 
 From a verified origin that declares a feature - never from candidate paths - the
@@ -81,6 +87,10 @@ feature manifest, or a base the run cannot name, refuses verification.
 A feature test that ran and failed is `FailureFeatureAcceptance`, routed
 `RouteHold`. It is a recorded verdict:
 
+- The failure is confirmed first, by the existing flake law: one immediate rerun of
+  the identical tree inside the same attempt (so a judged failure costs two
+  verifications). If the rerun disagrees the result is `flaky_verification`, which
+  stops the run as it does for any assurance; if it agrees, it is the hold below.
 - The assurance operation succeeds as a verdict and its attempt is **not** given
   back (`RestoreAttempt` is never called), and the verification stays charged to
   the assurance meter. A wait route would refund both.
@@ -120,6 +130,10 @@ choose one.
 
 ## Limits
 
+- A declaration cannot be removed by a re-proposal (a revision that omits it
+  inherits it); start a new plan to drop it. A revision that carries the
+  operator's own value back on a stage - a human substitution does - is accepted
+  and re-stamped; any other value is refused.
 - Feature tests live in the same Go package and base test surface as the ordinary
   browser tests (`cmd/zenchron-engineering`, `scripts/`); the manifest is the only
   new file.

@@ -92,6 +92,9 @@ func finishJourneyWorker(request ExecutionRequest) (ExecutionResult, error) {
 type featureAssurance struct {
 	mu       sync.Mutex
 	requests []AssuranceRequest
+	// ignoreFeature makes the verifier a provider that never heard of the
+	// feature request: it passes the Go suite and returns no feature record.
+	ignoreFeature bool
 }
 
 func (a *featureAssurance) ProducedEvidenceClasses() []domain.EvidenceClass {
@@ -115,7 +118,7 @@ func (a *featureAssurance) Assure(_ context.Context, request AssuranceRequest) (
 	a.requests = append(a.requests, request)
 	a.mu.Unlock()
 	result := AssuranceResult{ProviderID: "feature-journey-verifier", VerifierDefinition: "verifier-v1", Passed: true}
-	if request.FeatureAcceptance == "" {
+	if request.FeatureAcceptance == "" || a.ignoreFeature {
 		return result, nil
 	}
 	_, statErr := os.Stat(filepath.Join(request.CheckoutDir, journeyFixFile))
@@ -146,23 +149,24 @@ type featureJourney struct {
 }
 
 func newFeatureJourney(t *testing.T, worker *featureJourneyWorker) *featureJourney {
+	return newFeatureJourneyWith(t, worker, featureJourneyOptions{})
+}
+
+type featureJourneyOptions struct{ ignoreFeature, withoutRule bool }
+
+func newFeatureJourneyWith(t *testing.T, worker *featureJourneyWorker, options featureJourneyOptions) *featureJourney {
 	fleet := newFleetFixture(t, 4)
 	fleet.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
 	fleet.deps.Provider = worker
-	assurance := &featureAssurance{}
+	assurance := &featureAssurance{ignoreFeature: options.ignoreFeature}
 	fleet.deps.Assurance = assurance
 	// The operator-activated rule: the runtime-derived fact requires the claim.
 	rules := map[string]domain.PolicyRule{}
 	for id, rule := range fleet.deps.Policy.Rules {
 		rules[id] = rule
 	}
-	rules["FEATURE-FINAL-INTEGRATION-001"] = domain.PolicyRule{
-		When: domain.PolicyCondition{Fact: FinalIntegrationFactKey, Equals: domain.FactTrue},
-		Effect: domain.PolicyEffect{
-			RequiredClaims: &map[string]domain.RequiredClaim{FeatureAcceptanceClaimID: {EvidenceClass: AssuranceEvidenceClass, IndependentFromChangeProducer: true}},
-			Obligations: &map[string]domain.PolicyRequirement{"feature-acceptance": {
-				Statement: "The declared feature must pass its acceptance tests on the exact integrated candidate.", RequiredClaims: &[]string{FeatureAcceptanceClaimID}, Material: true}},
-		},
+	if !options.withoutRule {
+		rules["FEATURE-FINAL-INTEGRATION-001"] = featureRule()
 	}
 	fleet.deps.Policy.Rules = rules
 	fleet.runtime = fleet.newRuntime(fleet.deps)
@@ -423,7 +427,7 @@ func TestAFailedFeatureHoldsIsAttributedByTheOperatorAndReintegratesAfterGoverne
 	if resting := mustRun(t, j, heldRunID); resting.Disposition != Waiting || resting.Reason != ReasonFeatureAcceptanceFailed {
 		t.Fatalf("the answered integrator rests as %s/%s, want waiting/%s", resting.Disposition, resting.Reason, ReasonFeatureAcceptanceFailed)
 	}
-	if settled := (j.fleet.runtime).runSettled(mustRun(t, j, heldRunID)); !settled {
+	if settled := (j.fleet.runtime).epochRunSettled(mustRun(t, j, heldRunID)); !settled {
 		t.Fatal("the authenticated feature hold does not count as settled for a new epoch")
 	}
 
@@ -579,5 +583,45 @@ func TestAnIdenticalFailedIntegrationIsHeldAgainWithoutVerifyingItAgain(t *testi
 	}
 	if again, asked := j.attributionRequest(); !asked || again.ID == request.ID {
 		t.Fatalf("the new execution did not ask its own attribution: %+v asked=%t", again.ID, asked)
+	}
+}
+
+// featureRule is the operator-activated policy rule: the runtime-derived fact
+// requires the claim, and the obligation is material.
+func featureRule() domain.PolicyRule {
+	return domain.PolicyRule{
+		When: domain.PolicyCondition{Fact: FinalIntegrationFactKey, Equals: domain.FactTrue},
+		Effect: domain.PolicyEffect{
+			RequiredClaims: &map[string]domain.RequiredClaim{FeatureAcceptanceClaimID: {EvidenceClass: AssuranceEvidenceClass, IndependentFromChangeProducer: true}},
+			Obligations: &map[string]domain.PolicyRequirement{"feature-acceptance": {
+				Statement: "The declared feature must pass its acceptance tests on the exact integrated candidate.", RequiredClaims: &[]string{FeatureAcceptanceClaimID}, Material: true}},
+		},
+	}
+}
+
+// A declaration with nothing to enforce it, and a verifier that ignores it, both
+// fail closed: the integrator never reaches a generic pass and never hands off.
+func TestADeclaredFeatureNothingEnforcesNeverReleasesTheIntegrator(t *testing.T) {
+	for name, options := range map[string]featureJourneyOptions{
+		"the policy rule was never activated": {withoutRule: true},
+		"the verifier ignores the feature":    {ignoreFeature: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			j := newFeatureJourneyWith(t, &featureJourneyWorker{}, options)
+			for range 40 {
+				j.tick()
+			}
+			unit := j.fleet.graph(j.graphID).unit(t, "integrate")
+			if unit.Output != nil {
+				t.Fatalf("the integrator handed off with no feature acceptance: %+v", unit.Output)
+			}
+			if unit.RunID == "" {
+				t.Fatal("the integrator never started, so nothing was tested")
+			}
+			state := j.fleet.state(unit.RunID)
+			if a := state.projection.Assurance; a != nil && a.Passed {
+				t.Fatalf("a passing assurance was recorded for a candidate that never proved its feature: %+v", a)
+			}
+		})
 	}
 }
