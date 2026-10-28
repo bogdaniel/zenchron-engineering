@@ -124,6 +124,7 @@
         "runtime/driver_leases.go",
         "runtime/capacity*.go",
         "runtime/reconciler.go",
+        "runtime/failure_routing.go",
         "runtime/execution_continuation_budget.go",
         "runtime/external_wait_reasons.go",
         "runtime/run_policy.go",
