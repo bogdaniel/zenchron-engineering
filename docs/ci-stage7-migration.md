@@ -31,16 +31,27 @@ the monotonic floor and HOLD; controller adoption; branch integrity.
 
 ## Why the order matters
 
-A required check that no workflow produces can never be satisfied, so no pull
-request, including the one that fixes it, could merge (no bypass actor exists).
-Two independent changes are involved, so there are four states:
+Two independent changes are involved: the checks the ruleset requires and the
+checks the pull-request workflow produces. The danger is not a wedge but a silent
+hole. GitHub documents that a job skipped by its `if:` reports as successful, so it
+does not block a pull request even when required. Observed on the workflow pull
+request #704: `go` shows `skipped` and the pull request reads `CLEAN`, against a
+base whose ruleset still requires `go`. A ruleset that requires `go` is therefore
+*syntactically satisfied* by a push-only `go` job, with no full suite run. A
+required check proves verification only when it **executed**.
 
-| Ruleset requires | PR workflow produces | Mergeable? |
-|------------------|----------------------|------------|
-| `go` (before) | `go`, `evidence`, `evidence-race` (current) | yes - today |
-| `evidence`, `evidence-race` (after) | `go`, `evidence`, `evidence-race` (current) | yes - `go` is advisory |
-| `evidence`, `evidence-race` (after) | `evidence`, `evidence-race` (final) | yes - target |
-| `go` (before) | `evidence`, `evidence-race` (final) | **no - deadlock** |
+| Ruleset requires | PR workflow `go` job | Mergeable? | Full suite run before merge? |
+|------------------|----------------------|------------|------------------------------|
+| `go` (before) | runs (current) | yes - today | yes |
+| `evidence`, `evidence-race` (after) | runs, advisory (current) | yes | no; `evidence` and `evidence-race` gate instead |
+| `evidence`, `evidence-race` (after) | skipped (final) | yes - target | no; `evidence` and `evidence-race` gate instead |
+| `go` (before) | skipped (final) | **yes, and unsafe** | **no, and nothing replaces it** |
+
+The last row is the forbidden state. `go` reports `skipped`, which satisfies the
+requirement, while `evidence` and `evidence-race` are not required, so a pull
+request can merge with no executed verification at all, even with a red
+`evidence`. The old ruleset must never be read as preserving pre-merge full-suite
+verification once `go` is push-only.
 
 So the sequence only ever passes through the first three rows:
 
@@ -49,10 +60,11 @@ activate:   [before, current] -> OPERATOR ruleset -> [after, current] -> merge w
 roll back:  [after, final]    -> merge revert PR   -> [after, current] -> OPERATOR ruleset  -> [before, current]
 ```
 
-The workflow change is therefore a second pull request that must not merge while
-the ruleset still requires `go`: until the ruleset changes, GitHub shows its `go`
-check as expected and never reported, which is the correct signal. Its own
-`evidence` and `evidence-race` jobs still run and must be green.
+The workflow pull request must not merge while the live ruleset still requires
+`go`. GitHub will not stop it: its `go` check shows `skipped` and the pull request
+reads `CLEAN`, which is exactly the unsafe row. Re-read the live ruleset (Activation
+step 1) before merging it. Its own `evidence` and `evidence-race` jobs still run and
+must be green.
 
 ## Preconditions (re-observe; do not assume)
 
@@ -86,8 +98,9 @@ check as expected and never reported, which is the correct signal. Its own
    `evidence-race`, strict, app 15368; `bypass_actors` empty; `controller status`
    still reports a trust root (adoption does not read the check list).
 2. Merge the workflow pull request (`go` becomes push-only). It needs green
-   `evidence` and `evidence-race` and the normal review; it is `BLOCKED` before
-   step 1 and mergeable after it.
+   `evidence` and `evidence-race` and the normal review. GitHub reports it
+   mergeable before step 1 as well, because the skipped `go` counts as passed;
+   that is the unsafe state, so confirm step 1's re-read first.
 3. Observe the target configuration on the next ordinary pull request:
    - it merges with `evidence` and `evidence-race` only, and no `go` run starts;
    - the push to `main` starts the `go` job; until it succeeds `trusted_main`
@@ -111,7 +124,8 @@ Reverse order, so a valid merge path exists throughout:
   gh api -X PUT repos/bogdaniel/zenchron-engineering/rulesets/22043609 \
     --input ci/rulesets/trusted-main-adoption.pre-stage7.json
   ```
-  Only after R1 is on `main`; otherwise the deadlock row applies.
+  Only after R1 is on `main`; otherwise the unsafe row applies (`go` required
+  but skipped on every pull request).
 
 Rolling back never touches exact-revision adoption: T2 keeps running on every push
 in every state, and `VerifyTrustRoot` accepts both rulesets.

@@ -21,11 +21,12 @@ Observed 2026-10-28, `main` = `a1ea63ec5a31845735da09a953c48d9a82da45b2`
 | At least two weeks of T0/T1 shadow | **Met**: 21 days (#520 merged 2026-10-07T22:29:53Z; observed to 2026-10-28) |
 | At least 30 merged PRs | **Met**: 98 merged after #520 |
 | Representative high-risk and multi-domain changes | **Met**: see Coverage |
-| Every T1-PASS / `go`-FAIL case explained | **Met, with one stated limit**: 10 observations, all explained as flaky or runner timeouts; none is a selector miss. The limit: GitHub holds no second attempt on the same head for any of them, so "flaky" rests on the evidence below, not on a same-commit rerun |
+| Every T1-PASS / `go`-FAIL case explained | **Met, with stated limits**: 10 observations, none a selector miss: 1 cancellation, 2 package-alarm timeouts, 3 failures of tests that passed in the T1 whole-`runtime` run on the same head, and 4 suspected flakes. No same-head rerun of `go` exists for any of them (see the classification) |
 | Flaky failures separated from selector misses | **Done**: 2 of 98 merge commits had a red T2, both flaky/infra |
 | Controller runs the Stage 5 policy | **Met**: see Controller |
 
-No promotion requirement is unproven. The residual risk is the flaky runtime
+Every gate is met, with the limits stated above (no same-head rerun exists; four
+failures are suspected, not proven, flakes). The residual risk is the flaky runtime
 tests themselves (Findings), which affect T2 whether or not Stage 7 is applied.
 
 ## Coverage
@@ -63,26 +64,32 @@ the merge commit in the CSV.
 
 ### The 10 T1-PASS / `go`-FAIL observations
 
-| Run | Head | `go` failure | T1 evidence on that head | Explanation |
-|-----|------|--------------|-----------|-------------|
-| [40668929651](https://github.com/bogdaniel/zenchron-engineering/actions/runs/40668929651) | `a5a609fe` | `TestSameGenerationWithoutTheLeaseHasNoAuthority` | whole `runtime` ran and passed (2208 tests under T1) | same commit, same test, different outcome: flaky |
-| [39981229955](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39981229955) | `dca145e9` | `TestALongToolIsSuspendedThroughoutAndClearsOnClose` | narrow: 350 tests | PR changed adopted-build/controller-status code; the test is provider suspension timing; it fails on unrelated PRs below |
-| [39760145989](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39760145989) | `ca2063c2` | `runtime` package alarm | narrow: 6 guard tests | 30-minute package alarm on a hosted runner (#656 raised it to 45m) |
-| [39157650978](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39157650978) | `4646e55c` | `TestNestedVerificationNativeShimAndCandidateRunShareCapacity` | 6 guard tests only | the PR changed only PNG files under `docs/acceptance/`; it cannot cause a runtime failure |
-| [39075179632](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39075179632) | `ff48c009` | same nested-verification test | narrow: 353 tests (orchestration, workgraph, remediation, planning); the test belongs to `verification`, which the PR did not touch | the same test failed on the docs-only PR above, so it fails with no code cause |
-| [38593937196](https://github.com/bogdaniel/zenchron-engineering/actions/runs/38593937196) | `29c690ef` | `runtime` package alarm (30m) | whole `runtime` passed (1528 tests) | runner timeout |
-| [38309725113](https://github.com/bogdaniel/zenchron-engineering/actions/runs/38309725113) | `34251229` | `TestTheSilentProviderFixtureReallyHasALiveDescendant` (0.20 s) | whole `runtime` passed (1280 tests) | flaky |
-| [37848253929](https://github.com/bogdaniel/zenchron-engineering/actions/runs/37848253929) | `aaaaab6f` | `TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup` | whole `runtime` passed (1452 tests) | flaky; the same test failed T2 on #686 |
-| [37748697530](https://github.com/bogdaniel/zenchron-engineering/actions/runs/37748697530) | `b3935128` | `TestALongToolIsSuspendedThroughoutAndClearsOnClose` | narrow: 89 tests | PR changed trust/adoption code; unrelated provider timing test |
-| [39157842462](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39157842462) | `57485949` | `go` **cancelled** | n/a | superseded by a newer push; not a failure |
+No case has a second attempt of the `go` job on the same head; none was retried.
+"Directly evidenced" below means the failing test **passed in a different job on
+the same commit** (the T1 whole-`runtime` run), not that `go` was rerun.
 
-Four of the failures ran the **whole** `runtime` package under T1 on the same
-commit and passed, so a missing selection cannot explain them. The narrow ones
-failed in tests whose domain the PR did not touch, and the timing tests
-(`TestALongTool…`, `TestNestedVerification…`) recur across unrelated PRs and
-both red T2 runs. #689 (`6556a03`, `2f87b41`) hardened two of those timing
-assumptions after the second red T2. No selector or registry correction was
-needed.
+| Run | Head | `go` failure | T1 evidence on that head | Class | Explanation |
+|-----|------|--------------|-----------|-------|-------------|
+| [40668929651](https://github.com/bogdaniel/zenchron-engineering/actions/runs/40668929651) | `a5a609fe` | `TestSameGenerationWithoutTheLeaseHasNoAuthority` | whole `runtime` ran and passed (2208 tests under T1) | directly evidenced flaky | that test passed in the whole-`runtime` T1 run on the same commit |
+| [39981229955](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39981229955) | `dca145e9` | `TestALongToolIsSuspendedThroughoutAndClearsOnClose` | narrow: 350 tests | suspected flaky | no same-head pass of the failing test is evidenced; the PR changed adopted-build/controller-status code, the test is provider suspension timing, and it fails on unrelated PRs below |
+| [39760145989](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39760145989) | `ca2063c2` | `runtime` package alarm | narrow: 6 guard tests | timeout | 30-minute package alarm on a hosted runner (#656 raised it to 45m) |
+| [39157650978](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39157650978) | `4646e55c` | `TestNestedVerificationNativeShimAndCandidateRunShareCapacity` | 6 guard tests only | suspected flaky | no same-head pass of the failing test is evidenced; the PR changed only PNG files under `docs/acceptance/`, so no code path can explain it |
+| [39075179632](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39075179632) | `ff48c009` | same nested-verification test | narrow: 353 tests (orchestration, workgraph, remediation, planning); the test belongs to `verification`, which the PR did not touch | suspected flaky | no same-head pass of the failing test is evidenced; the test belongs to `verification`, which the PR did not touch, and it failed on the docs-only PR above |
+| [38593937196](https://github.com/bogdaniel/zenchron-engineering/actions/runs/38593937196) | `29c690ef` | `runtime` package alarm (30m) | whole `runtime` passed (1528 tests) | timeout | 30-minute package alarm; the whole `runtime` passed under T1 on the same commit |
+| [38309725113](https://github.com/bogdaniel/zenchron-engineering/actions/runs/38309725113) | `34251229` | `TestTheSilentProviderFixtureReallyHasALiveDescendant` (0.20 s) | whole `runtime` passed (1280 tests) | directly evidenced flaky | that test passed in the whole-`runtime` T1 run on the same commit |
+| [37848253929](https://github.com/bogdaniel/zenchron-engineering/actions/runs/37848253929) | `aaaaab6f` | `TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup` | whole `runtime` passed (1452 tests) | directly evidenced flaky | that test passed in the whole-`runtime` T1 run on the same commit; the same test failed T2 on #686 |
+| [37748697530](https://github.com/bogdaniel/zenchron-engineering/actions/runs/37748697530) | `b3935128` | `TestALongToolIsSuspendedThroughoutAndClearsOnClose` | narrow: 89 tests | suspected flaky | no same-head pass of the failing test is evidenced; the PR changed trust/adoption code and the test is unrelated provider timing |
+| [39157842462](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39157842462) | `57485949` | `go` **cancelled** | n/a | cancelled | superseded by a newer push; not a failure |
+
+Counts: 1 cancelled, 2 timeouts, 3 directly evidenced flaky, 4 suspected flaky.
+In four rows the whole `runtime` package passed under T1 on the same commit (three
+failing tests, one timeout), so a missing selection cannot explain them. The four
+suspected rows are an inference, not a proof: the failing tests recur across
+unrelated PRs and both red T2 runs, and one PR changed only images, but nothing
+shows those tests passing on those exact heads. The recurring timing tests
+(`TestALongTool…`, `TestNestedVerification…`) are the common cause; #689
+(`6556a03`, `2f87b41`) hardened two of those timing assumptions after the second red
+T2. No selector or registry correction was needed.
 
 ### The two red post-merge T2 runs
 
