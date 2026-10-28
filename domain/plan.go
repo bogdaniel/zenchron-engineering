@@ -24,8 +24,6 @@ package domain
 // anything, or knows a provider's name: the compiler, the resolver and the plan
 // reconciler are separate, and the kernel stays free of both.
 
-import "regexp"
-
 // EngineeringRole is a semantic responsibility in a plan. It is not a provider,
 // an executable, or a permanent AI persona: a plan may omit a role, combine two
 // of them into one stage, or instantiate one role several times.
@@ -695,23 +693,6 @@ type EngineeringPlan struct {
 }
 
 // Stage returns one stage by id.
-// DeclaredAcceptanceFeature is the operator-declared feature acceptance this
-// plan carries, or "" when it carries none.
-func (p EngineeringPlan) DeclaredAcceptanceFeature() string {
-	for _, stage := range p.Stages {
-		if stage.AcceptanceFeature != "" {
-			return stage.AcceptanceFeature
-		}
-	}
-	return ""
-}
-
-var acceptanceFeaturePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
-
-// ValidAcceptanceFeature reports whether id is usable as a feature name and as
-// the file name browser-acceptance/<id>.txt.
-func ValidAcceptanceFeature(id string) bool { return acceptanceFeaturePattern.MatchString(id) }
-
 func (p EngineeringPlan) Stage(id string) (PlanStage, bool) {
 	for _, stage := range p.Stages {
 		if stage.ID == id {
