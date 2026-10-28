@@ -149,6 +149,10 @@ choose one.
 - Feature tests live in the same Go package and base test surface as the ordinary
   browser tests (`cmd/zenchron-engineering`, `scripts/`); the manifest is the only
   new file.
+- A carried-forward verdict copies the original judged record and is reusable only
+  through it, so reuse chains across epochs yet is tied to the checker version that
+  judged it; a carry-forward with no record (written before this rule) establishes
+  nothing and the tree is verified afresh.
 - A feature failure recorded for a tree, base and checker is final for that
   combination: a later execution that recomposes to the same tree records the prior
   verdict instead of verifying again. A changed base (new tests) or checker revision
