@@ -177,3 +177,33 @@ func TestABrowserRequirementThatAppearsChangesTheAssuranceBinding(t *testing.T) 
 		}
 	}
 }
+
+// The evidence names the environment of the record that PROVED the browser claim,
+// not of whichever passing-looking record is listed first.
+func TestBrowserEvidenceSourcesItsEnvironmentFromTheProvingRecord(t *testing.T) {
+	mismatched := goodBrowserCheck()
+	mismatched.BaseRevision, mismatched.Environment = "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3", "environment-of-the-mismatched-record"
+	valid := goodBrowserCheck()
+	valid.Environment = "environment-of-the-proving-record"
+	observation := func(checks ...VerificationCheck) *AssuranceObservation {
+		return &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{Passed: true, Commit: dischargeCommit, Tree: dischargeTree, Checks: checks}}
+	}
+	for name, tc := range map[string]struct {
+		checks  []VerificationCheck
+		proved  bool
+		wantEnv string
+	}{
+		"a mismatched record first, a valid one later": {[]VerificationCheck{mismatched, valid}, true, "environment-of-the-proving-record"},
+		"a mismatched record alone":                    {[]VerificationCheck{mismatched}, false, ""},
+		"an ordinary single record":                    {[]VerificationCheck{valid}, true, "environment-of-the-proving-record"},
+		"the valid record first":                       {[]VerificationCheck{valid, mismatched}, true, "environment-of-the-proving-record"},
+	} {
+		item, proved := browserEvidenceItem(domain.EvidenceItem{}, observation(tc.checks...), dischargeCommit, dischargeBase)
+		if proved != tc.proved || item.Environment.Identifier != tc.wantEnv {
+			t.Errorf("%s: proved=%t environment=%q, want proved=%t environment=%q", name, proved, item.Environment.Identifier, tc.proved, tc.wantEnv)
+		}
+		if got := browserCheckProves(observation(tc.checks...), dischargeCommit, dischargeBase); got != tc.proved {
+			t.Errorf("%s: the boolean wrapper says %t, want %t", name, got, tc.proved)
+		}
+	}
+}

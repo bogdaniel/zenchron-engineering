@@ -168,8 +168,16 @@ func (v BaselineGoVerifier) withBrowserAcceptance(ctx context.Context, request A
 // one written before the requirement existed, and every one a generic suite
 // produced - proves nothing about a browser.
 func browserCheckProves(observation *AssuranceObservation, commit, base string) bool {
+	_, proved := provingBrowserCheck(observation, commit, base)
+	return proved
+}
+
+// provingBrowserCheck is browserCheckProves returning the exact record that
+// proved it, so anything derived from the proof - the evidence's environment -
+// comes from that record and never from another one that is merely listed first.
+func provingBrowserCheck(observation *AssuranceObservation, commit, base string) (VerificationCheck, bool) {
 	if observation == nil || commit == "" || base == "" {
-		return false
+		return VerificationCheck{}, false
 	}
 	for _, check := range observation.Checks {
 		results := check.Results
@@ -179,28 +187,24 @@ func browserCheckProves(observation *AssuranceObservation, commit, base string) 
 			check.Environment != "" && check.Artifact != "" &&
 			check.Commit == commit && check.Commit == observation.Commit && check.Tree != "" && check.Tree == observation.Tree &&
 			results != nil && results.Total > 0 && results.Passed == results.Total && results.Failed == 0 && results.Skipped == 0 {
-			return true
+			return check, true
 		}
 	}
-	return false
+	return VerificationCheck{}, false
 }
 
 // browserEvidenceItem turns the generic passing-assurance item for the browser
 // claim into the evidence that actually proves it, or reports that none can be
 // produced. The producer and environment name the browser check that ran, not
-// the Go suite that ran before it.
+// the Go suite that ran before it, and the environment is the proving record's.
 func browserEvidenceItem(item domain.EvidenceItem, observation *AssuranceObservation, commit, base string) (domain.EvidenceItem, bool) {
-	if !browserCheckProves(observation, commit, base) {
+	check, proved := provingBrowserCheck(observation, commit, base)
+	if !proved {
 		return domain.EvidenceItem{}, false
 	}
-	for _, check := range observation.Checks {
-		if check.Kind == CheckKindBrowserAcceptance && check.Outcome == CheckOutcomePassed {
-			item.Producer = domain.EvidenceProducer{ID: browserCheckerID, Type: domain.ProducerDeterministicTool}
-			item.Environment = domain.EvidenceEnvironment{Type: "assurance_provider", Identifier: check.Environment}
-			return item, true
-		}
-	}
-	return domain.EvidenceItem{}, false
+	item.Producer = domain.EvidenceProducer{ID: browserCheckerID, Type: domain.ProducerDeterministicTool}
+	item.Environment = domain.EvidenceEnvironment{Type: "assurance_provider", Identifier: check.Environment}
+	return item, true
 }
 
 // browserBindingSuffix extends the assurance operation binding when, and only
