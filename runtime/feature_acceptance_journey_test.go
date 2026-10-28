@@ -37,6 +37,9 @@ const (
 type featureJourneyWorker struct {
 	mu       sync.Mutex
 	firstRun map[string]string
+	// noFix makes a producer's remediation epoch change nothing, so the
+	// integrator recomposes to the identical tree.
+	noFix bool
 }
 
 func (w *featureJourneyWorker) WritesTypedResults() bool { return true }
@@ -60,7 +63,7 @@ func (w *featureJourneyWorker) Execute(_ context.Context, request ExecutionReque
 		original := w.firstRun[marker] == request.RunID
 		w.mu.Unlock()
 		files := map[string]string{marker + "-part.go": "package candidate\nconst Part = \"" + marker + "\"\n"}
-		if !original {
+		if !original && !w.noFix {
 			files[journeyFixFile] = "package candidate\n// corrected by " + request.RunID + "\n"
 		}
 		for name, content := range files {
@@ -142,10 +145,10 @@ type featureJourney struct {
 	ctx        context.Context
 }
 
-func newFeatureJourney(t *testing.T) *featureJourney {
+func newFeatureJourney(t *testing.T, worker *featureJourneyWorker) *featureJourney {
 	fleet := newFleetFixture(t, 4)
 	fleet.deps.Agent = ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI, TrustMode: TrustOperatorTrusted}
-	fleet.deps.Provider = &featureJourneyWorker{}
+	fleet.deps.Provider = worker
 	assurance := &featureAssurance{}
 	fleet.deps.Assurance = assurance
 	// The operator-activated rule: the runtime-derived fact requires the claim.
@@ -256,7 +259,7 @@ func (j *featureJourney) restart() {
 }
 
 func TestAFailedFeatureHoldsIsAttributedByTheOperatorAndReintegratesAfterGovernedRemediation(t *testing.T) {
-	j := newFeatureJourney(t)
+	j := newFeatureJourney(t, &featureJourneyWorker{})
 
 	// 1. The integrator composes cleanly and the declared feature judges the
 	// exact integrated tree and fails it.
@@ -510,4 +513,71 @@ func frontendFinding(t *testing.T, j *featureJourney) (orchestration.Engineering
 		}
 	}
 	return orchestration.EngineeringMessage{}, false, false
+}
+
+// A producer's remediation that changes nothing recomposes to the identical
+// failed tree. The journal already holds that verdict, so the integrator holds
+// again WITHOUT spending another verification, and asks the operator again about
+// the new execution rather than looping.
+func TestAnIdenticalFailedIntegrationIsHeldAgainWithoutVerifyingItAgain(t *testing.T) {
+	j := newFeatureJourney(t, &featureJourneyWorker{noFix: true})
+	var firstRunID string
+	j.until("the first integration holds a judged failure", func() bool {
+		firstRunID = j.integratorRunID()
+		return firstRunID != "" && failedFeatureObservation(j.fleet.state(firstRunID).projection) != nil
+	})
+	failedTree := failedFeatureObservation(j.fleet.state(firstRunID).projection).Tree
+	j.until("the attribution is asked", func() bool { _, asked := j.attributionRequest(); return asked })
+	request, _ := j.attributionRequest()
+	if err := j.resolve(request.ID, "backend", "operator@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	var epochRequestID string
+	j.until("the epoch authorization is raised", func() bool {
+		backendRun, ok := storedRun(t, j.fleet.phase8Fixture, j.fleet.graph(j.graphID).unit(t, "backend").RunID)
+		if !ok || backendRun.Orchestration == nil {
+			return false
+		}
+		messages, err := j.fleet.store.ScopeMessages(backendRun.Orchestration.BatchID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, message := range orchestration.Live(messages) {
+			if message.Kind == orchestration.KindDecisionRequest && message.Purpose == orchestration.EpochAuthorizationPurpose {
+				epochRequestID = message.ID
+			}
+		}
+		return epochRequestID != ""
+	})
+	verifications := len(j.assurance.featureRequests())
+	if err := j.resolve(epochRequestID, orchestration.EpochAuthorizationApprove, "operator@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	var secondRunID string
+	j.until("the integrator reintegrates the unchanged remediation", func() bool {
+		secondRunID = j.integratorRunID()
+		if secondRunID == "" || secondRunID == firstRunID {
+			return false
+		}
+		return failedFeatureObservation(j.fleet.state(secondRunID).projection) != nil
+	})
+	second := failedFeatureObservation(j.fleet.state(secondRunID).projection)
+	if second.Tree != failedTree {
+		t.Fatalf("the recomposed tree is %s, want the identical failed tree %s", second.Tree, failedTree)
+	}
+	if !strings.HasPrefix(second.FailureSignature, "identical_failed_candidate:") || !strings.HasSuffix(second.FailureSignature, firstRunID) {
+		t.Fatalf("the repeated failure does not name the verdict it repeats: %q", second.FailureSignature)
+	}
+	for range 6 {
+		j.tick()
+	}
+	if after := len(j.assurance.featureRequests()); after != verifications {
+		t.Fatalf("the identical failed tree was verified again: %d -> %d", verifications, after)
+	}
+	if run := mustRun(t, j, secondRunID); run.Disposition != Waiting || run.Reason == ReasonGoalStateReached {
+		t.Fatalf("the repeated failure settled %s/%s", run.Disposition, run.Reason)
+	}
+	if again, asked := j.attributionRequest(); !asked || again.ID == request.ID {
+		t.Fatalf("the new execution did not ask its own attribution: %+v asked=%t", again.ID, asked)
+	}
 }

@@ -123,6 +123,10 @@ choose one.
 - Feature tests live in the same Go package and base test surface as the ordinary
   browser tests (`cmd/zenchron-engineering`, `scripts/`); the manifest is the only
   new file.
+- A feature failure recorded for a tree, base and checker is final for that
+  combination: a later execution that recomposes to the same tree records the prior
+  verdict instead of verifying again. A changed base (new tests) or checker revision
+  is what makes it eligible again.
 - An open attribution decision keeps the run `decision_pending`; resolve it (with
   `none` if no input is to blame) before an externally caused epoch can start.
 - The dashboard API accepts the declaration; the browser form does not expose it yet.

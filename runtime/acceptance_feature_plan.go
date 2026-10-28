@@ -80,6 +80,8 @@ func declaredAcceptanceFeature(store *SQLiteOperationStore, graphID, unitID stri
 // the one its pinned plan stage declares. The origin is a copy for identity and
 // replay; the plan is the source, so a disagreement is corrupt state that stops
 // the run rather than a value to prefer.
+// ponytail: two store reads per run load for an orchestrated run; memoize by plan
+// digest if reconcile passes ever show it in a profile.
 func verifyAcceptanceFeatureOrigin(store *SQLiteOperationStore, origin *orchestration.BatchOrigin) error {
 	if origin == nil {
 		return nil
