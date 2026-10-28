@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+// CHARACTERIZATION OF A CURRENT DEFECT, not an intended invariant: this asserts
+// today's behavior so a feature-acceptance failure is never routed through it.
 // An assurance result never says a provider ran, so the wait path treats it as
 // work that did not happen: the attempt AND the execution time are given back.
 // That is right for an account refusal and wrong for a 13 minute browser run
@@ -54,6 +56,8 @@ func TestAWaitRoutedAssuranceResultWouldHaveItsSpentWorkRefunded(t *testing.T) {
 	}
 }
 
+// CHARACTERIZATION OF A CURRENT LIMIT: the legacy no-ceiling case is the
+// behavior of runs created before the assurance ceiling existed.
 // What survives a refund is the journal-derived assurance meter, and only for a
 // run that froze an assurance ceiling. A legacy run has no such backstop, so a
 // wait route would be an unbounded rerun loop there.
@@ -72,6 +76,8 @@ func TestOnlyTheJournalMeterSurvivesARefundAndOnlyUnderAnAssuranceCeiling(t *tes
 	}
 }
 
+// CHARACTERIZATION OF A CURRENT DEFECT for a judged failure: the retry cannot
+// change a deterministic answer. When RouteHold lands this test is replaced.
 // A judged failure reclassified as integration_conflict is retryable: it is
 // the same bounded loop of full re-verifications of the same integrated tree.
 func TestAReclassifiedIntegrationFailureIsRetriedAgainstTheSameCandidate(t *testing.T) {
