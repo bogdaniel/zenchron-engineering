@@ -10,10 +10,20 @@ disappearing.
 | T0 | `gofmt`, `go vet`, Windows build and vet | every PR | `ci/static.sh` |
 | T1 | every package except `runtime` whole, plus the `runtime` tests the impact registry selects | every PR | `go run ./ci/evidence` |
 | T1 race | the same selected high-risk (`race: true`) test names partitioned across four isolated runners; every part must pass | every PR | `go run ./ci/evidence -race -race-shard 1/4` (and 2/4–4/4) |
-| T2 | `go test -timeout 45m ./...` | today: every PR and every push to `main` (the required `go` check) | `.github/workflows/ci.yml` |
+| T2 | `go test -json -timeout 45m ./...` | today: every PR and every push to `main` (the required `go` check); after Stage 7: every push to `main` only | `.github/workflows/ci.yml` |
 | T3 | `go test -race ./...` | nightly, on request | `.github/workflows/assurance.yml` |
 
 ## Status
+
+**Stage 7 is prepared, not active.** The promotion audit
+([ci-stage7-promotion-audit.md](ci-stage7-promotion-audit.md)) finds the ADR-0007
+gates met, the ruleset payloads and the ordered, reversible migration are in
+[ci-stage7-migration.md](ci-stage7-migration.md), and
+`ci/evidence/workflow_test.go` holds the parts of `ci.yml` the ruleset and the
+trusted-revision resolver depend on. The live ruleset still requires `go` on
+every pull request until an operator applies it. The remainder of this section
+describes the state before that.
+
 
 Stages 0–3 and the T3 sweep are in place. T0 and T1 run as the `evidence` and
 `evidence-race` jobs beside the required `go` check. They are **not yet a merge gate**, and the full
@@ -181,3 +191,21 @@ and [matrix failure handling](https://docs.github.com/en/actions/how-tos/write-w
 contracts. The strict required `go` job, exact push-to-main T2, trust policy and
 unpartitioned whole-module T3 remain unchanged. CI still must prove every part
 at the exact submitted head; a focused probe is never that qualification.
+
+## Developing against these tiers
+
+- Run the focused tests for the behaviour you changed, `ci/static.sh`'s checks
+  (`gofmt -l .`, `go vet ./...`, the Windows build and vet), and
+  `go run ./ci/evidence -plan` to see what T1 will select. Add `-race` locally only
+  when the change touches a `race: true` domain.
+- Do not run the whole `go test ./...` before every pull request, and do not rerun
+  a passing suite without a source change or a specific diagnostic reason. Run it
+  to investigate a failure or to validate a broad interaction. GitHub's run is the
+  authoritative evidence; a local run is informal.
+- Four things are separate: **PR acceptance** (impact-directed evidence and
+  independent review), **merge** (authorized integration into `main`), **T2**
+  (exact-revision trust eligibility, produced by the push to `main`) and
+  **controller adoption** (a separate governed act following `trusted_main`).
+  Independent pull requests need not wait for each other's T2; dependent changes
+  still preserve ancestry and integrate on the right base. A failed T2 is a
+  remediation item, never a reason to bypass verification.
