@@ -160,6 +160,13 @@ type AssuranceRequest struct {
 	// sources, after the suite, and record the check that proves the
 	// browser-acceptance claim (browser_acceptance.go).
 	BrowserAcceptanceBase string
+	// FeatureAcceptance, when set, is the operator-declared feature whose tests
+	// the baseline verifier runs after the suite, with FeatureAcceptanceBase's
+	// manifest and test sources, against the exact integrated tree
+	// (feature_acceptance.go). Both are empty unless the contract requires the
+	// feature claim.
+	FeatureAcceptance     string
+	FeatureAcceptanceBase string
 	// The fields below are used by the semantic verifier. They are bounded,
 	// read-only context: identity, the exact base the diff is taken against, the
 	// changed-path inventory, a summary of the automated result, and the exact
@@ -451,6 +458,13 @@ const (
 	// an integrator unit never receives implementation authority, so there is
 	// no producer remediation to dispatch it to.
 	FailureIntegrationConflict FailureClass = "integration_conflict"
+	// FailureFeatureAcceptance is a JUDGED failure of the operator-declared
+	// feature acceptance on an integrated candidate: the tests ran, against the
+	// exact tree, and did not pass. It routes to RouteHold - never to a wait,
+	// which would refund the work it spent, never to a retry, which would
+	// re-verify the same deterministic tree, and never to a provider, which an
+	// integration unit does not have.
+	FailureFeatureAcceptance FailureClass = "feature_acceptance_failed"
 	// FailureIntegrationInvalidated is one consumed input this attempt could
 	// not read at its admitted subject - superseded, unreadable, or not a
 	// descendant of the verified base. A retry re-reads live state and may
@@ -577,6 +591,10 @@ const (
 	RouteWait                FailureRoute = "wait"
 	RouteRestore             FailureRoute = "restore_or_refuse"
 	RouteStop                FailureRoute = "stop"
+	// RouteHold is a recorded verdict that waits for an operator: the attempt it
+	// consumed stays consumed, nothing is retried, and the run settles with the
+	// reason feature_acceptance_failed until a governed decision moves it.
+	RouteHold FailureRoute = "hold"
 )
 
 func RouteFailure(c FailureClass) FailureRoute {
@@ -615,6 +633,8 @@ func RouteFailure(c FailureClass) FailureRoute {
 	// bounded retry here.
 	case FailureIntegrationConflict, FailureIntegrationInvalidated:
 		return RouteRetry
+	case FailureFeatureAcceptance:
+		return RouteHold
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess
 	case FailureWorkspaceIntegrity:
@@ -645,7 +665,7 @@ func CandidateVerdict(r AssuranceResult) bool {
 		return true
 	}
 	switch r.FailureClass {
-	case "", FailureFormat, FailureCompileTest, FailureVerification:
+	case "", FailureFormat, FailureCompileTest, FailureVerification, FailureFeatureAcceptance:
 		return true
 	}
 	return false

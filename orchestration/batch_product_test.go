@@ -1,6 +1,8 @@
 package orchestration
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,5 +52,34 @@ func TestABatchRefusesAMalformedOrOrphanedProductPin(t *testing.T) {
 	}
 	if err := direct.Validate(); err == nil {
 		t.Fatal("a direct batch has no graph and cannot carry a product pin")
+	}
+}
+
+// A declared acceptance feature is part of the unit execution's identity, and
+// the absence of one leaves every existing identity exactly as it was.
+func TestAnAcceptanceFeatureChangesTheBatchIdentityOnlyWhenDeclared(t *testing.T) {
+	origin := BatchOrigin{GraphID: "graph-1", UnitID: "compose", ExecutionKind: ExecutionKindIntegrationCompose}
+	plain, err := WorkUnitBatchID("acme/repo", "agent", 7, origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := origin
+	declared.AcceptanceFeature = "delivery-report"
+	withFeature, err := WorkUnitBatchID("acme/repo", "agent", 7, declared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := origin
+	other.AcceptanceFeature = "another-feature"
+	otherFeature, err := WorkUnitBatchID("acme/repo", "agent", 7, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain == withFeature || withFeature == otherFeature {
+		t.Fatalf("the feature does not change the identity: %s %s %s", plain, withFeature, otherFeature)
+	}
+	document, err := json.Marshal(origin)
+	if err != nil || strings.Contains(string(document), "acceptance_feature") {
+		t.Fatalf("an origin with no feature changed its document: %s (%v)", document, err)
 	}
 }

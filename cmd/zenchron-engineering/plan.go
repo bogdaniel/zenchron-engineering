@@ -118,7 +118,7 @@ func delegatePlanRevision(flags autonomyFlags, overrides autonomyOverrides, plan
 	}
 	delegated, payload, err := delegatePayload(stateDir, runtime.ControlRequest{
 		Command: runtime.ControlPlanRevise, PlanID: planID, Issue: issue, Agent: flags.Agent,
-		Repository: repository, DefaultBranch: defaultBranch, Template: flags.Template,
+		Repository: repository, DefaultBranch: defaultBranch, Template: flags.Template, AcceptanceFeature: flags.AcceptanceFeature,
 		Deterministic: flags.Deterministic, SubstituteHuman: flags.SubstituteHuman,
 		Note: flags.Note, Operator: requester.ID, ObjectiveWorkflow: true,
 	})
@@ -360,7 +360,7 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 		}
 	}
 	input := runtime.ProposeInput{
-		PlanID: planID, Objective: intent.Objective, Subject: intent.Subject,
+		PlanID: planID, Objective: intent.Objective, Subject: intent.Subject, AcceptanceFeature: flags.AcceptanceFeature,
 		Repository: composed.target.Identity, Contract: intent.Contract,
 		Model: intent.Model, Facts: intent.Facts, Template: flags.Template, Profile: flags.Profile, Issue: issue,
 		// The OBSERVED trusted base, from the same intent compilation that read

@@ -285,7 +285,7 @@ func (r PlanReconciler) startObjectiveStage(ctx context.Context, engine *Enginee
 	if !writesTypedResults(engine.deps.Provider) {
 		return StartOutcome{}, errors.New("objective worker cannot produce a typed handoff")
 	}
-	origin := orchestration.BatchOrigin{GraphID: graph.ID, UnitID: stage.ID, Inputs: unit.Inputs, ExecutionKind: unit.ExecutionKind}
+	origin := orchestration.BatchOrigin{GraphID: graph.ID, UnitID: stage.ID, Inputs: unit.Inputs, ExecutionKind: unit.ExecutionKind, AcceptanceFeature: stage.AcceptanceFeature}
 	batchID, err := orchestration.WorkUnitBatchID(r.Repository, engine.deps.Agent.ID, r.Issue, origin)
 	if err != nil {
 		return StartOutcome{}, err

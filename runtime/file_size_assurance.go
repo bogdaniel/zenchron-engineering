@@ -37,7 +37,7 @@ func fileSizePolicyRequired(contract domain.EngineeringWorkContract) bool {
 // that record - not a passing suite - is what proves the file-size claim.
 func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest) (AssuranceResult, error) {
 	incomplete := request.Commit == "" || request.Tree == "" || request.CheckoutDir == "" || request.Contract.ID == ""
-	if (request.FileSizePolicyBase == "" && request.BrowserAcceptanceBase == "") || incomplete {
+	if (request.FileSizePolicyBase == "" && request.BrowserAcceptanceBase == "" && request.FeatureAcceptanceBase == "") || incomplete {
 		return v.assureInSandbox(ctx, request)
 	}
 	if result, done, err := v.fileSizeVerdict(request); done {
@@ -48,7 +48,13 @@ func (v BaselineGoVerifier) Assure(ctx context.Context, request AssuranceRequest
 		result.Checks = append(result.Checks, fileSizeCheck(request, CheckOutcomePassed))
 	}
 	if request.BrowserAcceptanceBase != "" && err == nil && result.Passed {
-		return v.withBrowserAcceptance(ctx, request, result)
+		result, err = v.withBrowserAcceptance(ctx, request, result)
+	}
+	// The feature's own tests run only on a candidate everything before them
+	// passed, and an ordinary browser failure is reported as that failure, not
+	// as a feature verdict.
+	if request.FeatureAcceptanceBase != "" && request.FeatureAcceptance != "" && err == nil && result.Passed {
+		return v.runBrowserCheck(ctx, request, result, featureSpec(request))
 	}
 	return result, err
 }

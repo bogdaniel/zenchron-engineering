@@ -110,11 +110,16 @@ func TestBrowserAcceptanceInARealContainer(t *testing.T) {
 		t.Fatalf("the journal would refuse the record: %v", err)
 	}
 
-	// The artifacts on the host are what the record says: the kept manifest
-	// hashes to the record's digest, every retained file is a regular file within
-	// the bounds that the manifest lists with the same hash, and every selected
-	// test both wrote something and has something retained.
-	root := filepath.Join(storeRoot, "browser", request.RunID+"-"+commit+"-1-false", "artifacts")
+	assertRetainedArtifacts(t, filepath.Join(storeRoot, "browser", request.RunID+"-"+commit+"-1-false", "artifacts"), check, browserSelectionOf(t, checkout, commit))
+}
+
+// assertRetainedArtifacts holds a passing record to its artifacts on the host:
+// the kept manifest hashes to the record's digest, every retained file is a
+// regular file within the bounds that the manifest lists with the same hash, and
+// every selected test both wrote something and has something retained. Shared by
+// the browser and the feature container tests.
+func assertRetainedArtifacts(t *testing.T, root string, check VerificationCheck, selection []string) {
+	t.Helper()
 	manifestText, err := os.ReadFile(filepath.Join(root, browserManifestKept))
 	if err != nil {
 		t.Fatalf("no kept manifest: %v", err)
@@ -167,7 +172,7 @@ func TestBrowserAcceptanceInARealContainer(t *testing.T) {
 			t.Logf("could not keep the artifacts: %v: %s", err, out)
 		}
 	}
-	for _, name := range browserSelectionOf(t, checkout, commit) {
+	for _, name := range selection {
 		if wrote[name] == 0 || retained[name] == 0 {
 			t.Errorf("%s wrote %d files and has %d retained; both must be at least one", name, wrote[name], retained[name])
 		}

@@ -1,0 +1,239 @@
+package runtime
+
+// Operator-declared final-integration feature acceptance as verified evidence.
+//
+// A plan the operator declared a feature for carries it on its one terminal
+// deterministic integration stage (domain.PlanStage.AcceptanceFeature); the
+// stage's run records it on its verified BatchOrigin. From that origin - never
+// from candidate paths - the runtime produces the fact
+// acceptance.final_integration for that run only, an operator-activated policy
+// rule turns the fact into the claim FeatureAcceptanceClaimID, and the claim is
+// discharged only by a feature_acceptance record: the browser machinery run
+// with the feature's own manifest, browser-acceptance/<feature>.txt, read from
+// the trusted base together with the base's test surface, against the exact
+// integrated tree. Generic green assurance and an ordinary browser record are
+// different evidence and prove nothing here.
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/bogdaniel/zenchron-engineering/analysis"
+	"github.com/bogdaniel/zenchron-engineering/domain"
+)
+
+const (
+	// FeatureAcceptanceClaimID is the one claim id the runtime recognizes for
+	// feature acceptance. A policy rule on the acceptance.final_integration
+	// fact that requires it (evidence class automated_test) turns the check on.
+	FeatureAcceptanceClaimID = "claim-feature-acceptance"
+	// FinalIntegrationFactKey is the fact the runtime derives from a verified
+	// origin's declared feature.
+	FinalIntegrationFactKey = "acceptance.final_integration"
+
+	featureCheckerID   = "feature-acceptance-playwright"
+	featureProviderID  = "baseline-go-feature"
+	featureManifestDir = "browser-acceptance"
+)
+
+// featureManifestFile is where a feature's selected tests are listed, on the
+// base revision.
+func featureManifestFile(feature string) string {
+	return featureManifestDir + "/" + feature + ".txt"
+}
+
+// featureCheckerRevision identifies the implementation that produced a feature
+// record, so a change to how it is made invalidates earlier records.
+func featureCheckerRevision() string {
+	digest, _ := Digest(struct{ Name, Version string }{"feature-acceptance", "go-test-json-playwright-v1-base-pinned-feature-manifest"})
+	return digest
+}
+
+// featureAcceptanceRequired reports whether the contract's compiled required
+// claims include the feature claim.
+func featureAcceptanceRequired(contract domain.EngineeringWorkContract) bool {
+	_, required := contract.RequiredClaims[FeatureAcceptanceClaimID]
+	return required
+}
+
+// declaredFeature is the feature the run's verified origin declares, or "".
+func (s *runState) declaredFeature() string {
+	if s.origin == nil {
+		return ""
+	}
+	return s.origin.AcceptanceFeature
+}
+
+// featureAcceptanceFeature is the feature a contract's assurance must prove, or
+// "" when the contract does not require the claim. A required claim with no
+// declared feature or no base revision is refused by featureBaseRefusal, never
+// skipped.
+func featureAcceptanceFeature(contract domain.EngineeringWorkContract, feature string) string {
+	if !featureAcceptanceRequired(contract) {
+		return ""
+	}
+	return feature
+}
+
+func featureBaseRefusal(contract domain.EngineeringWorkContract, feature, base string) error {
+	if !featureAcceptanceRequired(contract) {
+		if feature != "" {
+			return fmt.Errorf("this run declares feature acceptance %q but its contract does not require %s; the policy rule on %s that activates the requirement is missing, and refusing to verify without it", feature, FeatureAcceptanceClaimID, FinalIntegrationFactKey)
+		}
+		return nil
+	}
+	if feature == "" {
+		return errors.New("the contract requires feature acceptance but this run's verified origin declares no feature; refusing to verify without it")
+	}
+	if base == "" {
+		return errors.New("the contract requires feature acceptance but the run has no base revision to read its tests from; refusing to verify without it")
+	}
+	return nil
+}
+
+func featureSpec(request AssuranceRequest) browserCheckSpec {
+	return browserCheckSpec{
+		base: request.FeatureAcceptanceBase, manifest: featureManifestFile(request.FeatureAcceptance), feature: request.FeatureAcceptance,
+		kind: CheckKindFeatureAcceptance, checker: featureCheckerID, checkerRevision: featureCheckerRevision(),
+		provider: featureProviderID, workDir: "feature", failureClass: FailureFeatureAcceptance,
+	}
+}
+
+// featureExpectation is what the verifying code can know about a feature
+// record that the record cannot vouch for itself: the digest and size of the
+// selection the base's manifest names. The zero value checks neither. It is
+// supplied where the manifest can be read (at the verifier boundary, where the
+// observation is written); a journalled observation is judged by the same
+// predicate without it, because it was only ever written after that check.
+type featureExpectation struct {
+	Selection string
+	Total     int
+}
+
+// featureCheckProves is the ONE definition of successful feature acceptance. It
+// reports whether the observation PROVES the feature for this exact integrated
+// candidate: a completed, passing feature record by the current checker for this
+// declared feature, bound to the observation's own commit and tree and to the
+// base whose manifest and tests ran, in which every selected test passed, none
+// failed or skipped, and the tests left artifacts. An ordinary browser record is
+// a different kind and never qualifies.
+func featureCheckProves(observation *AssuranceObservation, commit, base, feature string, expected featureExpectation) bool {
+	_, proved := provingFeatureCheck(observation, commit, base, feature, expected)
+	return proved
+}
+
+// provingFeatureCheck is featureCheckProves returning the exact record that
+// proved it, so anything derived from the proof (the evidence's environment) comes
+// from that record and never from another one that happens to be listed first.
+func provingFeatureCheck(observation *AssuranceObservation, commit, base, feature string, expected featureExpectation) (VerificationCheck, bool) {
+	if observation == nil || commit == "" || base == "" || feature == "" {
+		return VerificationCheck{}, false
+	}
+	for _, check := range observation.Checks {
+		results := check.Results
+		if check.Kind == CheckKindFeatureAcceptance && check.Outcome == CheckOutcomePassed &&
+			check.Feature == feature &&
+			check.Checker == featureCheckerID && check.CheckerRevision == featureCheckerRevision() &&
+			check.BaseRevision == base && check.Selection != "" && check.Surface != "" && check.ArtifactsSHA256 != "" &&
+			check.Environment != "" && check.Artifact != "" &&
+			check.Commit == commit && check.Commit == observation.Commit && check.Tree != "" && check.Tree == observation.Tree &&
+			results != nil && results.Total > 0 && results.Passed == results.Total && results.Failed == 0 && results.Skipped == 0 &&
+			(expected.Selection == "" || check.Selection == expected.Selection) && (expected.Total == 0 || results.Total == expected.Total) {
+			return check, true
+		}
+	}
+	return VerificationCheck{}, false
+}
+
+// featureEvidenceItem turns the generic passing-assurance item for the feature
+// claim into the evidence that actually proves it, or reports that none can be
+// produced.
+func featureEvidenceItem(item domain.EvidenceItem, observation *AssuranceObservation, commit, base, feature string) (domain.EvidenceItem, bool) {
+	check, proved := provingFeatureCheck(observation, commit, base, feature, featureExpectation{})
+	if !proved {
+		return domain.EvidenceItem{}, false
+	}
+	item.Producer = domain.EvidenceProducer{ID: featureCheckerID, Type: domain.ProducerDeterministicTool}
+	item.Environment = domain.EvidenceEnvironment{Type: "assurance_provider", Identifier: check.Environment}
+	return item, true
+}
+
+// featureBindingSuffix extends the assurance operation binding when, and only
+// when, the run's contract requires the feature claim: a newly required check
+// is planned, and a changed base, feature or checker makes it eligible again.
+// A run whose contract does not require it keeps the binding it always had.
+func (s *runState) featureBindingSuffix() string {
+	feature := s.declaredFeature()
+	if s.rt == nil || feature == "" {
+		return ""
+	}
+	contract, err := s.rt.contractFor(s)
+	if err != nil || !featureAcceptanceRequired(contract) {
+		return ""
+	}
+	return featureBindingSuffixFor(feature, s.pinnedBase())
+}
+
+// featureBindingSuffixFor is the pure suffix: it changes with the declared
+// feature, the pinned base (whose manifest and tests ran) and the checker.
+func featureBindingSuffixFor(feature, base string) string {
+	return "|feature-acceptance@" + fileSizeBindingDigest(featureCheckerRevision()+"\x00"+feature, base)
+}
+
+// declaredFeatureDetector produces FinalIntegrationFactKey from a verified
+// origin's declared feature. It is the only source of the fact: no path, issue
+// text, provider output or candidate content reaches it.
+type declaredFeatureDetector struct{ feature string }
+
+func (d declaredFeatureDetector) Detect(_ domain.ProjectModel, input analysis.Input) ([]domain.EngineeringFact, error) {
+	if d.feature == "" {
+		return nil, nil
+	}
+	return []domain.EngineeringFact{{
+		SchemaVersion: domain.SchemaVersion,
+		ID:            "fact-acceptance-final-integration-" + string(input.Stage),
+		Key:           FinalIntegrationFactKey,
+		Value:         domain.FactTrue,
+		Stage:         input.Stage,
+		Confidence:    domain.ConfidenceHigh,
+		Subject:       input.Subject,
+		Provenance:    domain.FactProvenance{Type: "approved_plan", Producer: "feature-acceptance-declaration"},
+	}}, nil
+}
+
+// flowFor is the kernel flow a run compiles its contracts with: the shared flow,
+// plus the declaration detector for a run whose verified origin declares a
+// feature. The same analyzer serves the predicted and the observed compilation,
+// so reassessment cannot lose the fact.
+func (r *EngineeringRuntime) flowFor(state *runState) KernelFlow {
+	feature := state.declaredFeature()
+	if feature == "" {
+		return r.flow
+	}
+	return KernelFlow{Analyzer: analysis.NewAnalyzerWithDetectors(analysis.CriticalBoundaryDetector{}, declaredFeatureDetector{feature: feature})}
+}
+
+// featureAcceptanceBase is the base revision whose feature manifest and test
+// sources the assurance must run, or "" when the contract does not require the
+// claim.
+func featureAcceptanceBase(contract domain.EngineeringWorkContract, base string) string {
+	if !featureAcceptanceRequired(contract) {
+		return ""
+	}
+	return base
+}
+
+// provesFeatureAcceptance refuses a passing verifier result that does not carry
+// the complete current feature-verification binding: the selection and size the
+// trusted base's manifest names, and every field featureCheckProves requires.
+func provesFeatureAcceptance(checkout, base, feature, commit, tree string, checks []VerificationCheck) error {
+	names, err := readManifestSelection(checkout, base, featureManifestFile(feature))
+	if err != nil {
+		return err
+	}
+	observation := &AssuranceObservation{AssuranceObservedPayload: AssuranceObservedPayload{Passed: true, Commit: commit, Tree: tree, Checks: checks}}
+	if !featureCheckProves(observation, commit, base, feature, featureExpectation{Selection: browserSelectionDigest(names), Total: len(names)}) {
+		return fmt.Errorf("the verifier passed a candidate whose contract requires feature acceptance %q without a passing feature record bound to this commit, tree, base, checker and selection", feature)
+	}
+	return nil
+}

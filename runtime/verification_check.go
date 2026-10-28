@@ -23,6 +23,11 @@ const (
 	// CheckKindBrowserAcceptance is the real-browser acceptance run against the
 	// exact candidate, in the network-less sandbox (browser_acceptance.go).
 	CheckKindBrowserAcceptance = "browser_acceptance"
+	// CheckKindFeatureAcceptance is the operator-declared final-integration
+	// feature acceptance: the same real-browser run, with the feature's own
+	// base-pinned manifest, recorded as its own kind so that neither record can
+	// ever be read as the other.
+	CheckKindFeatureAcceptance = "feature_acceptance"
 
 	CheckOutcomePassed = "passed"
 	CheckOutcomeFailed = "failed"
@@ -51,7 +56,9 @@ type VerificationCheck struct {
 	// sources that ran, what happened to each test, the environment it ran in,
 	// the immutable transcript and the digest of the artifacts the tests wrote.
 	// They are absent on a check that does not run tests.
-	Selection       string        `json:"selection,omitempty"`
+	Selection string `json:"selection,omitempty"`
+	// Feature names the declared feature a feature_acceptance record is for.
+	Feature         string        `json:"feature,omitempty"`
 	Surface         string        `json:"surface,omitempty"`
 	Results         *CheckResults `json:"results,omitempty"`
 	Environment     string        `json:"environment,omitempty"`
@@ -91,11 +98,16 @@ func validateVerificationChecks(checks []VerificationCheck) error {
 		}
 		errs = append(errs, bounded(prefix+"selection", check.Selection), bounded(prefix+"surface", check.Surface), bounded(prefix+"environment", check.Environment),
 			bounded(prefix+"artifact", check.Artifact), bounded(prefix+"artifacts_sha256", check.ArtifactsSHA256))
-		if check.Kind == CheckKindBrowserAcceptance {
+		if check.Kind == CheckKindFeatureAcceptance {
+			errs = append(errs, required(prefix+"feature", check.Feature))
+		} else if check.Feature != "" {
+			errs = append(errs, fmt.Errorf("%sfeature is only for a feature acceptance record", prefix))
+		}
+		if check.Kind == CheckKindBrowserAcceptance || check.Kind == CheckKindFeatureAcceptance {
 			errs = append(errs, required(prefix+"selection", check.Selection), required(prefix+"surface", check.Surface), required(prefix+"environment", check.Environment),
 				required(prefix+"artifact", check.Artifact), required(prefix+"base_revision", check.BaseRevision))
 			if check.Results == nil {
-				errs = append(errs, fmt.Errorf("%sresults is required for a browser acceptance record", prefix))
+				errs = append(errs, fmt.Errorf("%sresults is required for a browser or feature acceptance record", prefix))
 			}
 		}
 	}

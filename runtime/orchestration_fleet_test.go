@@ -352,9 +352,9 @@ type fleetFixture struct {
 	holdError error
 }
 
-func newFleetFixture(t *testing.T, capacity int) *fleetFixture {
+func newFleetFixture(t *testing.T, capacity int, seed ...func(origin string)) *fleetFixture {
 	t.Helper()
-	fixture := newPhase8Fixture(t)
+	fixture := newPhase8Fixture(t, seed...)
 	// A hundred and ten open issues. Ten are named; the other hundred exist
 	// so that "only what was named" is a claim with something to violate.
 	for issue := fleetFirstIssue; issue < fleetFirstIssue+110; issue++ {

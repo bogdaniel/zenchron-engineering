@@ -70,9 +70,15 @@ var browserEnvironment = []string{
 // name refuses verification: a required check that cannot be defined is not
 // skipped, and a name is never interpolated into a command unvalidated.
 func readBrowserSelection(dir, base string) ([]string, error) {
-	text, err := gitOutput(dir, "show", base+":"+browserManifestFile)
+	return readManifestSelection(dir, base, browserManifestFile)
+}
+
+// readManifestSelection is readBrowserSelection for any manifest path on the
+// base revision: the global one, or a feature's browser-acceptance/<id>.txt.
+func readManifestSelection(dir, base, manifest string) ([]string, error) {
+	text, err := gitOutput(dir, "show", base+":"+manifest)
 	if err != nil {
-		return nil, fmt.Errorf("the base revision has no %s: %w", browserManifestFile, err)
+		return nil, fmt.Errorf("the base revision has no %s: %w", manifest, err)
 	}
 	seen := map[string]bool{}
 	var names []string
@@ -82,13 +88,13 @@ func readBrowserSelection(dir, base string) ([]string, error) {
 			continue
 		}
 		if !browserTestName.MatchString(line) || seen[line] {
-			return nil, fmt.Errorf("%s names %q, which is not a unique test name", browserManifestFile, line)
+			return nil, fmt.Errorf("%s names %q, which is not a unique test name", manifest, line)
 		}
 		seen[line] = true
 		names = append(names, line)
 	}
 	if len(names) == 0 || len(names) > maxBrowserSelection {
-		return nil, fmt.Errorf("%s names %d tests, outside 1..%d", browserManifestFile, len(names), maxBrowserSelection)
+		return nil, fmt.Errorf("%s names %d tests, outside 1..%d", manifest, len(names), maxBrowserSelection)
 	}
 	sort.Strings(names)
 	return names, nil
