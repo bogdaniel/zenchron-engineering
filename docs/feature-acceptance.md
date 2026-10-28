@@ -32,6 +32,14 @@ rule the operator adds (below) is what makes a contract require the claim.
    proposal time. The attribution decision (below) is a closed menu of at most 20
    options: the inputs and the reserved `none`. The ordinary WorkGraph capacity is
    unchanged.
+   The declaration is also refused unless the selected integration is where **all**
+   the objective's material ends up, judged on the same effective graph: every
+   other material-producing stage must be in the integration's consumed ancestry. A
+   producer downstream of it (directly, or behind a reviewer or gate) or a parallel
+   producer it never consumes would ship material the feature tests never saw.
+   Reviewers, typed gates and approvals produce no material and stay allowed after
+   it. A re-proposal inherits the declaration and is judged again, so it cannot move
+   material past the integration.
 4. **The run's origin carries it.** The activated unit's `BatchOrigin` copies the
    feature from the digest-pinned plan stage, and it is part of that batch's
    identity only when non-empty. Whenever the origin is loaded it is verified
@@ -134,6 +142,10 @@ choose one.
   inherits it); start a new plan to drop it. A revision that carries the
   operator's own value back on a stage - a human substitution does - is accepted
   and re-stamped; any other value is refused.
+- `TestFeatureAcceptanceInARealContainer` (opt-in, like the browser one) runs a
+  feature manifest through the pinned image against an isolated fixture base and the
+  exact candidate: a genuine pass (every selected test passed, none skipped, typed
+  record exact-bound, retained artifacts verified) and a genuine failure.
 - Feature tests live in the same Go package and base test surface as the ordinary
   browser tests (`cmd/zenchron-engineering`, `scripts/`); the manifest is the only
   new file.
