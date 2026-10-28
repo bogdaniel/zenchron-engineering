@@ -578,8 +578,15 @@ type PlanStage struct {
 	Kind StageKind `json:"kind"`
 	// Role is required for an agent stage and absent for a gate: a gate is not
 	// performed by anybody, which is exactly why it creates no run.
-	Role                 EngineeringRole          `json:"role,omitempty"`
-	ExecutionKind        string                   `json:"execution_kind,omitempty"`
+	Role          EngineeringRole `json:"role,omitempty"`
+	ExecutionKind string          `json:"execution_kind,omitempty"`
+	// AcceptanceFeature names the final-integration feature acceptance this
+	// stage's integrated candidate must pass (browser-acceptance/<feature>.txt
+	// read from the trusted base). The OPERATOR's planning request declares it;
+	// the compiler stamps it on the one terminal integration_compose stage, so a
+	// planner can neither invent, remove nor replace it. Absent for every plan
+	// that declares none, which keeps those plans' documents and digests exact.
+	AcceptanceFeature    string                   `json:"acceptance_feature,omitempty"`
 	Objective            string                   `json:"objective,omitempty"`
 	DependsOn            []string                 `json:"depends_on,omitempty"`
 	RequiresCapabilities []EngineeringCapability  `json:"requires_capabilities,omitempty"`

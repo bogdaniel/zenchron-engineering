@@ -371,7 +371,11 @@ func (s *Supervisor) activateWorkUnit(graph WorkGraphView, unit WorkGraphUnitVie
 	// completed run from an earlier direct orchestration of the same issue, or
 	// from another graph, or from this unit against other inputs, is a
 	// different batch and therefore never satisfies this unit.
-	origin := orchestration.BatchOrigin{GraphID: graph.GraphID, UnitID: unit.UnitID, Inputs: unit.Inputs, ExecutionKind: unit.ExecutionKind}
+	feature, err := declaredAcceptanceFeature(s.deps.Store, graph.GraphID, unit.UnitID)
+	if err != nil {
+		return err
+	}
+	origin := orchestration.BatchOrigin{GraphID: graph.GraphID, UnitID: unit.UnitID, Inputs: unit.Inputs, ExecutionKind: unit.ExecutionKind, AcceptanceFeature: feature}
 	batchID, err := orchestration.WorkUnitBatchID(graph.Repository, graph.AgentID, unit.Issue, origin)
 	if err != nil {
 		return err

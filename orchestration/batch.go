@@ -89,6 +89,12 @@ type BatchOrigin struct {
 	// batch/run identity is genuinely distinct from epoch 1's, never a
 	// second claim on the same WorkUnitBatchID.
 	Epoch int `json:"epoch,omitempty"`
+	// AcceptanceFeature is the operator-declared final-integration feature
+	// acceptance this unit execution is held to, copied from the digest-pinned
+	// plan stage at activation and verified against it whenever the origin is
+	// loaded. Omitempty and additive: every batch written before it existed, and
+	// every unit of a plan that declares none, keeps its exact identity.
+	AcceptanceFeature string `json:"acceptance_feature,omitempty"`
 }
 
 // canonical is the origin with its input set in canonical order. The identity

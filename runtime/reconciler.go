@@ -303,6 +303,9 @@ func (r *EngineeringRuntime) workUnitOrigin(run EngineeringRun) (*orchestration.
 	if err != nil || !found {
 		return nil, err
 	}
+	if err := verifyAcceptanceFeatureOrigin(r.deps.Store, batch.Origin); err != nil {
+		return nil, deterministicRefusal("origin.acceptance_feature", err)
+	}
 	return batch.Origin, nil
 }
 
@@ -1368,7 +1371,7 @@ func bindAssuranceGo(s *runState) (string, bool) {
 	if !s.projection.CandidateComplete {
 		return "", false
 	}
-	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree + "|" + s.contractRevision() + s.fileSizeBindingSuffix() + s.browserBindingSuffix(), true
+	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree + "|" + s.contractRevision() + s.fileSizeBindingSuffix() + s.browserBindingSuffix() + s.featureBindingSuffix(), true
 }
 
 // bindIntegrationHandoffAdmit is the deferred handoff-report step for a
@@ -1769,6 +1772,10 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		if !wanted {
 			if class, failing := state.currentHeadFailure(); failing && RouteFailure(class) == RouteProviderRemediation {
 				return r.settle(state, Failed, "no_progress")
+			}
+			// A judged failure that waits for an operator is not a goal reached.
+			if class, failing := state.currentHeadFailure(); failing && RouteFailure(class) == RouteHold {
+				return r.settle(state, waitingOr(live, Waiting), ReasonFeatureAcceptanceFailed)
 			}
 			return r.settle(state, waitingOr(live, Waiting), waitingReason(reason, ReasonGoalStateReached))
 		}
@@ -2207,63 +2214,6 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, outcome, err
 	}
 	return true, Outcome{}, nil
-}
-
-// failureClassOf reads the same one shared mutationResult field lastFailure
-// does, without requiring the caller to care whether the class routes
-// anywhere in particular - unlike waitRoutedFailure, which only answers for
-// RouteWait.
-func failureClassOf(raw json.RawMessage) FailureClass {
-	var result mutationResult
-	if len(raw) == 0 || decodeJSON(raw, &result) != nil {
-		return ""
-	}
-	return result.FailureClass
-}
-
-// journalled reports whether an effect appended one particular event type.
-func journalled(entries []journalEntry, eventType string) bool {
-	for _, entry := range entries {
-		if entry.Type == eventType {
-			return true
-		}
-	}
-	return false
-}
-
-// reattemptable reports whether a route leaves the SAME operation eligible to
-// run again. Retry means run it again now; wait means run it again once the
-// external condition it named has been corrected. Every other route names a
-// different operation, or none.
-func reattemptable(route FailureRoute) bool {
-	return route == RouteRetry || route == RouteWait
-}
-
-// waitRoutedFailure reads the class an operation result recorded and reports it
-// only when it routes to a wait. It reads the same one shared field lastFailure
-// does, so this is not an execution.invoke special case: any handler that
-// records a wait-routed class settles the run into that wait.
-// providerExecuted reports whether the attempt recorded in this result actually
-// reached a worker. An unreadable or absent result is treated as HAVING
-// executed: refunding budget is the generous direction, and guessing generously
-// about an unknown is how a bounded budget stops being one.
-func providerExecuted(raw json.RawMessage) bool {
-	var result mutationResult
-	if len(raw) == 0 || decodeJSON(raw, &result) != nil {
-		return true
-	}
-	return result.ProviderExecuted
-}
-
-func waitRoutedFailure(raw json.RawMessage) (FailureClass, bool) {
-	var result mutationResult
-	if len(raw) == 0 || decodeJSON(raw, &result) != nil || result.FailureClass == "" {
-		return "", false
-	}
-	if RouteFailure(result.FailureClass) != RouteWait {
-		return "", false
-	}
-	return result.FailureClass, true
 }
 
 // waitReasons names the durable run reason each wait-routed class settles into.

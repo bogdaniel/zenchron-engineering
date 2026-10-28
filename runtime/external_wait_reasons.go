@@ -33,7 +33,16 @@ const ReasonReviewBudgetExhausted = "review_wall_budget_exhausted"
 // here, planning no further operation, until the request resolves.
 const ReasonDecisionPending = "decision_pending"
 
+// ReasonFeatureAcceptanceFailed is the wait an integration run settles into when
+// the operator-declared feature acceptance JUDGED its integrated candidate and
+// failed it (FailureFeatureAcceptance, RouteHold). It is somebody else's turn -
+// an operator attributes the failure and authorizes remediation - so it must
+// not spend the run's wall budget, while the verification that produced the
+// verdict stays charged to the assurance meter.
+const ReasonFeatureAcceptanceFailed = "feature_acceptance_failed"
+
 var externalWaitReasons = map[string]bool{
+	ReasonFeatureAcceptanceFailed:       true,
 	ReasonDeterministicFailureUnchanged: true,
 	// Waiting for a person: review, merge authority, a policy decision only an
 	// operator can make.

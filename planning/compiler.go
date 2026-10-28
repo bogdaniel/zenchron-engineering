@@ -83,6 +83,10 @@ type CompileInput struct {
 	// here is what makes that refusal reachable rather than theoretical.
 	Consumed   domain.PlanConsumption
 	ProposalID string
+	// AcceptanceFeature is the OPERATOR's declared final-integration feature
+	// acceptance, from the governed planning request - never from a proposal.
+	// Empty declares none.
+	AcceptanceFeature string
 }
 
 // Compile produces a validated plan revision.
@@ -110,6 +114,10 @@ func Compile(input CompileInput) (domain.EngineeringPlan, error) {
 		return domain.EngineeringPlan{}, err
 	}
 	stages = canonicalOrder(stages)
+	stages, err = bindAcceptanceFeature(stages, input.AcceptanceFeature)
+	if err != nil {
+		return domain.EngineeringPlan{}, err
+	}
 
 	envelope, err := resolveEnvelope(input, stages)
 	if err != nil {
@@ -196,9 +204,13 @@ func (input CompileInput) validate() error {
 // an architect or a security reviewer that no obligation asked for would be the
 // rigid workflow #64 exists to avoid.
 func (input CompileInput) baseStages() ([]domain.PlanStage, error) {
+	proposed, err := withoutEchoedAcceptanceFeature(input.Proposed, input.AcceptanceFeature)
+	if err != nil {
+		return nil, err
+	}
 	switch {
-	case len(input.Proposed) > 0:
-		return append([]domain.PlanStage{}, input.Proposed...), nil
+	case len(proposed) > 0:
+		return proposed, nil
 	case input.Template != nil:
 		return templateStages(*input.Template, input.Facts), nil
 	}
@@ -258,51 +270,6 @@ func assuranceClaims(contract domain.EngineeringWorkContract) []string {
 	}
 	sort.Strings(claims)
 	return claims
-}
-
-// SubstituteHumanReview replaces one agent stage with a human decision gate.
-//
-// It is the operator's answer to an independence shortage that POLICY permits a
-// human to fill: no eligible independent worker exists, policy said a person may
-// review instead, and the operator decided to do that. The conversion is
-// deterministic and it is not applied here - it produces the stages for a new
-// revision, which goes through the ordinary validation and approval boundary
-// like any other.
-//
-// It refuses where policy did not permit the substitution. A plan cannot grant
-// itself a substitution, and neither can an operator: the permission comes from
-// the obligation that required the independence in the first place.
-func SubstituteHumanReview(plan domain.EngineeringPlan, stageID string, claims []string) ([]domain.PlanStage, error) {
-	stage, found := plan.Stage(stageID)
-	if !found {
-		return nil, fmt.Errorf("plan %s has no stage %q", plan.ID, stageID)
-	}
-	if stage.Kind != domain.StageAgent {
-		return nil, fmt.Errorf("stage %q is a %s: only an agent stage can be replaced by a human decision", stageID, stage.Kind)
-	}
-	if stage.Independence == nil || !stage.Independence.HumanSubstitutionPermitted {
-		return nil, fmt.Errorf("stage %q does not carry a policy-permitted human substitution: the permission comes from the obligation that required the independence, and nothing else may grant it", stageID)
-	}
-	if len(claims) == 0 {
-		return nil, fmt.Errorf("a human decision gate states what the person is deciding, and no required claim was given")
-	}
-	stages := make([]domain.PlanStage, 0, len(plan.Stages))
-	for _, existing := range plan.Stages {
-		if existing.ID != stageID {
-			stages = append(stages, existing)
-			continue
-		}
-		stages = append(stages, domain.PlanStage{
-			ID:              existing.ID,
-			Kind:            domain.StageHumanDecisionGate,
-			DependsOn:       existing.DependsOn,
-			RequiredClaims:  mergeStrings(existing.RequiredClaims, claims),
-			SubstitutesRole: existing.Role,
-			Rationale: fmt.Sprintf("operator decision: no eligible worker is independent of %s in dimension %q, and policy permits an independent human review in its place",
-				strings.Join(existing.Independence.DifferentFrom, ", "), existing.Independence.Dimension),
-		})
-	}
-	return stages, nil
 }
 
 // ---------------------------------------------------------------------------
