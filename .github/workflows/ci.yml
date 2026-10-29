@@ -9,7 +9,14 @@ permissions:
   contents: read
 
 jobs:
+  # T2 (#516 Stage 7, ADR-0007): the full suite, on every push to main only. This
+  # is the exact-revision evidence the trusted-main resolver accepts (check "go",
+  # GitHub Actions, workflow ci.yml, event push, branch main), so its name, its
+  # command and its trigger must not change. A pull request is gated by the
+  # evidence jobs below instead; docs/ci-stage7-migration.md gives the order the
+  # ruleset and this condition must change in.
   go:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -35,9 +42,9 @@ jobs:
         run: go test -json -timeout 45m ./...
 
   # T0 + T1 (#516): static evidence, then the behavioral evidence that
-  # ci/evidence/registry.json selects for what this pull request changed. It
-  # runs beside the full suite above, which stays the required merge gate until
-  # trusted-main adoption no longer reads "every commit on main passed it".
+  # ci/evidence/registry.json selects for what this pull request changed. With
+  # the race aggregate below it is the pull-request merge gate; the full suite
+  # above runs after the merge.
   evidence:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
