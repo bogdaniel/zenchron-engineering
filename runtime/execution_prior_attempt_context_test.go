@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // priorAttemptTranscript builds a transcript in the exact shape the provider
@@ -623,11 +625,11 @@ func (p *priorContextProvider) Execute(_ context.Context, request ExecutionReque
 	if index < len(p.stops) {
 		stop = p.stops[index]
 	}
-	result := ExecutionResult{ProviderID: "prior-context-recorder", Attempt: request.Attempt, Outcome: Succeeded, PriorContext: inherited}
+	result := ExecutionResult{ProviderID: "prior-context-recorder", Attempt: request.Attempt, Outcome: execution.Succeeded, PriorContext: inherited}
 	if stop == StopCompleted {
 		return result, nil
 	}
-	result.Outcome = OperationFailed
+	result.Outcome = execution.Failed
 	return result, &ProviderStopError{Reason: stop, Detail: "reasoning iterations exceeded 16"}
 }
 

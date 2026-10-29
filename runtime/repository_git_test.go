@@ -451,6 +451,10 @@ func (c *fixedCredential) Credential(identity RemoteIdentity) (string, string, e
 // involved, and the secret must never appear in argv, the child environment,
 // or the resulting repository.
 func TestRemoteCredentialSeamAuthenticatesWithoutLeaking(t *testing.T) {
+	// The leak check below scans os.TempDir(). A PRIVATE one makes it answer
+	// for this test's seam alone, not for every process sharing the host's
+	// temporary directory (#331).
+	t.Setenv("TMPDIR", t.TempDir())
 	root := t.TempDir()
 	origin := filepath.Join(root, "origin")
 	initFixtureRepo(t, origin, "README.md", "real\n")
@@ -648,8 +652,8 @@ func TestRepositoryGitEnvironmentIsBuiltFromScratch(t *testing.T) {
 		"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": "/dev/null",
 		"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1",
 		"GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "PAGER": "cat",
-		"GIT_OPTIONAL_LOCKS": "0", "GIT_LITERAL_PATHSPECS": "1",
-		"GIT_TEMPLATE_DIR": "/template",
+		"GIT_OPTIONAL_LOCKS": "0", "GIT_LITERAL_PATHSPECS": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+		"GIT_GRAFT_FILE": os.DevNull, "GIT_TEMPLATE_DIR": "/template",
 	} {
 		if names[key] != want {
 			t.Fatalf("%s = %q, want %q", key, names[key], want)

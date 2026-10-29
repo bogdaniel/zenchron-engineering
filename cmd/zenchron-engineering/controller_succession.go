@@ -497,6 +497,10 @@ func (c *composition) installControllerUpgrade(supervisor *runtime.Supervisor, r
 	observe := func(ctx context.Context) (runtime.RevisionRecord, error) {
 		return runtime.ObserveTrustedMainRevision(ctx, deps, repository, source)
 	}
+	// THE FLOOR is the trusted main this controller was adopted under, from
+	// its own provenance - not its source, which may be older (ADR-0007 §5).
+	// A record that does not project leaves no floor, and the hold says why.
+	floor, floorErr := provenance.TrustFloor()
 	service := runtime.BindControllerService(
 		c.config.StateDir, controllerRoot(), c.store, self, role, supervisor)
 
@@ -511,7 +515,12 @@ func (c *composition) installControllerUpgrade(supervisor *runtime.Supervisor, r
 		},
 		DependencyCacheDir: c.config.Assurance.DependencyCacheDir,
 	}, runtime.ControllerUpdaterPorts{
-		ObserveTrustedMain: observe,
+		ObserveTrustedMain: func(ctx context.Context) (runtime.TrustedMainView, error) {
+			return runtime.ObserveTrustedMain(ctx, deps, repository, source)
+		},
+		Floor:      floor,
+		FloorError: floorErr,
+		IsAncestor: runtime.LocalGitAncestry(source),
 		Build: func(ctx context.Context, request runtime.AdoptedBuildRequest) (runtime.AdoptedBuildProvenance, error) {
 			return runtime.BuildAdoptedController(ctx, request, deps, builderRecord())
 		},

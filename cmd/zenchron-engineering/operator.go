@@ -25,20 +25,16 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
@@ -160,7 +156,7 @@ func autonomyResume(ctx context.Context, engine engineeringRuntime, built *compo
 	if code, detail, refused := resumeRefusal(run, runID, events); refused {
 		return code, errors.New(detail)
 	}
-	return reconcile(ctx, engine, runID, stdout)
+	return reconcile(ctx, engine, built, runID, stdout)
 }
 
 // resumeRefusal is the complete, ordered list of persisted conditions a plain
@@ -173,6 +169,12 @@ func resumeRefusal(run runtime.EngineeringRun, runID string, events []runtime.En
 		// which already treats a terminal run as a generation boundary.
 		return runtime.ExitCancelled, fmt.Sprintf(
 			"run %s was cancelled (%s); explicit operator intent is not withdrawn by asking again. Start new work with `autonomy run issue <number>`", runID, reason), true
+	}
+	// A pause is cleared only by `unpause` (#86); resume never walks over it.
+	if pause := runtime.JournalPause(events); pause != nil {
+		return runtime.ExitWaiting, fmt.Sprintf(
+			"run %s is paused by %s since %s (%s); `autonomy unpause %s` clears it",
+			runID, terminalSafe(pause.Operator), pause.Since.Format(time.RFC3339), terminalSafe(pause.Reason), runID), true
 	}
 	if reason == runtime.WatchWaitingOptInRemoved {
 		return runtime.ExitWaiting, fmt.Sprintf(
@@ -222,7 +224,7 @@ func persistedDisposition(run runtime.EngineeringRun, events []runtime.Engineeri
 // source refresh draws. It is deliberately not stopReason: a refresh is not a
 // person abandoning the work, and the two must stay distinguishable in the
 // journal forever.
-const refreshReason = "operator_source_refresh"
+const refreshReason = runtime.ReasonOperatorSourceRefresh
 
 // refreshView is what `refresh` reports: which run was refreshed, which
 // snapshot it had pinned, which run now answers the same source, and which
@@ -320,6 +322,11 @@ func autonomyRefresh(ctx context.Context, engine engineeringRuntime, built *comp
 	}
 	view.Successor = successor
 
+	if built != nil {
+		if _, err := built.recordPolicyGeneration(); err != nil {
+			return runtime.ExitInvalid, err
+		}
+	}
 	outcome, err := engine.Reconcile(ctx, successor)
 	if err != nil {
 		return exitFor(err, runtime.ExitFailed), err
@@ -523,12 +530,22 @@ func staleAuthorityRequests(events []runtime.EngineeringEvent, current *runtime.
 	return out
 }
 
-// leaseOf reports who holds the run-driving lease. The lease owner lives in the
-// operation document the journal records, so it is read from there rather than
-// from a second source.
+// leaseOf reports who holds the run-driving lease. For a running operation it is
+// the live row status matched to this attempt; otherwise it is the operation
+// document the journal records.
 func leaseOf(events []runtime.EngineeringEvent, report runtime.StatusReport) *leaseView {
 	if report.Operation == nil {
 		return nil
+	}
+	// A running operation's live lease is on its row, which status has
+	// already matched to this exact attempt (#326).
+	if report.Operation.ProgressSource == "row" {
+		lease := report.Operation.Lease
+		if lease == nil {
+			return nil
+		}
+		heartbeat, expires := lease.HeartbeatAt, lease.ExpiresAt
+		return &leaseView{Owner: lease.Owner, Operation: report.Operation.ID, HeartbeatAt: &heartbeat, ExpiresAt: &expires, Elapsed: report.Operation.Elapsed}
 	}
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
@@ -581,6 +598,12 @@ func githubWaitOf(built *composition, repository string) *githubWaitView {
 // value here because the CLI renders durable state; it does not re-derive it.
 const providerAccountWaitReason = "execution_provider_account_unavailable"
 
+// providerWait reports a durable provider wait (#87): any retry other than
+// transport backoff, whose status this does not change.
+func providerWait(retry *runtime.RetryStatus) bool {
+	return retry != nil && retry.Disposition != runtime.DispositionTransportBackoff
+}
+
 // nextOperatorAction is the one interpretive field in the view, and it is a
 // total function of the rest of it: the same durable state always yields the
 // same sentence. It grants nothing and decides nothing.
@@ -595,6 +618,9 @@ func nextOperatorAction(view statusView) string {
 	// It is an EXTERNAL account prerequisite, not a human-authority condition,
 	// and telling an operator that the authority boundary is refusing would
 	// send them to resolve a condition that does not exist.
+	case providerWait(view.Retry):
+		return view.Retry.ResumeCondition + "; the run resumes on its own at the next probe (" +
+			view.Retry.NotBefore.UTC().Format(time.RFC3339) + "), and `autonomy resume " + run + "` does not probe earlier"
 	case view.Reason == providerAccountWaitReason:
 		return "restore execution-provider account availability, then `autonomy resume " + run + "`"
 	case view.AuthorityRefusal != "":
@@ -622,6 +648,10 @@ func nextOperatorAction(view statusView) string {
 		return "the forge rate-limit budget is exhausted until " + view.GitHub.RateLimit.ResetAt.UTC().Format(time.RFC3339) + "; no action is needed before then"
 	}
 	if view.Disposition == runtime.Failed {
+		if h := view.HeldMaterial; h != nil {
+			return "the run ended (" + view.Reason + ") holding " + h.Kind + " material at " + short(h.Revision) +
+				" in its candidate workspace; nothing was published and no budget was renewed. It is retained from gc: inspect it there and carry it forward through new, governed work"
+		}
 		if d := view.ExecutionDiagnostic; d != nil {
 			return "the run failed (" + view.Reason + ") at execution stage " + d.Stage +
 				"; the sanitized diagnostic is shown above and `autonomy events " + run + "` holds the full journal"
@@ -643,6 +673,22 @@ func attemptNumbers(attempts []int) string {
 		parts = append(parts, strconv.Itoa(attempt))
 	}
 	return strings.Join(parts, ",")
+}
+
+// permissionDenials renders the denial count, which is read from the final
+// result and is therefore UNKNOWN - never 0 - when none was observed.
+//
+// It is decided from the progress mode RECORDED with the attempt: only the
+// structured Claude stream has a final result that lists denials at all, so
+// for every other provider the count is not unknown but not applicable.
+func permissionDenials(o domain.InvocationObservation) string {
+	if o.ProgressMode != runtime.ProgressStructuredClaudeEvents {
+		return "n/a (provider reports none)"
+	}
+	if !o.FinalResultObserved {
+		return "unknown (no final result)"
+	}
+	return strconv.Itoa(o.PermissionDenials)
 }
 
 // orUnknown renders a fact the provider does not expose as unknown rather than
@@ -674,8 +720,28 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 	// digest alone cannot say whether the binary or the configuration moved.
 	line("controller build", fmt.Sprintf("%s version=%s source=%s tree=%s binary=%s",
 		build.Kind, build.Version, short(build.SourceRevision), short(build.SourceTree), short(build.BinarySHA256)))
-	line("controller config", fmt.Sprintf("global=%s repository=%s",
+	// The configuration digest is THIS process's; the budgets below are the
+	// run's own frozen policy (ADR-0003 §6.2), and the two are labelled apart.
+	line("controller config", fmt.Sprintf("global=%s repository=%s (current process)",
 		short(view.Controller.ConfigDigest.Global), short(view.Controller.ConfigDigest.Repository)))
+	policy := fmt.Sprintf("sha=%s source=%s", short(view.RunPolicy.SHA256), view.RunPolicy.Source)
+	if len(view.RunPolicy.Unverifiable) > 0 {
+		policy += " unverifiable (controller changed): " + strings.Join(view.RunPolicy.Unverifiable, ",")
+	}
+	line("run policy", policy)
+	if budgets := view.Budgets; budgets != nil {
+		line("run budgets", fmt.Sprintf("wall=%s attempt_wall=%s lifecycle=%s inactivity=%s attempts=%d continuations=%d invocations=%d remediation=%d assurance=%d assurance_wall=%s",
+			budgets.WallLimit, budgets.AttemptWallLimit, budgets.LifecycleDeadline, budgets.ProviderInactivityLimit,
+			budgets.MaxExecutionAttempts, budgets.MaxExecutionContinuations, budgets.MaxProviderInvocations,
+			budgets.MaxRemediationAttempts, budgets.MaxAssuranceAttempts, budgets.AssuranceWallLimit))
+	} else {
+		// UNKNOWN is printed as unknown, never as a zero or an absent "none".
+		unknown := make([]string, len(view.RunPolicy.Unverifiable))
+		for i, member := range view.RunPolicy.Unverifiable {
+			unknown[i] = member + "=unknown"
+		}
+		line("run budgets", "unknown (controller changed) "+strings.Join(unknown, " "))
+	}
 	// WHO IS DOING THE WORK, in the view an operator opens to ask about one
 	// run. The JSON has carried the binding for a while and the text did not,
 	// so answering "which worker owns this" meant switching output formats.
@@ -689,13 +755,45 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		line("workspace", view.Worker.Workspace)
 	}
 	line("disposition", strings.TrimSpace(string(view.Disposition)+" "+view.Reason))
+	if providerWait(view.Retry) {
+		line("next probe", "at "+view.Retry.NotBefore.UTC().Format(time.RFC3339)+" (no earlier, across restarts)")
+	}
 	line("phase", view.Phase)
-	line("active consumed", view.ActiveElapsed)
+	if view.AccountingMode == "legacy" {
+		line("accounting mode", "legacy")
+		line("active consumed", view.ActiveElapsed)
+		line("execution charge", fmt.Sprintf("%s (authoritative legacy charge)", view.ExecutionElapsed))
+		line("assurance observed", fmt.Sprintf("%s (overlapping execution charge)", view.AssuranceElapsed))
+	} else {
+		line("active consumed", fmt.Sprintf("%s (execution %s, assurance %s)", view.ActiveElapsed, view.ExecutionElapsed, view.AssuranceElapsed))
+	}
 	line("external wait", view.ExternalWaitElapsed)
 	line("lifecycle age", view.Elapsed)
 	line("base", view.Base.ID+"@"+short(view.Base.Revision))
 	line("candidate", fmt.Sprintf("%s rev=%s tree=%s", view.Candidate.Branch, short(view.Candidate.Revision), short(view.Candidate.Tree)))
 	line("contract", view.Contract.ID+"@"+view.Contract.Revision)
+	// WHAT A BUDGET-ENDED RUN IS HOLDING (#203). Exhaustion with valuable
+	// material and exhaustion with none are different facts, so both are
+	// stated rather than one being left as a missing line.
+	if h := view.HeldMaterial; h != nil {
+		line("held material", fmt.Sprintf("%s %s rev=%s tree=%s", h.Disposition, h.Kind, orUnknown(short(h.Revision)), orUnknown(short(h.Tree))))
+		if h.Kind == runtime.HeldUncommitted || h.Kind == runtime.HeldCommittedUnobserved {
+			line("held content", fmt.Sprintf("operation=%s paths=%d digest=%s", h.Operation, h.PathCount, orUnknown(short(h.ContentDigest))))
+		}
+		blocked := h.NextStep
+		if h.Successor != "" {
+			blocked = strings.TrimSpace(blocked + " successor=" + h.Successor + " unavailable: " + h.SuccessorUnavailable)
+		}
+		line("held next step", strings.TrimSpace(orUnknown(blocked)+" blocked by "+h.BlockedBy))
+	} else if runtime.BudgetBoundary(view.Disposition, view.Reason) {
+		line("held material", "none (no material result)")
+	}
+	// A running operation whose live row could not be matched is reported from
+	// the journal, and says so rather than passing stale values off as live.
+	journalMark := ""
+	if view.Operation != nil && view.Operation.ProgressSource == "journal" {
+		journalMark = " (journal)"
+	}
 	if view.Operation != nil {
 		operation := fmt.Sprintf("%s %s attempt %d/%d active consumed %s",
 			view.Operation.Kind, view.Operation.State, view.Operation.Attempt, view.Operation.MaxAttempts, view.Operation.Elapsed)
@@ -714,13 +812,37 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		// four minutes means nothing without the window it is measured
 		// against, and reading the pair is how an operator tells a provider
 		// that is thinking from one whose host lost its network.
-		if limit := view.Operation.InactivityLimit; limit > 0 {
-			progress := "none recorded"
+		if limit := view.Operation.InactivityLimit; limit > 0 || view.Operation.InactivityLimitUnknown {
+			window := limit.String()
+			if view.Operation.InactivityLimitUnknown {
+				window = "unknown"
+			}
+			// No recorded progress means the silence is UNKNOWN, not zero.
+			progress, silent := "none recorded", "unknown"
 			if view.Operation.LastProgressAt != nil {
 				progress = view.Operation.LastProgressAt.UTC().Format(time.RFC3339)
+				silent = view.Operation.SilentFor.String()
 			}
-			line("progress", fmt.Sprintf("last %s silent %s inactivity limit %s",
-				progress, view.Operation.SilentFor, limit))
+			// A SUSPENDED WINDOW IS NOT AN IMPENDING KILL (#352). An open
+			// structured tool holds the inactivity bound, so printing the
+			// silence against the limit would announce a kill the watch will
+			// not make; the deadline line below is what still bounds it.
+			since := view.Operation.InactivitySuspendedSince
+			switch {
+			case view.Operation.InactivitySuspension == "active" && since != nil:
+				line("progress"+journalMark, fmt.Sprintf("last %s inactivity suspended — structured tool open since %s (limit %s resumes when it closes)",
+					progress, since.UTC().Format(time.RFC3339), window))
+			default:
+				line("progress"+journalMark, fmt.Sprintf("last %s silent %s inactivity limit %s",
+					progress, silent, window))
+				if view.Operation.InactivitySuspension == "unverified" && since != nil {
+					line("suspension", fmt.Sprintf("unverified — a structured tool was recorded open since %s, but the owning controller's liveness cannot be established",
+						since.UTC().Format(time.RFC3339)))
+				}
+			}
+		}
+		if deadline := view.Operation.Deadline; deadline != nil {
+			line("deadline", fmt.Sprintf("%s (%s)", deadline.UTC().Format(time.RFC3339), orUnknown(string(view.Operation.DeadlineBound))))
 		}
 	}
 	if view.Lease != nil {
@@ -728,7 +850,7 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 		if view.Lease.HeartbeatAt != nil {
 			heartbeat = view.Lease.HeartbeatAt.UTC().Format(time.RFC3339)
 		}
-		line("lease", fmt.Sprintf("%s heartbeat %s elapsed %s", view.Lease.Owner, heartbeat, view.Lease.Elapsed))
+		line("lease"+journalMark, fmt.Sprintf("%s heartbeat %s elapsed %s", view.Lease.Owner, heartbeat, view.Lease.Elapsed))
 	}
 	for _, evidence := range view.Evidence {
 		line("evidence", evidence.ID+"@"+evidence.Revision)
@@ -781,24 +903,82 @@ func renderStatusText(stdout io.Writer, view statusView) error {
 			"%d destructive Git operation(s) refused; dirty candidate work preserved: %s",
 			n, view.CandidateDiscardRefused))
 	}
+	// HOW THE LATEST EXECUTION ATTEMPT RAN AND ENDED (#327), from its
+	// journalled provenance, so a stalled or deadline-killed attempt explains
+	// itself without the raw transcript. Absence is stated, never rendered as
+	// zeros: an attempt that never reached a provider recorded nothing.
+	if p := view.ExecutionAttemptProvenance; p != nil {
+		inv := p.Invocation
+		limit := "none"
+		if inv.InactivityLimit > 0 {
+			limit = inv.InactivityLimit.String()
+		}
+		line("execution attempt", fmt.Sprintf(
+			"identity=%d termination=%s progress_mode=%s inactivity_limit=%s structured_events=%d open_tools_at_exit=%d permission_denials=%s",
+			p.AttemptIdentity, orUnknown(inv.TerminationCause), orUnknown(inv.ProgressMode), limit,
+			inv.StructuredEvents, inv.OpenToolsAtExit, permissionDenials(inv.InvocationObservation)))
+		if inv.Truncated {
+			line("execution attempt", "provenance truncated to its fixed-size core: the full record did not fit the durable ceiling")
+		}
+		if len(inv.PermissionDeniedTools) > 0 {
+			line("denied tools", strings.Join(inv.PermissionDeniedTools, ","))
+		}
+		line("execution invocation", fmt.Sprintf("%s version=%s permission=%s sandbox=%s auth=%s (%s) elapsed=%s overran_deadline=%t",
+			inv.Executable, orUnknown(inv.Version), orUnknown(inv.PermissionMode), orUnknown(inv.SandboxMode),
+			orUnknown(inv.AuthMode), orUnknown(inv.AuthModeSource), inv.Elapsed, inv.OverranDeadline))
+		// The allowlisted provider-control environment (#391): absent and
+		// empty are printed differently, never collapsed.
+		if len(inv.ProviderEnvironment) > 0 {
+			vars := make([]string, 0, len(inv.ProviderEnvironment))
+			for _, e := range inv.ProviderEnvironment {
+				switch {
+				case e.SHA256 != "":
+					vars = append(vars, e.Name+"=sha256:"+short(e.SHA256))
+				case e.Value == nil:
+					vars = append(vars, e.Name+" (absent)")
+				case e.Bounded:
+					vars = append(vars, fmt.Sprintf("%s=%q (bounded)", e.Name, *e.Value))
+				default:
+					vars = append(vars, fmt.Sprintf("%s=%q", e.Name, *e.Value))
+				}
+			}
+			line("execution environment", strings.Join(vars, " "))
+		}
+	} else if view.Attempts[runtime.OpExecutionInvoke] > 0 {
+		line("execution attempt", "no invocation provenance recorded: the latest attempt did not reach a provider, or has not ended")
+	}
 	if d := view.ExecutionDiagnostic; d != nil {
 		failure := strings.TrimSpace(fmt.Sprintf("stage=%s class=%s route=%s %s",
 			d.Stage, d.FailureClass, d.Route, d.Code))
 		switch d.FailureClass {
 		case runtime.FailureProviderAccountUnavailable:
 			failure = "provider account unavailable (" + failure + ")"
-		// The three provider conditions an operator most needs kept apart, and
-		// the ones #238 collapsed into hours of apparent active work. A stall
-		// is a live process that stopped moving; unavailable is a host that
-		// cannot reach the provider; quota is an allowance that will come back.
+		// The provider conditions an operator most needs kept apart, and the
+		// ones #238 collapsed into hours of apparent active work. A stall is a
+		// live process that stopped moving; unavailable is an endpoint that
+		// answered it cannot serve; connectivity is a host that cannot reach
+		// it (#380); quota is an allowance that will come back.
 		case runtime.FailureProviderNoProgress:
 			failure = "provider stalled: terminated by the inactivity policy (" + failure + ")"
 		case runtime.FailureProviderUnavailable:
-			failure = "provider unavailable: the host could not reach the provider (" + failure + ")"
+			failure = "provider unavailable: the endpoint reported it cannot serve (" + failure + ")"
+		case runtime.FailureConnectivity:
+			failure = "connectivity unavailable: the host could not reach the endpoint; retrying after a bounded backoff (" + failure + ")"
 		case runtime.FailureProviderQuota:
 			failure = "provider quota exhausted (" + failure + ")"
 		}
 		line("execution failure", failure)
+		// WHICH BOUND ended the attempt and WHAT comes next (#328): an
+		// attempt-wall stop, run active-work exhaustion and an inactivity stop
+		// are different resources, and a successor the runtime already knows
+		// it cannot admit is named as unavailable rather than implied.
+		if d.Bound != "" || d.Successor != "" {
+			next := d.Successor
+			if d.SuccessorUnavailable != "" {
+				next += " unavailable: " + d.SuccessorUnavailable
+			}
+			line("execution bound", strings.TrimSpace(fmt.Sprintf("bound=%s successor=%s", d.Bound, next)))
+		}
 		line("execution provider", strings.TrimSpace(fmt.Sprintf("%s model=%s", d.ProviderKind, d.Model)))
 		if d.HTTPStatus != 0 || d.ProviderErrorCode != "" || d.ProviderErrorParam != "" {
 			line("execution response", strings.TrimSpace(fmt.Sprintf("http=%d provider_error=%s param=%s",
@@ -835,226 +1015,6 @@ func short(revision string) string {
 		return revision[:12]
 	}
 	return revision
-}
-
-// ---------------------------------------------------------------------------
-// events
-// ---------------------------------------------------------------------------
-
-// maxEventPayloadBytes bounds ONE rendered payload. Canonical payloads are
-// already bounded by the journal, so this is a display bound: it keeps a
-// follower's output readable and keeps the renderer honest about the fact that
-// it prints a SUMMARY, never a body.
-const maxEventPayloadBytes = 1024
-
-// followInterval is how often `--follow` re-reads the journal. It is a polite
-// poll of a local SQLite file, not a subscription: no lock is taken, no
-// notification channel is opened, and a controller appending concurrently is
-// simply observed on the next pass.
-const followInterval = time.Second
-
-// eventView renders one journalled event. Every member is journal identity,
-// journal position, or a bounded summary. Artifact CONTENT is never printed:
-// what is rendered is the artifact REFERENCE the journal itself holds - a path,
-// a digest, and its local-only and sanitized flags - so listing events can
-// never emit raw local-only material.
-type eventView struct {
-	SchemaVersion     string             `json:"schema_version"`
-	View              string             `json:"view"`
-	Sequence          int64              `json:"sequence"`
-	ID                string             `json:"id"`
-	RunID             string             `json:"run_id"`
-	Type              string             `json:"type"`
-	OccurredAt        time.Time          `json:"occurred_at"`
-	Actor             string             `json:"actor"`
-	OperationID       string             `json:"operation_id,omitempty"`
-	StateBefore       string             `json:"state_before,omitempty"`
-	StateAfter        string             `json:"state_after,omitempty"`
-	Subject           *eventSubject      `json:"subject,omitempty"`
-	Payload           json.RawMessage    `json:"payload,omitempty"`
-	PayloadSummary    *payloadSummary    `json:"payload_summary,omitempty"`
-	Artifacts         []runtime.Artifact `json:"artifacts,omitempty"`
-	PreviousEventID   string             `json:"previous_event_id,omitempty"`
-	PreviousEventHash string             `json:"previous_event_hash,omitempty"`
-	EventHash         string             `json:"event_hash,omitempty"`
-}
-
-// eventSubject is the exact state an event is bound to, when its payload names
-// one. It is what makes a journal line answerable without opening the payload.
-type eventSubject struct {
-	Commit    string             `json:"commit,omitempty"`
-	Tree      string             `json:"tree,omitempty"`
-	Contract  *runtime.Ref       `json:"contract,omitempty"`
-	Candidate *runtime.Candidate `json:"candidate,omitempty"`
-	Action    string             `json:"action,omitempty"`
-	Request   *runtime.Ref       `json:"request,omitempty"`
-}
-
-// payloadSummary replaces a payload too large to render. It states the size and
-// the digest of what was withheld rather than truncating JSON into something
-// that no longer parses.
-type payloadSummary struct {
-	Bytes  int    `json:"bytes"`
-	SHA256 string `json:"sha256"`
-}
-
-// autonomyEvents renders the persisted journal in persisted order. It opens the
-// durable store DIRECTLY: it takes no ownership of the state directory and no
-// run-driving lease, which is what makes it safe - and correct - to read a run
-// another controller is currently driving.
-func autonomyEvents(parent context.Context, flags autonomyFlags, runID string, stdout io.Writer) (int, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return runtime.ExitInvalid, err
-	}
-	config, err := runtime.LoadConfig(flags.Config, cwd)
-	if err != nil {
-		return runtime.ExitInvalid, err
-	}
-	store, err := runtime.OpenSQLiteOperationStore(config.StateDir)
-	if err != nil {
-		return runtime.ExitInvalid, err
-	}
-	defer store.Close()
-
-	if _, found, err := store.Run(runID); err != nil {
-		return runtime.ExitFailed, err
-	} else if !found {
-		err := &runNotFoundError{RunID: runID}
-		return exitRunNotFound, err
-	}
-	if !flags.Follow {
-		events, err := store.Events(runID)
-		if err != nil {
-			return runtime.ExitFailed, err
-		}
-		if err := writeJSON(stdout, eventViews(events)); err != nil {
-			return runtime.ExitFailed, err
-		}
-		return runtime.ExitCompleted, nil
-	}
-	return followEvents(parent, store, runID, stdout)
-}
-
-// followEvents tails the journal. It mutates nothing: the only call it makes is
-// the same read the one-shot path makes, so a concurrent append by an
-// independent handle is simply the next thing it observes. It exits cleanly on
-// SIGINT or SIGTERM, which is a shutdown of THIS reader and never a
-// cancellation of the run.
-func followEvents(parent context.Context, store *runtime.SQLiteOperationStore, runID string, stdout io.Writer) (int, error) {
-	ctx, stopSignals := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
-
-	var last int64
-	ticker := time.NewTicker(followInterval)
-	defer ticker.Stop()
-	for {
-		events, err := store.Events(runID)
-		if err != nil {
-			return runtime.ExitFailed, err
-		}
-		for _, event := range events {
-			if event.Sequence <= last {
-				continue
-			}
-			last = event.Sequence
-			if err := writeJSON(stdout, renderEvent(event)); err != nil {
-				return runtime.ExitFailed, err
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return runtime.ExitCompleted, nil
-		case <-ticker.C:
-		}
-	}
-}
-
-func eventViews(events []runtime.EngineeringEvent) []eventView {
-	out := make([]eventView, 0, len(events))
-	for _, event := range events {
-		out = append(out, renderEvent(event))
-	}
-	return out
-}
-
-// renderEvent renders one journalled row. Nothing is re-ordered, nothing is
-// filtered, and no artifact body is opened.
-func renderEvent(event runtime.EngineeringEvent) eventView {
-	view := eventView{
-		SchemaVersion:     event.SchemaVersion,
-		View:              "autonomy.events/1",
-		Sequence:          event.Sequence,
-		ID:                event.ID,
-		RunID:             event.RunID,
-		Type:              event.Type,
-		OccurredAt:        event.OccurredAt,
-		Actor:             eventActor(event),
-		OperationID:       event.OperationID,
-		StateBefore:       event.StateBefore,
-		StateAfter:        event.StateAfter,
-		Subject:           eventSubjectOf(event.Payload),
-		Artifacts:         event.Artifacts,
-		PreviousEventID:   event.PreviousEventID,
-		PreviousEventHash: event.PreviousEventHash,
-		EventHash:         event.EventHash,
-	}
-	if len(event.Payload) > maxEventPayloadBytes {
-		sum := sha256.Sum256(event.Payload)
-		view.PayloadSummary = &payloadSummary{Bytes: len(event.Payload), SHA256: hex.EncodeToString(sum[:])}
-		return view
-	}
-	view.Payload = event.Payload
-	return view
-}
-
-// eventActor is where the event came from. An operator-appended event carries
-// no operation id, because recording operator intent is not an engineering side
-// effect and never takes an operation lease; that is what distinguishes it.
-func eventActor(event runtime.EngineeringEvent) string {
-	switch event.Type {
-	case runtime.EventHumanAuthorityRecorded:
-		return "operator"
-	case runtime.EventRunCancelled:
-		if event.OperationID == "" {
-			return "operator"
-		}
-	case runtime.EventGitHubPRObserved, runtime.EventGitHubCIObserved, runtime.EventGitHubReviewObserved,
-		runtime.EventSourceIntentChanged, runtime.EventSourceOptInRemoved, runtime.EventSourceOptInRestored:
-		return "forge"
-	}
-	return "runtime"
-}
-
-// eventSubjectOf reads the exact state binding a payload names, if it names
-// one. It decodes the shared member names rather than every payload type, so a
-// payload the renderer has never heard of still reports its binding.
-func eventSubjectOf(payload json.RawMessage) *eventSubject {
-	if len(payload) == 0 {
-		return nil
-	}
-	var bound struct {
-		Commit    string             `json:"commit"`
-		Tree      string             `json:"tree"`
-		Contract  *runtime.Ref       `json:"contract"`
-		Candidate *runtime.Candidate `json:"candidate"`
-		Action    *domain.Action     `json:"action"`
-		Request   *runtime.Ref       `json:"request"`
-	}
-	if json.Unmarshal(payload, &bound) != nil {
-		return nil
-	}
-	subject := eventSubject{
-		Commit: bound.Commit, Tree: bound.Tree,
-		Contract: bound.Contract, Candidate: bound.Candidate, Request: bound.Request,
-	}
-	if bound.Action != nil {
-		subject.Action = bound.Action.Type + ":" + bound.Action.Target
-	}
-	if subject == (eventSubject{}) {
-		return nil
-	}
-	return &subject
 }
 
 // ---------------------------------------------------------------------------
@@ -1107,6 +1067,7 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 		// uses, and the SAME PATH a real shell would resolve.
 		ControllerRoot:    controllerRoot(),
 		EntrypointPathEnv: os.Getenv("PATH"),
+		GoEnvFile:         runtime.OperatorGoEnvFile(os.Getenv("GOENV")),
 	}
 	// The running binary's own provenance. A resolution failure is carried
 	// through as itself rather than discarded: doctor must be able to say "I
@@ -1133,6 +1094,11 @@ func doctorInput(flags autonomyFlags, overrides autonomyOverrides) runtime.Docto
 	sandbox := runtime.DockerSandbox{Image: config.Assurance.Image, Endpoint: runtime.DockerEndpoint{Host: config.Assurance.DockerHost}}
 	artifacts := runtime.ArtifactStore{Root: filepath.Join(config.StateDir, "artifacts")}
 	in.StateDir = config.StateDir
+	if snapshot, err := observeLiveController(config.StateDir)(); err != nil {
+		in.ControllerUpdateError = err
+	} else {
+		in.ControllerUpdate = snapshot.Update
+	}
 	in.Sandbox = sandbox
 	in.DependencyCacheDir = config.Assurance.DependencyCacheDir
 	in.SemanticAssurance = overrides.SemanticAssurance

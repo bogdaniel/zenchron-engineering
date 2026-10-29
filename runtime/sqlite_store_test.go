@@ -300,7 +300,7 @@ func TestSQLiteRefusesNewerSchemaVersion(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", "file:"+dir+"/runtime.db")
+	db, err := sql.Open("sqlite", sqliteFileURI(filepath.Join(dir, "runtime.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,6 +310,10 @@ func TestSQLiteRefusesNewerSchemaVersion(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	before, err := os.ReadFile(filepath.Join(dir, "runtime.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, err = OpenSQLiteOperationStore(dir)
 	var unsupported UnsupportedSchemaError
 	if !errors.As(err, &unsupported) {
@@ -317,6 +321,15 @@ func TestSQLiteRefusesNewerSchemaVersion(t *testing.T) {
 	}
 	if unsupported.Found != 99 || unsupported.Supported != sqliteSchemaVersion {
 		t.Fatalf("unexpected schema error detail: %+v", unsupported)
+	}
+	// FAIL CLOSED MEANS UNTOUCHED (#89 A6): the refusal writes nothing to the
+	// database another binary still depends on.
+	after, err := os.ReadFile(filepath.Join(dir, "runtime.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("refusing a newer schema modified the database")
 	}
 }
 
@@ -377,7 +390,7 @@ func TestSQLiteOperationAndJournalWritesShareOneDatabase(t *testing.T) {
 
 func TestSQLiteMigratesAJournalFreeDatabaseForward(t *testing.T) {
 	dir := t.TempDir()
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "runtime.db"))
+	db, err := sql.Open("sqlite", sqliteFileURI(filepath.Join(dir, "runtime.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,18 +507,18 @@ func TestSQLiteGlobalRunCeilingIsAtomicAcrossHandles(t *testing.T) {
 	if err != nil || !okB {
 		t.Fatal(err, okB)
 	}
-	_, gotA, err := storeA.AcquireOperation(leasedAt(opA, "one", now), revA, 1)
+	_, gotA, err := storeA.AcquireOperation(leasedAt(opA, "one", now), revA, 1, 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, gotB, err := storeB.AcquireOperation(leasedAt(opB, "two", now), revB, 1)
+	_, gotB, err := storeB.AcquireOperation(leasedAt(opB, "two", now), revB, 1, 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if gotA == gotB {
 		t.Fatalf("max=1 was not durable: run-a acquired=%v, run-b acquired=%v", gotA, gotB)
 	}
-	if _, _, err := storeA.AcquireOperation(opA, 0, 1); err == nil {
+	if _, _, err := storeA.AcquireOperation(opA, 0, 1, 1, 1); err == nil {
 		t.Fatal("an acquisition without an observed revision was accepted")
 	}
 

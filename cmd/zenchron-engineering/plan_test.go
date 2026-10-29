@@ -375,7 +375,7 @@ func TestThePlanLifecycleWorksWhileASupervisorOwnsTheStateDirectory(t *testing.T
 	// and its address is bounded by the operating system. `serve` refuses a
 	// state_dir that would exceed it, with that message; a test that used the
 	// default temporary path would be testing that refusal instead.
-	stateDir, err := os.MkdirTemp("", "zc")
+	stateDir, err := os.MkdirTemp("/tmp", "zc")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +491,7 @@ func TestPlanShowRendersOneExactRevision(t *testing.T) {
 // the supervisor - a service account, or another person's login - for a
 // decision somebody else made in their terminal.
 func TestADelegatedDecisionRecordsTheRequester(t *testing.T) {
-	stateDir, err := os.MkdirTemp("", "zc")
+	stateDir, err := os.MkdirTemp("/tmp", "zc")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -549,7 +549,7 @@ func TestADelegatedDecisionRecordsTheRequester(t *testing.T) {
 // and decide plans while the persistent runtime ran, and could not START one
 // without stopping it - which is the runtime's whole point.
 func TestAFirstPlanIsProposedThroughARunningSupervisor(t *testing.T) {
-	stateDir, err := os.MkdirTemp("", "zc")
+	stateDir, err := os.MkdirTemp("/tmp", "zc")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +627,7 @@ func TestAFirstPlanIsProposedThroughARunningSupervisor(t *testing.T) {
 // same target. Durable state answers it for a plan whose stages have started,
 // and a first proposal states what its requester resolved.
 func TestTheDelegatedPathDoesNotAssumeTheBaseBranch(t *testing.T) {
-	stateDir, err := os.MkdirTemp("", "zc")
+	stateDir, err := os.MkdirTemp("/tmp", "zc")
 	if err != nil {
 		t.Fatal(err)
 	}

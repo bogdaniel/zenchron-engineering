@@ -1,0 +1,178 @@
+@reference "./tokens.css";
+
+/* Runtime inspectors reuse the approved tokens, panels and responsive shell. */
+@layer components {
+  .fact-pair {
+    @apply contents;
+  }
+}
+.run-timeline li { grid-template-columns: 96px 12px minmax(0,1fr); }
+.run-timeline li:not(:last-child)::after { left: 113px; }
+.runtime-metrics strong { display: block; margin: 8px 0; font-size: 22px; font-weight: 450; }
+/* .dependency-map keeps its radial-gradient background as plain CSS (Decision
+   5 - same as components.css's .workgraph/.plan-dependency-grid). */
+.dependency-map { overflow: auto; padding: 0 0 10px; background-image: radial-gradient(var(--border) .65px, transparent .65px); background-size: 14px 14px; }
+.dependency-map svg { display: block; }
+@layer components {
+  .dependency-edge {
+    @apply fill-none stroke-muted stroke-[1.5];
+  }
+  .dependency-node {
+    @apply cursor-pointer;
+  }
+  .dependency-arrowhead {
+    @apply fill-muted;
+  }
+}
+.dependency-node rect { fill: var(--shell); stroke: var(--control-border); }
+.dependency-node text { fill: var(--text); font-family: var(--sans); font-size: 13px; }
+.dependency-node .dependency-meta { fill: var(--muted); font-size: 12px; }
+.dependency-node.selected rect { stroke: var(--orange); stroke-width: 2; fill: var(--surface); }
+.dependency-node:hover rect { fill: var(--raised); }
+.dependency-node:focus { outline: none; }
+.dependency-node:focus-visible rect { stroke: var(--orange); stroke-width: 3; }
+/* A dependency reference to an id outside this node set, or to itself, is
+   malformed recorded data - distinguished here from a true, dependency-free
+   root rather than silently rendered as one. Red (not the .selected orange)
+   so the warning still reads when a flagged node is also selected. */
+.dependency-node.unresolved rect { stroke: var(--red); stroke-width: 2; stroke-dasharray: 4 3; }
+.dependency-node.unresolved .dependency-meta { fill: var(--red); }
+@layer components {
+  .dependency-mobile {
+    @apply hidden;
+  }
+  .dependency-fallback {
+    @apply grid;
+  }
+}
+@media (max-width: 760px) {
+  .dependency-map { display: none; }
+  .dependency-mobile { display: grid; }
+  .dependency-mobile .graph-node::after { content: none; }
+  .run-timeline li { grid-template-columns: 86px 10px minmax(0,1fr); }
+  .run-timeline li:not(:last-child)::after { left: 99px; }
+}
+@layer components {
+  .runtime-facts {
+    @apply text-[13px] leading-normal;
+  }
+}
+.product-body > .runtime-facts { padding: 14px 0; }
+.workspace-aside .runtime-facts { grid-template-columns: minmax(0,1fr); gap: 5px; }
+.workspace-aside .runtime-facts dd { margin-bottom: 10px; }
+@layer components {
+  .run-timeline {
+    @apply max-h-[440px] overflow-auto;
+  }
+}
+.dependency-map { max-height: 440px; }
+/* Loading/error/empty states render a one-line message in place of the
+   scrollable timeline - without a floor here the panel collapses then grows
+   back on every page click, visibly jumping the Next/Previous events buttons. */
+.activity-body { min-height: 160px; }
+.filter-bar #workunit-picker { min-width: 0; max-width: 100%; flex: 1; }
+@media (max-width: 760px) { .run-timeline { max-height: 320px; } }
+@layer components {
+  .login-screen {
+    @apply grid min-h-[100dvh] place-items-center p-6;
+  }
+  .login-panel {
+    @apply w-full max-w-[460px];
+  }
+}
+.login-panel .brand { border-bottom: 1px solid var(--border); padding: 24px; }
+.login-panel h1 { font-size: 24px; margin-top: 12px; }
+.login-panel form { margin-top: 24px; display: grid; gap: 14px; }
+@layer components {
+  .login-panel input {
+    @apply w-full min-w-0 rounded-[4px] border border-control-border bg-bg p-3;
+  }
+}
+@layer components {
+  .login-theme {
+    @apply mt-5;
+  }
+}
+/* Extra .field-label step on the selector (not just .revision-picker input)
+   outranks .field-label :is(input,...)'s equal-specificity width:100% below -
+   NumberField now wraps this input in that shared label, and equal
+   specificity would otherwise fall back to source order. */
+@layer components {
+  .revision-picker .field-label input {
+    @apply ml-2 w-[80px] rounded-[4px] border border-control-border bg-bg p-2 text-text;
+  }
+}
+/* .field-label's stacked-form margin-bottom is meaningless on this one-row
+   filter-bar; it would otherwise skew align-items:center against the
+   single-line button/link siblings beside it. */
+.revision-picker .field-label { margin-bottom: 0; }
+@media (max-width: 760px) { .revision-picker { flex-wrap: wrap; } }
+@layer components {
+  .runtime-sidebar {
+    @apply overflow-y-auto;
+  }
+}
+.runtime-sidebar > * { flex-shrink: 0; }
+@media (max-width: 760px) { .dependency-mobile { grid-template-columns: minmax(0,1fr); } }
+/* Existing governed workspace workflows share the approved controls and surfaces. */
+@layer components {
+  .intake-form {
+    @apply grid max-w-[760px] gap-4;
+  }
+}
+.intake-form label, .field-label { display: grid; gap: 8px; margin-bottom: 12px; }
+@layer components {
+  .intake-form :is(input, select), .field-label :is(input,select,textarea) {
+    @apply w-full min-w-0 rounded-[var(--radius)] border border-control-border bg-bg p-2.5;
+  }
+}
+/* Unscoped: PlanControls' "Use deterministic revision" checkbox renders
+   outside .intake-form and was left with none of this layout - the same
+   drifted-copy shape the FilterBar extraction fixed for filter rows.
+   Selector is `label.checkbox-label`, not just `.checkbox-label`: equal
+   specificity to `.intake-form label` above, so source order (this rule is
+   later) decides it - a bare class selector would lose that tie and silently
+   fall back to the stacked grid layout whenever nested under .intake-form. */
+label.checkbox-label { display: flex; align-items: center; gap: 8px; }
+@layer components {
+  .checkbox-label input {
+    @apply size-6;
+  }
+}
+@layer components {
+  .field-error {
+    @apply m-0 text-[12px] text-red;
+  }
+}
+/* No rule anywhere addressed disabled/invalid/read-only field appearance -
+   only :focus-visible and .button:disabled existed. */
+input:disabled, select:disabled, textarea:disabled { opacity: .55; cursor: not-allowed; }
+input[aria-invalid="true"], select[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: var(--red); }
+input[readonly], textarea[readonly] { background: var(--shell); }
+@layer components {
+  .plan-preview-stage {
+    @apply border-b border-border px-0 py-3;
+  }
+}
+.plan-control-actions, .publication-buttons, .run-control-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+/* RunControls renders this row as a direct Panel child, unlike its sibling
+   blocks (StopRun, PublicationControls) which wrap themselves in
+   .product-body's own 20px inset - without a matching inset here it sits
+   flush against the panel's left edge instead of lining up with them. */
+.run-control-actions { padding: 0 20px; }
+@layer components {
+  .governed-feedback {
+    @apply mx-0 my-3 basis-full border border-border p-3;
+  }
+  .governed-reason {
+    @apply basis-full;
+  }
+}
+.decision-buttons .governed-reason { order: 3; }
+@layer components {
+  .request-picker {
+    @apply w-full text-left text-text;
+  }
+}
+.request-picker strong, .request-picker span { display: block; }
+@media (max-width:760px) { .run-control-actions .button, .publication-buttons .button { flex: 1 1 40%; } .intake-form { max-width: 100%; } }

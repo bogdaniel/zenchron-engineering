@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -250,7 +251,7 @@ func (r *EngineeringRuntime) remainingBudgets(state *runState) RemainingBudgets 
 	// would record wall_seconds: 0 in a durable handoff record while the
 	// runtime would still grant it nearly its whole budget - provenance
 	// disagreeing with the semantics it exists to carry forward.
-	elapsed := state.activeElapsed(r.deps.Clock.Now())
+	elapsed := state.executionElapsed(r.deps.Clock.Now())
 	remainingWall := budgets.WallLimit - elapsed
 	if len(state.outstandingReviewKeys()) > 0 && remainingWall < 0 {
 		remainingWall = state.reviewContinuationRemaining(r.deps.Clock.Now())
@@ -276,7 +277,7 @@ func (r *EngineeringRuntime) remainingBudgets(state *runState) RemainingBudgets 
 	// follow.
 	invocations := UnknownBudget()
 	if limit := state.providerInvocationLimit(); limit > 0 {
-		left := limit - state.projection.Attempts[OpExecutionInvoke]
+		left := limit - state.providerInvocationsSpent()
 		if left < 0 {
 			left = 0
 		}
@@ -384,12 +385,6 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 // the provider, the candidate mutation, the commit, the push and the
 // publication in one place rather than in five.
 //
-// What this does NOT do is interrupt an attempt already under way. An operation
-// leased and started before the stop runs to completion: nothing on the
-// executing path re-reads the run, and ending it early is cooperative
-// cancellation, a different mechanism from a durable condition. That boundary
-// is stated again where each condition lives.
-//
 // CancelRun records durable operator cancellation intent for one run and stops
 // its scheduling. It lives here, in the runtime, because two callers need
 // exactly one cancellation path: the `stop RUN` command and the supervisor's
@@ -424,20 +419,31 @@ func (r *EngineeringRuntime) RequestAgentHandoff(runID, agentID, reason string) 
 // terminal. There is no third case FOR AN ACQUISITION, because the run document
 // and the acquisition are the same database.
 //
-// That is the boundary, and it is narrower than "stop means stop". What this
-// prevents is work being TAKEN UP after the stop; it does not interrupt an
-// attempt that has already begun. An operation acquired and started before the
-// run document was written executes to completion: Start, the operation.before
-// append and handle re-read nothing, and CancelRequested has no reader on the
-// executing path at all - Next's eligibility filter is its only one.
-// Interrupting a started attempt is cooperative cancellation, which is a
-// different mechanism and is not built here.
+// An attempt already STARTED is a different window, and only one kind of it is
+// reached (#213): the provider of a running execution.invoke. invokeExecution
+// arms watchExecution around Provider.Execute only; it reads this same durable
+// disposition while the provider runs and cancels the invocation once it has
+// successfully read the run as Cancelled. An invocation whose executor
+// committed the stop as the owner of its termination is journalled
+// OperationCancelled with a run_cancelled diagnostic; one ended by anything
+// else keeps that. Every other operation kind already started -
+// candidate.commit, candidate.push, pull_request.create, publication - runs to
+// completion exactly as before; whether a stop should gate those runtime
+// effects is #215, not this. Nothing a stop does retracts an effect that has
+// already happened.
 //
 // It is idempotent: cancelling an already cancelled run appends nothing and
 // reports the same answer. It is also REPEATABLE, which is not the same thing:
 // a second stop still finishes whatever operations the first one left active,
 // because a stop whose later writes failed is exactly the case an operator
 // retries.
+//
+// A COMPLETED or FAILED run is refused with a RunTerminalError (#439): its
+// outcome is history, not something a stop may rewrite, so neither the journal
+// nor the run row is written. The refusal is made by the run.cancelled append
+// itself, so it holds against a completion that commits while this stop is in
+// flight. A dead owner's abandoned lease on such a run is still reclaimed -
+// the lease only, exactly as dead-owner reclaim does - before the refusal.
 func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, runID, reason string) (Outcome, error) {
 	run, found, err := store.Run(runID)
 	if err != nil {
@@ -458,6 +464,10 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 	// would try - short-circuited on the disposition it had already written and
 	// repaired nothing. It is also the state every database already carrying
 	// this defect is in, and those are healed by the same fall-through.
+	// refused is set when the run already completed or failed (#439). Its
+	// outcome is not rewritten, but a lease its dead owner left behind is still
+	// reclaimed below, and then the refusal is returned.
+	var refused error
 	if run.Disposition == Cancelled {
 		outcome.Reason = run.Reason
 	} else {
@@ -478,12 +488,15 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 			Type:       EventRunCancelled,
 			OccurredAt: now,
 			Payload:    payload,
-		}); err != nil {
+		}); IsRunTerminal(err) {
+			refused = err
+		} else if err != nil {
 			return Outcome{}, err
-		}
-		run.Disposition, run.Reason, run.UpdatedAt = Cancelled, reason, now
-		if err := store.PutRun(run); err != nil {
-			return Outcome{}, err
+		} else {
+			run.Disposition, run.Reason, run.UpdatedAt = Cancelled, reason, now
+			if err := store.PutRun(run); err != nil {
+				return Outcome{}, err
+			}
 		}
 	}
 	operations, err := store.Operations(runID)
@@ -492,6 +505,16 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 	}
 	for _, op := range operations {
 		if op.State != Leased && op.State != Running {
+			continue
+		}
+		// A refused stop is not a cancellation: it only does what dead-owner
+		// reclaim does - drop a provably abandoned lease and leave the row's
+		// state for reconcileStoreLag to copy from the journal. A live owner's
+		// lease and a lease-less row are left exactly as they are.
+		if refused != nil {
+			if _, err := scheduler.defaults().reclaimAbandoned(op, now); err != nil {
+				return Outcome{}, err
+			}
 			continue
 		}
 		// Cancellation is REQUESTED first, so a driver that is mid-flight on
@@ -519,5 +542,32 @@ func CancelRun(store *SQLiteOperationStore, scheduler Scheduler, now time.Time, 
 			}
 		}
 	}
+	if refused != nil {
+		return Outcome{}, refused
+	}
 	return outcome, nil
+}
+
+// RunTerminalError is CancelRun's refusal to stop a run that already completed
+// or failed. It carries the outcome the run keeps.
+type RunTerminalError struct {
+	RunID       string
+	Disposition Disposition
+	Reason      string
+	// Verb is the refused pause or unpause (#86); empty for a stop.
+	Verb string
+}
+
+func (e *RunTerminalError) Error() string {
+	if e.Verb != "" {
+		return fmt.Sprintf("run %s is %s; there is nothing to %s", e.RunID, e.Disposition, e.Verb)
+	}
+	return fmt.Sprintf("run %q is already %s (%s); stop never rewrites a terminal outcome", e.RunID, e.Disposition, e.Reason)
+}
+
+// IsRunTerminal reports a CancelRun refused because the run already finished:
+// a bulk or plan-driven stop treats that run as settled, not as a failure.
+func IsRunTerminal(err error) bool {
+	var terminal *RunTerminalError
+	return errors.As(err, &terminal)
 }

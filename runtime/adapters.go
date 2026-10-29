@@ -7,301 +7,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
 )
-
-// ExecutionProvider can change only the supplied candidate directory. It has
-// no authority and receives no publication credentials.
-type ExecutionProvider interface {
-	Execute(context.Context, ExecutionRequest) (ExecutionResult, error)
-}
-type ExecutionRequest struct {
-	RunID string
-	// OperationID is the runtime operation that authorized this invocation.
-	// It is OPERATIONAL IDENTITY, not provider metadata: a brokered candidate
-	// command is a runtime-owned side effect, so its Docker lifecycle has to be
-	// bound to the exact operation that caused it. Without it a crashed
-	// controller has no durable name it alone may reconcile, and recovery would
-	// have to guess by prefix or label.
-	OperationID string
-	// Attempt is the PHYSICAL invocation number for OperationID: which try of
-	// this operation this particular provider call is. The runtime derives it
-	// from its own monotonic invocation count and the evidence already stored,
-	// so it is a fact the runtime owns; a provider must never invent, default,
-	// or carry it over.
-	//
-	// It is not the operation's budget attempt. That one is refunded when a
-	// provider condition routes to an external wait, so it can move backwards -
-	// and an identity that moves backwards points at a transcript that already
-	// exists.
-	//
-	// Together with RunID and OperationID it is the complete identity of ONE
-	// invocation, and therefore of the forensic transcript that invocation
-	// produces. Before this existed a transcript was keyed by run alone, so a
-	// retry silently overwrote the evidence of the attempt before it and the
-	// history of a bounded retry could not be read back at all.
-	Attempt int
-	// PriorAttemptFailure is the runtime's own typed classification of the
-	// PREVIOUS attempt of this exact operation, or empty on attempt 1. It comes
-	// from durable scheduler state - the same provenance the reattemptability
-	// rule reads - never from a diagnostic string, and it is what decides
-	// whether this retry may inherit that attempt's observations. See
-	// PriorAttemptContextEligible.
-	PriorAttemptFailure   FailureClass
-	SourceSnapshot        Ref
-	ControllerID          string
-	Base                  Ref
-	Candidate             Candidate
-	CandidateDir          string
-	Contract              Ref
-	Objective             string
-	AcceptanceObligations []string
-	Constraints           []string
-	Prohibitions          []string
-	Permissions           []string
-	TrustedInstructions   string
-	// Instructions are the operator-owned InstructionPack lines an AgentProfile
-	// contributes. They are TRUSTED text and reach the worker alongside the
-	// runtime's own instructions, which is exactly why they may come only from
-	// the operator-owned planning directory. Candidate content never arrives
-	// here; it arrives as delimited untrusted data.
-	Instructions []string
-	Purpose      InvocationPurpose
-	// Mode is what this invocation requires of the provider. The zero value is
-	// the ordinary mutating invocation, so every existing caller keeps its
-	// exact behaviour; a planner-role stage sets the non-mutating mode and an
-	// adapter that cannot prove one refuses.
-	Mode domain.InvocationMode
-	// ModelPreference is the AgentProfile's model preference for this
-	// invocation. Empty means the agent's own configured default.
-	ModelPreference string
-	// DenyPermissionBypass is an AgentProfile's refusal of the provider's
-	// unsafe permission mode for this stage, even where the agent has standing
-	// operator permission for it. It is a NARROWING and there is no member
-	// beside it that permits one: a profile can refuse the bypass and can never
-	// grant it.
-	DenyPermissionBypass bool
-	Findings             []Finding
-	// Feedback is the admitted, applicable, undelivered reviewer feedback this
-	// invocation is being given. It is UNTRUSTED DATA: it reaches the worker
-	// inside explicit delimiters, framed by the runtime-owned trusted
-	// instructions as third-party description of desired behaviour, and it
-	// expands no permission. Every item in it has already passed the actor
-	// admission gate; nothing that failed that gate is ever placed here.
-	Feedback []FeedbackContext
-	// Upstream is the accepted output of the plan stages this one depends on:
-	// the exact commit and tree, and the DIFF itself.
-	//
-	// The diff is candidate content, so it reaches the worker the way every
-	// other piece of candidate-derived text does - as delimited untrusted data
-	// framed by the runtime-owned instructions - and it is never stored in a
-	// durable payload. It exists because a reviewer that cannot see the change
-	// is not reviewing it: an independent review stage runs in its own
-	// workspace at the trusted base, and this is what makes its work real.
-	Upstream []UpstreamContext
-	// ReviewerResultPath is the runtime-owned file this invocation must write
-	// its structured verdict to, set only for a reviewer stage.
-	//
-	// It is supplied BY the runtime and lives outside the candidate workspace,
-	// which is what makes the channel unspoofable: repository content is not on
-	// this path and cannot predict it, and the runtime empties the slot before
-	// the invocation so no earlier attempt's answer can be inherited. Empty for
-	// every other stage, and a provider that is given none emits no verdict.
-	ReviewerResultPath string
-	// RequiredTools are the executables THIS invocation's contract obliges the
-	// worker to run, derived from the contract's own frozen acceptance
-	// obligations.
-	//
-	// It is the invocation's requirement, never the operator's global toolchain
-	// declaration. That list is a readiness ceiling - which executables the
-	// brokered environment must resolve at all - and granting from it would
-	// give every stage every command family the operator ever declared.
-	// Customization may narrow privilege; it may never silently widen it.
-	RequiredTools []string
-	// ScratchDir is the runtime-owned, EXEC-CAPABLE build scratch brokered to
-	// this invocation as GOTMPDIR and GOCACHE.
-	//
-	// A Go toolchain does not only compile: `go test` links a binary and then
-	// EXECUTES it. Brokering a module cache while leaving the build directory
-	// to the process default meant that binary landed wherever the surrounding
-	// environment put temporary files, and the runtime's own verifier sandbox
-	// mounts that location noexec. The candidate then failed a check no
-	// candidate could pass.
-	ScratchDir string
-	// Deadline is the ABSOLUTE instant this invocation's authority ends, taken
-	// from the operation's durable remaining execution budget.
-	//
-	// It is carried as an instant rather than left to be re-derived from a
-	// duration so that what bounds the process and what is recorded as its
-	// authority are ONE fact. Two arithmetic results computed at different
-	// moments can disagree, and a provenance record that disagrees with the
-	// bound is worse than none: it reads as forensic truth.
-	Deadline *time.Time
-	Budgets  ProviderBudget
-}
-
-// InvocationPurpose is deliberately operational rather than a provider role.
-type InvocationPurpose string
-
-const (
-	InvocationInitial     InvocationPurpose = "initial_implementation"
-	InvocationRemediation InvocationPurpose = "remediation"
-	// InvocationPlanning is REASONING about what work is required. It produces
-	// a structured proposal and changes nothing: it is the only purpose that
-	// runs in a non-mutating provider mode, and the runtime verifies the
-	// workspace afterwards rather than trusting that claim.
-	InvocationPlanning InvocationPurpose = "planning"
-	// InvocationContinuation resumes work a bounded stop interrupted. It is
-	// exact-bound to the runtime-owned checkpoint commit and tree the previous
-	// invocation produced, so the provider sees a clean workspace at a known
-	// revision and never unbound dirty state. It carries no findings: nothing
-	// judged the work, it was simply cut off.
-	InvocationContinuation InvocationPurpose = "continuation"
-)
-
-// UpstreamContext is one completed upstream stage's output as a downstream
-// stage sees it.
-type UpstreamContext struct {
-	StageID string
-	RunID   string
-	Commit  string
-	Tree    string
-	// Diff is the change that stage produced, bounded by the runtime. Empty
-	// means the runtime could not read it, which is stated rather than hidden.
-	Diff string
-	// Truncated reports that the diff was cut to the runtime's bound, so a
-	// reviewer knows it is reading part of a change rather than all of it.
-	Truncated bool
-}
-
-type Finding struct {
-	Classification FailureClass
-	// Verifier is the identity of what OBSERVED the failure, kept separate
-	// from what the failure IS. Collapsing the two into one signature made
-	// every failure a verifier could ever report indistinguishable from every
-	// other, which is what left five consecutive remediation attempts reading
-	// byte-identical input and editing blindly.
-	Verifier string
-	// Signature identifies THE FAILURE. It is a digest of normalized failure
-	// evidence, not the evidence itself: a candidate's own tests write that
-	// evidence, and a digest is the one form of it that cannot carry a
-	// sentence. Two different failures differ here; the same failure twice
-	// does not.
-	Signature string
-	// ArtifactRef is the immutable, attempt-scoped transcript this finding was
-	// derived from. It is composed from runtime identity, never from a path a
-	// provider or candidate supplied.
-	ArtifactRef string
-	// Diagnostic is a bounded, sanitized excerpt of that transcript, and it is
-	// UNTRUSTED DATA. A candidate's tests print into the verifier's own stdout,
-	// so this text is quoted to a model inside untrusted markers and is never
-	// rendered into the trusted half of an envelope. Holding it in the same
-	// struct as the trusted fields is safe only because no formatter prints a
-	// Finding whole; see findingSummary and String.
-	Diagnostic string `json:"-"`
-}
-
-// String renders a finding WITHOUT its diagnostic, and exists so that the
-// safety of this type does not depend on every future caller remembering to.
-//
-// The trusted half of a worker envelope is built with a format verb. A later
-// %v or %s on a Finding - in a log line, an error, a debug print, a rendering
-// of a slice of them - would otherwise splice attacker-writable verifier bytes
-// into whatever it was building. With this method that is structurally
-// impossible: the excerpt has exactly one way out, verifierEvidenceEnvelope,
-// which quotes it inside untrusted markers. The json tag above closes the
-// serialization route for the same reason.
-func (f Finding) String() string {
-	fields := []string{"class=" + string(f.Classification)}
-	if f.Verifier != "" {
-		fields = append(fields, "verifier="+f.Verifier)
-	}
-	if f.Signature != "" {
-		fields = append(fields, "signature="+f.Signature)
-	}
-	if f.ArtifactRef != "" {
-		fields = append(fields, "evidence="+f.ArtifactRef)
-	}
-	return "[" + strings.Join(fields, " ") + "]"
-}
-
-type ProviderBudget struct {
-	MaxTokens     *int64
-	MaxCostMicros *int64
-	WallLimit     time.Duration
-	// InactivityLimit is how long this ONE invocation may go without producing
-	// observable output before the runtime terminates it.
-	//
-	// It sits beside WallLimit because it is the same kind of statement - a
-	// bound this invocation runs under - and because every caller that states
-	// one has to state the other in the same place. It is not a share of
-	// WallLimit and does not reduce it: a provider that keeps talking is still
-	// stopped by the total bound, and a provider that goes quiet is stopped by
-	// this one long before the total bound would notice. Zero means no
-	// inactivity bound, which is what a caller predating this budget gets.
-	InactivityLimit time.Duration
-	// InactivityWindow is the CONFIGURED per-attempt window InactivityLimit was
-	// derived from. The two differ when a byte_output successor inherits only
-	// the remainder. A provider control derived from the window - Claude's
-	// background-wait ceiling (#322) - reads this one, so a shrunken remainder
-	// can never silently shrink it. Zero means the caller stated no separate
-	// window, and InactivityLimit is then the configured window itself: the
-	// planner (supervisor.go) and any caller passing the configured limit
-	// directly rely on that, so zero must stay legal.
-	InactivityWindow time.Duration
-}
-type ExecutionResult struct {
-	ProviderID, Model, AuthMode string
-	Attempt                     int
-	Outcome                     OperationState
-	Tokens, CostMicros          *int64
-	Artifacts                   []Artifact
-	ChangeSummary               string
-	ChangedPaths                []string
-	Failure                     *ProviderFailure
-	// PriorContext is the runtime's account of the prior-attempt observations
-	// this invocation was actually given, or nil when it was given none. It is
-	// an observation about the handoff, not about the work, and it exists so a
-	// replayed run can explain a retry rather than leaving an operator to infer
-	// what the model saw.
-	PriorContext *PriorAttemptObservations
-	// Invocation is the non-secret record of HOW this attempt was invoked:
-	// which executable, which version, which permission and sandbox mode, and
-	// which security-relevant arguments. It is a POINTER because a provider
-	// that cannot state it truthfully must state nothing rather than a zero
-	// value that would read as "no sandbox, no bypass, unknown auth" - three
-	// claims it did not make.
-	Invocation *InvocationProvenance
-	// Review is the structured verdict a reviewer stage emitted, read by the
-	// adapter from the runtime-owned result path. It is nil when none was
-	// written, which is an ordinary outcome rather than a failure: a reviewer
-	// that produced only prose produced no verdict, and the stage stays
-	// unsettled. It is a CLAIM at this point and authorizes nothing until
-	// AdmitReviewerResult has checked it.
-	Review *ReviewerResult
-}
-
-// ExecutionAttemptRef is the runtime-owned identity of one provider
-// invocation: which run, which authorizing operation, which attempt of it.
-//
-// It is deliberately built only from durable scheduler facts. A timestamp, a
-// model response id, a random provider id or anything derived from candidate
-// text would all be unusable here for the same reason: replay has to arrive at
-// the same identity from the journal alone, and none of those are in it.
-type ExecutionAttemptRef struct {
-	RunID       string
-	OperationID string
-	Attempt     int
-}
-
-// AttemptRef is the identity of the invocation this request authorizes.
-func (r ExecutionRequest) AttemptRef() ExecutionAttemptRef {
-	return ExecutionAttemptRef{RunID: r.RunID, OperationID: r.OperationID, Attempt: r.Attempt}
-}
 
 // AttemptRef is the immutable identity of ONE verification of ONE candidate.
 //
@@ -319,30 +29,6 @@ func (r AssuranceRequest) AttemptRef() ExecutionAttemptRef {
 	return ExecutionAttemptRef{RunID: r.RunID, OperationID: operation, Attempt: r.Attempt}
 }
 
-// Validate refuses an identity a provider cannot honestly write evidence
-// under. It is a PLUMBING check, not a policy one: reaching it with a zero
-// attempt means a request producer was never wired to the scheduler, which is
-// a defect in this runtime rather than a condition of the run.
-func (a ExecutionAttemptRef) Validate() error {
-	// Whitespace is not an identity. ToolBroker already refuses a blank
-	// operation id as unbound, and a namespace of encoded spaces would be a
-	// durable place to file evidence that no operation authorized.
-	if strings.TrimSpace(a.RunID) == "" {
-		return fmt.Errorf("execution attempt identity requires a run")
-	}
-	if strings.TrimSpace(a.OperationID) == "" {
-		return fmt.Errorf("execution attempt identity requires an authorizing operation")
-	}
-	if a.Attempt < 1 {
-		return fmt.Errorf("execution attempt identity requires the scheduler attempt for operation %q, got %d", a.OperationID, a.Attempt)
-	}
-	return nil
-}
-
-type ProviderFailure struct {
-	Classification   FailureClass
-	RawDiagnosticRef string
-}
 type AssuranceProvider interface {
 	Assure(context.Context, AssuranceRequest) (AssuranceResult, error)
 }
@@ -450,10 +136,9 @@ type SemanticClaimRequest struct {
 
 type AssuranceRequest struct {
 	RunID, Commit, Tree, CheckoutDir string
-	// Attempt is the SCHEDULER's attempt number for the assurance operation.
-	// It exists so a verification writes evidence under an identity a replay
-	// arrives at from the journal alone, exactly as #55 requires of a provider
-	// invocation.
+	// Attempt is the SCHEDULER's physical attempt identity for this assurance
+	// operation. It exists so a resumed invocation writes evidence to a fresh,
+	// durable slot, exactly as #55 requires of a provider invocation.
 	Attempt int
 	// Confirmation marks the SECOND verification of one candidate that
 	// AssuranceRerun performs to tell a flake from a real failure. Both
@@ -465,6 +150,23 @@ type AssuranceRequest struct {
 	Policy             Ref
 	Producer           Ref
 	VerifierDefinition string
+	// FileSizePolicyBase, when set, makes the baseline verifier enforce the
+	// repository's file-size policy on Tree first, with the ceilings and
+	// exceptions of this base revision (see file_size_policy.go). Empty when
+	// the contract does not require it.
+	FileSizePolicyBase string
+	// BrowserAcceptanceBase, when set, makes the baseline verifier run the
+	// browser tests named by this base revision, with this base revision's test
+	// sources, after the suite, and record the check that proves the
+	// browser-acceptance claim (browser_acceptance.go).
+	BrowserAcceptanceBase string
+	// FeatureAcceptance, when set, is the operator-declared feature whose tests
+	// the baseline verifier runs after the suite, with FeatureAcceptanceBase's
+	// manifest and test sources, against the exact integrated tree
+	// (feature_acceptance.go). Both are empty unless the contract requires the
+	// feature claim.
+	FeatureAcceptance     string
+	FeatureAcceptanceBase string
 	// The fields below are used by the semantic verifier. They are bounded,
 	// read-only context: identity, the exact base the diff is taken against, the
 	// changed-path inventory, a summary of the automated result, and the exact
@@ -489,6 +191,10 @@ type AssuranceResult struct {
 	// runtime/assurance_evidence.go.
 	ArtifactRef      string
 	FailureSignature string
+	// Checks are the specialised deterministic checks this verifier completed
+	// on the exact commit and tree (verification_check.go). They are recorded
+	// on the observation; a claim that needs one is discharged only from them.
+	Checks []VerificationCheck
 	// Model and Tokens are recorded only when the producer actually reports
 	// them. Nothing here is invented when a provider does not expose usage.
 	Model  string
@@ -551,7 +257,7 @@ func GuardCandidatePathShape(root string, paths []string) error {
 			continue
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlink candidate path %q", normalized)
+			return deterministicPathRefusal("candidate.symlink", normalized, fmt.Errorf("symlink candidate path %q", normalized))
 		}
 	}
 	return nil
@@ -567,6 +273,21 @@ func GuardCandidatePathShape(root string, paths []string) error {
 // candidate, and its bytes are not candidate bytes, because neither reaches the
 // tree. The gates are unchanged for everything that does reach it.
 func GuardCandidateCommitContent(root string, paths []string, maxBytes int64) error {
+	return guardCommitNamesAndSizes(paths, maxBytes, func(normalized string) (int64, bool) {
+		info, err := os.Lstat(filepath.Join(root, normalized))
+		if err != nil {
+			return 0, false
+		}
+		return info.Size(), true
+	})
+}
+
+// guardCommitNamesAndSizes is the one implementation of the sensitive-name and
+// size-ceiling rules. sizeOf answers for a normalized path, and false means the
+// path carries no bytes (a deletion), so it adds nothing to the total. The
+// worktree form above and the staged-blob form in CandidateWorkspace.Commit
+// differ only in where the size comes from.
+func guardCommitNamesAndSizes(paths []string, maxBytes int64, sizeOf func(normalized string) (int64, bool)) error {
 	var total int64
 	for _, p := range paths {
 		normalized, err := normalizedCandidatePath(p)
@@ -579,15 +300,15 @@ func GuardCandidateCommitContent(root string, paths []string, maxBytes int64) er
 		// credential_policy.go permanently unopenable by the engineering
 		// system that has to maintain them.
 		if sensitiveCredentialFilename(filepath.Base(normalized)) {
-			return fmt.Errorf("sensitive candidate path %q", normalized)
+			return deterministicPathRefusal("candidate.sensitive_path", normalized, fmt.Errorf("sensitive candidate path %q", normalized))
 		}
-		info, err := os.Lstat(filepath.Join(root, normalized))
-		if err != nil {
+		size, ok := sizeOf(normalized)
+		if !ok {
 			continue
 		}
-		total += info.Size()
+		total += size
 		if maxBytes > 0 && total > maxBytes {
-			return fmt.Errorf("candidate exceeds size ceiling")
+			return deterministicRefusal("candidate.size_limit", fmt.Errorf("candidate exceeds size ceiling"))
 		}
 	}
 	return nil
@@ -596,7 +317,7 @@ func GuardCandidateCommitContent(root string, paths []string, maxBytes int64) er
 func normalizedCandidatePath(p string) (string, error) {
 	normalized, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: []string{p}, PathsKnown: true})
 	if err != nil || filepath.IsAbs(p) || len(normalized.Paths) != 1 {
-		return "", fmt.Errorf("unsafe candidate path %q", p)
+		return "", deterministicRefusal("candidate.path_shape", fmt.Errorf("unsafe candidate path %q", p))
 	}
 	return normalized.Paths[0], nil
 }
@@ -612,100 +333,15 @@ func VerificationSurfaceChanged(paths []string) bool {
 	return false
 }
 
-type FailureClass string
-
 const (
 	FailureFormat                  FailureClass = "format"
 	FailureCompileTest             FailureClass = "compile_or_test"
 	FailureVerification            FailureClass = "verification_failure"
 	FailureSurface                 FailureClass = "verification_surface_changed"
 	FailureWeakened                FailureClass = "verification_weakened"
-	FailureTransientProvider       FailureClass = "transient_execution_provider"
 	FailureTransientInfrastructure FailureClass = "transient_infrastructure"
 	FailureMaterialScope           FailureClass = "material_scope_change"
 	FailureAuthorityWait           FailureClass = "authority_wait"
-	// FailureProviderAccountUnavailable is a recoverable EXTERNAL ACCOUNT
-	// prerequisite of the execution provider: the provider refused at its own
-	// account boundary before any reasoning happened. It is not transient (a
-	// retry cannot clear it), not a producer or code failure (no work was
-	// attempted), not an authority failure (nothing about permission changed),
-	// and not terminal (an operator restores the account and the same run
-	// continues). It is deliberately NOT FailureAuthorityWait: conflating an
-	// external billing prerequisite with the human-authority boundary would
-	// make status tell an operator to resolve an authority condition that does
-	// not exist.
-	FailureProviderAccountUnavailable FailureClass = "provider_account_unavailable"
-	// FailureProviderQuota is an execution worker refused by its own plan or
-	// account QUOTA: the allowance is spent and returns on that provider's own
-	// schedule. It is deliberately distinct from
-	// FailureProviderAccountUnavailable, which is an account prerequisite an
-	// operator must repair, and from FailureTransientProvider, which is
-	// capacity that clears in seconds.
-	//
-	// It is a CAPACITY WAIT, not an engineering attempt: no reasoning happened,
-	// no candidate moved, no evidence or authority changed. Routing it to a
-	// wait is what stops several concurrent workers sharing one subscription
-	// from burning a run's remediation budget on an allowance that will simply
-	// come back.
-	FailureProviderQuota FailureClass = "provider_quota"
-	// FailureControllerShutdown is the CONTROLLER stopping, observed from
-	// inside an invocation as a cancelled context.
-	//
-	// It is not the work failing and it is not the operator cancelling the run.
-	// Those are different acts with different records: `stop RUN` journals
-	// run.cancelled and the Cancelled disposition takes precedence over
-	// everything below it, while a shutdown is supposed to leave every run
-	// exactly as resumable as its journal says.
-	//
-	// Classifying it as FailureUnknown routed it to RouteStop, so a supervisor
-	// shutting down terminalized whatever was mid-flight - the controller
-	// lifecycle failure shape #57 documents, and the exact opposite of what
-	// docs/supervisor.md promises about shutdown.
-	FailureControllerShutdown FailureClass = "controller_shutdown"
-	// FailureProviderRateLimited is the same shape at a shorter timescale: the
-	// provider asked to be called less often. It is kept separate from quota
-	// because the operator action differs - one waits, the other means the
-	// configured concurrency is above what that account tolerates - and an
-	// operator cannot see that difference through one merged class.
-	FailureProviderRateLimited FailureClass = "provider_rate_limited"
-	// FailureProviderNoProgress is a provider invocation the runtime ended
-	// because it produced no output for the whole configured inactivity
-	// window.
-	//
-	// It is not a quota, not an account condition, and not a verdict about the
-	// work: nothing external refused anything, and the process was alive the
-	// entire time. That liveness is exactly what made it invisible - the run
-	// that exposed it charged 8h55m of an active-work budget to a coding CLI
-	// that had lost its network, and the run wall budget was what eventually
-	// noticed.
-	//
-	// It routes to a bounded RETRY rather than a wait. A stall is a runtime
-	// bound reached, like FailureExecutionIncomplete, and the condition may
-	// well be gone by the next attempt - but it is bounded by the execution
-	// attempt ceiling and the silent interval is still charged to the wall
-	// budget, so a provider that always stalls exhausts its attempts in
-	// minutes instead of consuming the day. It is deliberately NOT
-	// continuation-eligible: silence is not interrupted work waiting to be
-	// resumed, and a retry inherits no observations from it.
-	FailureProviderNoProgress FailureClass = "provider_no_progress"
-	// FailureProviderUnavailable is the provider's TRANSPORT being gone, named
-	// by the provider's own diagnostic: DNS did not resolve, the connection was
-	// refused or reset, or the endpoint answered that it is unavailable.
-	//
-	// It is a recognized statement, never an inference from silence. Silence
-	// is FailureProviderNoProgress; only an explicit diagnostic reaches here,
-	// because guessing "offline" from an arbitrary substring is how a provider
-	// bug becomes a permanent wait. It is separate from
-	// FailureProviderAccountUnavailable - the credential is fine and there is
-	// nothing for an operator to repair in their account - and separate from
-	// FailureTransientProvider, which is that provider's own capacity rather
-	// than the host's ability to reach it at all.
-	//
-	// It routes to a bounded external WAIT under the existing #83 accounting:
-	// a host with no network is not performing engineering work, so the
-	// interval must not be charged to the active-work budget, and the same run
-	// continues once connectivity returns.
-	FailureProviderUnavailable FailureClass = "provider_unavailable"
 	// FailureStateStorageExhausted is the operator's local state ceiling being
 	// reached before a candidate workspace was allocated. It is detected BEFORE
 	// the clone, so nothing is half-written and the run's existing state is
@@ -717,14 +353,6 @@ const (
 	// automatically to make room - trading one active run's evidence for
 	// another's progress is not a decision a scheduler gets to make.
 	FailureStateStorageExhausted FailureClass = "state_storage_exhausted"
-	// FailureExecutionIncomplete is a producer invocation that produced real
-	// work and then ran out of one of the runtime's own bounds. The work is
-	// preserved as a checkpoint; the OPERATION did not complete, which is why
-	// it is a failure at all. It routes to a retry because continuing is
-	// exactly what it needs, and routing it that way is what puts continuations
-	// under the ordinary execution attempt budget instead of a counter of their
-	// own.
-	FailureExecutionIncomplete FailureClass = "execution_incomplete"
 
 	// FailureExecutionDeadlineExceeded is a provider that returned AFTER its
 	// durable execution deadline, whatever the adapter reported.
@@ -736,19 +364,6 @@ const (
 	// already ended.
 	FailureExecutionDeadlineExceeded FailureClass = "execution_deadline_exceeded"
 
-	// FailureRunCancelled is the SAME revocation arriving from the other
-	// direction: a provider that returned after the operator stopped the run.
-	//
-	// It sits beside the deadline class deliberately, and routes the same way,
-	// because it is the same statement - the authority to turn this result into
-	// a candidate had already ended - and not a statement about the work, which
-	// may be perfect. What differs is only the cause and when it is knowable: a
-	// deadline can be recognised only once the attempt ends, while cancellation
-	// exists before it begins and is therefore ALSO refused at acquisition,
-	// where it prevents the invocation rather than discarding its result. This
-	// class is what remains for an attempt that was legitimately acquired and
-	// then outlived the stop.
-	FailureRunCancelled FailureClass = "run_cancelled"
 	// FailureAssurancePrerequisite is the ENVIRONMENT the verifier needs not
 	// being there: the configured image resolves no toolchain, the
 	// operator-provisioned dependency cache is missing or empty, or the exact
@@ -827,11 +442,143 @@ const (
 	// executable would destroy work over a condition that is entirely local
 	// and entirely fixable.
 	FailureCandidateGuardUnavailable FailureClass = "candidate_guard_unavailable"
-	FailureGovernanceMismatch        FailureClass = "governance_mismatch"
-	FailureWorkspaceIntegrity        FailureClass = "workspace_integrity_violation"
-	FailureBaseIntegrationConflict   FailureClass = "base_integration_conflict"
-	FailureFlaky                     FailureClass = "flaky_verification"
-	FailureUnknown                   FailureClass = "unknown"
+	// FailureCandidateWriterAlive is a candidate whose writer lock is still
+	// held by a process from an earlier invocation - one that outlived its
+	// supervisor (#168). Refused before dispatch, it waits: an operator stops
+	// the stale writer and the same run continues.
+	FailureCandidateWriterAlive    FailureClass = "candidate_writer_alive"
+	FailureGovernanceMismatch      FailureClass = "governance_mismatch"
+	FailureWorkspaceIntegrity      FailureClass = "workspace_integrity_violation"
+	FailureBaseIntegrationConflict FailureClass = "base_integration_conflict"
+	FailureFlaky                   FailureClass = "flaky_verification"
+	// FailureIntegrationConflict is a WorkGraph integration unit's (#475)
+	// deterministic composition blocked - a Git textual conflict, or a clean
+	// merge whose independent assurance then failed (semantic/uncertain).
+	// Unlike FailureBaseIntegrationConflict it never routes to the provider:
+	// an integrator unit never receives implementation authority, so there is
+	// no producer remediation to dispatch it to.
+	FailureIntegrationConflict FailureClass = "integration_conflict"
+	// FailureFeatureAcceptance is a JUDGED failure of the operator-declared
+	// feature acceptance on an integrated candidate: the tests ran, against the
+	// exact tree, and did not pass. It routes to RouteHold - never to a wait,
+	// which would refund the work it spent, never to a retry, which would
+	// re-verify the same deterministic tree, and never to a provider, which an
+	// integration unit does not have.
+	FailureFeatureAcceptance FailureClass = "feature_acceptance_failed"
+	// FailureIntegrationInvalidated is one consumed input this attempt could
+	// not read at its admitted subject - superseded, unreadable, or not a
+	// descendant of the verified base. A retry re-reads live state and may
+	// legitimately still find it true; exhausting the attempt budget fails
+	// the run, which the WorkGraph's own dependents already fail closed on.
+	FailureIntegrationInvalidated FailureClass = "integration_invalidated"
+	// FailureFeedbackUnresolved is an invocation delivered admitted feedback
+	// that returned without discharging it: the workspace it left behind is
+	// unchanged, and it did not state (or failed to bind) an explicit
+	// no_change_required resolution. See FeedbackResolution.
+	//
+	// Provider return is not proof of semantic completion (#376): a producer
+	// that defers to background work it never finishes, or that simply
+	// misreads admitted feedback, returns exactly this way - indistinguishable
+	// from one that legitimately needed to do nothing, right up until it is
+	// asked to STATE that rather than have it inferred. So neither shape is
+	// read as success; both are this class, and only a bound, admitted
+	// resolution (or a mutation) escapes it.
+	//
+	// It routes to a bounded RETRY of the SAME execution.invoke operation,
+	// under that operation's existing attempt ceiling - no budget is minted
+	// or reset, and a provider that keeps returning unresolved exhausts its
+	// attempts and stops truthfully, exactly like any other producer failure
+	// that never lands. It is deliberately excluded from
+	// PriorAttemptContextEligible: the provider was not cut short by a
+	// runtime bound mid-task, so the retry gets a fresh invocation rather
+	// than observations from an attempt that said nothing.
+	FailureFeedbackUnresolved FailureClass = "feedback_unresolved"
+	// FailureReviewRemediationUnresolved is the same shape as
+	// FailureFeedbackUnresolved (#376), bound to an admitted independent-review
+	// BLOCK (#474) rather than GitHub feedback: an invocation delivered
+	// admitted review-remediation findings that returned without discharging
+	// them, having neither mutated the candidate nor stated an admitted
+	// no_change_required resolution naming them.
+	//
+	// A successful, non-mutating provider return is not proof the BLOCK was
+	// addressed - the exact #474 B1 gap a reviewer's REQUEST_CHANGES verdict
+	// would otherwise let slip past as a quietly completed operation, with
+	// nothing left wanting a successor. Only a bound, admitted resolution (or
+	// a mutation) escapes it.
+	//
+	// It routes to a bounded RETRY of the SAME execution.invoke operation, the
+	// same shape FailureFeedbackUnresolved uses: no budget is minted or reset,
+	// and a producer that keeps returning unresolved exhausts its attempts and
+	// stops truthfully, exactly like any other producer failure that never
+	// lands.
+	FailureReviewRemediationUnresolved FailureClass = "review_remediation_unresolved"
+	// FailureCheckpointContinuationUnresolved is a continuation invocation -
+	// one that inherited a runtime-owned checkpoint, interrupted rather than
+	// finished work - that returned without settling it: it did not state (or
+	// failed to bind) an explicit FeedbackResolutionCheckpointComplete claim
+	// bound to the exact checkpoint revision and tree it was shown. See
+	// FeedbackResolution.
+	//
+	// Provider return is not proof of semantic completion (#379, generalizing
+	// #376 from feedback discharge to checkpoint continuation): a continuation
+	// that defers to background work it never finishes, or that simply
+	// misreads the checkpoint, returns exactly this way - indistinguishable
+	// from one that legitimately needed to do nothing further, right up until
+	// it is asked to STATE that rather than have it inferred. Mutation does
+	// NOT escape this class by itself: it proves work happened, not that the
+	// inherited checkpoint is finished, so only a bound, admitted completion
+	// claim escapes it, mutated or not.
+	//
+	// It routes to a bounded RETRY of the SAME execution.invoke operation,
+	// under that operation's existing attempt ceiling - no budget is minted
+	// or reset, and a continuation that keeps returning unresolved exhausts
+	// its attempts and stops truthfully, exactly like any other producer
+	// failure that never lands. It is deliberately excluded from
+	// PriorAttemptContextEligible: the provider was not cut short by a
+	// runtime bound mid-task, so the retry gets a fresh invocation rather
+	// than observations from an attempt that said nothing.
+	FailureCheckpointContinuationUnresolved FailureClass = "checkpoint_continuation_unresolved"
+	// FailureReviewerProtocolIncomplete is a reviewer-role invocation that
+	// completed - the process exited cleanly, within its bounds - without
+	// crossing the reviewer-result protocol (reviewer_result.go): the result
+	// file it wrote failed to decode as one, or it wrote none at all.
+	//
+	// It is deliberately NOT FailureVerification. That class means a verdict
+	// WAS reached and the candidate was judged and found wanting; this class
+	// means no verdict was reached at all. A reviewer that produced malformed
+	// JSON, or stdout but no result file, has refused to answer the question
+	// it was asked - that is a defect of THIS invocation's protocol
+	// compliance, not an observation about the candidate under review, and
+	// folding it into FailureVerification is what let a reviewer's own broken
+	// output read as the candidate having failed review (#374).
+	//
+	// It routes to a bounded RETRY of the SAME execution.invoke operation, the
+	// same shape FailureFeedbackUnresolved uses: no budget is minted or reset,
+	// and a reviewer that keeps failing the protocol exhausts its attempts and
+	// stops truthfully. The exact reason is kept (ReviewerResultRefusedError)
+	// and returned to the reviewer on the retry as a finding, so correction is
+	// possible instead of the reviewer guessing what was wrong the first time.
+	FailureReviewerProtocolIncomplete FailureClass = "reviewer_protocol_incomplete"
+	// FailureDecisionBindingStale is a decision-resumed execution.invoke
+	// attempt whose own binding - the exact decision set and candidate
+	// subject it was created against - no longer matches current durable
+	// state: one of its decisions was superseded, a newer one now claims the
+	// coalesced set, or the subject moved, all found by a fresh read taken
+	// immediately before dispatch (#508 review P4b §6). Nothing was
+	// attempted; it routes to a bounded retry of the SAME operation, the
+	// same shape FailureFeedbackUnresolved uses, so a genuinely stale
+	// binding exhausts its own attempts rather than ever being dispatched
+	// with context that would contradict it.
+	FailureDecisionBindingStale FailureClass = "decision_binding_stale"
+	// FailureReviewRemediationStale is the same shape as
+	// FailureDecisionBindingStale, for an admitted independent-review BLOCK
+	// (#474 B2): a live GitHub read taken immediately before the provider is
+	// launched disagreed with the head the admitted findings were assembled
+	// against, or GitHub was unreachable for that read. Nothing was
+	// attempted; it routes to a bounded retry of the SAME operation, so a
+	// genuinely moved PR exhausts its own attempts rather than ever
+	// delivering findings whose subject may already be gone.
+	FailureReviewRemediationStale FailureClass = "review_remediation_stale"
 )
 
 type FailureRoute string
@@ -844,6 +591,10 @@ const (
 	RouteWait                FailureRoute = "wait"
 	RouteRestore             FailureRoute = "restore_or_refuse"
 	RouteStop                FailureRoute = "stop"
+	// RouteHold is a recorded verdict that waits for an operator: the attempt it
+	// consumed stays consumed, nothing is retried, and the run settles with the
+	// reason feature_acceptance_failed until a governed decision moves it.
+	RouteHold FailureRoute = "hold"
 )
 
 func RouteFailure(c FailureClass) FailureRoute {
@@ -869,8 +620,21 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureCompileTest, FailureBaseIntegrationConflict, FailureVerification:
 		return RouteProviderRemediation
 	case FailureTransientProvider, FailureTransientInfrastructure, FailureExecutionIncomplete,
-		FailureProviderNoProgress:
+		FailureProviderNoProgress, FailureFeedbackUnresolved, FailureReviewRemediationUnresolved,
+		FailureCheckpointContinuationUnresolved, FailureReviewerProtocolIncomplete,
+		FailureProviderBackgroundWorkUnresolved, FailureConnectivity, FailureDecisionBindingStale,
+		FailureReviewRemediationStale:
 		return RouteRetry
+	// An integration unit never gets a producer to remediate it (#475): its
+	// whole producer stage is deterministic composition, not a free-form
+	// invocation. A bounded retry re-reads live state through the same
+	// unconditional live-currency check every attempt makes; exhausting the
+	// attempt budget is what makes either class terminal, same as any other
+	// bounded retry here.
+	case FailureIntegrationConflict, FailureIntegrationInvalidated:
+		return RouteRetry
+	case FailureFeatureAcceptance:
+		return RouteHold
 	case FailureMaterialScope, FailureSurface, FailureWeakened, FailureGovernanceMismatch:
 		return RouteReassess
 	case FailureWorkspaceIntegrity:
@@ -883,11 +647,28 @@ func RouteFailure(c FailureClass) FailureRoute {
 	case FailureAuthorityWait, FailureProviderAccountUnavailable, FailureAssurancePrerequisite,
 		FailureToolchainUnavailable, FailureProviderQuota, FailureProviderRateLimited,
 		FailureStateStorageExhausted, FailureControllerShutdown, FailureProviderUnavailable,
-		FailureCandidateGuardUnavailable:
+		FailureCandidateGuardUnavailable, FailureCandidateWriterAlive:
 		return RouteWait
 	default:
 		return RouteStop
 	}
+}
+
+// CandidateVerdict reports whether an assurance result is a valid verdict
+// about the CANDIDATE: a pass, or a failure the verifier judged (format,
+// compile/test, verification, or an unpassed result naming no class, which is
+// read as verification). This is the one definition. Everything else - an
+// infrastructure fault, a cancellation, a missing prerequisite - says nothing
+// about the candidate, and only two verdicts can disagree as a flake.
+func CandidateVerdict(r AssuranceResult) bool {
+	if r.Passed {
+		return true
+	}
+	switch r.FailureClass {
+	case "", FailureFormat, FailureCompileTest, FailureVerification, FailureFeatureAcceptance:
+		return true
+	}
+	return false
 }
 
 // PriorAttemptContextEligible reports whether a retry of the same execution

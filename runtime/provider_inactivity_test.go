@@ -46,19 +46,28 @@ func TestRecognizedConnectivityDiagnosticsRouteToABoundedWait(t *testing.T) {
 		"claude dns temporary": {claudeSpec, "getaddrinfo EAI_AGAIN api.anthropic.com"},
 		"gemini econnreset":    {geminiSpec, "FetchError: read ECONNRESET"},
 		"qwen ehostunreach":    {qwenSpec, "connect EHOSTUNREACH 140.82.121.5:443"},
-		// HTTP's own vocabulary, shared because it is not any vendor's.
-		"gateway": {codexSpec, "unexpected status 503 Service Unavailable"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := classifyAgentFailure(tc.spec, terminalDiagnostic([]byte(tc.diagnostic))); got != FailureProviderUnavailable {
-				t.Fatalf("classified as %q, want %q - an unclassified connectivity failure is what became hours of apparent active work", got, FailureProviderUnavailable)
+			if got := classifyAgentFailure(tc.spec, terminalDiagnostic([]byte(tc.diagnostic))); got != FailureConnectivity {
+				t.Fatalf("classified as %q, want %q - an unclassified connectivity failure is what became hours of apparent active work", got, FailureConnectivity)
 			}
 		})
 	}
+	// TRANSPORT LOSS (#380) spends an attempt, but only after a durable bounded
+	// backoff the reconciler records as the external connectivity_backoff wait.
+	if route := RouteFailure(FailureConnectivity); route != RouteRetry || !externalWaitReasons[ReasonConnectivityBackoff] {
+		t.Fatalf("connectivity_unavailable routes to %q", route)
+	}
+	if PriorAttemptContextEligible(FailureConnectivity) {
+		t.Fatal("a provider that was never reached handed observations to its retry")
+	}
 
-	// It is a BOUNDED EXTERNAL WAIT under the existing #83/#229/#232
-	// accounting, not a new mechanism: the route, the reason and the
-	// active-work exclusion all come from machinery that already existed.
+	// ENDPOINT CAPACITY - HTTP's own gateway vocabulary, shared because it is
+	// not any vendor's - stays a refunded wait under the existing
+	// #83/#229/#232 accounting.
+	if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte("unexpected status 503 Service Unavailable"))); got != FailureProviderUnavailable {
+		t.Fatalf("gateway classified as %q", got)
+	}
 	if route := RouteFailure(FailureProviderUnavailable); route != RouteWait {
 		t.Fatalf("provider_unavailable routes to %q, want a bounded wait", route)
 	}
@@ -94,7 +103,7 @@ func TestSilenceIsNeverClassifiedAsOffline(t *testing.T) {
 		"error sending mail", // not "error sending request"
 	} {
 		for name, spec := range map[string]cliAgentSpec{"codex": codexSpec, "claude": claudeSpec, "gemini": geminiSpec, "qwen": qwenSpec} {
-			if got := classifyAgentFailure(spec, terminalDiagnostic([]byte(diagnostic))); got == FailureProviderUnavailable {
+			if got := classifyAgentFailure(spec, terminalDiagnostic([]byte(diagnostic))); got == FailureProviderUnavailable || got == FailureConnectivity {
 				t.Fatalf("%s guessed %q into %q", name, diagnostic, got)
 			}
 		}
@@ -474,7 +483,7 @@ func TestRecognizedProgressAdvancesDurablyAndRepetitionDoesNot(t *testing.T) {
 	started := *op.LastProgressAt
 
 	clock.advance(time.Minute)
-	moved, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, "512")
+	moved, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, ProviderProgress{Key: "512"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +495,7 @@ func TestRecognizedProgressAdvancesDurablyAndRepetitionDoesNot(t *testing.T) {
 	// alive - must not refresh the window.
 	advanced := *moved.LastProgressAt
 	clock.advance(time.Minute)
-	same, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, "512")
+	same, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, ProviderProgress{Key: "512"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,10 +586,8 @@ func TestTheProviderInactivityBudgetIsFiniteAndTightenOnly(t *testing.T) {
 	}
 }
 
-// TestARunKeepsTheTighterWindowItWasCreatedUnder proves the persisted budget
-// narrows the configured one, exactly as the wall limit does. A run created
-// under a tighter window must not silently widen because the operator later
-// relaxed their configuration.
+// TestARunKeepsTheTighterWindowItWasCreatedUnder proves the persisted window is
+// the run's, exactly: a later configuration neither widens nor narrows it.
 func TestARunKeepsTheTighterWindowItWasCreatedUnder(t *testing.T) {
 	fixture := newPhase8Fixture(t)
 	deps := fixture.deps
@@ -603,10 +610,12 @@ func TestARunKeepsTheTighterWindowItWasCreatedUnder(t *testing.T) {
 	if got := state.budgets().ProviderInactivityLimit; got != 2*time.Minute {
 		t.Fatalf("the run's tighter window was overruled by configuration: %s", got)
 	}
-	// A run persisted under a WIDER one does not widen the configured bound.
+	// A run persisted under a WIDER one keeps it too: the frozen value is
+	// exact, so a later, narrower configuration does not reach a live run
+	// (ADR-0003 B1 - never min(live, frozen)).
 	state.run.Budgets = &RunBudgets{ProviderInactivityLimit: time.Hour}
-	if got := state.budgets().ProviderInactivityLimit; got != 10*time.Minute {
-		t.Fatalf("a persisted run widened its own window to %s", got)
+	if got := state.budgets().ProviderInactivityLimit; got != time.Hour {
+		t.Fatalf("a later configuration rewrote the run's frozen window to %s", got)
 	}
 	// A run persisted BEFORE this budget existed carries none, and must get the
 	// configured window rather than an unbounded one.
@@ -646,7 +655,7 @@ func TestTheTerminalSurfaceExcludesTheSessionRendering(t *testing.T) {
 	// A genuine offline diagnostic is preserved, which is the whole point of
 	// keeping the classification rather than deleting it.
 	genuine := "ERROR: stream error: error sending request for url (https://chatgpt.com/backend-api/codex/responses): dns error\n"
-	if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte(genuine))); got != FailureProviderUnavailable {
+	if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte(genuine))); got != FailureConnectivity {
 		t.Fatalf("a genuine transport diagnostic classified as %q", got)
 	}
 	// The SAME bytes, arriving as session output instead, assert nothing. This
@@ -665,7 +674,7 @@ func TestTheTerminalSurfaceExcludesTheSessionRendering(t *testing.T) {
 	if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte(buried))); got != FailureUnknown {
 		t.Fatalf("a phrase outside the terminal window classified as %q", got)
 	}
-	if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte(strings.Repeat("x", 200)+"dns error\n"))); got != FailureProviderUnavailable {
+	if got := classifyAgentFailure(codexSpec, terminalDiagnostic([]byte(strings.Repeat("x", 200)+"dns error\n"))); got != FailureConnectivity {
 		t.Fatalf("the process's last words classified as %q", got)
 	}
 }
@@ -687,8 +696,10 @@ func TestALeaseHeartbeatCannotRefreshProviderInactivityAuthority(t *testing.T) {
 	op := plannedExecution(t, scheduler, 30*time.Minute)
 
 	// Real provider output, recorded durably, opens the window where it should.
+	// It is a CLOSED recorder's write, so the datum is exact and the arithmetic
+	// below carries no crash allowance (#352) that could mask a refresh.
 	clock.advance(time.Minute)
-	if _, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, "512"); err != nil {
+	if _, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, ProviderProgress{Key: "512", Final: true}); err != nil {
 		t.Fatal(err)
 	}
 	observed, _, _, err := scheduler.Store.Operation(op.ID)
@@ -731,7 +742,7 @@ func TestALeaseHeartbeatCannotRefreshProviderInactivityAuthority(t *testing.T) {
 
 	// AND REAL OUTPUT STILL DOES BOTH. The narrowing must not have made the
 	// durable record unreachable.
-	moved, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, "1024")
+	moved, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, ProviderProgress{Key: "1024"})
 	if err != nil {
 		t.Fatal(err)
 	}

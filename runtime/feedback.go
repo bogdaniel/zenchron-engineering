@@ -13,7 +13,7 @@ package runtime
 // visible as GitHub state and fully auditable here; it simply never enters an
 // agent's context.
 //
-// Four rules shape the design.
+// Five rules shape the design.
 //
 //   - Admission is decided by the ACTOR's current repository permission, not by
 //     what the comment says. Text is never the gate.
@@ -27,6 +27,12 @@ package runtime
 //   - Feedback applies to the CURRENT head of the ACTIVE generation. A review
 //     of a superseded commit is history, and a frozen generation never wakes up
 //     because someone commented on its old pull request.
+//   - A pull-request review's own DISPOSITION is decided before its text is.
+//     An APPROVE or COMMENT review is non-blocking by GitHub's own semantics,
+//     so its body is never a remediation obligation, however actionable it
+//     reads; only a REQUEST_CHANGES review's text is ever admitted. This is
+//     the same actor-not-text principle as the first rule, applied to the one
+//     feedback class that carries its own disposition.
 
 import (
 	"crypto/sha256"
@@ -38,11 +44,6 @@ import (
 	"strings"
 	"time"
 )
-
-// FeedbackClass is where an item came from. It is recorded because the operator
-// question "why did the worker see this" is answered differently for a review
-// of the exact head and for a comment on the source issue.
-type FeedbackClass string
 
 const (
 	// FeedbackReview is a submitted pull-request review.
@@ -175,8 +176,19 @@ type FeedbackItem struct {
 	Path   string
 	Commit string
 	// Bot marks an actor GitHub reports as an App or bot account.
-	Bot       bool
-	CreatedAt time.Time
+	Bot bool
+	// ReviewState is the submitted disposition of a FeedbackReview item -
+	// approved, changes requested, commented, or dismissed. It is meaningless
+	// for every other class, which carries no disposition of their own.
+	//
+	// It exists because disposition and text are admitted independently
+	// otherwise: a GitHub APPROVE review that carries explanatory text would
+	// pass every other check - a real collaborator, non-empty body, current
+	// head - and be admitted as if it were a blocking review, even though
+	// GitHub itself treats an approval as non-blocking regardless of what its
+	// text says.
+	ReviewState GitHubReviewState
+	CreatedAt   time.Time
 }
 
 // Key is the durable identity of one item: its class and its forge id. It is
@@ -212,8 +224,20 @@ type FeedbackDecision struct {
 	// delivered when the candidate moves to head B, and the remainder of a
 	// batch larger than the per-invocation bound, whose own delivery advances
 	// the head past the items it left behind.
-	Commit    string `json:"commit,omitempty"`
-	CreatedAt string `json:"created_at,omitempty"`
+	Commit string `json:"commit,omitempty"`
+	// ReviewState is the normalized GitHub disposition a FeedbackReview
+	// decision was judged against - approved, changes_requested, commented or
+	// dismissed - restricted to that closed vocabulary. It is empty for every
+	// other feedback class, which carries no disposition of its own, and for
+	// a review whose reported state this runtime did not recognize.
+	//
+	// It is persisted, not just consulted, so the durable audit record can
+	// say WHICH disposition governed a refusal: without it, an APPROVE
+	// refusal, a COMMENT refusal and a DISMISSED refusal are indistinguishable
+	// in the journal, all collapsing to the same generic
+	// feedbackRefusedNonBlockingReview reason.
+	ReviewState GitHubReviewState `json:"review_state,omitempty"`
+	CreatedAt   string            `json:"created_at,omitempty"`
 }
 
 // Admission reasons. They are a closed vocabulary so an operator reading a
@@ -228,6 +252,13 @@ const (
 	feedbackRefusedEmpty        = "carries no text, so there is nothing to deliver"
 	feedbackAdmittedAllowedBot  = "authored by an operator-allowlisted automation account"
 	feedbackRefusedUnauthorized = "actor has no permission on this repository"
+	// feedbackRefusedNonBlockingReview is the review-disposition rule: a
+	// pull-request review's own GitHub disposition, not what its text says,
+	// decides whether it is a remediation obligation. An APPROVE or COMMENT
+	// review is non-blocking by GitHub's own semantics, so its text is
+	// observable history, never engineering feedback - however explanatory or
+	// actionable that text reads.
+	feedbackRefusedNonBlockingReview = "a pull-request review's disposition does not request changes, so its text is not a remediation obligation"
 	// The runtime could not establish which account it publishes as, so it
 	// cannot recognize its own comments and admits nothing at all.
 	feedbackRefusedUnidentifiedRuntime = "the runtime's own publication identity is unresolved, so its own comments could not be told apart from anyone else's"
@@ -253,8 +284,9 @@ func AdmitFeedback(items []FeedbackItem, policy FeedbackPolicy, permissions map[
 				Key: item.Key(), Class: item.Class,
 				Actor: item.Actor.Login, ActorID: item.Actor.ID,
 				HeadRevision: head, Commit: item.Commit,
-				Applicable: feedbackApplies(item, head),
-				Reason:     feedbackRefusedUnidentifiedRuntime,
+				Applicable:  feedbackApplies(item, head),
+				Reason:      feedbackRefusedUnidentifiedRuntime,
+				ReviewState: reviewDisposition(item),
 			}
 			if !item.CreatedAt.IsZero() {
 				decision.CreatedAt = item.CreatedAt.UTC().Format(time.RFC3339)
@@ -266,6 +298,7 @@ func AdmitFeedback(items []FeedbackItem, policy FeedbackPolicy, permissions map[
 			Key: item.Key(), Class: item.Class,
 			Actor: item.Actor.Login, ActorID: item.Actor.ID,
 			HeadRevision: head, Commit: item.Commit,
+			ReviewState: reviewDisposition(item),
 		}
 		if !item.CreatedAt.IsZero() {
 			decision.CreatedAt = item.CreatedAt.UTC().Format(time.RFC3339)
@@ -284,6 +317,11 @@ func AdmitFeedback(items []FeedbackItem, policy FeedbackPolicy, permissions map[
 			decision.Reason = feedbackRefusedBot
 		case strings.TrimSpace(string(item.Body)) == "":
 			decision.Reason = feedbackRefusedEmpty
+		case item.Class == FeedbackReview && item.ReviewState.normalized() != GitHubReviewChangesRequested:
+			// Checked ahead of staleness and permission: disposition is part
+			// of admission semantics, not a tiebreaker applied only once
+			// everything else would otherwise admit the item.
+			decision.Reason = feedbackRefusedNonBlockingReview
 		case !decision.Applicable:
 			decision.Reason = feedbackRefusedStale
 		default:
@@ -317,6 +355,17 @@ func feedbackApplies(item FeedbackItem, head string) bool {
 		return true
 	}
 	return head != "" && item.Commit == head
+}
+
+// reviewDisposition is the normalized disposition to persist on a decision:
+// the item's own, restricted to the closed vocabulary, for a FeedbackReview
+// item, and the zero value for every other class, which carries no
+// disposition of its own.
+func reviewDisposition(item FeedbackItem) GitHubReviewState {
+	if item.Class != FeedbackReview {
+		return ""
+	}
+	return item.ReviewState.normalized()
 }
 
 // FeedbackObservedPayload is the journalled admission record for one item. It
@@ -424,6 +473,71 @@ func (s FeedbackState) Pending(head string) []FeedbackObservedPayload {
 	return pending
 }
 
+// feedbackRedeliveryFor is the admitted feedback a PRIOR ATTEMPT of exactly
+// this operation already consumed, re-derived for a retry (#376). It reads
+// the durable EventFeedbackConsumed records this operation ID itself wrote -
+// never a different operation's - and resolves them back against the
+// admitted record, ignoring Pending()'s own-consumption filter entirely: the
+// whole point is to show a retry the SAME items it was shown before, which
+// Pending() would otherwise have already excluded.
+func (s *runState) feedbackRedeliveryFor(operationID string) []FeedbackObservedPayload {
+	if operationID == "" {
+		return nil
+	}
+	keys := map[string]bool{}
+	for _, e := range s.events {
+		if e.Type != EventFeedbackConsumed || e.OperationID != operationID {
+			continue
+		}
+		var payload FeedbackConsumedPayload
+		if decodeJSON(e.Payload, &payload) != nil {
+			continue
+		}
+		for _, key := range payload.Keys {
+			keys[key] = true
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	var redelivered []FeedbackObservedPayload
+	for _, decision := range s.feedbackState().Admitted {
+		if keys[decision.Key] {
+			redelivered = append(redelivered, decision)
+		}
+	}
+	return redelivered
+}
+
+// feedbackDeliveryFor is what an attempt of operationID is given: its own
+// prior attempts' consumed items (feedbackRedeliveryFor) first, then pending
+// in its order, deduplicated by key, at most maxDeliveredFeedbackItems, in
+// admission order. The redelivered items are never displaced by newer ones
+// (#87 F1); pending only fills the room left, and what does not fit stays
+// unconsumed for the next binding. The first attempt delivers at most the cap
+// and a retry's redelivery set is what earlier attempts delivered, so by
+// induction no attempt exceeds it, which keeps a no-change resolution and the
+// consumption record within their own bounds. The two sets are disjoint in
+// practice (Pending excludes consumed keys), so a plain #376 redelivery is
+// unchanged. The operation's binding still names the set that opened it; what
+// each attempt delivered is recorded by its own EventFeedbackConsumed.
+func (s *runState) feedbackDeliveryFor(operationID string, pending []FeedbackObservedPayload) []FeedbackObservedPayload {
+	want := map[string]bool{}
+	for _, decision := range append(s.feedbackRedeliveryFor(operationID), pending...) {
+		if len(want) == maxDeliveredFeedbackItems {
+			break
+		}
+		want[decision.Key] = true
+	}
+	var out []FeedbackObservedPayload
+	for _, decision := range s.feedbackState().Admitted {
+		if want[decision.Key] {
+			out = append(out, decision) // Seen keeps admitted keys unique
+		}
+	}
+	return out
+}
+
 // Seen reports whether an item has already been judged, so re-polling records
 // nothing new. Dedup is by durable forge identity, never by text.
 func (s FeedbackState) Seen(key string) bool {
@@ -436,7 +550,13 @@ func (s FeedbackState) Seen(key string) bool {
 }
 
 // feedbackState replays the run's feedback position from the journal.
+// feedbackState folds once per loaded event slice. Appending invalidates the
+// cached fold by changing its length; each load creates a fresh runState.
+// Callers treat the returned map and slice as read-only.
 func (s *runState) feedbackState() FeedbackState {
+	if s.feedbackCached != nil && s.feedbackEventCount == len(s.events) {
+		return *s.feedbackCached
+	}
 	state := FeedbackState{Consumed: map[string]bool{}}
 	for _, event := range s.events {
 		switch event.Type {
@@ -465,6 +585,8 @@ func (s *runState) feedbackState() FeedbackState {
 			}
 		}
 	}
+	s.feedbackCached = &state
+	s.feedbackEventCount = len(s.events)
 	return state
 }
 

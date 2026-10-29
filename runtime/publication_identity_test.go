@@ -19,10 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -200,9 +202,11 @@ func TestAnUnresolvedPublicationIdentityAdmitsNothing(t *testing.T) {
 	}
 
 	// ...and a human is still admitted, so this is fail-closed rather than
-	// refuse-everything.
+	// refuse-everything. The review requests changes: a review's own
+	// disposition gates its text before identity or permission do, and an
+	// APPROVE/COMMENT review would never reach admission regardless of actor.
 	human := FeedbackItem{
-		Class: FeedbackReview, ID: 2,
+		Class: FeedbackReview, ID: 2, ReviewState: GitHubReviewChangesRequested,
 		Actor: GitHubActor{Login: "operator", ID: 7}, Body: "please change this", Commit: "head-sha",
 	}
 	permissions["operator"] = PermissionWrite
@@ -996,7 +1000,8 @@ func (d *mintFailureDoer) Do(*http.Request) (*http.Response, error) {
 func TestATransientMintFailureIsNotACredentialRejection(t *testing.T) {
 	path, _ := appKeyFile(t, 0o600)
 	for name, doer := range map[string]*mintFailureDoer{
-		"the forge is unreachable": {err: errors.New("dial tcp 140.82.121.6:443: connect: connection refused")},
+		// Typed, as http.Client returns it: transience is never read from prose (#380).
+		"the forge is unreachable": {err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}},
 		"the forge says not now": {
 			status: http.StatusForbidden,
 			header: http.Header{"Retry-After": []string{"60"}},

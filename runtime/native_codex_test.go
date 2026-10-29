@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // codexCapableHelp models an installed CLI that advertises the sandbox
@@ -22,6 +24,7 @@ const codexCapableHelp = `Options:
   -s, --sandbox <SANDBOX_MODE>  [possible values: read-only, workspace-write, danger-full-access]
   -a, --ask-for-approval <APPROVAL_POLICY>
       --ignore-user-config
+      --output-last-message <FILE>
   -C, --cd <DIR>
 `
 
@@ -71,7 +74,7 @@ func TestNativeCodexBindsExactCandidateWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ProviderID != "native-codex" || result.Outcome != Succeeded || result.Attempt != 1 {
+	if result.ProviderID != "native-codex" || result.Outcome != execution.Succeeded || result.Attempt != 1 {
 		t.Fatalf("provider observation lost: %#v", result)
 	}
 	call := codexInvocation(t, fake)
@@ -146,7 +149,7 @@ func TestNativeCodexReceivesNoAmbientHostEnvironment(t *testing.T) {
 	// is small: four variables that are not these four would satisfy it, so a
 	// member swapped for another would pass a length check unnoticed. That is
 	// how a test stops being able to fail for the reason it exists.
-	want := map[string]bool{"PATH": true, "HOME": true, "USER": true, "CODEX_HOME": true}
+	want := map[string]bool{"PATH": true, "HOME": true, "USER": true, "CODEX_HOME": true, "GOENV": true}
 	for _, call := range fake.calls {
 		seen := map[string]bool{}
 		for _, entry := range call.env {
@@ -161,6 +164,9 @@ func TestNativeCodexReceivesNoAmbientHostEnvironment(t *testing.T) {
 			// HOME and CODEX_HOME are the PINNED home, not the operator's.
 			if (name == "HOME" || name == "CODEX_HOME") && value != provider.CodexHome {
 				t.Fatalf("%s is %q, want the pinned codex home %q", name, value, provider.CodexHome)
+			}
+			if name == "GOENV" && value != os.DevNull {
+				t.Fatalf("GOENV is %q, want %q (#430)", value, os.DevNull)
 			}
 		}
 	}
@@ -260,7 +266,7 @@ func TestNativeCodexRetriesOnlyRecognizedTransientCapacity(t *testing.T) {
 		if err == nil {
 			t.Fatalf("provider failure was not surfaced for %q", tc.diagnostic)
 		}
-		if result.Outcome != OperationFailed || result.Failure == nil || result.Failure.Classification != tc.want {
+		if result.Outcome != execution.Failed || result.Failure == nil || result.Failure.Classification != tc.want {
 			t.Fatalf("failure classification for %q = %#v, want %q", tc.diagnostic, result.Failure, tc.want)
 		}
 		if len(result.Artifacts) != 2 {

@@ -115,6 +115,11 @@ func controllerBuildAdopted(args []string, overrides autonomyOverrides, stdout i
 	fmt.Fprintf(stdout, "source:            %s\n", provenance.Source.Revision)
 	fmt.Fprintf(stdout, "tree:              %s\n", provenance.Source.Tree)
 	fmt.Fprintf(stdout, "trusted main:      %s (tree %s)\n", provenance.TrustedMain.Revision, provenance.TrustedMain.Tree)
+	fmt.Fprintf(stdout, "main head:         %s (tree %s)\n", provenance.MainHead.Revision, provenance.MainHead.Tree)
+	fmt.Fprintf(stdout, "trust evidence:    %s %s run %d attempt %d, inconsistent=%t, %d newer commit(s) skipped\n",
+		provenance.TrustEvidence.Observation.Tier, provenance.TrustEvidence.Observation.Deciding.Conclusion,
+		provenance.TrustEvidence.Observation.Deciding.RunID, provenance.TrustEvidence.Observation.Deciding.Attempt,
+		provenance.TrustEvidence.Observation.Inconsistent, len(provenance.Skipped))
 	fmt.Fprintf(stdout, "trust root:        ruleset %d %q %s\n", provenance.TrustRoot.RulesetID, provenance.TrustRoot.Name, provenance.TrustRoot.Digest)
 	fmt.Fprintf(stdout, "observed by:       %s via %s\n", provenance.TrustRoot.ObservedBy.Role, provenance.TrustRoot.ObservedBy.Method)
 	fmt.Fprintf(stdout, "bypass:            observed=%t, %d actor(s)\n", provenance.TrustRoot.Bypass.Observed, provenance.TrustRoot.Bypass.Count)

@@ -46,9 +46,87 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// roleHolder owns the lifecycle of a re-executed process holding the
+// controller role. Exactly one goroutine ever calls cmd.Wait, started the
+// moment the process starts, so every other caller learns liveness by
+// consulting exitc rather than racing a second Wait or trusting signal
+// delivery - which a zombie (exited, not yet reaped) still answers, even
+// though its lease is already gone by the time anyone could observe that.
+type roleHolder struct {
+	cmd   *exec.Cmd
+	exitc chan struct{} // closed once cmd.Wait returns
+	err   error         // valid only after exitc is closed
+}
+
+// alive reports whether the holder process has been observed to exit. It
+// cannot race a transition the other way: a holder only ever goes from
+// alive to dead, never back, so once exitc is closed it stays closed.
+func (h *roleHolder) alive() bool {
+	select {
+	case <-h.exitc:
+		return false
+	default:
+		return true
+	}
+}
+
+func (h *roleHolder) kill(t *testing.T) {
+	t.Helper()
+	if err := h.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (h *roleHolder) waitExit(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-h.exitc:
+	case <-time.After(timeout):
+		t.Fatal("the role holder did not exit in time")
+	}
+}
+
+// aliveAfterGrace reports whether the holder is still alive, giving the sole
+// Wait goroutine a bounded chance to close exitc first. The kernel frees a
+// dying holder's lease the moment the process exits, but exitc only closes
+// once cmd.Wait returns - ordered after that exit, never before it, but not
+// atomic with it. Checking alive() the instant an unexpected acquisition
+// succeeds can therefore land inside that exit-to-observation gap and read a
+// just-dead holder as live. Waiting here closes the gap instead of trusting
+// a snapshot taken while the one goroutine that will ever learn the answer
+// is still on its way to learning it.
+func (h *roleHolder) aliveAfterGrace(timeout time.Duration) bool {
+	select {
+	case <-h.exitc:
+		return false
+	case <-time.After(timeout):
+		return true
+	}
+}
+
+// failIfRoleAdmittedSecondHolder is called at the one place this ambiguity
+// can arise: AcquireControllerRole unexpectedly succeeded while a fixture
+// holder was supposed to exclude it. That has two possible explanations -
+// production code wrongly admitted a second live holder, or the fixture
+// holder had already exited and freed the role itself - and only the Wait
+// goroutine's observation can tell them apart, so the distinction is made
+// here rather than by a signal sent before the attempt, which a zombie
+// would answer for either case alike. A bounded wait, not a snapshot, is
+// what tells them apart: the lease is already gone by the time the kernel
+// frees it, but exitc can still be open for a beat afterward.
+func (h *roleHolder) failIfRoleAdmittedSecondHolder(t *testing.T, productionFailureMsg string) {
+	t.Helper()
+	if !h.aliveAfterGrace(2 * time.Second) {
+		t.Fatal("HARNESS PRECONDITION: the role holder had already exited; " +
+			"role acquisition succeeded because the fixture died, not because " +
+			"production code admitted a second live holder")
+	}
+	t.Fatal(productionFailureMsg)
+}
+
 // holdRoleInAnotherProcess starts a real process holding the role and returns
 // it once the role is provably taken.
-func holdRoleInAnotherProcess(t *testing.T, stateDir string) *exec.Cmd {
+func holdRoleInAnotherProcess(t *testing.T, stateDir string) *roleHolder {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=TestMain")
 	cmd.Env = append(os.Environ(), roleHolderEnv+"="+stateDir)
@@ -65,7 +143,16 @@ func holdRoleInAnotherProcess(t *testing.T, stateDir string) *exec.Cmd {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = stdin.Close(); _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	holder := &roleHolder{cmd: cmd, exitc: make(chan struct{})}
+	go func() {
+		holder.err = cmd.Wait()
+		close(holder.exitc)
+	}()
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		<-holder.exitc
+	})
 	ready := make([]byte, len("held\n"))
 	if _, err := stdout.Read(ready); err != nil {
 		t.Fatalf("the holder never reported taking the role: %v", err)
@@ -73,7 +160,10 @@ func holdRoleInAnotherProcess(t *testing.T, stateDir string) *exec.Cmd {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		if held, decided := ControllerRoleHeld(stateDir); held && decided {
-			return cmd
+			return holder
+		}
+		if !holder.alive() {
+			t.Fatalf("HARNESS PRECONDITION: the role holder exited before the role read as held: %v", holder.err)
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("the role never read as held while another process held it")
@@ -87,10 +177,10 @@ func holdRoleInAnotherProcess(t *testing.T, stateDir string) *exec.Cmd {
 // coincidence.
 func TestControllerRoleExcludesASecondLiveProcess(t *testing.T) {
 	state := t.TempDir()
-	holdRoleInAnotherProcess(t, state)
+	holder := holdRoleInAnotherProcess(t, state)
 
 	if _, err := AcquireControllerRole(state); err == nil {
-		t.Fatal("a second process took the controller role")
+		holder.failIfRoleAdmittedSecondHolder(t, "a second process took the controller role")
 	} else if !strings.Contains(err.Error(), "another live process") {
 		t.Fatalf("error = %v, want one naming the live holder", err)
 	}
@@ -102,12 +192,8 @@ func TestControllerRoleIsFreedWhenTheHolderIsKilled(t *testing.T) {
 	state := t.TempDir()
 	holder := holdRoleInAnotherProcess(t, state)
 
-	if err := holder.Process.Kill(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := holder.Process.Wait(); err != nil {
-		t.Fatal(err)
-	}
+	holder.kill(t)
+	holder.waitExit(t, 2*time.Second)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		lock, err := AcquireControllerRole(state)
@@ -299,5 +385,68 @@ func TestInstanceLockIsNotTheRoleLock(t *testing.T) {
 	t.Cleanup(func() { _ = role.Release() })
 	if _, err := AcquireControllerRole(state); err == nil {
 		t.Fatal("the role admitted a second holder while two instance locks were held")
+	}
+}
+
+// harnessPreconditionEnv re-invokes this test as a subprocess so it can
+// exercise a real, expected t.Fatal without failing the outer run: the
+// child fails on purpose, and the parent asserts on what it printed.
+const harnessPreconditionEnv = "ZENCHRON_TEST_ASSERT_HARNESS_PRECONDITION"
+
+// RESTORED DEFECT: kill the role holder and race the parent's acquisition
+// against the same process's exit, so the role can read as free for a
+// reason that has nothing to do with production code, then prove the
+// harness attributes the resulting unexpected acquisition to its own dead
+// fixture (HARNESS PRECONDITION) rather than reporting it as the production
+// exclusion property failing. This is the exact misattribution #350 traced:
+// a dead holder answering signal 0 (a zombie still does) let a harness bug
+// masquerade as "a process of the right generation took a role another
+// process holds".
+//
+// The race is run several times, each in its own subprocess, because it is
+// narrow: the kernel frees the lease at the killed process's exit, but the
+// sole Wait goroutine only reports that by closing exitc once cmd.Wait
+// returns, a beat later. TestControllerRoleIsFreedWhenTheHolderIsKilled
+// waits out that beat (waitExit) before acquiring, which is right for what
+// it tests but means it never lands in the gap. Acquiring immediately after
+// kill, in a tight retry loop, is what gives the exit-to-observation gap a
+// real chance to be hit - and repeating it is what would catch a regression
+// to the unbounded alive() snapshot, which only misattributes when the gap
+// is actually hit.
+func TestHarnessAttributesADeadHolderToItselfNotToProduction(t *testing.T) {
+	if os.Getenv(harnessPreconditionEnv) == "" {
+		const attempts = 20
+		for i := 0; i < attempts; i++ {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestHarnessAttributesADeadHolderToItselfNotToProduction$", "-test.v")
+			cmd.Env = append(os.Environ(), harnessPreconditionEnv+"=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("the restored defect did not fail as expected; output:\n%s", out)
+			}
+			if !strings.Contains(string(out), "HARNESS PRECONDITION") {
+				t.Fatalf("the harness did not attribute the dead holder to itself; output:\n%s", out)
+			}
+			if strings.Contains(string(out), "a process of the right generation took a role another process holds") {
+				t.Fatalf("the harness reported the production-role failure instead of its own precondition; output:\n%s", out)
+			}
+		}
+		return
+	}
+
+	state := t.TempDir()
+	holder := holdRoleInAnotherProcess(t, state)
+	holder.kill(t)
+
+	// Deliberately not holder.waitExit first: that would wait out the very
+	// gap this test exists to land in. Retry acquisition immediately and as
+	// fast as possible instead, racing the still-running Wait goroutine.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := AcquireControllerRole(state); err == nil {
+			holder.failIfRoleAdmittedSecondHolder(t, "a process of the right generation took a role another process holds")
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("the role stayed held after its holder was killed: %v", err)
+		}
 	}
 }

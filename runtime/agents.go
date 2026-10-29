@@ -53,11 +53,6 @@ const (
 	AgentKindOpenAIResponses = "openai_responses"
 )
 
-// TrustMode is what the runtime may honestly claim about the boundary around
-// one execution worker. It is not a capability and never an authority: an
-// operator_trusted agent may author a change and still cannot authorize it.
-type TrustMode string
-
 const (
 	// TrustOperatorTrusted is a tool the local operator installed,
 	// authenticated and chose to run. Its candidate WRITE scope is bounded
@@ -152,6 +147,11 @@ type AgentConfig struct {
 	// independent statements are required precisely so a bypass can never be
 	// reached by a default.
 	AllowPermissionBypass bool `json:"allow_permission_bypass,omitempty"`
+	// FrontendCacheDir is the operator-owned root of lockfile-keyed offline npm
+	// caches: <root>/<sha256 of frontend/package-lock.json>. It is only read; a
+	// matching cache is copied into the invocation's own scratch. Empty means the
+	// worker gets no npm environment.
+	FrontendCacheDir string `json:"frontend_cache_dir,omitempty"`
 	// Unattended states whether this agent may be started by unattended
 	// scheduling (supervisor discovery), as opposed to by an explicit operator
 	// command. It is a POINTER so absent and an explicit false are different
@@ -172,6 +172,7 @@ type ResolvedAgent struct {
 	CredentialPath        string
 	Endpoint              string
 	AllowPermissionBypass bool
+	FrontendCacheDir      string
 	Unattended            bool
 	// DeclaredAuthMode is an operator-STATED authentication mode. It exists
 	// only for the pre-#63 provider block, which had one; a #63 agent has no
@@ -503,6 +504,12 @@ func resolveAgent(id string, config AgentConfig) (ResolvedAgent, error) {
 			}
 			agent.Home = home
 		}
+		if cache := strings.TrimSpace(config.FrontendCacheDir); cache != "" {
+			if !filepath.IsAbs(cache) {
+				return refuse(member("frontend_cache_dir") + " must be an absolute path to a directory of lockfile-keyed npm caches")
+			}
+			agent.FrontendCacheDir = cache
+		}
 		if strings.TrimSpace(config.CredentialPath) != "" {
 			return refuse(member("credential_path") + " is not valid for a native CLI agent: the CLI authenticates itself and Zenchron holds no credential for it")
 		}
@@ -516,6 +523,9 @@ func resolveAgent(id string, config AgentConfig) (ResolvedAgent, error) {
 	}
 	if strings.TrimSpace(config.Home) != "" {
 		return refuse(member("home") + " is not valid for a brokered provider agent")
+	}
+	if strings.TrimSpace(config.FrontendCacheDir) != "" {
+		return refuse(member("frontend_cache_dir") + " is not valid for a brokered provider agent")
 	}
 	if config.AllowPermissionBypass {
 		return refuse(member("allow_permission_bypass") + " is not valid for a brokered provider agent: its boundary is proven, not bypassable")

@@ -14,12 +14,19 @@ package runtime
 // supervisor owns them.
 
 import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/binary"
 	"fmt"
+	"hash"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
@@ -30,8 +37,10 @@ import (
 // that used to require a database or a path convention - where is the workspace,
 // where are the logs - are answered here.
 type RunSummary struct {
-	RunID      string `json:"run_id"`
-	Repository string `json:"repository"`
+	producerFinished  bool
+	VerificationTools []VerificationPermit `json:"verification_tools,omitempty"`
+	RunID             string               `json:"run_id"`
+	Repository        string               `json:"repository"`
 	// Issue is the source issue number, or zero for a run whose goal is not an
 	// issue.
 	Issue int `json:"issue,omitempty"`
@@ -86,6 +95,14 @@ type RunSummary struct {
 	FeedbackPending  int `json:"feedback_pending,omitempty"`
 	// Attempts is the per-operation-kind attempt tally.
 	Attempts map[string]int `json:"attempts,omitempty"`
+	// Held reports that a budget-ended run is holding valuable material
+	// (#203). It is independent of Disposition: a terminal run may hold
+	// material or may not, and an operator triaging a fleet needs to find the
+	// ones that do without opening each one's detail.
+	Held bool `json:"held,omitempty"`
+	// Paused is the operator's pause in force (#86), read from the journal.
+	// It is independent of Disposition, which a pause never changes.
+	Paused *RunPause `json:"paused,omitempty"`
 	// Error is set when this run's state could not be replayed. One unreadable
 	// run must not hide the rest of the fleet.
 	Error string `json:"error,omitempty"`
@@ -102,10 +119,34 @@ type Fleet struct {
 	// produced "Workers: 3 / 2 active" on a fleet with one run parked for
 	// review - true of neither quantity, and reading as though the ceiling had
 	// been breached when it had been enforced exactly.
-	Capacity  int          `json:"capacity"`
-	Executing int          `json:"executing"`
-	Active    int          `json:"active"`
-	Runs      []RunSummary `json:"runs"`
+	Capacity  int `json:"capacity"`
+	Executing int `json:"executing"`
+	Active    int `json:"active"`
+	// The capacity-class view (#85). ObservationCapacity is the observation
+	// ceiling, as Capacity is the work ceiling; zero means a reader that does
+	// not know the configuration (the control plane), and is omitted. The six counts partition the
+	// nonterminal runs exactly: Working + Observing + Runnable + Waiting +
+	// Paused + Unavailable == Active. Paused (#86) is a paused run holding no
+	// active operation; one still settling counts as Working or Observing. They are read from durable operation rows, never
+	// from a supervisor's memory; see capacityState.
+	ObservationCapacity int `json:"observation_capacity,omitempty"`
+	Working             int `json:"working"`
+	Observing           int `json:"observing"`
+	Runnable            int `json:"runnable"`
+	Waiting             int `json:"waiting"`
+	Paused              int `json:"paused"`
+	Unavailable         int `json:"unavailable"`
+	// The verification view (#490). VerificationCapacity is the verification
+	// ceiling, omitted like ObservationCapacity by a reader that does not know
+	// the configuration. Verifying counts occupied resource slots: assurance
+	// leases plus nested tool grants, including cleanup still awaiting proof.
+	// AwaitingVerification counts runnable assurance runs and working providers
+	// whose tools are waiting with no tool already executing. Neither is added
+	// to the mutually exclusive run partition above.
+	VerificationCapacity int          `json:"verification_capacity,omitempty"`
+	Verifying            int          `json:"verifying"`
+	AwaitingVerification int          `json:"awaiting_verification"`
+	Runs                 []RunSummary `json:"runs"`
 	// Plans is the plan-level view beside the runs. An operator with a plan
 	// awaiting their approval is being waited ON, and that has to be visible in
 	// the same place they look to see whether anything is happening.
@@ -113,6 +154,9 @@ type Fleet struct {
 	// SupervisorRunning reports whether a persistent supervisor currently owns
 	// the control endpoint for this state directory.
 	SupervisorRunning bool `json:"supervisor_running"`
+	// SupervisorPolicy is the SupervisorPolicyDigest of the most recent
+	// supervisor start (ADR-0003 B4), or empty when no start has recorded one.
+	SupervisorPolicy string `json:"supervisor_policy,omitempty"`
 	// ControlEndpoint is the mechanism and path, so an operator can see the
 	// authority boundary they are relying on.
 	ControlEndpoint string `json:"control_endpoint,omitempty"`
@@ -157,48 +201,50 @@ func summarizePlans(store *SQLiteOperationStore) []PlanSummary {
 	}
 	summaries := make([]PlanSummary, 0, len(plans))
 	for _, plan := range plans {
-		summary := PlanSummary{PlanID: plan.ID, Revision: plan.Revision}
-		snapshot, err := store.ReplayPlan(plan.ID)
-		if err != nil {
-			summary.Error = boundedDetail(err.Error())
-			summaries = append(summaries, summary)
-			continue
-		}
-		summary.Consumed = snapshot.Consumed
-		summary.Runs = snapshot.ChildRuns()
-		summary.Stages = map[string]int{}
-		for _, projection := range snapshot.Stages {
-			summary.Stages[string(projection.State)]++
-		}
-		// The GOVERNING document, which is the approved revision when there is
-		// one. Judging completion against the latest proposal would answer about
-		// obligations nobody authorized; judging it against the stored head
-		// revision would do the same whenever a newer proposal exists.
-		//
-		// An APPROVED revision that cannot be read leaves the required graph
-		// UNKNOWN, and unknown governance state fails closed. Falling back to
-		// the head revision was a fail-open: a store error or a missing row
-		// would have completion judged against a document nobody approved -
-		// possibly a newer proposal with fewer obligations - which is the same
-		// silence-as-success this function exists to remove, reached through a
-		// different door.
-		governing := plan
-		if approved, ok := snapshot.ApprovedRevision(); ok {
-			summary.ApprovedRevision = approved
-			exact, found, err := store.PlanRevision(plan.ID, approved)
-			if err != nil || !found {
-				summary.State = PlanStateBlocked
-				summary.Error = boundedDetail(fmt.Sprintf(
-					"approved revision %d could not be read, so this plan's required obligations are unknown and its completion cannot be judged", approved))
-				summaries = append(summaries, summary)
-				continue
-			}
-			governing = exact
-		}
-		summary.State = planState(governing.Stages, snapshot)
-		summaries = append(summaries, summary)
+		summaries = append(summaries, summarizePlan(store, plan))
 	}
 	return summaries
+}
+
+func summarizePlan(store *SQLiteOperationStore, plan domain.EngineeringPlan) PlanSummary {
+	summary := PlanSummary{PlanID: plan.ID, Revision: plan.Revision}
+	snapshot, err := store.ReplayPlan(plan.ID)
+	if err != nil {
+		summary.Error = boundedDetail(err.Error())
+		return summary
+	}
+	summary.Consumed = snapshot.Consumed
+	summary.Runs = snapshot.ChildRuns()
+	summary.Stages = map[string]int{}
+	for _, projection := range snapshot.Stages {
+		summary.Stages[string(projection.State)]++
+	}
+	// The GOVERNING document, which is the approved revision when there is
+	// one. Judging completion against the latest proposal would answer about
+	// obligations nobody authorized; judging it against the stored head
+	// revision would do the same whenever a newer proposal exists.
+	//
+	// An APPROVED revision that cannot be read leaves the required graph
+	// UNKNOWN, and unknown governance state fails closed. Falling back to
+	// the head revision was a fail-open: a store error or a missing row
+	// would have completion judged against a document nobody approved -
+	// possibly a newer proposal with fewer obligations - which is the same
+	// silence-as-success this function exists to remove, reached through a
+	// different door.
+	governing := plan
+	if approved, ok := snapshot.ApprovedRevision(); ok {
+		summary.ApprovedRevision = approved
+		exact, found, err := store.PlanRevision(plan.ID, approved)
+		if err != nil || !found {
+			summary.State = PlanStateBlocked
+			summary.Error = boundedDetail(fmt.Sprintf(
+				"approved revision %d could not be read, so this plan's required obligations are unknown and its completion cannot be judged", approved))
+			return summary
+		}
+		governing = exact
+	}
+	summary.State = planState(governing.Stages, snapshot)
+	return summary
 }
 
 // planState is the plan-level answer, derived from the APPROVED DOCUMENT's
@@ -275,8 +321,20 @@ func planState(required []domain.PlanStage, snapshot PlanSnapshot) string {
 // is unreadable: that run reports its own error and the rest are still
 // answered, because a fleet view whose whole value is "show me everything" must
 // not be lost to one bad row.
-func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now time.Time) (Fleet, error) {
+func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity, observationCapacity, verificationCapacity int, now time.Time) (Fleet, error) {
+	fleet, err := fleetStatus(store, stateDir, capacity, now, nil)
+	fleet.ObservationCapacity, fleet.VerificationCapacity = observationCapacity, verificationCapacity
+	return fleet, err
+}
+
+// fleetStatus is FleetStatus with an optional summary cache, which a
+// long-lived reader passes and a one-shot CLI does not.
+func fleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now time.Time, cache *summaryCache) (Fleet, error) {
 	runs, err := store.Runs()
+	if err != nil {
+		return Fleet{}, err
+	}
+	journals, err := runJournalDigests(store, cache)
 	if err != nil {
 		return Fleet{}, err
 	}
@@ -286,10 +344,70 @@ func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 		ControlEndpoint:   ControlSocketPath(stateDir) + " (" + ControlEndpointMechanism + ")",
 	}
 	fleet.Plans = summarizePlans(store)
+	if start, found, err := store.LatestSupervisorStart(); err != nil {
+		return Fleet{}, err
+	} else if found {
+		fleet.SupervisorPolicy = start.PolicyDigest
+	}
+	byRun, err := capacityOperations(store)
+	if err != nil {
+		return Fleet{}, err
+	}
+	permits, err := store.VerificationPermits()
+	if err != nil {
+		return Fleet{}, err
+	}
+	toolsByRun := map[string][]VerificationPermit{}
+	for _, p := range permits {
+		toolsByRun[p.Parent.RunID] = append(toolsByRun[p.Parent.RunID], p)
+		if p.State == VerificationGranted {
+			fleet.Verifying++
+		}
+	}
 	for _, run := range runs {
-		summary := summarizeRun(store, stateDir, run, now)
+		summary := cache.summarize(store, stateDir, run, journals[run.ID], now)
+		summary.VerificationTools = toolsByRun[run.ID]
+		toolWaiting, toolHolding := false, false
+		for _, p := range summary.VerificationTools {
+			op := byRun[run.ID][p.Parent.OperationID]
+			toolWaiting = toolWaiting || (p.State == VerificationWaiting && op.State == Running && op.AttemptIdentity == p.Parent.Attempt)
+			toolHolding = toolHolding || p.State == VerificationGranted
+		}
+		if toolWaiting && !toolHolding && summary.Executing {
+			fleet.AwaitingVerification++
+			summary.Reason = ReasonVerificationCapacity
+		}
 		if !terminalDisposition(run.Disposition) {
 			fleet.Active++
+			switch {
+			case summary.Error != "":
+				fleet.Unavailable++
+			default:
+				state := capacityState(byRun[run.ID], now)
+				if toolHolding && state != CapacityWork && state != CapacityObservation {
+					state = capacityWaiting
+					summary.Reason = ReasonVerificationCleanup
+				}
+				holding, awaiting := verificationOccupancy(byRun[run.ID], now)
+				if state == CapacityWork && holding {
+					fleet.Verifying++
+				}
+				if state == capacityRunnable && awaiting {
+					fleet.AwaitingVerification++
+				}
+				switch {
+				case state == CapacityWork:
+					fleet.Working++
+				case state == CapacityObservation:
+					fleet.Observing++
+				case summary.Paused != nil:
+					fleet.Paused++
+				case state == capacityRunnable:
+					fleet.Runnable++
+				default:
+					fleet.Waiting++
+				}
+			}
 		}
 		if summary.Executing {
 			fleet.Executing++
@@ -310,68 +428,231 @@ func FleetStatus(store *SQLiteOperationStore, stateDir string, capacity int, now
 	return fleet, nil
 }
 
-func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringRun, now time.Time) RunSummary {
-	summary := RunSummary{
-		RunID: run.ID, Repository: run.Repository, Agent: run.AgentID,
-		Phase: run.Phase, Disposition: run.Disposition, Reason: run.Reason,
-		Branch: run.Candidate.Branch, Elapsed: now.Sub(run.CreatedAt),
+// capacityOperations reads, per nonterminal run, only the operations that can
+// still decide its count: those not succeeded or cancelled. Decoding every
+// operation of every run on each control-plane read would undo #428. A
+// dependency outside that set (succeeded, in practice) is read by id, so
+// leasable sees exactly what Next sees.
+func capacityOperations(store *SQLiteOperationStore) (map[string]map[string]RunOperation, error) {
+	args := []any{}
+	for _, disposition := range terminalDispositions {
+		args = append(args, string(disposition))
 	}
-	if issue, err := issueNumberOf(run.Goal); err == nil {
-		summary.Issue = issue
-	}
-	if dir := candidateDir(stateDir, run.ID); dirExists(dir) {
-		summary.Workspace = dir
-	}
-	events, err := store.Events(run.ID)
+	rows, err := store.db.Query(`SELECT document FROM run_operations
+		WHERE json_extract(document, '$.state') NOT IN ('succeeded', 'cancelled')
+		  AND run_id IN (SELECT id FROM runs WHERE json_extract(document, '$.disposition') NOT IN (`+
+		strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`))`, args...)
 	if err != nil {
-		summary.Error = boundedDetail(err.Error())
-		return summary
+		return nil, err
 	}
-	snapshot, err := Reduce(run, events)
+	operations, err := scanOperations(rows)
 	if err != nil {
-		summary.Error = boundedDetail(err.Error())
-		return summary
+		return nil, err
 	}
-	projection, err := Project(events)
-	if err != nil {
-		summary.Error = boundedDetail(err.Error())
-		return summary
+	byRun := map[string]map[string]RunOperation{}
+	for _, op := range operations {
+		if byRun[op.RunID] == nil {
+			byRun[op.RunID] = map[string]RunOperation{}
+		}
+		byRun[op.RunID][op.ID] = op
 	}
-	// The journal is the authority for the agent binding; the row is only a
-	// projection of it, so a row that somehow disagrees loses.
-	state := &runState{run: run, snapshot: snapshot, events: events, projection: projection}
-	agent, err := state.recordedAgent()
-	if err != nil {
-		summary.Error = boundedDetail(err.Error())
-		return summary
-	}
-	if agent.AgentID != "" {
-		summary.Agent, summary.ProviderKind = agent.AgentID, agent.Kind
-		summary.TrustMode, summary.Model = agent.TrustMode, agent.Model
-	}
-	summary.Disposition, summary.Reason = snapshot.Disposition, snapshot.Reason
-	summary.CandidateRevision, summary.CandidateTree = projection.CandidateRevision, projection.CandidateTree
-	summary.Attempts = projection.Attempts
-	if operation, ok := state.currentOperation(); ok {
-		summary.Operation, summary.Attempt = operation.Kind, operation.Attempt
-	}
-	summary.Executing = executingNow(store, run.ID)
-	if pr := projection.PullRequest; pr != nil {
-		summary.PullRequest, summary.PRState = pr.Number, pr.State
-	}
-	if ci := projection.CI; ci != nil && !ci.Stale {
-		summary.CI = ci.Conclusion
-	}
-	if review := projection.Review; review != nil && !review.Stale {
-		summary.Review = review.State
-	}
-	feedback := state.feedbackState()
-	for _, decision := range feedback.Admitted {
-		if decision.Admitted {
-			summary.FeedbackAdmitted++
+	for _, all := range byRun {
+		for _, op := range all {
+			for _, id := range op.DependsOn {
+				if _, ok := all[id]; ok {
+					continue
+				}
+				if dependency, _, found, err := store.Operation(id); err != nil {
+					return nil, err
+				} else if found {
+					all[id] = dependency
+				}
+			}
 		}
 	}
-	summary.FeedbackPending = len(feedback.Pending(projection.Head()))
+	return byRun, nil
+}
+
+// capacityRunnable and capacityWaiting are the two states of a run holding no
+// active operation. They are not capacity classes; they only share the type
+// so capacityState answers in one value.
+const (
+	capacityRunnable CapacityClass = "runnable"
+	capacityWaiting  CapacityClass = "waiting"
+)
+
+// capacityState places one nonterminal run's durable operations in exactly one
+// operator count (#85). Active means what AcquireOperation counts: leased or
+// running WITH a lease. A run holds at most one, so work-or-observation is a
+// partition; should it ever hold both, work wins, which is the closed side.
+// Runnable is a WORK operation Next would lease now: leasable, the scheduler's
+// own predicate, and not expired. The one approximation is liveness, which a
+// read never probes: an abandoned lease counts as active (Working or
+// Observing) until a scheduler reclaims it.
+func capacityState(all map[string]RunOperation, now time.Time) CapacityClass {
+	active := CapacityClass("")
+	for _, op := range all {
+		if op.Lease != nil && (op.State == Leased || op.State == Running) {
+			if class := OperationCapacityClass(op.Kind); active == "" || class == CapacityWork {
+				active = class
+			}
+		}
+	}
+	if active != "" {
+		return active
+	}
+	for _, op := range all {
+		if OperationCapacityClass(op.Kind) == CapacityWork && runnableNow(op, all, now) {
+			return capacityRunnable
+		}
+	}
+	return capacityWaiting
+}
+
+// runnableNow is an operation holding nothing that Next would lease now.
+func runnableNow(op RunOperation, all map[string]RunOperation, now time.Time) bool {
+	return op.State != Leased && op.State != Running && leasable(op, all, now, false) && !OperationExpired(op, now)
+}
+
+// verificationOccupancy places one run against the verification ceiling
+// (#490): holding a verification slot, or runnable with a verification to
+// lease. They refine Working and Runnable and are never a partition member of
+// their own, because a verification is work.
+func verificationOccupancy(all map[string]RunOperation, now time.Time) (holding, awaiting bool) {
+	for _, op := range all {
+		if holdsVerificationSlot(op) {
+			return true, false
+		}
+	}
+	for _, op := range all {
+		if consumesVerification(op.Kind) && runnableNow(op, all, now) {
+			return false, true
+		}
+	}
+	return false, false
+}
+
+func summarizeRun(store *SQLiteOperationStore, stateDir string, run EngineeringRun, now time.Time) RunSummary {
+	events, err := store.Events(run.ID)
+	if err != nil {
+		summary := initialRunSummary(stateDir, run, now)
+		summary.Error = boundedDetail(err.Error())
+		return summary
+	}
+	summary := summarizeRunEvents(stateDir, run, events, now)
+	summary.Executing = executingNow(store, run.ID)
+	return summary
+}
+
+// summaryCache memoizes the replayed part of each RunSummary for a long-lived
+// reader such as the control plane, which re-reads the whole fleet every few
+// seconds. Decoding, canonicalizing and hash-verifying every journal on every
+// read cost ~8ms a run - about a second at 93 runs.
+//
+// The key is the run row plus a SHA-256 over exactly the event bytes replay
+// reads: the same columns, the same WHERE, the same order as Events. Replay is
+// a pure function of those inputs, so a hit returns what replaying would
+// return - including for a journal edited in place, which changes the bytes,
+// misses, replays, and is refused by the chain check exactly as an uncached
+// read would refuse it (#428 review). What depends on the clock or on the
+// process - elapsed, executing right now, workspace - is recomputed on every
+// read, and failed summaries are never cached.
+type summaryCache struct {
+	mu      sync.Mutex
+	entries map[string]cachedSummary
+}
+
+type cachedSummary struct {
+	run     EngineeringRun
+	journal [sha256.Size]byte
+	summary RunSummary
+}
+
+// runJournalDigests hashes, per run, every column of every event row replay
+// would read, or nothing when there is no cache to key. Reading the raw bytes
+// is a fraction of replaying them: no JSON decoding, no canonical encoding.
+func runJournalDigests(store *SQLiteOperationStore, cache *summaryCache) (map[string][sha256.Size]byte, error) {
+	if cache == nil {
+		return nil, nil
+	}
+	rows, err := store.db.Query(`SELECT `+sqliteEventReadColumns+` FROM events WHERE stream_kind = ? ORDER BY run_id ASC, sequence ASC`, streamRun)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	raw := make([]sql.RawBytes, len(columns))
+	dest := make([]any, len(columns))
+	for i := range raw {
+		dest[i] = &raw[i]
+	}
+	digests := map[string][sha256.Size]byte{}
+	var current string
+	var h hash.Hash
+	flush := func() {
+		if h != nil {
+			var sum [sha256.Size]byte
+			copy(sum[:], h.Sum(nil))
+			digests[current] = sum
+		}
+	}
+	var length [8]byte
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		if runID := string(raw[1]); h == nil || runID != current {
+			flush()
+			current, h = runID, sha256.New()
+		}
+		for _, column := range raw {
+			// Length-prefixed, so no two different rows hash alike by shifting
+			// bytes between adjacent columns.
+			binary.BigEndian.PutUint64(length[:], uint64(len(column)))
+			h.Write(length[:])
+			h.Write(column)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	flush()
+	return digests, nil
+}
+
+func (c *summaryCache) summarize(store *SQLiteOperationStore, stateDir string, run EngineeringRun, journal [sha256.Size]byte, now time.Time) RunSummary {
+	if c == nil {
+		return summarizeRun(store, stateDir, run, now)
+	}
+	c.mu.Lock()
+	entry, ok := c.entries[run.ID]
+	c.mu.Unlock()
+	if ok && entry.journal == journal && reflect.DeepEqual(entry.run, run) {
+		summary := entry.summary
+		summary.Attempts = maps.Clone(summary.Attempts)
+		summary.Elapsed = now.Sub(run.CreatedAt)
+		summary.Executing = executingNow(store, run.ID)
+		summary.Workspace = ""
+		if dir := candidateDir(stateDir, run.ID); dirExists(dir) {
+			summary.Workspace = dir
+		}
+		return summary
+	}
+	// journal was digested before this replay, so a journal that changes in
+	// between is cached under the older digest and simply replayed again next
+	// time: the cache can be conservative, never stale.
+	summary := summarizeRun(store, stateDir, run, now)
+	if summary.Error == "" {
+		c.mu.Lock()
+		if c.entries == nil {
+			c.entries = map[string]cachedSummary{}
+		}
+		c.entries[run.ID] = cachedSummary{run: run, journal: journal, summary: summary}
+		c.mu.Unlock()
+	}
 	return summary
 }
 

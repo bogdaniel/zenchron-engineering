@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,74 @@ func TestCandidateCloneCommitAndMetadataIntegrity(t *testing.T) {
 	}
 	if err := w.AssertIntegrity(); err == nil {
 		t.Fatal("accepted producer Git metadata mutation")
+	}
+}
+
+// TestRefuseSubmodulesAtAdmission pins the clone shape the runtime really uses
+// (`clone --no-checkout`, `checkout --detach`): a submodule path is an empty
+// directory and `git status` is clean, yet the index records the gitlink. The
+// refusal must come from the index, must name the capability limit, and must
+// not fire for a repository without submodules.
+func TestRefuseSubmodulesAtAdmission(t *testing.T) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin")
+	if _, err := runGit("", "init", origin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(origin, "config", "user.name", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(origin, "config", "user.email", "test@example.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(origin, "README.md"), []byte("base\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(origin, "add", "README.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(origin, "commit", "-m", "plain"); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := gitOutput(origin, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain = strings.TrimSpace(plain)
+	if _, err := runGit(origin, "update-index", "--add", "--cacheinfo", "160000,"+plain+",vendor/lib"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(origin, "commit", "-m", "submodule"); err != nil {
+		t.Fatal(err)
+	}
+	withSubmodule, err := gitOutput(origin, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withSubmodule = strings.TrimSpace(withSubmodule)
+
+	clean, err := CreateCandidateClone(filepath.Join(root, "state"), "run-plain", origin, plain, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseSubmodules(clean.Dir); err != nil {
+		t.Fatalf("refused a repository with no submodules: %v", err)
+	}
+
+	w, err := CreateCandidateClone(filepath.Join(root, "state"), "run-sub", origin, withSubmodule, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = refuseSubmodules(w.Dir)
+	if err == nil {
+		t.Fatal("admitted a repository that records a submodule")
+	}
+	var refusal *SubmoduleUnsupportedError
+	if !errors.As(err, &refusal) || len(refusal.Paths) != 1 || refusal.Paths[0] != "vendor/lib" {
+		t.Fatalf("refusal does not name the submodule path: %v", err)
+	}
+	if !strings.Contains(err.Error(), "cannot carry submodules") {
+		t.Fatalf("refusal does not name the capability limit: %v", err)
 	}
 }
 
@@ -447,5 +516,60 @@ func TestCandidateCommitCarriesTheContentBehindAHiddenGitlink(t *testing.T) {
 	content, err := gitOutput(w.Dir, "show", "HEAD:"+hidden+"/checked-out.txt")
 	if err != nil || strings.TrimSpace(content) != "assurance" {
 		t.Fatalf("a producer hid its change behind a staged gitlink: %q %v", content, err)
+	}
+}
+
+func TestResolveRepositoryCheckoutRequirement(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		init, origin  bool
+		action, cause string
+	}{
+		{name: "non repository", action: "cd into", cause: "not a git repository"},
+		{name: "no origin", init: true, action: "add an origin remote", cause: "no origin remote"},
+		{name: "valid checkout", init: true, origin: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.init {
+				if _, err := runGit(dir, "init"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const remote = "https://github.com/example/target.git"
+			if tc.origin {
+				if err := os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("[remote \"origin\"]\n\turl = "+remote+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, explicit := range []string{"", "explicit/target"} {
+				target, err := ResolveRepository(dir, explicit)
+				if tc.origin {
+					identity := "example/target"
+					if explicit != "" {
+						identity = explicit
+					}
+					if err != nil || target != (RepositoryTarget{Identity: identity, Remote: remote, DefaultBranch: "main"}) {
+						t.Fatalf("target=%+v err=%v", target, err)
+					}
+					continue
+				}
+				var refusal *RepositoryTargetError
+				if !errors.As(err, &refusal) || target != (RepositoryTarget{}) {
+					t.Fatalf("target=%+v err=%v", target, err)
+				}
+				for _, want := range []string{"must run from a Git checkout containing the target repository, with an origin remote", tc.action, tc.cause, "git remote get-url origin"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("missing %q: %v", want, err)
+					}
+				}
+				if strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), "--repo") {
+					t.Errorf("unsafe or misleading guidance: %v", err)
+				}
+				if errors.Unwrap(refusal).Error() != tc.cause {
+					t.Errorf("unsanitized cause: %v", errors.Unwrap(refusal))
+				}
+			}
+		})
 	}
 }

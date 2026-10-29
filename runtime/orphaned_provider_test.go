@@ -153,7 +153,7 @@ func TestAGuardThatCannotBeArmedRefusesBeforeTheWorkloadStarts(t *testing.T) {
 
 	marker := filepath.Join(t.TempDir(), "workload-ran")
 	cmd := exec.Command("sh", "-c", ": > "+marker)
-	err := runBoundedProcess(context.Background(), cmd, 50*time.Millisecond)
+	_, err := runBoundedProcess(context.Background(), cmd, 50*time.Millisecond)
 	if err == nil {
 		t.Fatal("a workload was run with containment that could not be armed")
 	}

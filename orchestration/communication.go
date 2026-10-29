@@ -1,0 +1,561 @@
+package orchestration
+
+// The typed communication protocol (#473).
+//
+// Workers coordinate through a deliberately small vocabulary instead of an
+// operator relaying transcript prose between them:
+//
+//	EngineeringHandoff    completed responsibility -> downstream context (#470, handoff.go)
+//	CollaborationRequest  a bounded request to another unit, or the response to one
+//	Finding               a defect, risk or inconsistency bound to an exact admitted subject
+//	DecisionRequest       a question only a human or designated authority may answer
+//	StateUpdate           a compact, non-authoritative progress observation
+//
+// The handoff is consumed, not redesigned: a message names an admitted handoff
+// as its subject, and the subject it is bound to is that handoff's
+// runtime-observed one.
+//
+// The same split as the handoff applies. A worker writes a MessageReport - only
+// the parts that are its to say - through a runtime-owned slot. The runtime
+// admits each draft into an immutable EngineeringMessage whose provenance,
+// route and subject come from the runtime's own records, never from the
+// worker. No message grants a permission, settles a lifecycle, or answers a
+// DecisionRequest: there is no member that could say so.
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
+)
+
+// MessageSchemaVersion versions both the worker document and the admitted
+// record. An unrecognized version is refused rather than interpreted.
+const MessageSchemaVersion = "0.1"
+
+// MessageKind is one of the four message primitives beside the handoff.
+type MessageKind string
+
+const (
+	KindCollaborationRequest MessageKind = "collaboration_request"
+	KindFinding              MessageKind = "finding"
+	KindDecisionRequest      MessageKind = "decision_request"
+	KindStateUpdate          MessageKind = "state_update"
+)
+
+// The categories a Finding may carry.
+const (
+	FindingDefect        = "defect"
+	FindingRisk          = "risk"
+	FindingInconsistency = "inconsistency"
+)
+
+// Audience is who an admitted message is routed to. The runtime derives it
+// from the kind and the subject; a worker never chooses it.
+type Audience string
+
+const (
+	// AudienceUnit routes to exactly one unit (Route.Unit).
+	AudienceUnit Audience = "unit"
+	// AudienceAuthority routes to the human or designated authority. Nothing
+	// a worker writes can answer it.
+	AudienceAuthority Audience = "authority"
+	// AudienceScope is a non-authoritative observation visible across the
+	// scope. It is never copied per unit.
+	AudienceScope Audience = "scope"
+)
+
+// Bounds. They are refusals, never truncations.
+const (
+	MaxMessageReportBytes = 32 << 10
+	// MaxMessagesPerInvocation is also the routing fan-out of one invocation:
+	// every admitted message has at most one recipient.
+	MaxMessagesPerInvocation = 8
+	// MaxScopeMessages bounds one scope's durable history, and so every list
+	// projected from it.
+	MaxScopeMessages = 256
+	// MaxScopeUnits bounds the roster a scope is admitted against.
+	MaxScopeUnits     = MaxBatchItems
+	maxMessageBody    = 4 << 10
+	maxMessagePurpose = 256
+	maxMessageRef     = 128
+)
+
+// MessageReport is the document a worker writes through the runtime-owned
+// message slot. Like HandoffReport it carries no run, unit, candidate or
+// agent identity: the strict decoder refuses such members as unknown.
+type MessageReport struct {
+	SchemaVersion string         `json:"schema_version"`
+	Messages      []MessageDraft `json:"messages"`
+}
+
+// MessageDraft is one worker-stated message. Which members a kind may carry
+// is fixed by validateDraft; a member a kind does not use is refused, not
+// ignored, so a worker cannot route a Finding or answer a decision by
+// writing a member the runtime would otherwise drop.
+type MessageDraft struct {
+	Kind MessageKind `json:"kind"`
+	// Target is the unit a CollaborationRequest is addressed to. It is the
+	// only member through which a worker names a recipient.
+	Target string `json:"target,omitempty"`
+	// InReplyTo makes a CollaborationRequest the response to an admitted
+	// request addressed to the writer's unit.
+	InReplyTo string `json:"in_reply_to,omitempty"`
+	// Supersedes corrects an admitted message of the same kind from the same
+	// unit. The superseded record stays; history is appended, never rewritten.
+	Supersedes string `json:"supersedes,omitempty"`
+	// SubjectHandoff names an admitted EngineeringHandoff. The subject bound
+	// is that handoff's runtime-observed candidate, never a restatement.
+	SubjectHandoff string `json:"subject_handoff,omitempty"`
+	Purpose        string `json:"purpose,omitempty"`
+	Category       string `json:"category,omitempty"`
+	// ExpectedOutcomeKind, when set on a DecisionRequest, is the ONLY
+	// outcome kind #508's ResolveDecision will accept for it - allow_deny,
+	// selected_option or text - prescribed by the asker, never chosen by
+	// whoever answers it (#508 review P4c). Absent is a legacy or
+	// deliberately open-ended question: ResolveDecision then accepts any of
+	// the three bounded outcome kinds, exactly as it did before this member
+	// existed - every request #473 admitted before P4c decodes with this
+	// member absent and is unaffected.
+	ExpectedOutcomeKind string `json:"expected_outcome_kind,omitempty"`
+	// PermittedOptions is the closed, exhaustive set of values a
+	// selected_option answer may take - required when ExpectedOutcomeKind is
+	// selected_option, forbidden otherwise. It is frozen into the admitted,
+	// insert-only EngineeringMessage: no later message, including one that
+	// supersedes this request, can widen an already-admitted request's own
+	// set, and nothing a resolving caller supplies can override it either -
+	// ResolveDecision reads it only from the durable request itself.
+	PermittedOptions []string `json:"permitted_options,omitempty"`
+	Body             string   `json:"body"`
+}
+
+// DecodeMessageReport strictly decodes and validates one document: exactly
+// one JSON object, no unknown member, no trailing data, within every bound.
+func DecodeMessageReport(document []byte) (MessageReport, error) {
+	if len(document) > MaxMessageReportBytes {
+		return MessageReport{}, fmt.Errorf("message report is %d bytes, above the %d byte bound", len(document), MaxMessageReportBytes)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(document))
+	decoder.DisallowUnknownFields()
+	var report MessageReport
+	if err := decoder.Decode(&report); err != nil {
+		return MessageReport{}, fmt.Errorf("message report is not a valid document: %w", err)
+	}
+	if len(bytes.TrimSpace(document[decoder.InputOffset():])) != 0 {
+		return MessageReport{}, errors.New("message report carries trailing data after its JSON value")
+	}
+	return report, report.Validate()
+}
+
+// Validate refuses a report this build cannot act on. An absent slot is how
+// a worker says nothing, so an empty report is refused rather than admitted
+// as a second way to say it.
+func (r MessageReport) Validate() error {
+	if r.SchemaVersion != MessageSchemaVersion {
+		return fmt.Errorf("message schema version %q is not %q", r.SchemaVersion, MessageSchemaVersion)
+	}
+	if len(r.Messages) == 0 || len(r.Messages) > MaxMessagesPerInvocation {
+		return fmt.Errorf("a message report carries %d messages, not 1 to %d", len(r.Messages), MaxMessagesPerInvocation)
+	}
+	for i, draft := range r.Messages {
+		if err := validateDraft(draft); err != nil {
+			return fmt.Errorf("message %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// draftShape is which optional members a kind requires (true) or permits
+// (false); a member absent from the map is forbidden.
+var draftShape = map[MessageKind]map[string]bool{
+	KindCollaborationRequest: {"target": true, "purpose": true, "in_reply_to": false, "subject_handoff": false},
+	KindFinding:              {"subject_handoff": true, "category": true},
+	KindDecisionRequest:      {"purpose": true, "subject_handoff": false},
+	KindStateUpdate:          {},
+}
+
+func validateDraft(d MessageDraft) error {
+	shape, known := draftShape[d.Kind]
+	if !known {
+		return fmt.Errorf("message kind %q is not a recognized kind", d.Kind)
+	}
+	if err := messageText("body", d.Body, maxMessageBody); err != nil {
+		return err
+	}
+	members := map[string]string{
+		"target": d.Target, "purpose": d.Purpose, "in_reply_to": d.InReplyTo,
+		"subject_handoff": d.SubjectHandoff, "category": d.Category,
+	}
+	for name, value := range members {
+		required, allowed := shape[name]
+		switch {
+		case value == "" && required:
+			return fmt.Errorf("a %s requires %s", d.Kind, name)
+		case value != "" && !allowed:
+			return fmt.Errorf("a %s may not carry %s", d.Kind, name)
+		}
+	}
+	for name, value := range map[string]string{"target": d.Target, "in_reply_to": d.InReplyTo, "supersedes": d.Supersedes, "subject_handoff": d.SubjectHandoff} {
+		if value != "" {
+			if err := messageText(name, value, maxMessageRef); err != nil {
+				return err
+			}
+		}
+	}
+	if d.Purpose != "" {
+		if err := messageText("purpose", d.Purpose, maxMessagePurpose); err != nil {
+			return err
+		}
+	}
+	if d.Category != "" && d.Category != FindingDefect && d.Category != FindingRisk && d.Category != FindingInconsistency {
+		return fmt.Errorf("finding category %q must be %q, %q or %q", d.Category, FindingDefect, FindingRisk, FindingInconsistency)
+	}
+	if d.Kind == KindDecisionRequest {
+		return validateDecisionRequestShape(d.ExpectedOutcomeKind, d.PermittedOptions)
+	}
+	if d.ExpectedOutcomeKind != "" || len(d.PermittedOptions) > 0 {
+		return fmt.Errorf("a %s may not carry expected_outcome_kind or permitted_options", d.Kind)
+	}
+	return nil
+}
+
+// MaxDecisionRequestOptions bounds one decision_request's own permitted-
+// option set - a closed, exhaustive menu an authority selects from, never an
+// open-ended list a worker could use to smuggle an unbounded document.
+const MaxDecisionRequestOptions = 20
+
+// validateDecisionRequestShape is #508 review P4c's grammar enforcement: a
+// decision_request MAY prescribe the only outcome kind that may answer it,
+// and selected_option MUST then also prescribe its own closed, exhaustive,
+// deduplicated option set. Absent (kind == "") is a legacy or deliberately
+// open-ended question - every #473 request admitted before this member
+// existed decodes with it absent and is validated exactly as it always was;
+// an unrecognized kind, or a malformed/missing/oversized option set, fails
+// closed rather than being interpreted.
+func validateDecisionRequestShape(kind string, options []string) error {
+	if kind == "" {
+		if len(options) > 0 {
+			return errors.New("permitted_options requires expected_outcome_kind to be selected_option")
+		}
+		return nil
+	}
+	switch kind {
+	case DecisionAllowDeny, DecisionText:
+		if len(options) > 0 {
+			return fmt.Errorf("a %s decision_request may not carry permitted_options", kind)
+		}
+		return nil
+	case DecisionSelectedOption:
+		if len(options) == 0 {
+			return errors.New("a selected_option decision_request requires its permitted_options")
+		}
+		if len(options) > MaxDecisionRequestOptions {
+			return fmt.Errorf("a decision_request names %d permitted options, above the %d bound", len(options), MaxDecisionRequestOptions)
+		}
+		seen := make(map[string]bool, len(options))
+		for _, option := range options {
+			if err := boundedDecisionText("permitted option", option, maxDecisionOptionBytes); err != nil {
+				return err
+			}
+			if seen[option] {
+				return fmt.Errorf("permitted option %q is repeated", option)
+			}
+			seen[option] = true
+		}
+		return nil
+	default:
+		return fmt.Errorf("decision_request expected_outcome_kind %q is not %q, %q or %q", kind, DecisionAllowDeny, DecisionSelectedOption, DecisionText)
+	}
+}
+
+func messageText(name, value string, limit int) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("message %s is required", name)
+	}
+	if len(value) > limit {
+		return fmt.Errorf("message %s is %d bytes, above the %d byte bound", name, len(value), limit)
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("message %s is not valid UTF-8", name)
+	}
+	return nil
+}
+
+// EngineeringMessage is the durable, immutable record of one admitted
+// message. Everything except Purpose, Category, Body, ExpectedOutcomeKind
+// and PermittedOptions is runtime-owned.
+type EngineeringMessage struct {
+	SchemaVersion string          `json:"schema_version"`
+	ID            string          `json:"id"`
+	Scope         string          `json:"scope"`
+	Kind          MessageKind     `json:"kind"`
+	Source        MessageSource   `json:"source"`
+	Route         MessageRoute    `json:"route"`
+	Subject       *MessageSubject `json:"subject,omitempty"`
+	InReplyTo     string          `json:"in_reply_to,omitempty"`
+	Supersedes    string          `json:"supersedes,omitempty"`
+	Purpose       string          `json:"purpose,omitempty"`
+	Category      string          `json:"category,omitempty"`
+	// ExpectedOutcomeKind and PermittedOptions are the asker's own frozen
+	// answer-shape prescription (#508 review P4c; see MessageDraft). Copied
+	// verbatim at admission and never again - the insert-only table this
+	// becomes a row of is what makes "never widened after admission" true.
+	ExpectedOutcomeKind string   `json:"expected_outcome_kind,omitempty"`
+	PermittedOptions    []string `json:"permitted_options,omitempty"`
+	Body                string   `json:"body"`
+	// DocumentSHA256 is the digest of the exact slot document journalled when
+	// the producing invocation completed.
+	DocumentSHA256 string    `json:"document_sha256"`
+	AdmittedAt     time.Time `json:"admitted_at"`
+}
+
+// MessageSource is the exact invocation that wrote a message, as the runtime
+// recorded it. Index is the draft's position in that invocation's report.
+//
+// System is true only for a message a runtime operation produced directly,
+// with no provider invocation at all (#475's deterministic integration
+// composition is the first such operation) - decided exclusively by the
+// store-controlled admission path reading the producing OPERATION'S OWN
+// KIND, never by anything a worker-written report could claim: MessageDraft
+// has no such member, so a provider's own JSON can never set this either
+// way. The zero value (false) is every message admitted before this field
+// existed, unaffected.
+type MessageSource struct {
+	Unit  string `json:"unit"`
+	RunID string `json:"run_id"`
+	// AgentID is the run's bound execution agent. Required unless System is
+	// true: a system-authored message names no agent, because no agent
+	// invocation produced it - claiming one would be exactly the fabricated
+	// provider attempt this field exists to prevent.
+	AgentID     string `json:"agent_id,omitempty"`
+	OperationID string `json:"operation_id"`
+	Attempt     int    `json:"attempt"`
+	Index       int    `json:"index"`
+	System      bool   `json:"system,omitempty"`
+}
+
+// MessageRoute is the runtime-derived recipient.
+type MessageRoute struct {
+	Audience Audience `json:"audience"`
+	Unit     string   `json:"unit,omitempty"`
+}
+
+// MessageSubject is the exact subject a message is bound to: an admitted
+// handoff, the unit that owns it, and the candidate the runtime observed.
+type MessageSubject struct {
+	Handoff  string         `json:"handoff"`
+	Owner    string         `json:"owner"`
+	Revision HandoffSubject `json:"revision"`
+}
+
+// Validate refuses a record missing any runtime-owned binding, or one whose
+// route contradicts its kind.
+func (m EngineeringMessage) Validate() error {
+	if m.SchemaVersion != MessageSchemaVersion {
+		return fmt.Errorf("engineering message schema version %q is not %q", m.SchemaVersion, MessageSchemaVersion)
+	}
+	required := map[string]string{
+		"id": m.ID, "scope": m.Scope, "source.unit": m.Source.Unit, "source.run_id": m.Source.RunID,
+		"source.operation_id": m.Source.OperationID, "document_sha256": m.DocumentSHA256,
+	}
+	if !m.Source.System {
+		required["source.agent_id"] = m.Source.AgentID
+	}
+	for name, value := range required {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("engineering message %s is required", name)
+		}
+	}
+	if m.Source.System && m.Source.AgentID != "" {
+		return errors.New("a system-authored engineering message may not also name an agent id")
+	}
+	if m.Source.Attempt <= 0 || m.Source.Index < 0 || m.AdmittedAt.IsZero() {
+		return errors.New("engineering message attempt, index and admission time must be valid")
+	}
+	if route := routeOf(m.Kind, m.Target(), m.Subject); route != m.Route {
+		return fmt.Errorf("engineering message route %+v is not the route of a %s", m.Route, m.Kind)
+	}
+	return validateDraft(m.draft())
+}
+
+// Target is the unit a CollaborationRequest names, read back from its route.
+func (m EngineeringMessage) Target() string {
+	if m.Kind != KindCollaborationRequest {
+		return ""
+	}
+	return m.Route.Unit
+}
+
+func (m EngineeringMessage) draft() MessageDraft {
+	draft := MessageDraft{Kind: m.Kind, Target: m.Target(), InReplyTo: m.InReplyTo, Supersedes: m.Supersedes,
+		Purpose: m.Purpose, Category: m.Category, ExpectedOutcomeKind: m.ExpectedOutcomeKind,
+		PermittedOptions: m.PermittedOptions, Body: m.Body}
+	if m.Subject != nil {
+		draft.SubjectHandoff = m.Subject.Handoff
+	}
+	return draft
+}
+
+// routeOf is the one routing rule. A Finding goes to the owner of the subject
+// it is bound to - deterministically, and never where its writer pointed it.
+func routeOf(kind MessageKind, target string, subject *MessageSubject) MessageRoute {
+	switch kind {
+	case KindCollaborationRequest:
+		return MessageRoute{Audience: AudienceUnit, Unit: target}
+	case KindFinding:
+		if subject == nil {
+			return MessageRoute{}
+		}
+		return MessageRoute{Audience: AudienceUnit, Unit: subject.Owner}
+	case KindDecisionRequest:
+		return MessageRoute{Audience: AudienceAuthority}
+	case KindStateUpdate:
+		return MessageRoute{Audience: AudienceScope}
+	}
+	return MessageRoute{}
+}
+
+// AppliesTo reports whether a message bound to a subject applies to this
+// exact one. A Finding about an older candidate never silently carries over
+// to a newer one: different revision, different answer.
+func (m EngineeringMessage) AppliesTo(current HandoffSubject) bool {
+	return m.Subject != nil && m.Subject.Revision == current
+}
+
+// MessageID is the identity of the draft at index of one exact invocation's
+// report. Replaying the same invocation yields the same identities.
+func MessageID(runID, operationID string, attempt, index int) (string, error) {
+	if runID == "" || operationID == "" || attempt <= 0 || index < 0 {
+		return "", errors.New("a message identity needs the run, operation, physical attempt and index")
+	}
+	digest, err := domain.Digest(struct {
+		Run       string `json:"run"`
+		Operation string `json:"operation"`
+		Attempt   int    `json:"attempt"`
+		Index     int    `json:"index"`
+	}{runID, operationID, attempt, index})
+	if err != nil {
+		return "", err
+	}
+	return "message-" + digest[:32], nil
+}
+
+// DeliverFinding copies an already-admitted unit-routed Finding into the
+// scope its own Route already names as the recipient (#475 B1). A WorkGraph
+// integration unit's conflict Finding is admitted into ITS OWN single-item
+// batch scope, where routeOf has already named the upstream producer as
+// Route.Unit without granting it anything: that producer's inbox is
+// projected from ITS OWN scope, which this Finding was never a member of.
+// Delivery is this one explicit, narrow step - copying the SAME admitted
+// observation into that other existing, durable scope - never a new scope,
+// never every unit's messages, never a second message bus.
+//
+// destinationUnit is the producer's OWN name within its own scope
+// (BatchItemUnit(its issue), e.g. "issue-101") - NOT the graph unit id
+// ("a") that named it as Route.Unit inside the INTEGRATOR's scope. The two
+// are different naming spaces for the exact same unit: a batch's own
+// roster is always named by its issue (queryBatchMessageScope), and a graph
+// unit id is only ever a foreign alias another unit's scope uses for it.
+// Subject.Owner and Route.Unit are rewritten to destinationUnit so the
+// delivered copy routes correctly inside the scope it actually lives in.
+//
+// destinationRevision is the SAME handoff's full, authoritative
+// HandoffSubject, read by the caller from the destination's own durable
+// handoff record. The consuming unit's own scope can only reconstruct a
+// foreign input's subject from WorkUnitInputs, which carries no
+// BaseRevision - so message.Subject.Revision, copied from there, may be
+// missing it even though it names the SAME exact handoff. This function
+// completes that one gap and nothing else: destinationRevision's
+// CandidateRevision and CandidateTree must exactly match the original
+// message's own Subject.Revision, and its BaseRevision must match too
+// whenever the original already carried one (#475 review P1) - a mismatch
+// on any of those is refused outright, never silently accepted as though
+// delivery were free to rebind the Finding to a different candidate. Only a
+// genuinely absent BaseRevision is filled in; the handoff identity itself
+// (Subject.Handoff) is unchanged either way, so this is completing the one
+// record already named, never substituting a different one.
+//
+// Everything else about the message is preserved exactly: Kind, Source,
+// Category and Body are copied verbatim, so the producer reads the
+// identical observation its conflict actually was, never a restatement a
+// second author could get wrong. Only ID and Scope otherwise change,
+// because a message's id is a global identity (#475 review): reusing the
+// original id under a second scope would not create a second row, it would
+// silently do nothing, which is exactly the failure this function exists to
+// avoid.
+//
+// The result is still fully self-validating: Validate() recomputes Route
+// from Kind/Target/Subject exactly as it does for any other message, so a
+// delivered copy that disagreed with its own content would be refused here,
+// before anything durable is written from it.
+func DeliverFinding(message EngineeringMessage, destinationScope, destinationUnit string, destinationRevision HandoffSubject) (EngineeringMessage, error) {
+	if message.Kind != KindFinding {
+		return EngineeringMessage{}, fmt.Errorf("only a %s can be delivered this way, not a %s", KindFinding, message.Kind)
+	}
+	if message.Route.Audience != AudienceUnit || message.Route.Unit == "" {
+		return EngineeringMessage{}, errors.New("a finding delivery requires a unit-routed finding")
+	}
+	if message.Subject == nil {
+		return EngineeringMessage{}, errors.New("a finding delivery requires a subject-bound finding")
+	}
+	if strings.TrimSpace(destinationScope) == "" || strings.TrimSpace(destinationUnit) == "" {
+		return EngineeringMessage{}, errors.New("a finding delivery names its destination scope and the producer's own name within it")
+	}
+	if destinationScope == message.Scope {
+		return EngineeringMessage{}, errors.New("a finding delivery's destination scope must differ from the scope it was admitted in")
+	}
+	original := message.Subject.Revision
+	if original.CandidateRevision != destinationRevision.CandidateRevision || original.CandidateTree != destinationRevision.CandidateTree {
+		return EngineeringMessage{}, fmt.Errorf(
+			"a finding delivery's destination candidate %s/tree %s does not match the finding's own exact subject candidate %s/tree %s",
+			short12(destinationRevision.CandidateRevision), short12(destinationRevision.CandidateTree),
+			short12(original.CandidateRevision), short12(original.CandidateTree))
+	}
+	if original.BaseRevision != "" && original.BaseRevision != destinationRevision.BaseRevision {
+		return EngineeringMessage{}, fmt.Errorf(
+			"a finding delivery's destination base revision %s does not match the finding's own exact subject base revision %s",
+			short12(destinationRevision.BaseRevision), short12(original.BaseRevision))
+	}
+	id, err := DeliveredFindingID(message.ID, destinationScope)
+	if err != nil {
+		return EngineeringMessage{}, err
+	}
+	delivered := message
+	delivered.ID, delivered.Scope, delivered.Route.Unit = id, destinationScope, destinationUnit
+	subject := *delivered.Subject
+	subject.Owner, subject.Revision = destinationUnit, destinationRevision
+	delivered.Subject = &subject
+	return delivered, delivered.Validate()
+}
+
+// short12 bounds an identity string in an error message.
+func short12(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
+// DeliveredFindingID is the deterministic identity of one Finding delivered
+// into one destination scope: the same original message delivered into the
+// same destination always names the same record, so replaying delivery
+// after a restart or a repeated reconcile pass finds the row it already
+// wrote instead of inserting a second one. A caller may compute it directly,
+// without the rest of DeliverFinding's work, to cheaply recognize a
+// delivery that already landed before paying for the delivery it would
+// otherwise require.
+func DeliveredFindingID(originalID, destinationScope string) (string, error) {
+	digest, err := domain.Digest(struct {
+		Original    string `json:"original"`
+		Destination string `json:"destination"`
+	}{originalID, destinationScope})
+	if err != nil {
+		return "", err
+	}
+	return "message-delivered-" + digest[:32], nil
+}

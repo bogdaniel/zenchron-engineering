@@ -69,6 +69,7 @@ type GCKind string
 
 const (
 	GCCandidateWorkspace GCKind = "candidate_workspace"
+	GCSubjectStore       GCKind = "subject_store"
 	GCAssuranceCheckout  GCKind = "assurance_checkout"
 	GCExecutionScratch   GCKind = "execution_scratch"
 	GCRawTranscript      GCKind = "raw_transcript"
@@ -92,7 +93,20 @@ type GCPlan struct {
 	Now      time.Time  `json:"now"`
 	Eligible []GCTarget `json:"eligible"`
 	Retained []GCTarget `json:"retained"`
+	// Held counts the retained candidate workspaces that hold #203 material,
+	// and their measured size: disk gc will never reclaim on its own.
+	Held GCHeldSummary `json:"held"`
 }
+
+// GCHeldSummary is how many held workspaces exist and how many bytes they use.
+// Bytes is a lower bound when part of a workspace is unreadable.
+type GCHeldSummary struct {
+	Workspaces int   `json:"workspaces"`
+	Bytes      int64 `json:"bytes"`
+}
+
+// gcHeldReason prefixes the retention reason of a held workspace.
+const gcHeldReason = "run holds held material: "
 
 // GCResult is what a real run did. Skipped holds targets the plan judged
 // eligible and revalidation then refused - the concurrency case, reported
@@ -188,6 +202,13 @@ func (c Collector) Plan() (GCPlan, error) {
 		if reason := c.prove(root, target, now); reason != "" {
 			target.Reason = reason
 			plan.Retained = append(plan.Retained, target)
+			if strings.HasPrefix(reason, gcHeldReason) {
+				bytes, _ := StateStorage{Dir: target.Path}.Usage() // lower bound on error
+				if target.Kind == GCCandidateWorkspace {
+					plan.Held.Workspaces++
+				}
+				plan.Held.Bytes += bytes
+			}
 			continue
 		}
 		plan.Eligible = append(plan.Eligible, target)
@@ -210,6 +231,11 @@ func (c Collector) discover(root string) ([]GCTarget, error) {
 		candidate := filepath.Join(runDir, "candidate")
 		if isDir(candidate) {
 			targets = append(targets, GCTarget{Kind: GCCandidateWorkspace, RunID: id, Path: candidate})
+		}
+		// The verified copy of the candidate's commits (#437) is reclaimed on
+		// exactly the terms the candidate workspace is.
+		if subject := subjectStoreDir(candidate); isDir(subject) {
+			targets = append(targets, GCTarget{Kind: GCSubjectStore, RunID: id, Path: subject})
 		}
 		entries, err := os.ReadDir(filepath.Join(runDir, "assurance"))
 		if err != nil && !os.IsNotExist(err) {
@@ -367,6 +393,20 @@ func (c Collector) prove(root string, target GCTarget, now time.Time) string {
 	if now.Sub(settled) < c.retention() {
 		return "within the retention window"
 	}
+	// Held material (#203) lives in the candidate workspace: an unpublished
+	// runtime commit or uncommitted changes nothing else has a copy of.
+	// Retention age is no reason to destroy it, so gc never collects it. There
+	// is NO governed release yet: the only way such a workspace goes away
+	// today is an operator deleting it by hand outside the runtime. The
+	// plan's Held summary counts these so the cost stays visible.
+	if held := snapshot.HeldMaterial; held != nil && (target.Kind == GCCandidateWorkspace || target.Kind == GCSubjectStore) {
+		return gcHeldReason + held.Kind + " at " + held.Revision
+	}
+	// A terminal run's candidate can still have a writer a dead supervisor
+	// left behind (#168); deleting under it would race what it writes.
+	if target.Kind == GCCandidateWorkspace && !candidateWriterFree(candidateWriterLockPath(target.Path)) {
+		return "a process still holds the candidate writer lock; `lsof " + candidateWriterLockPath(target.Path) + "` names it"
+	}
 	if target.Kind == GCRawTranscript && !rawArtifactOf(snapshot, target.Path) {
 		return "ownership cannot be proven: no journalled raw artifact at this path"
 	}
@@ -493,6 +533,11 @@ func (c Collector) Collect() (GCResult, error) {
 		}
 		if err := os.RemoveAll(target.Path); err != nil {
 			return result, err
+		}
+		if target.Kind == GCCandidateWorkspace {
+			if err := removeCandidateWriterLock(target.Path); err != nil {
+				return result, err
+			}
 		}
 		result.Deleted = append(result.Deleted, target)
 	}

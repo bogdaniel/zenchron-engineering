@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
 )
@@ -73,6 +75,12 @@ func main() {
 // passes the status to os.Exit unchanged, so the code a handler returns is the
 // code the process reports.
 func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
+	if root := strings.TrimSpace(os.Getenv("ZENCHRON_CONTROLLER_ROOT")); root != "" && !filepath.IsAbs(root) {
+		return exitUsage, fmt.Errorf("ZENCHRON_CONTROLLER_ROOT must be an absolute path")
+	}
+	if len(args) > 0 && args[0] == "control-plane" {
+		return controlPlane(args[1:], stdout)
+	}
 	if len(args) == 1 && args[0] == "version" {
 		fmt.Fprintln(stdout, version)
 		return runtime.ExitCompleted, nil
@@ -99,14 +107,30 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 	if len(args) >= 1 && args[0] == gitBrokerSubcommand {
 		return gitBroker(args[1:])
 	}
+	if len(args) >= 1 && args[0] == "__verification-tool" {
+		return verificationTool(args[1:])
+	}
 	if len(args) >= 1 && args[0] == "autonomy" {
 		return autonomy(args[1:], autonomyOverrides{}, stdout)
+	}
+	if len(args) >= 1 && args[0] == "benchmark" {
+		return benchmarkCommand(args[1:], time.Now, stdout)
 	}
 	// `serve` is top level rather than under `autonomy`, because it is not one
 	// more operation on a run: it is the persistent runtime the rest of the
 	// commands talk to.
 	if len(args) >= 1 && args[0] == "serve" {
 		return serveCommand(args[1:], autonomyOverrides{}, stdout)
+	}
+	// `up`, `down` and `status` are the one-action lifecycle over `serve` and
+	// `control-plane`; they start and stop those commands and decide nothing.
+	switch {
+	case len(args) >= 1 && args[0] == "up":
+		return upCommand(args[1:], osUpHost{}, defaultUpTiming, stdout)
+	case len(args) >= 1 && args[0] == "down":
+		return downCommand(args[1:], osUpHost{}, defaultUpTiming, stdout)
+	case len(args) >= 1 && args[0] == "status":
+		return statusCommand(args[1:], osUpHost{}, stdout)
 	}
 	if len(args) >= 3 && args[0] == "selfhost" && args[1] == "issue" {
 		models, err := parseModelFlags(args[3:])
@@ -124,7 +148,7 @@ func run(args []string, commands commandRunner, stdout io.Writer) (int, error) {
 		}
 		return runtime.ExitCompleted, nil
 	}
-	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|serve|autonomy ...|controller inspect-self [--json]|controller status [--json] [--config <path>]|controller build-adopted [--repo owner/name] [--config <path>] [--output <dir>] [--revision <sha>]|controller re-adopt --reason <text>|controller install [--bin-dir <dir>] [--config <path>]|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}\n\n" + serveUsage)
+	return exitUsage, fmt.Errorf("usage: zenchron-engineering {version|up|down|status|serve|benchmark ...|autonomy ...|controller inspect-self [--json]|controller status [--json] [--config <path>]|controller build-adopted [--repo owner/name] [--config <path>] [--output <dir>] [--revision <sha>]|controller re-adopt --reason <text>|controller install [--bin-dir <dir>] [--config <path>]|selfhost issue <number> [--model <name>] [--fallback-model <name> ...]|selfhost resume issue <number>}\n\n" + serveUsage)
 }
 
 func parseModelFlags(args []string) ([]string, error) {

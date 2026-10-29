@@ -1,0 +1,273 @@
+// Visual fixtures only. No runtime observations, credentials, or network calls.
+export const fixture = Object.freeze({
+  observedAt: "2026-10-13T14:32:08Z",
+  product: "Zenchron Engineering",
+  repository: "bogdaniel/zenchron-engineering",
+  revision: "81e4b9a927c530df268b6a381c591007de52f6a3",
+  tree: "642acf8025732d8a9f4af13001937ddbf9e1a243",
+  contract: "contract-612 / r3",
+  policy: "engineering-policy / r7",
+  controller: "fixture-controller-g42",
+});
+
+/** @typedef {'Executing'|'Review'|'Decision'|'Planning'|'Accepted'|'Remediation'|'Queued'} ObjectiveState */
+/** @typedef {{id:string, title:string, detail:string, state:ObjectiveState, product:string, issue:number, agent:string, handoffs?:{admitted:number,total:number}, reviews?:{completed:number,total:number}, decisionNeeded?:boolean, blocker:string, updated:string}} Objective */
+/** @type {ReadonlyArray<Objective>} */
+export const objectives = Object.freeze([
+  {
+    id: "OBJ-612",
+    title: "Harden credential isolation at the execution boundary",
+    detail: "Close inherited credential paths; retain native CLI behavior.",
+    state: "Decision",
+    product: "Engineering OS",
+    issue: 612,
+    agent: "codex-build",
+    handoffs: { admitted: 2, total: 4 },
+    reviews: { completed: 1, total: 1 },
+    decisionNeeded: true,
+    blocker: "Publication approval",
+    updated: "2 min",
+  },
+  {
+    id: "OBJ-608",
+    title: "Preserve exact-tree evidence across controller succession",
+    detail: "Bind continuation evidence to the adopted controller revision.",
+    state: "Executing",
+    product: "Engineering OS",
+    issue: 608,
+    agent: "claude-core",
+    handoffs: { admitted: 1, total: 3 },
+    blocker: "—",
+    updated: "Now",
+  },
+  {
+    id: "OBJ-605",
+    title: "Make provider capacity waits explainable",
+    detail: "Project typed capacity holds without renewing consumed budget.",
+    state: "Review",
+    product: "Engineering OS",
+    issue: 605,
+    agent: "claude-review",
+    reviews: { completed: 1, total: 2 },
+    blocker: "Independent review",
+    updated: "4 min",
+  },
+  {
+    id: "OBJ-601",
+    title: "Recover a WorkGraph after an interrupted handoff",
+    detail: "Reconcile durable handoffs before advancing downstream units.",
+    state: "Remediation",
+    product: "Engineering OS",
+    issue: 601,
+    agent: "codex-build",
+    handoffs: { admitted: 1, total: 4 },
+    blocker: "Handoff repair queued",
+    updated: "6 min",
+  },
+  {
+    id: "OBJ-598",
+    title: "Clarify why a plan stage is ineligible",
+    detail: "Name missing capabilities and independence dimensions.",
+    state: "Planning",
+    product: "Engineering OS",
+    issue: 598,
+    agent: "claude-core",
+    decisionNeeded: true,
+    blocker: "Plan approval",
+    updated: "9 min",
+  },
+  {
+    id: "OBJ-594",
+    title: "Keep held candidate material visible after cancellation",
+    detail: "Separate terminal disposition from preserved candidate material.",
+    state: "Executing",
+    product: "Engineering OS",
+    issue: 594,
+    agent: "codex-build",
+    handoffs: { admitted: 1, total: 3 },
+    blocker: "—",
+    updated: "Now",
+  },
+  {
+    id: "OBJ-590",
+    title: "Bound event replay reads for long-running objectives",
+    detail: "Use the run-local cursor and retain causal ordering.",
+    state: "Accepted",
+    product: "Engineering OS",
+    issue: 590,
+    agent: "claude-core",
+    handoffs: { admitted: 3, total: 3 },
+    blocker: "—",
+    updated: "28 min",
+  },
+  {
+    id: "OBJ-586",
+    title: "Show configuration drift before the next invocation",
+    detail: "Expose the frozen posture and current mismatch independently.",
+    state: "Queued",
+    product: "Engineering OS",
+    issue: 586,
+    agent: "Unassigned",
+    handoffs: { admitted: 0, total: 3 },
+    blocker: "Dependency handoff",
+    updated: "34 min",
+  },
+  {
+    id: "OBJ-581",
+    title: "Distinguish stale assurance from a failing result",
+    detail: "Preserve separate evidence lifecycle and result fields.",
+    state: "Accepted",
+    product: "Engineering OS",
+    issue: 581,
+    agent: "codex-build",
+    handoffs: { admitted: 3, total: 3 },
+    blocker: "—",
+    updated: "47 min",
+  },
+  {
+    id: "OBJ-579",
+    title: "Add an operator guide for independent review",
+    detail: "Document exact candidate bindings and external merge authority.",
+    state: "Review",
+    product: "Operator guides",
+    issue: 579,
+    agent: "claude-review",
+    reviews: { completed: 1, total: 2 },
+    blocker: "Review verdict",
+    updated: "1 hr",
+  },
+]);
+
+export const agents = Object.freeze([
+  {
+    id: "codex-build",
+    kind: "codex_cli",
+    trust: "operator_trusted",
+    used: 2,
+    state: "Executing",
+    initials: "CX",
+  },
+  {
+    id: "claude-core",
+    kind: "claude_code",
+    trust: "operator_trusted",
+    used: 1,
+    state: "Executing",
+    initials: "CC",
+  },
+  {
+    id: "claude-review",
+    kind: "claude_code",
+    trust: "operator_trusted",
+    used: 1,
+    state: "Reviewing",
+    initials: "CR",
+  },
+  {
+    id: "api-isolated",
+    kind: "openai_responses",
+    trust: "protected",
+    used: 0,
+    state: "Available",
+    initials: "AI",
+  },
+]);
+
+export const actionItems = Object.freeze([
+  {
+    id: "DEC-041",
+    objective: "OBJ-612",
+    type: "Publication",
+    eligibilityVerified: true,
+    consequence: "Open a pull request for this exact candidate. No merge or adoption authority.",
+    title: "Approve publication of the credential isolation change",
+    detail: "Record the missing human evidence for opening a pull request. Merge remains external.",
+    action: "git.open_pull_request",
+    target: "run-owned branch · issue-612",
+    age: "12 min",
+    state: "Ready for decision",
+    claim: "claim-publication-owner",
+    run: "run-612-g1",
+    binding: "authority-request-612-r3",
+    revision: 3,
+  },
+  {
+    id: "DEC-039",
+    objective: "OBJ-598",
+    type: "Plan approval",
+    eligibilityVerified: true,
+    consequence:
+      "Start dependency-ready agent stages within the approved budget. No publication or acceptance authority.",
+    title: "Review the plan for stage eligibility diagnostics",
+    detail: "Authorize the proposed decomposition and assignments within the existing budget ceiling.",
+    action: "plan.approve",
+    target: "plan-598 · revision 2",
+    age: "24 min",
+    state: "Ready for decision",
+    claim: "operator-plan-approval",
+    run: "No run before approval",
+    binding: "plan-598-r2-digest",
+    revision: 2,
+  },
+]);
+
+export const timeline = Object.freeze([
+  [
+    "14:32",
+    "Publication awaits human evidence",
+    "Exact candidate and contract are ready for the owner decision.",
+    "orange",
+  ],
+  ["14:28", "Independent assurance established", "Deterministic verifier · exact tree · 46 checks passed.", "green"],
+  ["14:24", "Review handoff admitted", "claude-review · independent execution agent · APPROVE.", "green"],
+  ["14:18", "Candidate observed and reassessed", "No material scope expansion; permission ceiling preserved.", "muted"],
+  ["14:11", "Implementation handoff admitted", "codex-build · candidate 81e4b9a · producer report recorded.", "muted"],
+  [
+    "13:42",
+    "Approved plan revision started",
+    "Operator approved plan-612 r3; dependency-ready agent stages became runs.",
+    "muted",
+  ],
+]);
+
+export const recoveryItems = Object.freeze([
+  {
+    id: "REC-036",
+    objective: "OBJ-601",
+    title: "Reconcile the interrupted handoff",
+    state: "Repair queued",
+    detail:
+      "Runtime-owned handoff recovery uses the existing repair allowance. No new permission or plan approval is implied.",
+  },
+  {
+    id: "REC-032",
+    objective: "OBJ-605",
+    title: "Refresh exact-tree assurance",
+    state: "Evidence stale",
+    detail:
+      "Passing evidence belongs to the previous candidate. Recheck only within existing assurance authority and budget; publication remains withheld.",
+  },
+]);
+
+export const scaleObjectives = Object.freeze([
+  ...objectives,
+  ...Array.from({ length: 490 }, (_, i) =>
+    Object.freeze({
+      ...objectives[1],
+      id: `OBJ-S${String(i + 1).padStart(3, "0")}`,
+      issue: 700 + i,
+      title: `Bounded engineering objective ${i + 1}: preserve exact-subject evidence`,
+    }),
+  ),
+]);
+export const scaleTimeline = Object.freeze([
+  ...timeline,
+  ...Array.from({ length: 9994 }, (_, i) =>
+    Object.freeze([
+      "13:00",
+      `Observed event ${i + 7}`,
+      "Scale fixture metadata only; not a runtime journal or acceptance record.",
+      "muted",
+    ]),
+  ),
+]);

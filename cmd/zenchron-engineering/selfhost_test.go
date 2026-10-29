@@ -47,6 +47,9 @@ func TestSelfhostIssuePublishesVerifiedHandoff(t *testing.T) {
 	if !strings.Contains(strings.Join(commands.calls, "\n"), "--ask-for-approval never --sandbox workspace-write") {
 		t.Fatal("Codex was not run with the bounded non-interactive policy")
 	}
+	if !slices.Contains(commands.codexEnv, "GOENV="+os.DevNull) {
+		t.Fatalf("Codex worker env %q does not isolate GOENV (#430)", commands.codexEnv)
+	}
 	if !strings.Contains(commands.prBody, "Closes #4") || !strings.Contains(commands.prBody, "do not authorize merge") {
 		t.Fatalf("PR body did not preserve the trust boundary:\n%s", commands.prBody)
 	}
@@ -359,6 +362,7 @@ type fakeCommands struct {
 	codexErrors             []error
 	codexAttempts           int
 	lastCodexFailed         bool
+	codexEnv                []string
 	codexLoginStatus        string
 	statusAfterCodexFailure string
 	pr                      pullRequest
@@ -542,7 +546,10 @@ func countCodexExecutions(calls []string) int {
 	return count
 }
 
-func (f *fakeCommands) OutputEnv(dir string, _ []string, name string, args ...string) (string, error) {
+func (f *fakeCommands) OutputEnv(dir string, env []string, name string, args ...string) (string, error) {
+	if name == "codex" {
+		f.codexEnv = env
+	}
 	return f.Output(dir, name, args...)
 }
 

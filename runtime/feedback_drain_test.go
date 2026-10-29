@@ -7,6 +7,9 @@ package runtime
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // TestAConsumptionRecordMayCarryOnlyLostItems. When every pending item's text
@@ -58,8 +61,8 @@ func TestFeedbackIsNotConsumedWhenNoWorkerRan(t *testing.T) {
 		t.Fatal("a refused invocation carries provenance, so the two cases cannot be told apart")
 	}
 	ranAndFailed := ExecutionResult{
-		Outcome:    OperationFailed,
-		Invocation: &InvocationProvenance{AgentID: "codex", Executable: "codex"},
+		Outcome:    execution.Failed,
+		Invocation: &InvocationProvenance{AgentID: "codex", InvocationObservation: domain.InvocationObservation{Executable: "codex"}},
 		Failure:    &ProviderFailure{Classification: FailureUnknown},
 	}
 	if ranAndFailed.Invocation == nil {

@@ -11,9 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // claudeHelpExcerpt is the real `claude --help` shape (2.1.282) around the
@@ -58,6 +62,7 @@ const claudeHelpExcerpt = `Options:
   -p, --print                           Print response and exit (useful for
                                         pipes).
   --safe-mode                           Start with all customizations disabled
+  --disallowedTools <tools...>          Remove selected tools from the session
   --verbose                             Override verbose mode setting from
                                         config
 `
@@ -108,42 +113,6 @@ func TestAChoiceMustBelongToTheFlagsOwnHelpRow(t *testing.T) {
 	}
 }
 
-// TestClaudeRunsTheStructuredProtocolInBothModes: --print with stream-json and
-// --verbose on the editing AND the plan invocation, no partial-token streaming,
-// no --bare, and every existing constraint still passed.
-func TestClaudeRunsTheStructuredProtocolInBothModes(t *testing.T) {
-	for name, plan := range map[string]bool{"mutating": false, "plan": true} {
-		t.Run(name, func(t *testing.T) {
-			provider, request, fake := agentFixture(t, AgentKindClaudeCode)
-			request.RequiredTools = []string{"go"}
-			request.ScratchDir = t.TempDir()
-			if plan {
-				request = planningRequest(request)
-			}
-			if _, err := provider.Execute(context.Background(), request); err != nil {
-				t.Fatal(err)
-			}
-			args := " " + strings.Join(fake.execution(t).args, " ") + " "
-			want := []string{" --print ", " --output-format stream-json ", " --verbose ", " --safe-mode ", " --model test-model "}
-			if plan {
-				want = append(want, " --permission-mode plan ")
-			} else {
-				want = append(want, " --permission-mode acceptEdits ", " --add-dir ", " --allowedTools Bash(go *) ")
-			}
-			for _, flag := range want {
-				if !strings.Contains(args, flag) {
-					t.Errorf("argv lacks %q: %s", flag, args)
-				}
-			}
-			for _, forbidden := range []string{"--include-partial-messages", "--bare"} {
-				if strings.Contains(args, forbidden) {
-					t.Errorf("argv carries %q: %s", forbidden, args)
-				}
-			}
-		})
-	}
-}
-
 // TestClaudeWithoutTheStructuredProtocolIsUnavailable: a binary that does not
 // advertise stream-json on --output-format, or --verbose, is refused; it is
 // never run in text mode supervised by byte silence.
@@ -170,58 +139,6 @@ func TestClaudeWithoutTheStructuredProtocolIsUnavailable(t *testing.T) {
 			}
 		})
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Fixtures: Claude's real stream-json shapes, top-level messages carrying
-// content blocks.
-// ---------------------------------------------------------------------------
-
-const (
-	claudeInit    = `{"type":"system","subtype":"init","session_id":"s","model":"m","tools":["Bash"]}`
-	claudeUnknown = `{"type":"future_event","payload":{"x":1}}`
-	claudeText    = `{"type":"text","text":"working on it"}`
-)
-
-func claudeToolUse(id string) string {
-	return `{"type":"tool_use","id":"` + id + `","name":"Bash","input":{"command":"go test ./..."}}`
-}
-
-// claudeAssistant is one assistant line; parent "" is the main thread.
-func claudeAssistant(messageID, parent string, blocks ...string) string {
-	return `{"type":"assistant","message":{"id":"` + messageID + `","role":"assistant","content":[` +
-		strings.Join(blocks, ",") + `]},"parent_tool_use_id":` + claudeParent(parent) + `,"session_id":"s"}`
-}
-
-func claudeToolResult(toolID, parent string) string {
-	return `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + toolID +
-		`","content":"ok"}]},"parent_tool_use_id":` + claudeParent(parent) + `,"session_id":"s"}`
-}
-
-func claudeParent(parent string) string {
-	if parent == "" {
-		return "null"
-	}
-	return `"` + parent + `"`
-}
-
-// claudeRetry is a system/api_retry line; status is JSON ("429" or "null").
-func claudeRetry(category, status string, noResponse bool) string {
-	line := `{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":500,"error_status":` + status +
-		`,"error":"` + category + `","uuid":"u","session_id":"s"`
-	if noResponse {
-		line += `,"no_response":{"waited_ms":60000,"retry_wait_ms":60000}`
-	}
-	return line + "}"
-}
-
-func claudeResult(isError bool, subtype string, denials int) string {
-	d := make([]string, denials)
-	for i := range d {
-		d[i] = `{"tool_name":"Bash","tool_use_id":"t","tool_input":{}}`
-	}
-	return fmt.Sprintf(`{"type":"result","subtype":%q,"is_error":%t,"result":"rate_limit authentication_failed overloaded","permission_denials":[%s]}`,
-		subtype, isError, strings.Join(d, ","))
 }
 
 // feed writes lines to a stream in small arbitrary chunks, which is how the
@@ -353,6 +270,69 @@ func TestClaudeOpenToolBookkeeping(t *testing.T) {
 	}
 }
 
+// #384, #385: a main-thread Bash call started with run_in_background stays
+// outstanding for the rest of the stream - never cleared by the ordinary
+// turn-boundary bookkeeping that closes s.open, and never cleared by any
+// later call. A BashOutput poll is never enough: the typed stream gives no
+// way to tell a poll of a still-running shell from a poll of a finished one.
+// Nor is a KillShell call, however many or whatever identity they name: a
+// KillShell tool_use being emitted is the model's request, not an observed
+// result, and even a successful one names an identity the typed stream never
+// bound back to a specific tracked start (see
+// claudeStream.backgroundStarts).
+func TestClaudeBackgroundShellBookkeeping(t *testing.T) {
+	unresolved := func(lines ...string) bool {
+		stream := newClaudeStream(1)
+		feed(stream, lines...)
+		return stream.outcome(true).UnresolvedBackgroundWork
+	}
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"an ordinary foreground Bash call is never flagged", []string{
+			claudeAssistant("M1", "", claudeToolUse("X")), claudeToolResult("X", ""),
+			claudeResult(false, "success", 0)}, false},
+		{"a background shell with no follow-up at all", []string{
+			claudeAssistant("M1", "", claudeBackgroundToolUse("X")), claudeToolResult("X", ""),
+			claudeResult(false, "success", 0)}, true},
+		{"a background shell merely polled with BashOutput stays unresolved", []string{
+			claudeAssistant("M1", "", claudeBackgroundToolUse("X")), claudeToolResult("X", ""),
+			claudeAssistant("M2", "", claudePollToolUse("Y")), claudeToolResult("Y", ""),
+			claudeResult(false, "success", 0)}, true},
+		{"a background shell killed with KillShell still stays unresolved: issuing KillShell is not proof it terminated", []string{
+			claudeAssistant("M1", "", claudeBackgroundToolUse("X")), claudeToolResult("X", ""),
+			claudeAssistant("M2", "", claudeKillShellToolUse("Y", "bash_1")), claudeToolResult("Y", ""),
+			claudeResult(false, "success", 0)}, true},
+		{"a KillShell naming a nonexistent or unrelated shell id never discharges a start", []string{
+			claudeAssistant("M1", "", claudeBackgroundToolUse("X")), claudeToolResult("X", ""),
+			claudeAssistant("M2", "", claudeKillShellToolUse("Y", "no-such-shell")), claudeToolResult("Y", ""),
+			claudeResult(false, "success", 0)}, true},
+		{"the flag survives an intervening unrelated turn", []string{
+			claudeAssistant("M1", "", claudeBackgroundToolUse("X")), claudeToolResult("X", ""),
+			claudeAssistant("M2", "", claudeToolUse("Z")), claudeToolResult("Z", ""),
+			claudeResult(false, "success", 0)}, true},
+		{"a nested subagent's own background call never sets the main-thread flag", []string{
+			claudeAssistant("M1", "", claudeToolUse("AGENT")),
+			claudeAssistant("S1", "AGENT", claudeBackgroundToolUse("N")),
+			claudeToolResult("AGENT", "")}, false},
+		{"two background shells, each given a distinct KillShell call, still stay unresolved", []string{
+			claudeAssistant("M1", "", claudeBackgroundToolUse("X")), claudeToolResult("X", ""),
+			claudeAssistant("M2", "", claudeBackgroundToolUse("X2")), claudeToolResult("X2", ""),
+			claudeAssistant("M3", "", claudeKillShellToolUse("Y", "bash_1")), claudeToolResult("Y", ""),
+			claudeAssistant("M4", "", claudeKillShellToolUse("Y2", "bash_2")), claudeToolResult("Y2", ""),
+			claudeResult(false, "success", 0)}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := unresolved(tc.lines...); got != tc.want {
+				t.Fatalf("unresolved background work = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // An executor that does not feed the stream is refused before Claude runs.
 func TestStructuredClaudeRefusesAnExecutorThatCannotObserveStdout(t *testing.T) {
 	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
@@ -407,7 +387,7 @@ func TestStructuredProgressRefreshesTheWindowAndStderrDoesNot(t *testing.T) {
 		started := time.Now()
 		result, err := provider.Execute(context.Background(), request)
 		elapsed := time.Since(started)
-		if err != nil || result.Outcome != Succeeded {
+		if err != nil || result.Outcome != execution.Succeeded {
 			t.Fatalf("a Claude emitting progress was failed: %v %#v", err, result.Failure)
 		}
 		if elapsed <= inactivityWindow {
@@ -509,6 +489,10 @@ func TestAHungToolIsBoundedByTheAbsoluteDeadline(t *testing.T) {
 	if result.Invocation.TerminationCause != "deadline_reached" || result.Invocation.OpenToolsAtExit != 1 {
 		t.Fatalf("provenance = %+v, want the deadline with the tool still open", result.Invocation)
 	}
+	// NO FINAL RESULT, SO THE DENIALS ARE UNKNOWN (#327): absent, never 0.
+	if result.Invocation.FinalResultObserved || result.Invocation.PermissionDeniedTools != nil {
+		t.Fatalf("a deadline-killed attempt claims a final result: %+v", result.Invocation)
+	}
 	if result.Failure == nil || result.Failure.Classification != FailureExecutionIncomplete {
 		t.Fatalf("failure = %#v, want the existing deadline semantics", result.Failure)
 	}
@@ -526,7 +510,7 @@ func TestTheFinalResultIsSeenPastTheCaptureCeiling(t *testing.T) {
 		"i=0\nwhile [ $i -lt 100 ]; do "+strings.TrimSuffix(emit(claudeAssistant("m", "", claudeText)), "\n")+
 			"; i=$((i+1)); done\n"+emit(claudeResult(false, "success", 0)))
 	result, err := provider.Execute(context.Background(), request)
-	if err != nil || result.Outcome != Succeeded {
+	if err != nil || result.Outcome != execution.Succeeded {
 		t.Fatalf("the result past the ceiling was not seen: %v %#v", err, result.Failure)
 	}
 	transcript, readErr := os.ReadFile(result.Artifacts[0].Path)
@@ -557,7 +541,7 @@ func TestClaudeTypedFailureClassification(t *testing.T) {
 		{claudeRetry("overloaded", "529", false), FailureProviderUnavailable},
 		{claudeRetry("server_error", "503", false), FailureProviderUnavailable},
 		{claudeRetry("server_error", "500", false), FailureUnknown},
-		{claudeRetry("unknown", "null", true), FailureProviderUnavailable},
+		{claudeRetry("unknown", "null", true), FailureConnectivity},
 		{claudeRetry("unknown", "null", false), FailureUnknown},
 		{claudeRetry("a_future_category", "418", false), FailureUnknown},
 	} {
@@ -597,11 +581,18 @@ func TestAZeroExitStillFailsOnAnErrorResultOrNoResult(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.failed != (result.Outcome == OperationFailed) {
+			if tc.failed != (result.Outcome == execution.Failed) {
 				t.Fatalf("outcome = %q, want failed=%v", result.Outcome, tc.failed)
 			}
 			if result.Invocation.PermissionDenials != tc.denials {
 				t.Fatalf("permission denials = %d, want %d", result.Invocation.PermissionDenials, tc.denials)
+			}
+			// The denial count is only KNOWN when a final result was read.
+			if observed := name != "no final result"; result.Invocation.FinalResultObserved != observed {
+				t.Fatalf("final_result_observed = %v, want %v", result.Invocation.FinalResultObserved, observed)
+			}
+			if tc.denials > 0 && !reflect.DeepEqual(result.Invocation.PermissionDeniedTools, []string{"Bash"}) {
+				t.Fatalf("denied tools = %v, want the typed tool name only", result.Invocation.PermissionDeniedTools)
 			}
 			if !tc.failed {
 				if result.Failure != nil {
@@ -618,6 +609,65 @@ func TestAZeroExitStillFailsOnAnErrorResultOrNoResult(t *testing.T) {
 			}
 		})
 	}
+}
+
+// #384, #385: a zero exit with a valid, non-error final result is STILL not
+// success end to end when the typed stream shows this invocation started a
+// background shell - the exact shape of "I'll report back once it
+// completes" and then nothing. Neither a BashOutput poll nor a KillShell
+// call restores success: a poll proves only that Claude looked, never what
+// it saw, and a KillShell call proves only that Claude asked, with no typed
+// evidence that it succeeded or that the identity it named was ever the
+// shell this invocation started.
+func TestAnAbandonedBackgroundShellFailsAValidResult(t *testing.T) {
+	answer := "done"
+	expectUnresolved := func(t *testing.T, transcript string) {
+		t.Helper()
+		provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+		fake.outputs = []CommandOutput{{Stdout: []byte(transcript + "\n")}}
+		result, err := provider.Execute(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Outcome != execution.Failed {
+			t.Fatalf("outcome = %q, want OperationFailed", result.Outcome)
+		}
+		if result.Failure == nil || result.Failure.Classification != FailureProviderBackgroundWorkUnresolved {
+			t.Fatalf("failure = %#v, want %q", result.Failure, FailureProviderBackgroundWorkUnresolved)
+		}
+	}
+
+	automatic := claudeAssistant("M1", "", claudeToolUse("X")) + "\n" +
+		claudeAutomaticResult("X", "", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000,"interrupted":false}`) + "\n" +
+		claudeResultWithAnswer(false, "go test ./... is still running in the background and I will confirm once it completes.")
+	expectUnresolved(t, automatic)
+
+	abandoned := claudeAssistant("M1", "", claudeBackgroundToolUse("X")) + "\n" + claudeToolResult("X", "") + "\n" +
+		claudeResultWithAnswer(false, answer)
+	expectUnresolved(t, abandoned)
+	if RouteFailure(FailureProviderBackgroundWorkUnresolved) != RouteRetry {
+		t.Fatal("an abandoned background shell must route to a bounded retry of the same operation")
+	}
+
+	polledOnly := claudeAssistant("M1", "", claudeBackgroundToolUse("X")) + "\n" + claudeToolResult("X", "") + "\n" +
+		claudeAssistant("M2", "", claudePollToolUse("Y")) + "\n" + claudeToolResult("Y", "") + "\n" +
+		claudeResultWithAnswer(false, answer)
+	expectUnresolved(t, polledOnly)
+
+	killed := claudeAssistant("M1", "", claudeBackgroundToolUse("X")) + "\n" + claudeToolResult("X", "") + "\n" +
+		claudeAssistant("M2", "", claudeKillShellToolUse("Y", "bash_1")) + "\n" + claudeToolResult("Y", "") + "\n" +
+		claudeResultWithAnswer(false, answer)
+	expectUnresolved(t, killed)
+
+	// Required regression: a KillShell naming a nonexistent, refused or
+	// otherwise unrelated shell id must not be distinguishable, in this
+	// parser's typed evidence, from any other KillShell call - both stay
+	// unresolved, since neither is ever proven to correspond to the shell
+	// this invocation itself started.
+	killedStaleID := claudeAssistant("M1", "", claudeBackgroundToolUse("X")) + "\n" + claudeToolResult("X", "") + "\n" +
+		claudeAssistant("M2", "", claudeKillShellToolUse("Y", "no-such-shell")) + "\n" + claudeToolResult("Y", "") + "\n" +
+		claudeResultWithAnswer(false, answer)
+	expectUnresolved(t, killedStaleID)
 }
 
 // ---------------------------------------------------------------------------
@@ -711,7 +761,7 @@ func TestAStructuredClaudeAttemptGetsItsOwnWindowWithoutReplenishingAuthority(t 
 		t.Fatal(err)
 	}
 	// Structured activity advances durable progress, qualified by attempt.
-	recorded, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, fmt.Sprintf("%d:%d", op.AttemptIdentity, 1))
+	recorded, err := scheduler.RecordProviderProgress(op.ID, op.AttemptIdentity, ProviderProgress{Key: fmt.Sprintf("%d:%d", op.AttemptIdentity, 1)})
 	if err != nil || recorded.LastProgressAt == nil || !recorded.LastProgressAt.Equal(clock.Now()) {
 		t.Fatalf("structured progress did not advance durably: %+v %v", recorded, err)
 	}
@@ -729,8 +779,15 @@ func TestAStructuredClaudeAttemptGetsItsOwnWindowWithoutReplenishingAuthority(t 
 		if got := dispatchInactivityWindow(window, op, now, claude); got != window {
 			t.Fatalf("cycle %d: Claude's fresh attempt got %s, want its full %s window", cycle, got, window)
 		}
-		if got := dispatchInactivityWindow(window, op, now, codex); got != 0 {
-			t.Fatalf("cycle %d: codex's abandoned silence was forgiven: %s", cycle, got)
+		// Codex inherits the abandoned silence, less the crash allowance of an
+		// open recorder (#352): 11 recorded minutes less 5 leave 4 once, and
+		// the allowance does not come back on later cycles.
+		want := time.Duration(0)
+		if cycle == 1 {
+			want = window - (11*time.Minute - progressRecorderLag(window))
+		}
+		if got := dispatchInactivityWindow(window, op, now, codex); got != want {
+			t.Fatalf("cycle %d: codex got %s of its abandoned window, want %s", cycle, got, want)
 		}
 		// Monotonic facts across succession.
 		if op.ConsumedExecution < consumed || OperationRemaining(op, now) > remaining || op.AttemptIdentity <= identity {
@@ -791,7 +848,7 @@ func TestTheProviderInactivityMinimumIsRefusedBeforeAnyRun(t *testing.T) {
 func TestAFinalResultWithoutATrailingNewlineIsParsed(t *testing.T) {
 	provider, request := claudeProcess(t, "printf '%s' '"+claudeResult(false, "success", 0)+"'\n")
 	result, err := provider.Execute(context.Background(), request)
-	if err != nil || result.Outcome != Succeeded {
+	if err != nil || result.Outcome != execution.Succeeded {
 		t.Fatalf("an unterminated final result failed the run: %v %#v", err, result.Failure)
 	}
 }
@@ -848,15 +905,22 @@ func TestTheBackgroundWaitCeilingIgnoresARemainingWindow(t *testing.T) {
 	t.Fatalf("env %v does not carry the ceiling of the configured 10m window", fake.execution(t).env)
 }
 
-// A durable progress write that never returns cannot hold Claude's stdout.
+// A durable progress write that never returns cannot hold Claude's stdout -
+// the child writes far more than a pipe buffer and exits while the write is
+// still blocked - and cannot hold the invocation either (#352): closing the
+// recorder waits for it at most one record interval.
 func TestASlowDurableWriteDoesNotBlockTheStream(t *testing.T) {
-	provider, request := claudeProcess(t, emit(
-		claudeAssistant("m1", "", claudeText), claudeAssistant("m2", "", claudeText), claudeResult(false, "success", 0)))
+	const events = 2000
+	finished := t.TempDir() + "/finished"
+	provider, request := claudeProcess(t,
+		"i=0\nwhile [ $i -lt "+fmt.Sprint(events)+" ]; do "+strings.TrimSuffix(emit(claudeAssistant("m1", "", claudeText)), "\n")+
+			"; i=$((i+1)); done\n"+emit(claudeResult(false, "success", 0))+"touch "+finished+"\n")
 	recorded, release := make(chan string, 1), make(chan struct{})
-	defer close(release)
-	ctx := withProviderProgressRecorder(context.Background(), func(key string) {
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	ctx := execution.WithProgressRecorder(context.Background(), func(progress ProviderProgress) {
 		select {
-		case recorded <- key:
+		case recorded <- progress.Key:
 		default:
 		}
 		<-release
@@ -874,9 +938,17 @@ func TestASlowDurableWriteDoesNotBlockTheStream(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the recorder was never called")
 	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(finished); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a blocked durable write held Claude's stdout: the child never finished writing")
+		}
+	}
 	select {
 	case result := <-done:
-		if result.Outcome != Succeeded || result.Invocation.StructuredEvents != 2 {
+		if result.Outcome != execution.Succeeded || result.Invocation.StructuredEvents != events {
 			t.Fatalf("outcome %q with %d events", result.Outcome, result.Invocation.StructuredEvents)
 		}
 	case <-time.After(5 * time.Second):
@@ -906,7 +978,7 @@ func TestARequiredResultFieldCannotFailOpen(t *testing.T) {
 			provider, request, fake := agentFixture(t, AgentKindClaudeCode)
 			fake.outputs = []CommandOutput{{Stdout: []byte(line + "\n")}}
 			result, err := provider.Execute(context.Background(), request)
-			if err != nil || result.Outcome != OperationFailed {
+			if err != nil || result.Outcome != execution.Failed {
 				t.Fatalf("exit 0 with %s ended %q (%v)", line, result.Outcome, err)
 			}
 		})
@@ -924,7 +996,7 @@ func TestLateProviderProgressIsBoundToItsPhysicalAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.advance(time.Minute)
-	late, err := scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, "1:9")
+	late, err := scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, ProviderProgress{Key: "1:9"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -942,19 +1014,80 @@ func TestLateProviderProgressIsBoundToItsPhysicalAttempt(t *testing.T) {
 		t.Fatalf("attempt 2 is not running on a new identity: %+v", second)
 	}
 	clock.advance(time.Minute)
-	late, err = scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, "1:10")
+	late, err = scheduler.RecordProviderProgress(first.ID, first.AttemptIdentity, ProviderProgress{Key: "1:10"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if late.NoProgressKey != second.NoProgressKey || !late.LastProgressAt.Equal(*second.LastProgressAt) {
 		t.Fatalf("attempt 1's late write stamped attempt 2: key %q at %v", late.NoProgressKey, late.LastProgressAt)
 	}
-	own, err := scheduler.RecordProviderProgress(first.ID, second.AttemptIdentity, "2:1")
+	own, err := scheduler.RecordProviderProgress(first.ID, second.AttemptIdentity, ProviderProgress{Key: "2:1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if own.NoProgressKey != "2:1" || !own.LastProgressAt.Equal(clock.Now()) {
 		t.Fatalf("attempt 2's own write did not land: key %q at %v", own.NoProgressKey, own.LastProgressAt)
+	}
+}
+
+// #366, end to end through the real adapter: ExecutionResult.Answer carries
+// the decoded semantic text, redacted exactly as the stored transcript is -
+// and a provider with no such shape (Codex) exposes no answer at all, which
+// is the signal that keeps the planner's fallback path alive for it.
+func TestExecutionResultAnswerIsExposedOnlyByClaudesStructuredStream(t *testing.T) {
+	answer := "Proposal:\n```json\n{\"stages\": []}\n```\nissued with ghp_" + strings.Repeat("x", 36) + "\n"
+	provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+	fake.outputs = []CommandOutput{{Stdout: []byte(claudeResultWithAnswer(false, answer) + "\n")}}
+	result, err := provider.Execute(context.Background(), request)
+	if err != nil || result.Outcome != execution.Succeeded {
+		t.Fatalf("execute: %v %#v", err, result.Failure)
+	}
+	if strings.Contains(result.Answer, "ghp_") || !strings.Contains(result.Answer, "[REDACTED]") {
+		t.Fatalf("answer was not redacted: %q", result.Answer)
+	}
+	if !strings.Contains(result.Answer, "```json") {
+		t.Fatalf("answer lost its real content: %q", result.Answer)
+	}
+
+	codex, codexRequest, codexFake := agentFixture(t, AgentKindCodexCLI)
+	codexFake.outputs = []CommandOutput{{Stdout: []byte("done\n")}}
+	codexResult, err := codex.Execute(context.Background(), codexRequest)
+	if err != nil || codexResult.Outcome != execution.Succeeded {
+		t.Fatalf("codex execute: %v %#v", err, codexResult.Failure)
+	}
+	if codexResult.Answer != "" {
+		t.Fatalf("codex exposed a semantic answer it has no shape for: %q", codexResult.Answer)
+	}
+}
+
+// #366: the semantic answer is decoded exactly once out of the transport. A
+// fenced plan whose fence and quotes are JSON-escaped inside the "result"
+// field surfaces with real newlines and real quotes - what a consumer that
+// scanned the raw transcript bytes for that same fence would never find,
+// because there the fence and every quote inside it stay escaped.
+func TestClaudeStreamDecodesTheSemanticAnswerExactlyOnce(t *testing.T) {
+	answer := "Proposal:\n```json\n{\"stages\": []}\n```\n"
+	stream := newClaudeStream(1)
+	feed(stream, claudeResultWithAnswer(false, answer))
+	if got := stream.outcome(true); !got.AnswerObserved || got.Answer != answer {
+		t.Fatalf("answer = %q observed=%v, want %q observed=true", got.Answer, got.AnswerObserved, answer)
+	}
+
+	// AN ERROR RESULT NEVER PROMOTES ITS OWN TEXT TO AN ANSWER, even though the
+	// field is present and well-typed: the two typed terminal inputs gate this
+	// exactly as they gate FinalResult itself.
+	errored := newClaudeStream(1)
+	feed(errored, claudeResultWithAnswer(true, answer))
+	if got := errored.outcome(true); got.AnswerObserved {
+		t.Fatalf("an error result exposed an answer: %+v", got)
+	}
+
+	// A missing "result" field leaves AnswerObserved false rather than
+	// promoting its zero value into an accepted empty answer.
+	bare := newClaudeStream(1)
+	feed(bare, `{"type":"result","subtype":"success","is_error":false}`)
+	if got := bare.outcome(true); got.AnswerObserved {
+		t.Fatalf("a result with no \"result\" field exposed an answer: %+v", got)
 	}
 }
 
@@ -967,7 +1100,117 @@ func TestErrorMaxTurnsFailsClosedAsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Outcome != OperationFailed || result.Failure == nil || result.Failure.Classification != FailureUnknown {
+	if result.Outcome != execution.Failed || result.Failure == nil || result.Failure.Classification != FailureUnknown {
 		t.Fatalf("error_max_turns ended %q with %#v, want a fail-closed unknown", result.Outcome, result.Failure)
+	}
+}
+
+func TestClaudeAutomaticDetachmentTypedCorrelation(t *testing.T) {
+	for _, tc := range []struct {
+		name, tool, id, parent, metadata string
+		want                             bool
+	}{
+		{"automatic", "Bash", "X", "", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000}`, true},
+		{"identity alone", "Bash", "X", "", `{"backgroundTaskId":"bielbpgpe"}`, false},
+		{"timeout alone", "Bash", "X", "", `{"timedOutAfterMs":120000}`, false},
+		{"wrong tool", "Read", "X", "", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000}`, false},
+		{"unknown id", "Bash", "Y", "", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000}`, false},
+		{"nested result", "Bash", "X", "agent", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000}`, false},
+		{"wrong types", "Bash", "X", "", `{"backgroundTaskId":true,"timedOutAfterMs":"120000"}`, false},
+		{"empty", "Bash", "X", "", `{"backgroundTaskId":"","timedOutAfterMs":0}`, false},
+		{"null", "Bash", "X", "", `null`, false},
+		{"prose only", "Bash", "X", "", `{"stdout":"moved to the background (ID: bielbpgpe)"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := newClaudeStream(1)
+			feed(stream, claudeAssistant("M1", "", strings.Replace(claudeToolUse("X"), `"Bash"`, fmt.Sprintf("%q", tc.tool), 1)),
+				claudeAutomaticResult(tc.id, tc.parent, tc.metadata),
+				claudeAssistant("M2", "", claudeKillShellToolUse("K", "bielbpgpe")), claudeToolResult("K", ""),
+				claudeResultWithAnswer(false, "all finished"))
+			if got := stream.outcome(true).UnresolvedBackgroundWork; got != tc.want {
+				t.Fatalf("unresolved = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaudeAutomaticDetachmentOutranksFailedFinalResults(t *testing.T) {
+	for _, plan := range []bool{false, true} {
+		for _, processFailed := range []bool{false, true} {
+			provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+			if plan {
+				request = planningRequest(request)
+			}
+			if processFailed {
+				fake.err = errors.New("provider exited unsuccessfully")
+			}
+			fake.outputs = []CommandOutput{{Stdout: []byte(strings.Join([]string{
+				claudeAssistant("M1", "", claudeToolUse("X")),
+				claudeAutomaticResult("X", "", `{"backgroundTaskId":"bielbpgpe","timedOutAfterMs":120000}`),
+				claudeResult(true, "error_during_execution", 0),
+			}, "\n") + "\n")}}
+			result, _ := provider.Execute(context.Background(), request)
+			if result.Outcome != execution.Failed || result.Failure == nil || result.Failure.Classification != FailureProviderBackgroundWorkUnresolved {
+				t.Fatalf("plan=%v processFailed=%v: outcome=%v failure=%+v", plan, processFailed, result.Outcome, result.Failure)
+			}
+		}
+	}
+}
+
+func TestClaudeBashTimeoutUsesEffectiveAttemptAuthority(t *testing.T) {
+	for _, parentLimit := range []time.Duration{time.Hour, 30 * time.Second} {
+		provider, request, fake := agentFixture(t, AgentKindClaudeCode)
+		request.Budgets.WallLimit = 5 * time.Minute
+		deadline := time.Now().Add(2 * time.Minute)
+		request.Deadline = &deadline
+		ctx, cancel := context.WithTimeout(context.Background(), parentLimit)
+		defer cancel()
+		result, err := provider.Execute(ctx, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var values []string
+		for _, entry := range fake.execution(t).env {
+			if strings.HasPrefix(entry, "BASH_DEFAULT_TIMEOUT_MS=") || strings.HasPrefix(entry, "BASH_MAX_TIMEOUT_MS=") {
+				_, value, _ := strings.Cut(entry, "=")
+				values = append(values, value)
+			}
+		}
+		if len(values) != 2 || values[0] != values[1] {
+			t.Fatalf("timeout controls: %v", values)
+		}
+		var ms int64
+		if _, err := fmt.Sscan(values[0], &ms); err != nil {
+			t.Fatal(err)
+		}
+		remaining := result.Invocation.Deadline.Sub(*result.Invocation.StartedAt)
+		if ms <= 0 || time.Duration(ms)*time.Millisecond >= remaining || remaining-time.Duration(ms)*time.Millisecond > time.Second {
+			t.Fatalf("timeout %dms does not use remaining authority %s", ms, remaining)
+		}
+		for _, call := range fake.calls {
+			if last := call.args[len(call.args)-1]; last == "--help" || last == "--version" {
+				for _, entry := range call.env {
+					if strings.HasPrefix(entry, "BASH_") {
+						t.Fatalf("probe timeout: %s", entry)
+					}
+				}
+			}
+		}
+	}
+	if _, err := claudeBashTimeoutEnv(time.Millisecond); err == nil {
+		t.Fatal("tiny authority accepted")
+	}
+}
+
+// The incident envelope through a REAL process exiting 1 (Unix-only: it
+// needs the bounded-process double); the stdout-only cases stay in
+// connectivity_test.go.
+func TestConnectivityClaudeIncidentResultEnvelopeProcessExit(t *testing.T) {
+	incident := "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)"
+	// A quoted heredoc writes the exact line: no shell quoting to escape.
+	provider, request := claudeProcess(t, "cat <<'EOF'\n"+claudeResultWithAnswer(true, incident)+"\nEOF\nexit 1\n")
+	result, _ := provider.Execute(context.Background(), request)
+	if result.Failure == nil || result.Failure.Classification != FailureConnectivity || result.Invocation == nil || !result.Invocation.FinalResultObserved {
+		t.Fatalf("incident failure = %#v %#v", result.Failure, result.Invocation)
 	}
 }

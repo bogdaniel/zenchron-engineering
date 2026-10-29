@@ -196,6 +196,92 @@ automatically to make room: trading one active run's evidence for another's
 progress is not a decision a scheduler gets to make. `autonomy gc --dry-run`
 shows what is eligible under `gc.retention_hours`.
 
+**Doctor `state.go_env` WARN.** Your global Go env file (`go env GOENV`) sets
+`GOCACHE`, `GOTMPDIR`, `GOMODCACHE` or `GOPATH` under the state directory, so
+every Go command on the host writes into runtime state that retention may
+delete. Doctor never edits it; run the `go env -u ...` it names (and remove
+`GOFLAGS` if you did not set it). Doctor checks the default file
+(`os.UserConfigDir()/go/env`) even when its own `GOENV` is `off`, because other
+processes still read it. Workers run with `GOENV` at the null device, so a
+plain `go env -w` from a worker is discarded (#430). That is not a boundary: a
+worker that overrides `GOENV` or writes the file itself still can, because
+workers share your `HOME`, and isolating `HOME` is out of scope here.
+
+**`candidate_writer_alive`, or gc retaining a candidate with `a process still
+holds the candidate writer lock`.** A process from an earlier provider
+invocation, typically one that outlived a killed supervisor, still holds
+`<state>/runs/<run>/candidate.writer.lock` and may still be writing the
+candidate. `lsof <that path>` names it. Stop it: the waiting run re-checks the
+lock on each pass, once and without waiting, and proceeds when it is free; gc
+collects the candidate on its next pass. On a platform without advisory locks
+(Windows) a candidate with a lock file is never collected.
+
+## Reading a refused controller upgrade
+
+**`refused for <sha>: the adopted build failed, so no binary was produced: …`**
+on the `upgrade` line of `controller status`. The controller built trusted main
+in the pinned container and the build did not finish; it keeps serving, and it
+rebuilds the same revision after ten minutes. `controller status` prints the
+failing step under the line, and `controller status --json` carries the same
+facts as `live.snapshot.update.failure` (absent for refusals that are not
+sandbox build-step failures). The sanitized stderr tail appears in the refusal
+text; JSON also exposes it separately as `stderr`:
+
+| Field | Meaning |
+| --- | --- |
+| `upgrade step` / `step` | `toolchain` (the pinned image's `go version` probe) or `build` (the compile container) |
+| `attempts` | attempt count, including the first try and any container-reconciliation attempts |
+| `infrastructure` / `transient: true` | the Docker lifecycle itself failed (create, start, inspect, wait, remove, or a daemon that did not answer). Only these are retried, at most three attempts per step (the initial try plus two retries), with waits of 2s and 8s |
+| `deterministic (not retried)` / `transient: false` | the compiler or the probe ran and failed. It is never retried; the compiler's own stderr is in the refusal text |
+| `docker operation` / `operation_id`, `docker container` / `container` | the runtime-owned operation and container the step used, for `docker ps -a` and the record under `<state_dir>/artifacts/docker-operations/` |
+| `stderr` | the last 1,000 bytes of what Docker or the compiler said, control characters removed and credentials redacted |
+
+Before a Docker step runs again the runtime reconciles the exact container
+this operation names: it is removed only if it exists and is not running (the
+leftover of an interrupted attempt, which is what `Conflict. The container name
+... is already in use` means). That is only safe because each build holds an
+exclusive per-revision claim (`<state_dir>/artifacts/docker-operations/adopted-build-<digest>.lock`)
+for its whole duration, taken by the controller's updater and by `controller
+build-adopted` alike; the kernel drops it when the holder dies. A second build
+of the same revision is refused with `another build of this revision is in
+progress` and touches nothing - a container that exists and is not running may
+simply be the other build's, created and about to start. A failure before any
+container existed (the daemon not ready) is retried with a backoff and no
+cleanup. If the daemon cannot answer while the leftover is being reconciled,
+the container's state is unknown, so the step does NOT run again on a guess:
+the reconciliation is what is retried, inside the same bound, and a build that
+cannot reconcile is refused with `could not be reconciled` and the Docker
+step's own stderr (`docker inspect` and `docker rm` keep their output like
+`docker create` does). Retrying changes nothing the
+build is verified against: the revision, the trusted-main evidence, the build
+environment digest and the self-probe are checked exactly as on a first try,
+and no step ever falls back to an unattested `go build`. If the retry is spent
+and the refusal persists, `controller build-adopted --repo <owner/name>
+--revision <sha>` runs the same governed build by hand and prints the real
+error. This command still observes the trust root and resolves trusted main
+from accepted exact-revision evidence; `--revision` must name a commit contained
+in that trusted main. It revalidates the trust root and containment before
+publishing. The built binary must answer `controller inspect-self` with exactly
+the expected kind, version, source revision, source tree, and binary SHA-256;
+a missing or mismatching self probe refuses the build. A manual rebuild does
+not bypass these checks.
+
+After a controller handover, `up` checks the recorded dashboard's executable
+against the serving controller's executable. When both paths are known and
+differ, it stops the old dashboard and starts one with the serving controller's
+binary, keeping the old address unless `--listen` supplies another. First it
+waits up to 60 seconds for a live recorded dashboard to answer health checks;
+a slow response does not trigger a second dashboard. If it still cannot answer,
+`up` reports ``the dashboard (pid <pid>) is running on <address> but does not
+answer; see <log>, then `down` and `up` again``.
+
+A second primary control plane for the same state directory is refused before
+binding or recording its address, with `a primary control plane already runs
+for this state directory (...)`; the message points to `zenchron-engineering
+down` or `--auxiliary --listen <another address>` for a read-only instance.
+The primary claim also checks for a live recorded dashboard from before that
+lock existed.
+
 ## Supervisor and submission
 
 **`starting several issues at once needs a supervisor to own them; run
@@ -226,12 +312,57 @@ enrolled, so there is nothing to watch`.** `autonomy watch` needs enrolment.
 `serve` does not: with no enrolment it governs the repository the invocation
 targets and takes explicit submissions only.
 
+**`held at <sha>: …`** on the `serve` upgrade line, the `upgrade` line of
+`controller status`, and the `controller.trusted_main` WARN in `autonomy doctor`. The controller will not
+build or adopt a successor, and it keeps serving everything else (ADR-0007 §5).
+It names one of these reasons:
+
+- **`trust regression`:** trusted main resolved behind the trusted main this
+  controller was adopted under. This usually means a re-run of `go` turned red
+  on a commit that was trusted.
+- **no accepted revision:** none of the last 256 commits on `main`'s
+  first-parent chain has a passing exact-revision `go` run from the push to
+  `main`.
+- **`not comparable`:** the resolved trusted main and the floor are not on one
+  line of history.
+- **`could not be compared`:** the ancestry check itself failed, for example
+  because a commit is missing from the controller's source clone. This is a
+  fetch or clone fault, not divergent history.
+- **no floor:** this controller's own provenance could not be read.
+
+`controller status` and `doctor` also show the trust floor, together with the
+reason when no floor could be read (for example a provenance record whose T2
+evidence does not prove its own trusted main). They show the resolved trusted
+main, `main_head`, the deciding T2 attempt, and the newest ten commits that
+were not trusted, with the reason for each (`T2 pending`, or
+`T2 failure (run N attempt M)`). Nothing needs to
+be acknowledged. The hold clears on the next pass after trusted main resolves
+to the floor or past it, typically once a newer merge's `go` passes on `main`.
+Fix the failing commit forward; do not revert or rewrite `main`.
+
 ## Assurance and Docker
 
 **`assurance.verifier_sandbox` FAIL — `the verifier sandbox is <state>: Docker
 is missing, the daemon is unreachable, or the pinned assurance image is not
 present locally`.** Without it no candidate can be verified, so no run can
 complete. Start the daemon and pull the image by its pinned digest.
+
+**`assurance.verifier_sandbox` FAIL — `the verifier sandbox is unavailable:
+... Docker daemon did not respond within 10s`.** The daemon is installed but
+hung; restart it. Every Docker readiness and identity probe (`docker info`,
+`docker image inspect` of the pinned image, and the daemon-identity lookup
+before a container is created) runs under the caller's context AND a fixed
+10-second probe ceiling, whichever ends first: a shorter caller deadline is
+never replaced. The two endings are kept apart. The ceiling firing means
+Docker readiness is unavailable (`ErrSandboxUnavailable`). In either assurance
+phase, dependency preparation or the verification run, that is
+`transient_infrastructure`: the scheduler retries the same assurance, and it is
+never a verdict on the candidate, so it spends no remediation. The caller's own
+cancellation propagates as that cancellation, is never reported as an
+unavailable sandbox, and is classified by who cancelled: a controller shutdown
+leaves assurance unsatisfied and the run waiting on `controller_shutdown`, to
+re-run after restart; an operator stop is `run_cancelled`. Doctor uses the same
+probe, so it reports this diagnostic instead of hanging.
 
 **`assurance.toolchain` FAIL — `the pinned assurance image did not resolve the
 Go toolchain on the runtime sandbox path`.** A reachable daemon holding the
@@ -249,10 +380,72 @@ fragment.
 | --- | --- |
 | `no assurance.dependency_cache_dir is configured; offline verification has no trusted module material to read and never downloads any` | configure it |
 | `the dependency cache <path> cannot be inspected` | create it |
-| `the dependency cache <path> is EMPTY` | provision it from the trusted base module graph using the pinned image |
+| `the dependency cache <path> is EMPTY` | provision it — the command is below |
 
-Verification is offline by contract. An empty cache is a false readiness claim,
-not a warning: containers will start and then fail on missing modules.
+### Provisioning the dependency cache
+
+Run this once, against a checkout of the trusted base revision — the module
+graph you already trust, not a candidate's. The three values come verbatim from
+the configuration doctor just read.
+
+```bash
+CACHE=/Users/you/.zenchron/modcache   # assurance.dependency_cache_dir
+IMAGE=sha256:0123456789abcdef...      # assurance.image, the pinned digest
+BASE=/path/to/trusted/checkout        # the base module graph: its go.mod and go.sum
+
+mkdir -p "$CACHE"
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --read-only --tmpfs /gobuild \
+  --mount type=bind,src="$BASE",dst=/src,readonly \
+  --mount type=bind,src="$CACHE",dst=/cache \
+  --workdir /src \
+  --env GOMODCACHE=/cache \
+  --env GOCACHE=/gobuild/build --env GOTMPDIR=/gobuild \
+  --env GOPATH=/gobuild/gopath --env HOME=/gobuild \
+  --env GOTOOLCHAIN=local --env GOFLAGS='-mod=readonly -buildvcs=false' \
+  "$IMAGE" go mod download all
+```
+
+Then re-run `autonomy doctor --text`; `assurance.dependency_cache` reports how
+many top-level entries it found and whether a `cache/download` tree is there.
+
+Four things about that command are deliberate:
+
+- **It is the only step with a network.** There is no `--network none` here,
+  precisely because this is the operator provisioning trusted material —
+  everything downstream of it runs with networking off.
+- **`dst=/cache` and `GOMODCACHE=/cache` are the verifier's own mount point and
+  variable**, so the layout this writes is the layout verification reads. `$CACHE`
+  is the only writable host path; `/src` is read-only because provisioning reads a
+  module graph, it does not edit one. Every other place Go wants to write is named
+  and lands in the throwaway `/gobuild` tmpfs, which is why the root can be
+  `--read-only`.
+- **`GOTOOLCHAIN=local` pins the writer to the Go inside the pinned image**, the
+  same Go that will later read the cache. If that image's toolchain is older than
+  the tree's `go` directive this fails here, where the fix is the image, rather
+  than mid-verification.
+- **`all` is a module pattern, not a flag.** It downloads every module in the
+  build list rather than only what building the main packages needs. Verification
+  runs `go vet ./...` and `go test ./...` on the exact tree and cannot fetch
+  anything it is short of.
+
+### Why verification cannot fill the cache itself
+
+Assurance runs with no network by contract, and the cache is mounted read-only
+into every container that touches it — including dependency preparation.
+Preparation once mounted it writable and ran `go mod download` against the
+*candidate's* `go.mod`, which meant the module graph one candidate declared
+decided what got written into the material every other run then reads. Nothing
+malicious is needed for that to matter: it is simply not a trusted-material
+boundary if the thing being verified can extend it. Read-only makes the operator
+the only writer, which is what "operator-provisioned pre-warmed cache" always
+meant.
+
+So an empty cache is a false readiness claim rather than a warning, and doctor
+`FAIL`s it. The alternative is worse than a red line in a preflight: containers
+start, the toolchain fails on missing modules, and a missing environment
+prerequisite arrives looking like a verdict about the candidate's code.
 
 **A run waits at `assurance_dependency_unavailable`.** The same environment
 condition, met at run time. Re-running the identical command against the
@@ -319,6 +512,13 @@ consumed-feedback digest. Start a new generation with the agent you want:
 live generation was created by a different controller build or configuration.
 Restore that configuration, or use `--new-generation`.
 
+**`issue N already has live run ... under another configuration, plan stage or
+batch`.** The issue's live work belongs to another identity space (#58).
+Continue it with the controller or plan that owns it, or start fresh work
+deliberately with `autonomy run issue N --new-generation`. Automatic intake
+reports the same boundary and creates nothing; an issue whose runs have all
+finished - under any configuration - is never re-enrolled by a standing label.
+
 **`run ... was cancelled (operator_stop); explicit operator intent is not
 withdrawn by asking again`.** A run id is deterministic from the repository, the
 issue and the configuration digest, so `autonomy run issue N` addresses the same
@@ -369,7 +569,22 @@ engineering attempts: no reasoning happened, no candidate moved, no evidence or
 authority changed, and no remediation budget was consumed. Quota returns on the
 provider's own schedule. Repeated rate limiting means
 `supervisor.max_concurrent_runs` is above what that account tolerates. An
-unavailable account is repaired by you, then `resume`.
+unavailable account is repaired by you. The run probes the provider again
+every 5 minutes on its own; `status` shows the next probe time, which survives
+a restart, and `resume` does not probe earlier, even after you restore the
+account. That time is a floor: a parked
+run gets a supervisor turn at most every 4 poll intervals, so the probe can
+land up to that much later.
+
+**A run waits with `deterministic_failure_unchanged`.**
+
+The operation already established a local contradiction against the same relevant
+inputs. `autonomy events RUN` shows its `operation.after` failure code, signature,
+input digest and original diagnostic; an existing runtime commit remains recorded
+there even if observation or reassessment failed. Correct the relevant candidate,
+contract, source, policy or environment through its ordinary governed path, then
+reconcile. Waiting longer or raising an attempt ceiling cannot resolve the
+contradiction. No authority or budget is renewed by this wait.
 
 **A run fails with `..._attempts_exhausted` or `..._failure_not_retryable`.**
 The named operation ran out of its budget, or produced a class that does not

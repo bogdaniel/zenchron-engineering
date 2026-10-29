@@ -275,4 +275,13 @@ func TestOneUpstreamCandidateMayContainTheOthers(t *testing.T) {
 	if subject, err := reconciler.upstreamSubject(divergent); err == nil {
 		t.Fatalf("two divergent siblings produced a subject: %#v", subject)
 	}
+
+	// reviewSubject sits on top of upstreamSubject for reviewer stages, and it
+	// must propagate the same refusal rather than collapsing it into a plain
+	// "no subject": a reviewer left pending because containment is unprovable
+	// needs that reason to reach an operator, not silence indistinguishable
+	// from "nothing to review yet".
+	if subject, ok, err := reconciler.reviewSubject(divergent); err == nil {
+		t.Fatalf("two divergent siblings produced a review subject %#v ok=%v with no error", subject, ok)
+	}
 }

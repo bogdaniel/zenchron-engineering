@@ -1,0 +1,56 @@
+2026-09-24T22:00:36.386973Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (https://chatgpt.com/backend-api/ps/mcp)")))
+2026-09-24T22:00:36.585662Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses
+2026-09-24T22:00:36.642229Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (https://chatgpt.com/backend-api/ps/mcp)")))
+2026-09-24T22:00:36.747588Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses
+2026-09-24T22:00:37.052851Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses
+ERROR: Reconnecting... 2/5
+2026-09-24T22:00:37.577004Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses
+ERROR: Reconnecting... 3/5
+2026-09-24T22:00:37.645472Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (https://chatgpt.com/backend-api/ps/mcp)")))
+2026-09-24T22:00:37.648450Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (https://chatgpt.com/backend-api/ps/mcp)")))
+2026-09-24T22:00:37.903124Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (https://chatgpt.com/backend-api/ps/mcp)")))
+2026-09-24T22:00:38.453909Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses
+ERROR: Reconnecting... 4/5
+2026-09-24T22:00:38.906366Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (https://chatgpt.com/backend-api/ps/mcp)")))
+2026-09-24T22:00:39.178237Z ERROR codex_models_manager::manager: failed to refresh available models: Connection failed: error sending request
+2026-09-24T22:00:40.264440Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses
+ERROR: Reconnecting... 5/5
+2026-09-24T22:00:43.473411Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses
+warning: Falling back from WebSockets to HTTPS transport. stream disconnected before completion: failed to lookup address information: nodename nor servname provided, or not known
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+2026-09-24T22:05:12.338217Z ERROR codex_models_manager::manager: failed to refresh available models: Connection failed: error sending request
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+2026-09-24T22:09:45.324645Z ERROR codex_models_manager::manager: failed to refresh available models: Connection failed: error sending request
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+2026-09-24T22:14:18.162317Z ERROR codex_models_manager::manager: failed to refresh available models: Connection failed: error sending request
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+2026-09-24T22:18:51.090080Z ERROR codex_models_manager::manager: failed to refresh available models: Connection failed: error sending request
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+2026-09-24T22:23:24.292356Z ERROR codex_models_manager::manager: failed to refresh available models: Connection failed: error sending request
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network
+2026-09-24T22:27:57.448514Z ERROR codex_models_manager::manager: failed to refresh available models: Connection failed: error sending request
+ERROR: Reconnecting... waiting for network
+ERROR: Reconnecting... waiting for network

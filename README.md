@@ -97,12 +97,15 @@ requires protected execution" - see the known limitations in `ROADMAP.md`.
 | [`docs/getting-started.md`](docs/getting-started.md) | install, configure, first run |
 | [`docs/running-work.md`](docs/running-work.md) | one issue end to end |
 | [`docs/running-multiple-tasks.md`](docs/running-multiple-tasks.md) | several at once, and what happens when one merges first |
+| [`docs/orchestration.md`](docs/orchestration.md) | an explicit issue batch with mandatory typed handoffs - not a planner or a scheduler |
 | [`docs/github-feedback.md`](docs/github-feedback.md) | the review loop, and who is allowed to direct a worker |
+| [`docs/review.md`](docs/review.md) | first-class independent PR review: context packet, decision, publication |
 | [`docs/agents.md`](docs/agents.md) | the workers, trust modes, provenance |
 | [`docs/planning.md`](docs/planning.md) | agent profiles, plan templates, and the approval boundary |
 | [`docs/supervisor.md`](docs/supervisor.md) | `serve`, its control endpoint, drain/shutdown/stop-all |
 | [`docs/configuration.md`](docs/configuration.md) | every configuration member and which layer owns it |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | symptom, cause, fix |
+| [`docs/design/README.md`](docs/design/README.md) | accepted design, React implementation, actual controller evidence and migration inventory |
 | [`ROADMAP.md`](ROADMAP.md) | where this sits, and what comes next |
 | [`docs/product-architecture.md`](docs/product-architecture.md) | the running system |
 | [`docs/architecture.md`](docs/architecture.md) | the Authorization Kernel |
@@ -139,10 +142,12 @@ engineering intent
 
 ## Status
 
-The Authorization Kernel and the local Engineering Runtime are implemented. The
-current milestone makes that runtime a persistent, multi-agent, operator-usable
-control plane; the Engineering Planner above it is a later layer and is not
-built. See [`ROADMAP.md`](ROADMAP.md).
+The Authorization Kernel, persistent multi-agent Engineering Runtime and
+Engineering Planner are implemented. The browser workspace extends their local
+Control Plane with governed objective intake, exact plan approval and human
+decision controls. See [`ROADMAP.md`](ROADMAP.md) and
+[`docs/control-plane.md`](docs/control-plane.md) for the current surface and
+acceptance boundaries.
 
 ## Technology decisions
 
@@ -375,6 +380,13 @@ re-checked by every client, with no TCP listener and no stored credential beside
 it. Drain, shutdown and stop-all are three different operations, and only the
 last one cancels runs.
 
+Trusted main is not the tip of `main` (ADR-0007). `main_head` is wherever
+`main` is; `trusted_main` is the newest commit on `main`'s first-parent chain
+whose own full-suite (T2) run passed, as observed against exactly that commit.
+A merge moves `main_head` immediately. Adoption only ever stands on
+`trusted_main`, so code whose full assurance is still running, or red, is
+never adopted.
+
 A serving controller REPLACES ITSELF when trusted main moves. It builds the
 successor through the same governed adopted build an operator would run,
 prepares the transition, starts that successor inert, stops taking on new work,
@@ -426,7 +438,9 @@ ROADMAP.md                      Where the project is and what comes next
 docs/getting-started.md         Install, configure, first run
 docs/running-work.md            One issue end to end
 docs/running-multiple-tasks.md  Several at once, and base drift between them
+docs/orchestration.md           An explicit issue batch, its handoffs and aggregate status
 docs/github-feedback.md         The review loop and its admission gate
+docs/review.md                  First-class independent PR review: packet, decision, publication
 docs/agents.md                  Execution agents, trust modes, provenance
 docs/supervisor.md              serve, its control endpoint and lifecycle
 docs/configuration.md           Every configuration member and its layer
@@ -454,7 +468,7 @@ cmd/zenchron-engineering/       CLI entry point and composition root
 
 ## Non-goals
 
-Do not prematurely build a dashboard, Kubernetes orchestration, a visual workflow designer, a generic multi-agent framework, a vector database, a custom CI system, a marketplace, or enterprise RBAC.
+Do not prematurely build a dashboard, Kubernetes orchestration, a visual workflow designer, a generic multi-agent framework, a vector database, a custom CI system, a marketplace, or enterprise RBAC. The local operational console authorized by [ADR-0004](docs/adr/0004-local-operational-control-plane.md) is not an exception carved into this non-goal: it is a narrow, read-mostly projection over the already-implemented runtime's own store and journal, bounded to one operator on one machine, and it is not the later organization [`Control Plane`](ROADMAP.md) at M6 (#72).
 
 Nor, at this milestone: an AI agent router, a raw-LLM coding harness, a hosted
 control plane, remote worker federation, autonomous merge, or the engineering

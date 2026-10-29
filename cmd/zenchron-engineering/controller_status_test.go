@@ -141,3 +141,32 @@ func TestServeInstallsTheControllerReconciler(t *testing.T) {
 		t.Fatal("a supervisor pass reported no reconciliation, so serve's wiring is inert")
 	}
 }
+
+// A REFUSED UPGRADE IS READABLE AND SAFE. The step, attempts and Docker
+// operation print under the upgrade line (#674), and nothing a daemon or an
+// attacker put in them can drive the terminal.
+func TestControllerStatusRendersTheFailingUpgradeStepSafely(t *testing.T) {
+	var out bytes.Buffer
+	renderControllerStatus(&out, runtime.ControllerStatus{
+		DurableConsistency: runtime.DurableConsistent, Serving: runtime.Serving,
+		Live: runtime.LiveObservation{Reachable: true, Snapshot: &runtime.LiveControllerSnapshot{
+			Update: &runtime.ControllerUpdate{
+				State: runtime.UpdateRefused, Subject: runtime.RevisionRecord{Revision: strings.Repeat("9", 40)},
+				Detail: "docker create failed \x1b[31mred\x1b[0m: exit status 1",
+				Failure: &runtime.UpdateFailure{
+					Step: "build", Attempts: 3, Transient: true,
+					OperationID: "adopted-build-abc\x1b]0;pwned\x07", Container: "zenchron-0123456789ab",
+				},
+			},
+		}},
+	})
+	rendered := out.String()
+	for _, want := range []string{"upgrade step", "build (3 attempt(s), infrastructure, bounded retry spent)", "docker operation", "adopted-build-abc", "docker container", "zenchron-0123456789ab"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("the rendering omits %q:\n%s", want, rendered)
+		}
+	}
+	if strings.ContainsAny(rendered, "\x1b\x07") {
+		t.Fatalf("a control sequence reached the terminal:\n%q", rendered)
+	}
+}

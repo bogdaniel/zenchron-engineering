@@ -24,11 +24,51 @@ func TestValidationScratchGrants(t *testing.T) {
 		})
 	}
 	provider := CLIAgentProvider{Toolchain: ToolchainConfig{RequiredTools: []string{"go"}}, ExecScratchDir: scratch}
-	env := strings.Join(provider.toolchainEnv(), "\n")
-	for _, entry := range []string{"TMPDIR=" + scratch, "GOTMPDIR=" + scratch, "GOCACHE=" + filepath.Join(scratch, "cache"), "GOPATH=" + filepath.Join(scratch, "gopath"), "GOENV=off"} {
+	env := strings.Join(provider.env(claudeSpec, ""), "\n")
+	for _, entry := range []string{"TMPDIR=" + scratch, "GOTMPDIR=" + scratch, "GOCACHE=" + filepath.Join(scratch, "cache"), "GOPATH=" + filepath.Join(scratch, "gopath"), "GOENV=" + os.DevNull} {
 		if !strings.Contains(env, entry) {
 			t.Fatalf("missing %q in %s", entry, env)
 		}
+	}
+}
+
+// TestExecutionScratchDirIsShortAndUnescaped is #331. The scratch is the
+// worker's TMPDIR, so a '%' in it breaks every "file:" URI a test builds and
+// its length eats the Unix socket address budget. A real operation id encodes
+// to ~150 bytes of %XX; the leaf must stay escape-free, bounded, unique per
+// operation and attempt, and a pure function of identity.
+func TestExecutionScratchDirIsShortAndUnescaped(t *testing.T) {
+	t.Setenv("GOTMPDIR", "")
+	state := "/Users/operator/.zenchron/state"
+	run := "run-00a8aecb360c53896934e5b051b0ccc5"
+	operation := run + ":execution.invoke:execution.invoke#initial|1|b1202216a0cd9cc534ffcc17fe5dc4605f0bf352"
+	seen := map[string]bool{}
+	for _, attempt := range []ExecutionAttemptRef{
+		{RunID: run, OperationID: operation, Attempt: 1},
+		{RunID: run, OperationID: operation, Attempt: 2},
+		{RunID: run, OperationID: operation + "x", Attempt: 1},
+	} {
+		scratch, err := ExecutionScratchDir(state, attempt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if replay, _ := ExecutionScratchDir(state, attempt); replay != scratch {
+			t.Fatalf("scratch is not a function of identity: %q then %q", scratch, replay)
+		}
+		if strings.Contains(scratch, "%") {
+			t.Fatalf("scratch carries an escape: %s", scratch)
+		}
+		// runs/<run>/scratch/<16 hex>/attempt-N beneath the state dir.
+		if leaf, err := filepath.Rel(state, scratch); err != nil || len(leaf) > len("runs/")+len(run)+len("/scratch/")+16+len("/attempt-9") {
+			t.Fatalf("scratch leaf is unbounded: %q", leaf)
+		}
+		if filepath.Dir(filepath.Dir(scratch)) != filepath.Join(state, "runs", run, executionScratchDir) {
+			t.Fatalf("scratch left the run's scratch directory the collector reclaims: %s", scratch)
+		}
+		if seen[scratch] {
+			t.Fatalf("two attempts share scratch %s", scratch)
+		}
+		seen[scratch] = true
 	}
 }
 
@@ -81,12 +121,10 @@ func TestValidationScratchAdmissionSubject(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertCredentialKind(t, ScanCandidateForCredentialValues(candidate), CredentialMaterialInconclusive)
-			assertCredentialKind(t, scanPathsForCredentialValues(candidate, []string{shape}), CredentialMaterialInconclusive)
 			if err := os.WriteFile(source, []byte("ghp_"+strings.Repeat("a", 36)), 0600); err != nil {
 				t.Fatal(err)
 			}
 			assertCredentialKind(t, ScanCandidateForCredentialValues(candidate), CredentialMaterialValue)
-			assertCredentialKind(t, scanPathsForCredentialValues(candidate, []string{shape}), CredentialMaterialValue)
 			if err := os.Remove(source); err != nil {
 				t.Fatal(err)
 			}
@@ -194,16 +232,5 @@ func TestValue(t *testing.T) {
 	tree, err := gitOutput(candidate, "ls-tree", "-r", "--name-only", "HEAD")
 	if err != nil || strings.TrimSpace(tree) != "README.md\ngo.mod\nsource.go\nsource_test.go" {
 		t.Fatalf("commit subject: %q, %v", tree, err)
-	}
-}
-
-func TestCommitCredentialScanRefusesStatFailure(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "file"), []byte("source"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	assertCredentialKind(t, scanPathsForCredentialValues(root, []string{"file/child"}), CredentialMaterialInconclusive)
-	if err := scanPathsForCredentialValues(root, []string{"deleted"}); err != nil {
-		t.Fatalf("deletion refused: %v", err)
 	}
 }

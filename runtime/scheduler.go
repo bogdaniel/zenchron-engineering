@@ -45,11 +45,24 @@ type OperationStore interface {
 	// control endpoint's stop-all are different goroutines and nothing
 	// serializes them - leased and executed work the operator had stopped.
 	//
-	// It does not reach an attempt that has already STARTED. Nothing on the
-	// executing path re-reads the run or the cancellation flag, so an operation
-	// acquired before the stop runs to completion; ending it early would be
-	// cooperative cancellation, which is a different mechanism.
-	AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error)
+	// It does not reach an attempt that has already STARTED. The one started
+	// attempt a stop interrupts is the provider of a running
+	// execution.invoke, through the execution watcher (#213); every other
+	// started operation runs to completion (#215).
+	//
+	// The same statement refuses a PAUSED run (#86): the run's latest
+	// run.paused/run.unpaused event is read inside it, so a pause that commits
+	// after a driver read the run still refuses that driver's lease. Like the
+	// terminal-run condition, it is stated against SQLite only.
+	//
+	// The ceiling is PER CAPACITY CLASS (#85): only other runs holding an
+	// active operation of the acquired operation's class are counted, against
+	// maxRuns for work and maxObservations for observation. A verification
+	// operation (#490) is work that ALSO needs a verification slot: it is
+	// refused while maxVerifications other runs hold a verification operation,
+	// in the same statement, so the ceiling is durable and race-safe exactly
+	// as the class ceilings are.
+	AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations, maxVerifications int) (int64, bool, error)
 }
 
 // MemoryOperationStore is the in-process test double for OperationStore. It
@@ -87,6 +100,10 @@ func copyOperation(op RunOperation) RunOperation {
 	if op.LastProgressAt != nil {
 		progress := *op.LastProgressAt
 		op.LastProgressAt = &progress
+	}
+	if op.InactivitySuspension != nil {
+		suspension := *op.InactivitySuspension
+		op.InactivitySuspension = &suspension
 	}
 	return op
 }
@@ -158,7 +175,7 @@ func (s *MemoryOperationStore) PutOperation(op RunOperation, expected int64) (in
 // in test code, which is worth less than the rule it would imitate. The rule is
 // stated against SQLite, where the run document and the acquisition are one
 // statement, by TestSQLiteAStoppedRunsOperationIsNeverAcquired.
-func (s *MemoryOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error) {
+func (s *MemoryOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations, maxVerifications int) (int64, bool, error) {
 	if op.ID == "" || expected <= 0 {
 		return 0, false, fmt.Errorf("acquiring an operation needs its id and the revision it was read at")
 	}
@@ -167,13 +184,28 @@ func (s *MemoryOperationStore) AcquireOperation(op RunOperation, expected int64,
 	if revision, exists := s.revisions[op.ID]; !exists || revision != expected {
 		return 0, false, nil
 	}
-	driven := map[string]bool{}
-	for _, stored := range s.operations {
-		if stored.RunID != op.RunID && stored.Lease != nil && (stored.State == Leased || stored.State == Running) {
+	class := OperationCapacityClass(op.Kind)
+	ceiling := maxRuns
+	if class == CapacityObservation {
+		ceiling = maxObservations
+	}
+	driven, verifying := map[string]bool{}, map[string]bool{}
+	for id, stored := range s.operations {
+		active := stored.Lease != nil && (stored.State == Leased || stored.State == Running)
+		if stored.RunID == op.RunID && id != op.ID && active {
+			return 0, false, nil
+		}
+		if stored.RunID == op.RunID || !active {
+			continue
+		}
+		if OperationCapacityClass(stored.Kind) == class {
 			driven[stored.RunID] = true
 		}
+		if holdsVerificationSlot(stored) {
+			verifying[stored.RunID] = true
+		}
 	}
-	if len(driven) >= maxRuns {
+	if len(driven) >= ceiling || (consumesVerification(op.Kind) && len(verifying) >= maxVerifications) {
 		return 0, false, nil
 	}
 	s.operations[op.ID] = copyOperation(op)
@@ -207,6 +239,14 @@ type Scheduler struct {
 	Liveness          OwnerLiveness
 	LeaseDuration     time.Duration
 	MaxConcurrentRuns int
+	// MaxConcurrentObservations is the observation-class ceiling (#85).
+	MaxConcurrentObservations int
+	// MaxConcurrentVerifications is the verification ceiling (#490).
+	MaxConcurrentVerifications int
+	// Drivers is this process's record of the leases its drivers hold
+	// (#485). Shared by every Scheduler with this Owner; nil recovers only
+	// dead owners' leases.
+	Drivers *DriverLeases
 }
 
 func (s Scheduler) defaults() Scheduler {
@@ -226,6 +266,8 @@ func (s Scheduler) defaults() Scheduler {
 	if s.MaxConcurrentRuns <= 0 {
 		s.MaxConcurrentRuns = defaultMaxConcurrentRuns
 	}
+	s.MaxConcurrentObservations = resolveMaxConcurrentObservations(s.MaxConcurrentObservations)
+	s.MaxConcurrentVerifications = resolveMaxConcurrentVerifications(s.MaxConcurrentVerifications)
 	return s
 }
 
@@ -297,6 +339,14 @@ func adoptPlanned(prior RunOperation, kind string) (RunOperation, bool, error) {
 	return prior, false, nil
 }
 
+// leasable is the scheduler's eligibility test, shared with the fleet's
+// Runnable count so the two cannot drift: Next tries to lease exactly the
+// operations for which it holds, and retires an expired one instead.
+func leasable(op RunOperation, all map[string]RunOperation, now time.Time, ownerAlive bool) bool {
+	return dependenciesSatisfied(op, all) && op.Attempt < op.MaxAttempts && !op.CancelRequested &&
+		CanAcquire(op, now, ownerAlive)
+}
+
 func dependenciesSatisfied(op RunOperation, all map[string]RunOperation) bool {
 	for _, id := range op.DependsOn {
 		if all[id].State != Succeeded {
@@ -311,6 +361,21 @@ func dependenciesSatisfied(op RunOperation, all map[string]RunOperation) bool {
 // scheduler owns the operation, so the scan continues past it.
 func (s Scheduler) Next(runID string) (*RunOperation, error) {
 	s = s.defaults()
+	if err := s.reclaimVerificationPermits(); err != nil {
+		return nil, err
+	}
+	// #474 R9: an ordinary verification-slot acquisition must be able to
+	// free a dead, expired review-verification claim exactly as it already
+	// frees a dead, expired nested VerificationPermit - claimReviewVerificationSlot's
+	// own reclaim is not enough, since nothing here guarantees a review
+	// trigger ever runs again for a given repository to reach it (no active
+	// PR, or no --reviewer-agent configured at all).
+	if err := s.reclaimReviewVerificationClaims(); err != nil {
+		return nil, err
+	}
+	if pending, err := s.VerificationCleanupPending(runID); err != nil || pending {
+		return nil, err
+	}
 	ops, err := s.Store.Operations(runID)
 	if err != nil {
 		return nil, err
@@ -324,31 +389,30 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 		return nil, err
 	}
 	now := s.Clock.Now()
-	// This scan is a cheap early exit only. On its own it is a read-then-act
-	// race that two watcher processes both win, so the ceiling is re-checked
-	// inside the durable acquisition below; that check, not this one, is what
-	// makes max=1 hold across processes.
+	// This scan is where an ABANDONED operation is given back, because it is
+	// the only place a run ever looks at a sibling's operations at all.
 	//
-	// It is also where an ABANDONED operation is given back, because it is the
-	// only place a run ever looks at a sibling's operations at all.
-	activeRuns := map[string]bool{}
+	// It is deliberately NOT a capacity check (#85). It used to return early
+	// once every slot was taken, and that early exit was blind to capacity
+	// class: one long execution.invoke at a ceiling of one kept every waiting
+	// run from even observing its review. The ceilings are decided per class,
+	// transactionally, inside AcquireOperation below.
 	for _, op := range allOperations {
 		// A lease-less active row is an attempt nobody is holding - either one
 		// this scan already reclaimed, or one a sibling did. It occupies
-		// nothing, exactly as the durable count below reads it.
-		if op.Lease == nil || (op.State != Leased && op.State != Running) || op.RunID == runID {
+		// nothing, exactly as the durable count reads it.
+		//
+		// The run's OWN abandoned operations are reclaimed too: the store
+		// refuses a second active operation of one run, so an abandoned lease
+		// left on an exhausted operation would otherwise block the run's next
+		// operation forever. reclaimAbandoned applies CanAcquire's liveness and
+		// expiry rule, so a live driver's lease is never touched.
+		if op.Lease == nil || (op.State != Leased && op.State != Running) {
 			continue
 		}
-		reclaimed, err := s.reclaimAbandoned(op, now)
-		if err != nil {
+		if _, err := s.reclaimAbandoned(op, now); err != nil {
 			return nil, err
 		}
-		if !reclaimed {
-			activeRuns[op.RunID] = true
-		}
-	}
-	if len(activeRuns) >= s.MaxConcurrentRuns {
-		return nil, nil
 	}
 	for _, candidate := range ops {
 		op, revision, ok, err := s.Store.Operation(candidate.ID)
@@ -358,11 +422,8 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 		if !ok {
 			continue
 		}
-		if !dependenciesSatisfied(op, all) || op.Attempt >= op.MaxAttempts || op.CancelRequested {
-			continue
-		}
 		alive := op.Lease != nil && s.Liveness.Alive(op.Lease.Owner)
-		if !CanAcquire(op, now, alive) {
+		if !leasable(op, all, now, alive) {
 			continue
 		}
 		// Retired on EXECUTION AUTHORITY, not on wall-clock elapsed. The
@@ -379,12 +440,20 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 			continue
 		}
 		op.State = Leased
-		op.Lease = &Lease{Owner: s.Owner, HeartbeatAt: now, ExpiresAt: now.Add(s.LeaseDuration)}
+		// The grant is issued - and recorded as held - BEFORE the durable
+		// acquisition (#485), so no sibling driver in this process can read
+		// the new lease as one nobody here holds. The caller that receives the
+		// operation owns that grant from here and ends it with Relinquish.
+		grant := s.Drivers.issue()
+		op.Lease = &Lease{Owner: s.Owner, HeartbeatAt: now, ExpiresAt: now.Add(s.LeaseDuration), Grant: grant}
 		// Taking the lease IS taking the run-driving slot: the ceiling and the
 		// compare-and-set are one durable write. A refusal here is either a
 		// lost CAS or a full ceiling; both mean another driver owns the work,
 		// so the scan continues past it exactly as before.
-		_, acquired, err := s.Store.AcquireOperation(op, revision, s.MaxConcurrentRuns)
+		_, acquired, err := s.Store.AcquireOperation(op, revision, s.MaxConcurrentRuns, s.MaxConcurrentObservations, s.MaxConcurrentVerifications)
+		if err != nil || !acquired {
+			s.Drivers.release(grant)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -394,6 +463,50 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 		return &op, nil
 	}
 	return nil, nil
+}
+
+// VerificationSaturated reports whether other runs hold every verification
+// slot (#490). It is what lets a refused verification say it is waiting on
+// capacity rather than that the operation was merely unavailable. It reads the
+// same durable occupancy AcquireOperation counts, so it is true after a
+// restart exactly when the acquisition would still refuse.
+func (s Scheduler) VerificationSaturated(runID string) (bool, error) {
+	s = s.defaults()
+	all, err := s.Store.AllOperations()
+	if err != nil {
+		return false, err
+	}
+	verifying := map[string]bool{}
+	for _, op := range all {
+		if op.RunID != runID && holdsVerificationSlot(op) {
+			verifying[op.RunID] = true
+		}
+	}
+	nested := 0
+	if store, ok := s.Store.(VerificationPermitStore); ok {
+		permits, err := store.VerificationPermits()
+		if err != nil {
+			return false, err
+		}
+		for _, permit := range permits {
+			if permit.State == VerificationGranted {
+				nested++
+			}
+		}
+	}
+	// #474 R5: an independent-review trigger's durable claim is the same
+	// verification-capacity weight as a nested permit, counted into the
+	// SAME ceiling verificationCountSQL already enforces for the SQL-side
+	// acquisition path.
+	reviewing := 0
+	if store, ok := s.Store.(ReviewVerificationClaimStore); ok {
+		claims, err := store.ReviewVerificationClaims()
+		if err != nil {
+			return false, err
+		}
+		reviewing = len(claims)
+	}
+	return len(verifying)+nested+reviewing >= s.MaxConcurrentVerifications, nil
 }
 
 // reclaimAbandoned drops the lease of one leased or running operation that NO
@@ -426,8 +539,17 @@ func (s Scheduler) Next(runID string) (*RunOperation, error) {
 // The write is a compare-and-set, so two schedulers reclaiming the same
 // operation cannot both win, and a lost race simply leaves the operation
 // counted - the conservative answer.
+//
+// A lease THIS process left behind is the other abandoned shape (#485): its
+// owner is alive, so the dead-owner rule never applies, yet no driver here
+// holds it - the pass that took it returned without finishing it. DriverLeases
+// is what proves that, and only for a grant it issued itself; any other
+// lease is still reclaimable only when its owner is dead and it has expired.
 func (s Scheduler) reclaimAbandoned(candidate RunOperation, now time.Time) (bool, error) {
-	if candidate.Lease == nil || !CanAcquire(candidate, now, s.Liveness.Alive(candidate.Lease.Owner)) {
+	abandoned := func(op RunOperation) bool {
+		return op.Lease != nil && (CanAcquire(op, now, s.Liveness.Alive(op.Lease.Owner)) || s.stranded(op))
+	}
+	if !abandoned(candidate) {
 		return false, nil
 	}
 	op, revision, ok, err := s.Store.Operation(candidate.ID)
@@ -437,7 +559,7 @@ func (s Scheduler) reclaimAbandoned(candidate RunOperation, now time.Time) (bool
 	if op.State != Leased && op.State != Running {
 		return true, nil
 	}
-	if op.Lease == nil || !CanAcquire(op, now, s.Liveness.Alive(op.Lease.Owner)) {
+	if !abandoned(op) {
 		return false, nil
 	}
 	// ONLY the lease is dropped. The row goes on saying the attempt was leased
@@ -457,7 +579,19 @@ func (s Scheduler) reclaimAbandoned(candidate RunOperation, now time.Time) (bool
 	return released, err
 }
 
-func (s Scheduler) Start(id string) (RunOperation, error) {
+func (s Scheduler) Start(id string) (RunOperation, error) { return s.StartWithin(id, nil) }
+
+// AttemptLimit caps one physical attempt below its operation's own remaining
+// WallBudget. Within is the authority; Bound names which bound it is.
+type AttemptLimit struct {
+	Within time.Duration
+	Bound  AttemptBound
+}
+
+// StartWithin is Start with the attempt's deadline additionally bounded by
+// limit (#328). A nil limit is the legacy rule exactly. A non-positive Within
+// is zero authority - an already-passed deadline - never "unbounded".
+func (s Scheduler) StartWithin(id string, limit *AttemptLimit) (RunOperation, error) {
 	return s.transition(id, func(op *RunOperation, now time.Time) error {
 		if op.State != Leased || op.Lease == nil || op.Lease.Owner != s.Owner {
 			return fmt.Errorf("operation is not leased by scheduler")
@@ -477,6 +611,9 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		// process's total and read as "nothing new" - which would suppress the
 		// successor's real progress until it out-talked its predecessor.
 		op.NoProgressKey = ""
+		// A suspension belongs to the process that opened the tool, and that
+		// process is gone: no successor inherits it (#352).
+		op.InactivitySuspension = nil
 		// EXECUTION BEGINS HERE, so this is where authority starts being spent.
 		//
 		// The attempt's deadline is derived from what the operation has NOT yet
@@ -502,7 +639,11 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		// so nothing observed how that attempt ended and nothing classified it.
 		abandoned := op.ActiveSince != nil
 		if abandoned {
-			if orphaned := now.Sub(*op.ActiveSince); orphaned > 0 {
+			waiting, err := s.operationVerificationWait(*op, now)
+			if err != nil {
+				return err
+			}
+			if orphaned := now.Sub(*op.ActiveSince) - waiting; orphaned > 0 {
 				op.ConsumedExecution += orphaned
 				op.LastAttemptExecution = orphaned
 			}
@@ -529,8 +670,14 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 		// retry that inherited an exhausted window would refuse before dispatch
 		// forever, which is not a retry. The attempt ceiling is what bounds it,
 		// exactly as it bounds every other reattemptable class.
+		//
+		// An inherited datum keeps ProgressRecorderOpen with it: that is the
+		// evidence that the dead process's newest progress may never have
+		// become durable (#352). A fresh stamp is not recorded progress and
+		// has no unwritten tail.
 		if !abandoned || op.LastProgressAt == nil {
 			op.LastProgressAt = &now
+			op.ProgressRecorderOpen = false
 		}
 		op.ActiveSince = &now
 		if op.WallBudget > 0 {
@@ -540,6 +687,18 @@ func (s Scheduler) Start(id string) (RunOperation, error) {
 			}
 			deadline := now.Add(remaining)
 			op.Deadline = &deadline
+		}
+		op.DeadlineBound = ""
+		if limit != nil {
+			// The operation's own WallBudget is the run envelope it was planned
+			// under, so when IT is the earlier instant the binding bound is
+			// still the run's active work.
+			op.DeadlineBound = BoundRunActiveWork
+			within := max(limit.Within, 0)
+			if deadline := now.Add(within); op.Deadline == nil || !deadline.After(*op.Deadline) {
+				op.Deadline = &deadline
+				op.DeadlineBound = limit.Bound
+			}
 		}
 		return nil
 	})
@@ -587,27 +746,48 @@ func (s Scheduler) Heartbeat(id string) (RunOperation, error) {
 // fail an invocation that is working.
 //
 // It is BOUND to the physical attempt that observed it: the write lands only
-// while the row is running THAT attempt. The Claude recorder is deliberately
-// never joined (#322), so a delayed write from attempt N can arrive after N
-// settled, or after N+1 started on the same row - and either would durably
-// claim progress a different process made. (An operation leased before the
-// identity counter existed carries 0 here while its dispatch was clamped to 1,
-// so it misses its durable stamps until it settles; that is the only cost.)
-func (s Scheduler) RecordProviderProgress(id string, attempt int, key string) (RunOperation, error) {
+// while the row is running THAT attempt. A write of attempt N can still land
+// after N settled, or after N+1 started on the same row, and either would
+// durably claim progress - or a suspension - a different process made. (An
+// operation leased before the identity counter existed carries 0 here while
+// its dispatch was clamped to 1, so it misses its durable stamps until it
+// settles; that is the only cost.)
+//
+// The instant recorded is when the progress was OBSERVED - now less its Age -
+// not when the coalescing recorder got round to writing it (#352), and it
+// never moves backwards. The suspension and the recorder-open flag are the
+// attempt's current state, replaced whole on every write.
+func (s Scheduler) RecordProviderProgress(id string, attempt int, progress ProviderProgress) (RunOperation, error) {
 	return s.transition(id, func(op *RunOperation, now time.Time) error {
-		if key == "" || key == op.NoProgressKey {
-			return nil
-		}
 		if op.State != Running || op.AttemptIdentity != attempt {
 			return nil
 		}
-		op.NoProgressKey = key
-		op.LastProgressAt = &now
+		if progress.Key != "" && progress.Key != op.NoProgressKey {
+			at := now.Add(-max(progress.Age, 0))
+			if op.LastProgressAt != nil && at.Before(*op.LastProgressAt) {
+				at = *op.LastProgressAt
+			}
+			op.NoProgressKey, op.LastProgressAt = progress.Key, &at
+		}
+		op.ProgressRecorderOpen = !progress.Final
+		op.InactivitySuspension = nil
+		if progress.Suspended {
+			op.InactivitySuspension = &InactivitySuspension{
+				Since: now.Add(-max(progress.SuspendedAge, 0)), AttemptIdentity: attempt, Owner: s.Owner,
+			}
+		}
 		return nil
 	})
 }
 
 func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error) {
+	return s.finishAt(id, state, time.Time{}, "", time.Time{})
+}
+
+// finishAt also records retryAt (purely "not eligible before") with the
+// disposition that accounts for it, so the store row and the journal agree,
+// and, for store-lag recovery, when the attempt actually ended; zero is now.
+func (s Scheduler) finishAt(id string, state OperationState, retryAt time.Time, disposition RetryDisposition, endedAt time.Time) (RunOperation, error) {
 	if state != Succeeded && state != OperationFailed && state != OperationCancelled && state != Unknown {
 		return RunOperation{}, fmt.Errorf("not a terminal operation state")
 	}
@@ -616,13 +796,22 @@ func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error)
 			return fmt.Errorf("operation is not active")
 		}
 		op.State = state
+		op.RetryNotBefore, op.RetryDisposition = retryAt, disposition
 		op.Lease = nil
 		// What this attempt ACTUALLY executed joins the durable counter, and
 		// the operation stops being active. Anything that happens between now
 		// and the next attempt - an operator decision, a funded account, a
 		// human review - costs nothing, because nothing is executing.
 		if op.ActiveSince != nil {
-			spent := now.Sub(*op.ActiveSince)
+			ended := now
+			if !endedAt.IsZero() && endedAt.Before(ended) {
+				ended = endedAt
+			}
+			wait, err := s.operationVerificationWait(*op, ended)
+			if err != nil {
+				return err
+			}
+			spent := ended.Sub(*op.ActiveSince) - wait
 			if spent < 0 {
 				spent = 0
 			}
@@ -630,7 +819,9 @@ func (s Scheduler) Finish(id string, state OperationState) (RunOperation, error)
 			op.LastAttemptExecution = spent
 			op.ActiveSince = nil
 		}
-		op.Deadline = nil
+		op.Deadline, op.DeadlineBound = nil, ""
+		// The attempt's process is over, so neither can still be true of it.
+		op.InactivitySuspension, op.ProgressRecorderOpen = nil, false
 		return nil
 	})
 }
@@ -708,7 +899,7 @@ func (s Scheduler) RestoreAttempt(id string, refundExecution bool) (RunOperation
 		}
 		op.LastAttemptExecution = 0
 		op.ActiveSince = nil
-		op.Deadline = nil
+		op.Deadline, op.DeadlineBound = nil, ""
 		return nil
 	})
 }

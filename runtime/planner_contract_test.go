@@ -12,6 +12,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -23,7 +24,21 @@ import (
 func TestTheOutputContractDoesNotDemandEveryMemberItShows(t *testing.T) {
 	input, _ := plannerFixture(t, goodAnswer)
 	input.Contract.RequiredClaims = map[string]domain.RequiredClaim{"claim-validation": {EvidenceClass: "automated_test"}}
+	action := domain.Action{Type: "git.pull_request.create", Target: "main"}
+	input.Template = &domain.EngineeringPlanTemplate{Stages: []domain.TemplateStage{
+		{ID: "verify-candidate", Kind: domain.StageAssuranceGate, RequiredClaims: []string{"claim-validation"}},
+		{ID: "publication-approval", Kind: domain.StageHumanDecisionGate, Action: &action, RequiredClaims: []string{"claim-publication-approval"}},
+	}}
 	contract := plannerOutputContract(input)
+	if !strings.Contains(contract, "action git.pull_request.create:main") {
+		t.Fatal("the selected template's exact gate action is not stated to the planner")
+	}
+	if !strings.Contains(contract, "claims claim-validation") || !strings.Contains(contract, "claims claim-publication-approval") {
+		t.Fatal("the selected template's gate claims are not stated to the planner")
+	}
+	if !strings.Contains(contract, "may not name a human_approval claim") {
+		t.Fatal("the planner is not told to keep human claims off automated assurance gates")
+	}
 
 	if strings.Contains(contract, "EXACTLY the members shown") {
 		t.Fatal("the contract still tells the model that every member shown is required")
@@ -52,7 +67,7 @@ func TestTheOutputContractDoesNotDemandEveryMemberItShows(t *testing.T) {
 	// direction: the model cannot use it, and cannot know it may.
 	for _, member := range []string{
 		`"id"`, `"kind"`, `"role"`, `"objective"`, `"depends_on"`,
-		`"requires_capabilities"`, `"required_claims"`, `"independence"`, `"rationale"`, `"notes"`,
+		`"requires_capabilities"`, `"required_claims"`, `"action"`, `"independence"`, `"rationale"`, `"notes"`,
 	} {
 		if !strings.Contains(contract, member) {
 			t.Fatalf("the decoder accepts %s and the contract never shows it", member)
@@ -62,6 +77,18 @@ func TestTheOutputContractDoesNotDemandEveryMemberItShows(t *testing.T) {
 	// the contract does not define is a deterministic refusal.
 	if !strings.Contains(contract, "claim-validation") {
 		t.Fatalf("the contract does not state the claim vocabulary a gate may reference:\n%s", contract)
+	}
+	// The vocabulary quotes each id outside the example, apart from its class
+	// (a bracketed class suffix was copied into the id, #694), and that quoting
+	// must not reach the JSON example the answer is modelled on.
+	if !strings.Contains(contract, `"claim-validation" (evidence class automated_test)`) || strings.Contains(contract, "claim-validation [") {
+		t.Fatalf("the contract does not show the claim id apart from its evidence class:\n%s", contract)
+	}
+	const open, closing = "drawn from this shape:\n\n", "\n\nNo member other"
+	start := strings.Index(contract, open)
+	end := strings.Index(contract, closing)
+	if start < 0 || end < start || !json.Valid([]byte(contract[start+len(open):end])) {
+		t.Fatalf("the answer shape in the contract is not valid JSON:\n%s", contract)
 	}
 	// The capability list is substituted rather than left as a format verb.
 	if strings.Contains(contract, "{{capabilities}}") || strings.Contains(contract, "%!") {

@@ -85,6 +85,53 @@ func TestThePlanTextSaysWhatTheSnapshotOnlyHeld(t *testing.T) {
 	}
 }
 
+// A planner-role stage never becomes an EngineeringRun (it performs its work
+// through a verified non-mutating planning invocation), so it spends no
+// child_run from the envelope. The headroom warning must count only stages
+// that actually consume one - a plan with a decomposition stage plus three
+// implementation stages against max_child_runs: 4 has exactly one spare run,
+// not zero.
+func TestHeadroomWarningCountsOnlyRunCreatingStages(t *testing.T) {
+	plan := domain.EngineeringPlan{
+		ID: "plan-headroom", Revision: 1, Objective: "Ship the thing.",
+		Stages: []domain.PlanStage{
+			{ID: "decompose", Kind: domain.StageAgent, Role: domain.RolePlanner, InvocationMode: domain.InvocationModeNonMutatingPlanning},
+			{ID: "impl-1", Kind: domain.StageAgent, Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating},
+			{ID: "impl-2", Kind: domain.StageAgent, Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating},
+			{ID: "impl-3", Kind: domain.StageAgent, Role: domain.RoleImplementer, InvocationMode: domain.InvocationModeMutating},
+		},
+	}
+	view := runtime.PlanView{
+		Plan: plan,
+		Snapshot: runtime.PlanSnapshot{
+			PlanID: plan.ID, Revision: 1,
+		},
+		Envelope: domain.PlanBudgetEnvelope{MaxChildRuns: 4, MaxConcurrency: 2, MaxProviderInvocations: 8},
+	}
+
+	var out bytes.Buffer
+	if _, err := planOutput(autonomyFlags{Text: true}, view, &out, ""); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	if strings.Contains(text, "no re-performance headroom") {
+		t.Fatalf("a planner stage was counted as run-creating demand, warning about a ceiling that has one spare run:\n%s", text)
+	}
+
+	// The same plan with one fewer run-creating stage's worth of ceiling DOES
+	// warn: three run-creating stages against a ceiling of 3 has no headroom.
+	tight := view
+	tight.Envelope.MaxChildRuns = 3
+	out.Reset()
+	if _, err := planOutput(autonomyFlags{Text: true}, tight, &out, ""); err != nil {
+		t.Fatal(err)
+	}
+	text = out.String()
+	if !strings.Contains(text, "no re-performance headroom") {
+		t.Fatalf("three run-creating stages against a ceiling of 3 should warn about no headroom:\n%s", text)
+	}
+}
+
 // The approval preview cannot drive the terminal either.
 //
 // preview.Invalidated holds STAGE IDS, and the graph laws constrain only that

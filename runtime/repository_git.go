@@ -225,6 +225,9 @@ type RepositoryGitRunner struct {
 	// governed remote, and nil means every transport is refused.
 	Local  LocalPolicy
 	Remote *RemotePolicy
+	// Input is the command's stdin, for the batch forms (--stdin-paths,
+	// cat-file --batch). nil is /dev/null.
+	Input []byte
 }
 
 // controlPolicy is the default repository-control local profile.
@@ -640,6 +643,14 @@ func repositoryGitEnv(home, template, askpass string) []string {
 		"PAGER=cat",
 		"GIT_OPTIONAL_LOCKS=0",
 		"GIT_LITERAL_PATHSPECS=1",
+		// refs/replace/* would let a reader see stand-in bytes for an object
+		// a commit or push carries for real, so the gates would judge the
+		// wrong content (#437).
+		"GIT_NO_REPLACE_OBJECTS=1",
+		// .git/info/grafts rewrites parents for every reader, so an ancestry
+		// query could call a foreign head the candidate's own (#437). Grafts
+		// are read from the empty null device instead.
+		"GIT_GRAFT_FILE=" + os.DevNull,
 		// An empty runtime-owned template, so neither a user template nor a
 		// system template can seed hooks into a clone or init.
 		"GIT_TEMPLATE_DIR=" + template,
@@ -662,6 +673,10 @@ func (r RepositoryGitRunner) runtimeConfigOverrides(hooks string, transport gitT
 		"-c", "commit.gpgSign=false",
 		"-c", "tag.gpgSign=false",
 		"-c", "fetch.recurseSubmodules=false",
+		// GIT_GRAFT_FILE names an existing (empty) file, and Git advises that
+		// grafts are deprecated whenever it opens one; that hint is noise in
+		// every error this runner reports.
+		"-c", "advice.graftFileDeprecated=false",
 		"-c", "credential.helper=",
 		"-c", "protocol.allow=never",
 		"-c", "protocol.ext.allow=never",
@@ -787,12 +802,29 @@ func (r RepositoryGitRunner) run(args ...string) ([]byte, error) {
 		cmd.Dir = r.Dir
 	}
 	cmd.Env = repositoryGitEnv(home, template, askpass)
-	// nil Stdin is /dev/null, so anything that tried to prompt gets EOF.
+	// nil Stdin is /dev/null, so anything that tried to prompt gets EOF. Input
+	// is finite, so a prompt still reaches EOF after it.
 	cmd.Stdin = nil
+	if r.Input != nil {
+		cmd.Stdin = bytes.NewReader(r.Input)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(stderr.String()))
+		return nil, &gitCommandError{message: fmt.Sprintf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(stderr.String())), cause: err}
 	}
 	return stdout.Bytes(), nil
 }
+
+// gitCommandError is a failed git command. Its message is exactly the one this
+// runner has always reported; it additionally unwraps to the process error, so
+// a caller whose command gives an exit status a defined meaning - merge-base
+// --is-ancestor's exit 1 is "no", anything else is a failure - can read it
+// with errors.As instead of parsing stderr.
+type gitCommandError struct {
+	message string
+	cause   error
+}
+
+func (e *gitCommandError) Error() string { return e.message }
+func (e *gitCommandError) Unwrap() error { return e.cause }

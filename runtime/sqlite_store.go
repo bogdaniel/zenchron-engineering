@@ -15,7 +15,12 @@ import (
 // sqliteMigrations are applied in order; each one advances PRAGMA user_version
 // by one, so the applied count is the schema version. Never edit an applied
 // migration: append a new one.
-var sqliteMigrations = []string{`
+//
+// productSchemaMigrations (product_schema.go) and remediationSchemaMigrations
+// (remediation_schema.go) are appended rather than inlined here, to keep this
+// file under the repository's file-size cap - it is still one ordered
+// migration list, never a second schema version counter.
+var sqliteMigrations = append([]string{`
 CREATE TABLE run_operations (
 	id                TEXT PRIMARY KEY,
 	run_id            TEXT NOT NULL,
@@ -334,7 +339,306 @@ SELECT 'current', 'handoff_activation', handoff_id, updated_unix_nano,
                    'artifact', json_extract(document, '$.successor.artifact_path'))
   FROM controller_current_activation
  WHERE id = 'current';
-`}
+`, `
+CREATE INDEX run_operations_active ON run_operations(run_id, created_unix_nano, id)
+WHERE json_extract(document, '$.state') IN ('leased', 'running');
+CREATE INDEX runs_active ON runs(created_unix_nano, id)
+WHERE COALESCE(json_extract(document, '$.disposition'), '') NOT IN ('completed', 'failed', 'cancelled');
+`, `
+-- The controller-effective configuration a plan was first claimed under (#307).
+-- Empty for plans that predate it; see planConfigurationHold.
+ALTER TABLE plans ADD COLUMN config_digest TEXT NOT NULL DEFAULT '';
+`, `
+-- A durable, monotonically increasing CROSS-STREAM cursor (#399).
+--
+-- Every stream's own sequence column already orders that one run's (or
+-- plan's) history, but nothing orders events ACROSS runs: a fleet-wide
+-- observer asking "which runs changed since X" had no answer but polling
+-- every run or replaying the whole table (#96). global_sequence is that total
+-- order - one counter shared by every stream, allocated inside the same
+-- write-locked append transaction that allocates the stream-local sequence
+-- (appendToStream), so the two can never disagree about which event came
+-- first.
+--
+-- It is never part of the hash-chained document: a run's chain and digests
+-- are defined entirely by that run's own stream, and a fleet-wide numbering
+-- scheme is not something a run's history should need to know about, or be
+-- able to invalidate, to stay verifiable.
+--
+-- Existing rows are backfilled in ROWID order. That order already agrees with
+-- every stream's sequence order - appendToStream commits each row strictly
+-- after the rows before it in that stream, so ROWID order and per-stream
+-- sequence order are the same order seen through two different columns - so
+-- backfilling by it gives historical rows a global order consistent with the
+-- history they already have, not a renumbering of it.
+ALTER TABLE events ADD COLUMN global_sequence INTEGER NOT NULL DEFAULT 0;
+UPDATE events SET global_sequence = ranked.ord
+FROM (SELECT rowid AS rid, ROW_NUMBER() OVER (ORDER BY rowid) AS ord FROM events) AS ranked
+WHERE events.rowid = ranked.rid;
+CREATE UNIQUE INDEX events_global_sequence ON events(global_sequence);
+-- ChangesSince filters by stream_kind and orders by global_sequence. Without
+-- this index SQLite's planner prefers the existing (stream_kind, run_id,
+-- plan_id, sequence) index for the equality filter and then sorts the result
+-- in a temp B-tree before LIMIT applies - a scan of every matching row, which
+-- is exactly the unbounded cost #399 exists to avoid. This composite index
+-- answers the filter AND the ordering from one range scan, so LIMIT bounds
+-- the rows actually touched.
+CREATE INDEX events_stream_global_sequence ON events(stream_kind, global_sequence);
+`, `
+-- The operator pause (#86) is read inside every lease acquisition: the run's
+-- latest run.paused/run.unpaused event. This partial index makes the common
+-- never-paused case an empty probe rather than a scan of the run's journal.
+CREATE INDEX events_run_pause ON events(run_id, sequence) WHERE type IN ('run.paused', 'run.unpaused');
+`, `
+-- Basic explicit orchestration (#470), in the SAME database as runs and the
+-- journal. Both tables are insert-only: a batch is written once with every
+-- item's child run already decided, and an admitted handoff is immutable. Item
+-- state is never stored; it is projected from the child runs on every read.
+CREATE TABLE orchestration_batches (
+	id                TEXT PRIMARY KEY,
+	repository        TEXT NOT NULL,
+	created_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+CREATE TABLE orchestration_handoffs (
+	id                 TEXT PRIMARY KEY,
+	batch_id           TEXT NOT NULL REFERENCES orchestration_batches(id),
+	run_id             TEXT NOT NULL REFERENCES runs(id),
+	admitted_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
+CREATE INDEX orchestration_handoffs_by_run ON orchestration_handoffs(run_id, admitted_unix_nano, id);
+-- A reported handoff the runtime decided it can never admit (its report is
+-- gone or no longer the journalled document). Insert-only, keyed by the same
+-- identity an admission would have had, so one invocation is settled once.
+CREATE TABLE orchestration_handoff_refusals (
+	id                TEXT PRIMARY KEY,
+	batch_id          TEXT NOT NULL REFERENCES orchestration_batches(id),
+	run_id            TEXT NOT NULL REFERENCES runs(id),
+	refused_unix_nano INTEGER NOT NULL,
+	reason            TEXT NOT NULL
+);
+CREATE INDEX orchestration_handoff_refusals_by_run ON orchestration_handoff_refusals(run_id);
+`, `
+-- One row per supervisor start (ADR-0003 B4): the configuration identity it
+-- served under, that identity's controller-effective (C-only) content, and the
+-- supervisor operating policy (S) it applied. Insert-only. A row is also the
+-- evidence that a configuration identity token names exactly that C content,
+-- which is what lets an S-only edit keep the identity.
+CREATE TABLE supervisor_starts (
+	id                   TEXT PRIMARY KEY,
+	started_unix_nano    INTEGER NOT NULL,
+	config_global        TEXT NOT NULL,
+	config_repository    TEXT NOT NULL,
+	effective_global     TEXT NOT NULL,
+	effective_repository TEXT NOT NULL,
+	policy_digest        TEXT NOT NULL,
+	document             TEXT NOT NULL
+);
+CREATE INDEX supervisor_starts_projection ON supervisor_starts(config_global, config_repository, effective_global, effective_repository);
+`, `
+-- Nested grants share the operation database and its scheduler authority.
+-- They consume verification only; their parent already holds the work slot.
+CREATE TABLE verification_permits (
+	id TEXT PRIMARY KEY,
+	revision INTEGER NOT NULL,
+	document TEXT NOT NULL
+);
+`, `
+-- Typed inter-worker communication (#473). Insert-only, like the handoffs: a
+-- message is immutable once admitted, and a correction is a NEW row naming
+-- the one it supersedes. The partial unique index is the "superseded at most
+-- once" rule, so history stays a chain rather than a fork. seq is admission
+-- order, which is the order every projection reads.
+CREATE TABLE orchestration_messages (
+	seq                INTEGER PRIMARY KEY,
+	id                 TEXT NOT NULL UNIQUE,
+	scope              TEXT NOT NULL,
+	run_id             TEXT NOT NULL REFERENCES runs(id),
+	operation_id       TEXT NOT NULL,
+	attempt            INTEGER NOT NULL,
+	supersedes         TEXT,
+	admitted_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
+CREATE INDEX orchestration_messages_by_scope ON orchestration_messages(scope, seq);
+CREATE UNIQUE INDEX orchestration_messages_supersedes ON orchestration_messages(supersedes) WHERE supersedes IS NOT NULL;
+-- An invocation's message report the runtime decided it can never admit,
+-- keyed by the invocation, so it is settled once.
+CREATE TABLE orchestration_message_refusals (
+	id                TEXT PRIMARY KEY,
+	scope             TEXT NOT NULL,
+	run_id            TEXT NOT NULL REFERENCES runs(id),
+	refused_unix_nano INTEGER NOT NULL,
+	reason            TEXT NOT NULL
+);
+CREATE INDEX orchestration_message_refusals_by_scope ON orchestration_message_refusals(scope);
+`, `
+-- The WorkGraph (#472). Both tables are insert-only, and neither stores a unit
+-- state: a revision document is immutable, an activation is written once, and
+-- every unit state is projected from these two plus the child runs on each read.
+--
+-- A revision is an APPEND. Adopting revision N+1 leaves N and every activation
+-- exactly as they were, which is what keeps a mutation from resetting a budget
+-- a child run has already consumed.
+CREATE TABLE work_graph_revisions (
+	graph_id          TEXT NOT NULL,
+	revision          INTEGER NOT NULL,
+	repository        TEXT NOT NULL,
+	created_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL,
+	PRIMARY KEY (graph_id, revision)
+);
+-- One row per unit whose child run this graph has claimed, with the exact
+-- upstream outputs it was activated against. The primary key is what makes
+-- child association idempotent across replay and recovery: a unit is activated
+-- once, so a lost reply or a crashed pass cannot produce a second child run.
+--
+-- batch_id references the #470 batch that owns the child run - the one whose
+-- identity binds this graph, this unit and this exact input set - so the batch
+-- is durable before any activation can name it. run_id carries NO foreign key:
+-- the batch decides the child identity, and the existing orchestration pass
+-- creates that row afterwards.
+CREATE TABLE work_graph_activations (
+	graph_id            TEXT NOT NULL,
+	unit_id             TEXT NOT NULL,
+	batch_id            TEXT NOT NULL REFERENCES orchestration_batches(id),
+	run_id              TEXT NOT NULL,
+	inputs_digest       TEXT NOT NULL,
+	activated_unix_nano INTEGER NOT NULL,
+	PRIMARY KEY (graph_id, unit_id)
+);
+`, `
+-- Durable, authorized decision resolution (#508). Both tables are insert-only.
+--
+-- work_unit_holds is #472's readiness-owner seam, supplied: a hold an operator
+-- placed on one WorkGraph unit before its first activation. Its primary key IS
+-- the identity rule - a unit can be held at most once, ever - so a lost reply
+-- finds the hold already placed instead of a conflict.
+CREATE TABLE work_unit_holds (
+	id                TEXT PRIMARY KEY,
+	graph_id          TEXT NOT NULL,
+	unit_id           TEXT NOT NULL,
+	requested_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL,
+	UNIQUE(graph_id, unit_id)
+);
+CREATE INDEX work_unit_holds_by_graph ON work_unit_holds(graph_id);
+-- decision_resolutions answers exactly one live request - a worker-authored
+-- #473 decision_request message, or a work_unit_holds row above - with its id
+-- deterministic from the request alone (orchestration.DecisionResolutionID).
+-- One request can therefore have at most one row here, ever: an identical
+-- retry finds it, and a conflicting answer is refused before a second row
+-- could exist to disagree with the first.
+CREATE TABLE decision_resolutions (
+	id                TEXT PRIMARY KEY,
+	request_id        TEXT NOT NULL UNIQUE,
+	scope             TEXT NOT NULL,
+	resolved_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+`, `
+-- decision_resumption_admissions pins, at most once per execution.invoke
+-- operation, the exact decision set and subject a #508 P4b decision-resumed
+-- binding is authorized to resume for (review B1/B2): admitted inside one
+-- BEGIN IMMEDIATE transaction that re-validates liveness and subject fresh
+-- (AdmitDecisionResumption, decision_store.go), so a supersession or subject
+-- drift either lands BEFORE this row exists - refusing admission - or
+-- belongs to a later epoch, never retroactively rewriting an operation
+-- already admitted to run.
+CREATE TABLE decision_resumption_admissions (
+	operation_id       TEXT PRIMARY KEY,
+	binding            TEXT NOT NULL,
+	admitted_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
+`, `
+-- Independent PR review (#233). review_decisions is insert-only and never
+-- rewritten: a moved head or a different reviewer always identifies a
+-- different decision (review.DecisionID), so there is no "latest" to update
+-- in place, only more rows. repository and pr_number are indexed columns
+-- (not only fields inside document) so status and staleness can be answered
+-- with one query instead of a decode-every-row scan.
+--
+-- review_publications is a SEPARATE table on purpose: a publication attempt
+-- that fails after the decision already committed must never be able to
+-- corrupt or erase that decision by sharing its row.
+CREATE TABLE review_decisions (
+	id                TEXT PRIMARY KEY,
+	repository        TEXT NOT NULL,
+	pr_number         INTEGER NOT NULL,
+	head_sha          TEXT NOT NULL,
+	run_id            TEXT NOT NULL,
+	created_unix_nano INTEGER NOT NULL,
+	document          TEXT NOT NULL
+);
+CREATE INDEX review_decisions_by_pr ON review_decisions(repository, pr_number, created_unix_nano);
+CREATE TABLE review_publications (
+	decision_id TEXT PRIMARY KEY REFERENCES review_decisions(id),
+	document    TEXT NOT NULL
+);
+`, `
+-- A durable, atomic claim over one bounded review operation (#233 B4):
+-- performing an independent review, or publishing one decision, each claim
+-- exactly one key before doing any expensive or externally-visible work, so
+-- two concurrent callers for the same exact subject/reviewer cannot both
+-- invoke a provider or both submit a GitHub review. A claim is released by
+-- its owner on ordinary completion (success or a clean failure); one left
+-- behind by a crashed process is reclaimed once it is older than the
+-- caller's staleness bound - see ClaimReview - so a dead claimant can never
+-- strand the operation forever.
+CREATE TABLE review_claims (
+	claim_key         TEXT PRIMARY KEY,
+	claimed_unix_nano INTEGER NOT NULL,
+	owner             TEXT NOT NULL,
+	-- token is the fencing token ClaimReview mints on every successful claim
+	-- or steal. A release or renewal naming any other token is a no-op: it
+	-- names a claim that has already been superseded, so acting on it would
+	-- let a stale holder delete or extend a claim it no longer owns.
+	token             TEXT NOT NULL
+);
+-- review_publication_attempts is the durable "an external POST may be in
+-- flight or its outcome is unknown" marker (#233 P1). It is written BEFORE
+-- PublishReview calls GitHub.SubmitReview and removed only once that
+-- decision's outcome is confirmed - either a success this invocation itself
+-- observed, or a later reconciliation that found GitHub's own matching
+-- review. A row surviving past that point is proof no caller has yet
+-- confirmed what happened to some earlier POST, which is exactly the
+-- condition under which a NEW POST must be refused: GitHub's matching
+-- review not being visible yet is never proof it was never accepted.
+CREATE TABLE review_publication_attempts (
+	decision_id       TEXT PRIMARY KEY REFERENCES review_decisions(id),
+	started_unix_nano INTEGER NOT NULL
+);
+`, `
+-- Durable, idempotent authorization to route one independent review's
+-- REQUEST_CHANGES decision into producer remediation (#474). One row per
+-- decision_id, ever: the primary key is what makes a second admission
+-- attempt for the same already-admitted decision a read, never a second
+-- remediation budget envelope or a second provider invocation.
+CREATE TABLE review_remediation_admissions (
+	decision_id        TEXT PRIMARY KEY REFERENCES review_decisions(id),
+	run_id             TEXT NOT NULL,
+	admitted_unix_nano INTEGER NOT NULL,
+	document           TEXT NOT NULL
+);
+CREATE INDEX review_remediation_admissions_by_run ON review_remediation_admissions(run_id);
+`, `
+-- A durable, restart-visible claim that one independent-review trigger
+-- invocation occupies a verification-capacity slot (#474 R5). An
+-- independent review invokes a full reviewer provider - the same
+-- capacity-class weight as an ordinary verification operation - but is
+-- bound to no run's own operation row, so it has no other way to
+-- participate in the SAME MaxConcurrentVerifications ceiling
+-- verificationCountSQL already enforces for both durable verification
+-- operations and nested VerificationPermits. Counted additively into that
+-- SAME formula; never a second ceiling, never a second scheduler.
+CREATE TABLE review_verification_claims (
+	id       TEXT PRIMARY KEY,
+	revision INTEGER NOT NULL,
+	document TEXT NOT NULL
+);
+`}, append(append(productSchemaMigrations, remediationSchemaMigrations...), artifactActionReceiptSchemaMigrations...)...)
 
 // sqliteSchemaVersion is the newest schema this binary can operate.
 var sqliteSchemaVersion = len(sqliteMigrations)
@@ -385,7 +689,13 @@ func OpenSQLiteOperationStore(stateDir string) (*SQLiteOperationStore, error) {
 	// _txlock=immediate takes the write lock at BEGIN, so a transaction that
 	// reads state it is about to overwrite (journal sequence allocation) waits
 	// on busy_timeout instead of failing an unretryable upgrade in WAL mode.
-	dsn := (&url.URL{Scheme: "file", Path: path}).String() + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
+	//
+	// busy_timeout is SQLite's own bounded wait for the write lock. Ten
+	// drivers writing at once could wait past 5s, and a write that gives up
+	// fails its pass - which since #485 costs that pass and, truthfully, an
+	// attempt it had started, but should not happen for mere contention.
+	// 15s stays under the 30s control-request deadline.
+	dsn := sqliteFileURI(path) + "?_pragma=busy_timeout(15000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -395,6 +705,14 @@ func OpenSQLiteOperationStore(stateDir string) (*SQLiteOperationStore, error) {
 		return nil, err
 	}
 	return &SQLiteOperationStore{db: db}, nil
+}
+
+// sqliteFileURI is the one way a filesystem path becomes a SQLite "file:" URI.
+// SQLite percent-decodes the URI, so a raw "file:"+path opens a DIFFERENT file
+// whenever the path holds a '%', '?' or '#' (#331); url.URL escapes them.
+// path must be absolute: a relative one is not a valid "file:" URI path.
+func sqliteFileURI(path string) string {
+	return (&url.URL{Scheme: "file", Path: path}).String()
 }
 
 func (s *SQLiteOperationStore) Close() error { return s.db.Close() }
@@ -441,6 +759,22 @@ func (s *SQLiteOperationStore) AllOperations() ([]RunOperation, error) {
 	}
 	return scanOperations(rows)
 }
+
+// ActiveOperations returns only leased/running rows, optionally scoped to a run.
+func (s *SQLiteOperationStore) ActiveOperations(runID string) ([]RunOperation, error) {
+	query := `SELECT document FROM run_operations WHERE json_extract(document, '$.state') IN ('leased', 'running')`
+	var args []any
+	if runID != "" {
+		query += ` AND run_id = ?`
+		args = append(args, runID)
+	}
+	rows, err := s.db.Query(query+` ORDER BY created_unix_nano ASC, id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanOperations(rows)
+}
+
 func (s *SQLiteOperationStore) Operation(id string) (RunOperation, int64, bool, error) {
 	var document string
 	var revision int64
@@ -540,7 +874,23 @@ func (s *SQLiteOperationStore) PutOperation(op RunOperation, expected int64) (in
 // database. Scheduler.reclaimAbandoned retires an abandoned operation before
 // this count is taken, so what is counted here is always durable state - and
 // never a durable row plus a live opinion about it.
-func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns int) (int64, bool, error) {
+//
+// The count is PER CAPACITY CLASS (#85): only other runs holding an active
+// operation of the class being acquired are counted, against that class's
+// ceiling. The class is read from the canonical document's kind - the one the
+// runtime decodes - and never from the denormalized kind column, which nothing
+// verifies; the observation kinds are bound parameters generated from
+// OperationCapacityClass, so there is no second list. A row whose document
+// carries no kind is counted as work, which is the closed direction. A
+// verification operation (#490) is additionally counted against the
+// verification ceiling the same way, from the same document kind.
+//
+// The same statement also refuses an operation while ANOTHER operation of the
+// same run holds a lease. That is what makes "a run holds at most one active
+// operation" a durable fact rather than a property of whoever drives it: a
+// second process can never observe a run beside the work another process is
+// doing on it.
+func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64, maxRuns, maxObservations, maxVerifications int) (int64, bool, error) {
 	if op.ID == "" || expected <= 0 {
 		return 0, false, fmt.Errorf("acquiring an operation needs its id and the revision it was read at")
 	}
@@ -548,19 +898,62 @@ func (s *SQLiteOperationStore) AcquireOperation(op RunOperation, expected int64,
 	if err != nil {
 		return 0, false, err
 	}
-	args := []any{string(document), op.ID, expected, op.RunID}
+	args := []any{string(document), op.ID, expected, op.RunID, op.ID, op.RunID}
 	for _, disposition := range terminalDispositions {
 		args = append(args, string(disposition))
 	}
-	args = append(args, op.RunID, maxRuns)
+	observation := observationKindList()
+	ceiling, acquiringObservation := maxRuns, 0
+	if OperationCapacityClass(op.Kind) == CapacityObservation {
+		ceiling, acquiringObservation = maxObservations, 1
+	}
+	args = append(args, op.RunID)
+	for _, kind := range observation {
+		args = append(args, kind)
+	}
+	// #474 R8: an independent-review claim is read-only but still provider
+	// WORK (#85), bounded by max_concurrent_runs exactly as any other
+	// work-class operation is - never only by max_concurrent_verifications.
+	// It carries no run_operations row for the count just above to see, so
+	// its own run is added here, zeroed by the CASE when acquiring
+	// observation-class capacity instead (a review claim is never
+	// observation-class work).
+	reviewClaimSQL, reviewClaimArgs := reviewClaimRunCountSQL(op.RunID)
+	args = append(args, acquiringObservation)
+	args = append(args, acquiringObservation)
+	args = append(args, reviewClaimArgs...)
+	args = append(args, ceiling)
+	// The verification ceiling (#490) is asked only of a verification
+	// operation, and counted exactly as the class ceiling is: other runs
+	// holding a leased verification operation, read from the document's kind.
+	acquiringVerification := 0
+	if consumesVerification(op.Kind) {
+		acquiringVerification = 1
+	}
+	count, verificationArgs := verificationCountSQL()
+	args = append(args, acquiringVerification)
+	args = append(args, verificationArgs...)
+	args = append(args, maxVerifications)
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(terminalDispositions)), ",")
+	kinds := strings.TrimSuffix(strings.Repeat("?,", len(observation)), ",")
 	result, err := s.db.Exec(`UPDATE run_operations SET revision = revision + 1, document = ?
 		WHERE id = ? AND revision = ?
+		  AND NOT EXISTS (SELECT 1 FROM run_operations AS other
+		       WHERE other.run_id = ? AND other.id <> ?
+		         AND json_extract(other.document, '$.state') IN ('leased', 'running')
+		         AND json_extract(other.document, '$.lease') IS NOT NULL)
 		  AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = ?
 		       AND json_extract(runs.document, '$.disposition') IN (`+placeholders+`))
-		  AND (SELECT COUNT(DISTINCT run_id) FROM run_operations
+		  AND NOT (`+runPausedSQL("run_operations.run_id")+`)
+		  AND NOT EXISTS (SELECT 1 FROM verification_permits AS held
+		       WHERE json_extract(held.document, '$.state') = 'granted'
+		         AND json_extract(held.document, '$.parent.RunID') = run_operations.run_id)
+		  AND ((SELECT COUNT(DISTINCT run_id) FROM run_operations
 		       WHERE run_id <> ? AND json_extract(document, '$.state') IN ('leased', 'running')
-		         AND json_extract(document, '$.lease') IS NOT NULL) < ?`,
+		         AND json_extract(document, '$.lease') IS NOT NULL
+		         AND COALESCE(json_extract(document, '$.kind') IN (`+kinds+`), 0) = ?)
+		       + (CASE WHEN ? = 0 THEN `+reviewClaimSQL+` ELSE 0 END)) < ?
+		  AND (? = 0 OR (`+count+`) < ?)`,
 		args...)
 	if err != nil {
 		return 0, false, err

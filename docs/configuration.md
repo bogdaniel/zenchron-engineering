@@ -115,6 +115,7 @@ characters of `a-z`, `0-9`, `-` or `_`, and may not start with a separator.
 | `credential_path` | `openai_responses` only, absolute. A path to an operator-held credential, never a token value. Naming it on a native CLI agent is refused: the CLI authenticates itself and Zenchron holds no credential for it. | required for `openai_responses` |
 | `endpoint` | `openai_responses` only. Overrides the provider's API endpoint. Refused on a native CLI agent. | provider default |
 | `allow_permission_bypass` | Native CLI only. Standing operator permission for that provider's unsafe mode. It grants nothing alone: an invocation must also pass `--dangerous-permission-bypass`, and the resulting attempt provenance records it forever. Refused on `openai_responses`, whose boundary is proven rather than bypassable. | `false` |
+| `frontend_cache_dir` | Native CLI only. Absolute path to a directory of offline npm caches, one per lockfile, named by the SHA-256 of `frontend/package-lock.json`. For an invocation whose candidate has that lockfile, the runtime copies the matching cache into the invocation's own scratch and runs npm offline against the copy, with scripts and audit off. The operator's cache is only read, nothing enters the candidate, and no cache for the lockfile means npm fails offline rather than reaching a registry. It grants no permission and does not enable Chrome or Playwright. Refused on `openai_responses`. See [Frontend dependency cache](#frontend-dependency-cache). | unset: no npm environment |
 | `unattended` | Whether the supervisor's automatic discovery may start work on this agent. Explicit `false` keeps it to explicit operator commands. | `true` |
 
 `default_agent` names the agent `autonomy run issue N` uses when no `--agent` is
@@ -167,6 +168,105 @@ refused like any other malformed bound. Attempts and continuations are different
 resources: attempts retry one execution binding, continuations are successive
 pieces of productive work.
 
+**Every run budget is frozen when the run is created** (ADR-0003, Phase B1).
+The run records the resolved values, after the in-repo layer and any plan stage
+have tightened them, together with its execution agent, and records a
+RunPolicyDigest over them in its `run.created` event. From then on every budget
+the run is judged by is that frozen value: wall, attempt wall, lifecycle
+deadline, execution, continuation, remediation and assurance attempts, and the
+inactivity window. It is never the live configuration and never the smaller of
+the two. `autonomy status` reports the run's frozen budgets and its `run policy`
+digest and source. The `controller config` line is the current process's
+configuration, and the output labels it that way. Budgets are still part of the
+controller configuration digest, so editing one is still a controller change
+(`controller_changed`, #307) until ADR-0003 B3.
+
+A run created before B1 reports `legacy_run_budgets`, a policy derived from the
+budgets it persisted, or `legacy_controller_binding` when it persisted none. A
+budget such a run never recorded takes the value its controller binding
+identifies. Only a controller with the identical configuration digest ever
+reconciles it, so that value is the one it already had. Lifecycle deadline,
+provider-invocation total and attempt wall limit are exceptions: for these an
+absent value already means "none", "unbounded" or "the pre-#328 rule".
+If status is read by a controller whose configuration differs from the run's,
+the binding value cannot be verified. Status then reports `budgets: null`,
+names those members in `run_policy.unverifiable`, sets the operation's
+`inactivity_limit_unknown` when the window is one of them, and the text prints
+each one as `unknown`. It never shows this process's configuration, a zero, or
+an absent "none" as the run's value.
+
+`assurance_wall_limit_seconds` (#640) is the run's CUMULATIVE assurance-work
+ceiling and a different resource from `wall_limit_seconds`: time spent inside
+`assurance.go` and `assurance.semantic` is charged to it and NOT to the
+execution budget, so a successful 43 minute full-suite verification does not
+spend a 30 minute execution allowance. It is finite (every new run freezes 3600
+seconds; there is no operator configuration member for it yet, and no spelling
+that disables it),
+consumed across retries, `AssuranceRerun`, controller restarts and crashed
+workers, and never reset by them. Each assurance attempt is bounded by what
+remains of it. When it is spent the run fails `run_assurance_budget_exhausted`
+and the candidate is retained as held material. The 3600 second allowance gives
+headroom over one 43 minute full-suite verification; it does NOT fit two full
+43 minute passes, and a complete rerun is not promised. Exhaustion is reported
+(`run_assurance_budget_exhausted`), never absorbed. Exhausted, failed or timed-out
+assurance never satisfies assurance, authority or publication. Total active
+work is still reported: status shows `active consumed` (execution + assurance +
+other charged work, the figure a plan's aggregate ceiling is judged by) with its
+execution and assurance parts alongside for new-format runs (`accounting_mode: split`). The value is frozen per run at
+creation, so configuration digests do not move. A run frozen before #640 has no such
+ceiling and keeps the legacy rule exactly: its assurance time is charged to
+`wall_limit_seconds`. Status marks these runs `accounting_mode: legacy`: execution
+elapsed is the authoritative legacy charge, and assurance elapsed is observed
+and overlapping, not an additive share. Nothing is backfilled, and a negative frozen value is
+refused as corrupt state.
+
+`attempt_wall_limit_seconds` bounds ONE physical provider attempt, and it is a
+different resource from `wall_limit_seconds`, which is the run's CUMULATIVE
+active-work budget across every attempt and operation (#328). When the operator
+omits it, a new run freezes `min(3 hours, wall_limit_seconds)` as a last-resort
+hard fuse (#497). An explicitly stated value remains exact, including a shorter
+25-minute fuse; it cannot exceed the run wall. Existing runs retain their frozen
+values, and pre-#328 runs retain their legacy operation-remainder rule. The absent
+field stays absent in canonical configuration, so upgrading the binary does not
+change configuration digests. No live operator file is rewritten. Provider
+inactivity remains a separate bound, defaulting to 600 seconds, and verification
+capacity waits retain their existing accounting. Each attempt's
+deadline is fixed when it starts, as `start + min(attempt limit, remaining run
+active work)`, and is durable, so a restart resumes the same instant and a
+successor attempt never receives a fresh envelope of either kind. When an
+attempt stops:
+
+- at its own wall with run budget left, the existing checkpoint law picks the
+  successor: zero-delta work is a same-binding **retry** (spends
+  `max_execution_attempts`), productive work is a checkpoint and a
+  **continuation** (spends `max_execution_continuations`). An attempt-wall stop
+  never turns productive work into a retry;
+- at the run's remaining active work (the attempt was truncated because the run
+  had less left than one attempt limit), the stop is **run active-work
+  exhaustion**, and the run fails `run_wall_budget_exhausted` - UNLESS the run
+  has outstanding admitted review feedback and no review continuation yet. In
+  that case the one-time bounded review continuation is granted and the
+  successor runs under it, so status leaves that successor available.
+
+Status names which bound ended the attempt - `provider_inactivity`,
+`attempt_wall` or `run_active_work` - and the successor it selected, and says
+`unavailable: <reason>` (with route `stop`) instead of advertising a retry or
+continuation the run can no longer admit. The reasons are
+`run_active_work_exhausted`, `execution_attempts_exhausted`,
+`execution_continuations_exhausted` and `run_provider_invocations_exhausted`.
+
+It may be absent, and absent is the shipped default: it stays out of the
+configuration digest (so upgrading changes no existing configuration's
+identity), and each new run derives it at creation as its own
+`wall_limit_seconds` - one attempt may still spend the whole run, exactly as
+before, but a stop there is now reported as run exhaustion rather than as a
+retry. State a smaller value (for example 1800 inside a 5400 run) to give a run
+room for successors. A stated value above `wall_limit_seconds` is refused at
+load; 0 means absent. The value is frozen into the run at creation and read
+back exactly: editing the configuration never changes a live run, and runs
+created before this bound existed keep their original rule (the attempt is
+bounded by its operation's own remaining budget).
+
 `provider_inactivity_seconds` bounds how long ONE provider invocation may go
 without recognized provider progress. It is a third dimension: `wall_limit_seconds` bounds
 the work, `lifecycle_deadline_seconds` bounds the calendar, and this bounds
@@ -191,7 +291,10 @@ Recognized progress is provider-specific:
   window. Raw stdout or stderr bytes, `system` events (including `api_retry`),
   the final `result` and unknown events do not. While a main-thread tool call
   is open - a long `go test`, say - the inactivity kill is suspended, but the
-  absolute deadline is not, so a tool that hangs is still ended by it. Each
+  absolute deadline is not, so a tool that hangs is still ended by it. Status
+  reports the suspension from the live row of that attempt rather than silence
+  against the window (see [supervisor.md](supervisor.md)); a `tool_progress`
+  heartbeat is neither progress nor a suspension. Each
   physical Claude attempt gets the full window; the wall budget and the attempt
   ceiling are what bound repeated restarts. Claude's own
   `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` is set to three quarters of the
@@ -205,13 +308,20 @@ heartbeat, or a clock tick. A CLI
 that is legitimately thinking in silence is why the bound is a window of minutes
 rather than an immediate failure, and why reaching it is a bounded retry rather
 than a terminal failure. An invocation the policy terminates is recorded as
-`provider_no_progress`; a provider that emits an explicit connectivity
-diagnostic is `provider_unavailable` and waits instead, without spending the
-active-work budget. Silence is never classified as offline, and neither is
+`provider_no_progress`. A provider that names endpoint capacity (overloaded,
+502/503/504) is `provider_unavailable` and waits without spending the attempt or
+the active-work budget. One that names transport loss (temporary DNS, refused, reset,
+unreachable) is `connectivity_unavailable`: the attempt is spent and the retry
+waits out a durable bounded backoff (`connectivity_backoff`, external wait; 30 s
+doubling to 5 min; none after the last attempt). With the default
+`max_execution_attempts` of 2 an execution waits once for 30 s before stopping;
+an observation (3 attempts) waits 30 s and then 60 s (see [Retry dispositions](spec/runtime-v0.1.md#retry-dispositions)). Silence is never classified as offline, and neither is
 anything a worker merely wrote: a typed provider condition is read only from the
 bounded tail of the CLI's own diagnostic stream, or - for Claude Code - from the
 typed fields of its stream-json events (`api_retry.error`, `error_status`,
-`no_response`, the final `result`'s `is_error` and `subtype`), never from the
+`no_response`, the final `result`'s `is_error` and `subtype`, and an
+`is_error` result whose whole text is the CLI's own "Can't reach the API
+server" envelope), never from the
 session output a model and its tools control. A retry condition counts only if
 no accepted progress followed it.
 
@@ -225,6 +335,48 @@ can be used to loosen the other. The default ceiling is 1: an operator who wants
 parallel work must raise it. The polling floor is 30 seconds and it is a floor,
 not a clamp: a faster interval is refused rather than silently replaced. The
 default interval is 60 seconds.
+
+`supervisor.max_concurrent_observations` and `watch.max_concurrent_observations`
+bound how many runs may OBSERVE at once (`source.observe`, `github.observe`),
+with exactly the same rules: the stricter stated value wins, zero means
+unstated, a negative operator value is refused, and the default is 2. The two
+ceilings are separate capacity classes (#85): an observation never occupies a
+run slot, so a run waiting on review still notices its review while another
+run's long work holds every run slot. Every other operation kind, including
+any kind added later, is work and counts against `max_concurrent_runs`.
+
+`supervisor.max_concurrent_verifications` and
+`watch.max_concurrent_verifications` bound how many runs may run an expensive
+host verifier at once (#490): today `assurance.go`, which runs gofmt, go vet
+and go test against the exact candidate tree. Same rules again - stricter
+stated value wins, zero means unstated, a negative operator value is refused,
+a repository may only tighten - and the default is 2. It is a third, separate
+ceiling, never derived from `max_concurrent_runs`: ten providers can reason at
+once while only two verifications use the host. A verification is still work,
+so it also needs a run slot; this ceiling only ever narrows how much runs at
+once and never adds to it. A verification that finds every slot held is not
+started: the run waits with the reason `verification_capacity_unavailable`,
+spends no assurance attempt, and is not charged active-work budget for the
+wait. It is never a verification failure and never remediation. An admitted
+verifier keeps its ordinary timeout semantics, and the provider attempt wall is
+unchanged - capacity is bounded by admission, not by stretching deadlines.
+
+These concurrency and polling members (`supervisor.*` and the four `watch.*`
+members above, in either layer) are **supervisor operating policy** (ADR-0003
+category S). Changing one takes effect at the next `serve` start, with an
+ordinary restart: it is not a controller configuration change, it needs no
+`controller re-adopt`, and it never parks, re-identifies or rewrites a run.
+Every process that drives runs (`serve`, a standalone `autonomy watch`, or a
+local `run`/`resume`/`refresh`) records the policy it actually enforces - the
+resolved values, defaults and stricter-wins included - before driving
+(`supervisor_starts`, and `supervisor policy` on the banner; `autonomy status`
+names the latest policy digest).
+
+One ordering rule: start the controller that understands this once with the
+configuration unchanged before editing these members. That first start is what
+records that its configuration identity names exactly this controller-effective
+content; an S edit made before it cannot be proven S-only and is refused like
+any other controller configuration change.
 
 ### Discovery
 
@@ -249,7 +401,8 @@ default `zenchron:auto`.
 | `github.installation_id` | The numeric id of that App's installation on this repository, the last path segment of the installation URL. Required by and only used with `credential_mode: "github-app"`. Not a secret. | none |
 | `github.private_key_path` | Absolute path to the owner-only `.pem` holding the App's private key. The runtime mints the hourly installation token from it and re-mints before expiry. Required by and only used with `credential_mode: "github-app"`. See [github-feedback.md](github-feedback.md) for the provisioning runbook. | none |
 | `budgets.lifecycle_deadline_seconds` | Optional bound on TOTAL elapsed time for a run, including waits on people and accounts. `wall_limit_seconds` bounds the work; this bounds the calendar. Absent means a run waits as long as a person takes. | none |
-| `budgets.provider_inactivity_seconds` | How long ONE provider invocation may go without recognized provider progress (output bytes; structured assistant/tool events for Claude Code) before the runtime terminates its process group and records `provider_no_progress`. Finite always; there is no value that disables it. At least 10 when stated. | 600 |
+| `budgets.attempt_wall_limit_seconds` | Wall bound of ONE physical provider attempt, distinct from the cumulative run budget `wall_limit_seconds`. Frozen per run at creation. At most `wall_limit_seconds`. | absent: new runs freeze `min(10800, wall_limit_seconds)` seconds |
+| `budgets.provider_inactivity_seconds` | How long ONE provider invocation may go without recognized provider progress (output bytes; for Codex, output lines other than its known transport-retry chatter, and a Codex inactivity kill is always `provider_no_progress` rather than a transport class read from its output; structured assistant/tool events for Claude Code) before the runtime terminates its process group and records `provider_no_progress`. Finite always; there is no value that disables it. At least 10 when stated. | 600 |
 | `feedback.self_logins` | Identities the operator knows to be this system. The runtime also resolves its own credential identity on every feedback observation; this member exists for the identities it cannot discover. | none |
 | `gc.retention_hours` | Retention window for `autonomy gc`. Nothing younger is ever eligible for reclamation. | 168 (7 days) |
 | `operator.id` | The identity a run is recorded as having been authorized by. It is provenance, not authentication: nothing here is signed and no challenge was issued. | the local account name |
@@ -274,7 +427,10 @@ May name:
 | `budgets.max_remediation_attempts` | at least 1, at or below the operator value |
 | `budgets.max_assurance_attempts` | at least 1, at or below the operator value |
 | `budgets.provider_inactivity_seconds` | at least 10, at or below the operator value |
+| `budgets.attempt_wall_limit_seconds` | at least 1, at or below the operator value (or `min(10800, operator wall_limit_seconds)` when the operator states none) |
 | `watch.max_concurrent_runs` | at least 1, at or below the effective operator ceiling |
+| `watch.max_concurrent_observations` | at least 1, at or below the effective operator observation ceiling |
+| `watch.max_concurrent_verifications` | at least 1, at or below the effective operator verification ceiling |
 | `watch.poll_interval_seconds` | at or above the effective operator interval — a repository may only ask to be polled LESS often |
 
 May not name, and is refused with `repository configuration may not set "X": it
@@ -310,3 +466,22 @@ and which member produced it.
 - [troubleshooting.md](troubleshooting.md) — configuration refusals by message
 - [agents.md](agents.md), [supervisor.md](supervisor.md), [product-architecture.md](product-architecture.md)
 - [architecture.md](architecture.md), [spec/runtime-v0.1.md](spec/runtime-v0.1.md), [../README.md](../README.md), [../ROADMAP.md](../ROADMAP.md)
+
+## Frontend dependency cache
+
+A worker runs with network access denied, so `npm ci` in `frontend/` needs a cache that already holds the locked packages. Prepare one per lockfile on the operator host, from the official registry, with no credentials or host npm configuration:
+
+```sh
+LOCK=$(shasum -a 256 frontend/package-lock.json | cut -d' ' -f1)
+CACHE="$HOME/.zenchron-npm-cache/$LOCK"
+mkdir -p -m 700 "$CACHE"
+(cd frontend && env -i PATH="$PATH" HOME="$(mktemp -d)" \
+  NPM_CONFIG_USERCONFIG="$(mktemp)" NPM_CONFIG_GLOBALCONFIG="$(mktemp)" \
+  npm ci --ignore-scripts --registry=https://registry.npmjs.org/ --cache "$CACHE")
+```
+
+Then set `agents.<id>.frontend_cache_dir` to `$HOME/.zenchron-npm-cache`. A change to `package-lock.json` changes the directory name, so a stale cache is never used for a new lockfile; prepare a new one.
+
+Each invocation records `frontend_cache` in its provenance: the lockfile hash, whether the cache was `provisioned`, `cache_missing` or `scratch_unavailable`, and the node and npm versions found on the worker's search path (absent when unreadable). Absence of the record means the agent has no cache source or the workspace has no frontend lockfile.
+
+Provisioning dependencies does not let a worker run a browser. Browser acceptance remains a separate step run on the operator host and attributed to it.

@@ -101,6 +101,14 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	}
 	defer func() { _ = role.Release() }()
 	built.role = role
+	// The controller names itself, so `up`, `down` and `status` find it however
+	// it was started and after any controller handover. A record that cannot
+	// be written would make a healthy controller unstoppable by name, so it
+	// is a refusal rather than a warning.
+	if err := writeProcessRecord(built.config.StateDir, serviceServe, selfProcessRecord("")); err != nil {
+		return runtime.ExitInvalid, err
+	}
+	defer clearProcessRecord(built.config.StateDir, serviceServe)
 
 	// The control endpoint is opened before any work is driven, so an operator
 	// can reach a supervisor that is starting up. It proves nothing about
@@ -166,6 +174,14 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 			return runtime.ExitFailed, err
 		}
 	}
+	// THE SUPERVISOR POLICY THIS GENERATION RUNS UNDER, recorded once per
+	// start (ADR-0003 B4) and only now that the configuration identity is
+	// the governing one. A start that cannot record its policy does not
+	// serve: an S value nothing durable names is one nobody can audit.
+	policy, err := built.recordPolicyGeneration()
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
@@ -197,6 +213,7 @@ func serveCommand(args []string, overrides autonomyOverrides, stdout io.Writer) 
 	fmt.Fprintf(stdout, "  repositories      %s\n", strings.Join(repositoryNames(repositories), ", "))
 	fmt.Fprintf(stdout, "  discovery         %s\n", discoveryDescription(built))
 	fmt.Fprintf(stdout, "  self upgrade      %s\n", upgrading)
+	fmt.Fprintf(stdout, "  supervisor policy %s (max_concurrent_runs %d)\n", policy.PolicyDigest[:12], ceilingOf(built))
 	fmt.Fprintf(stdout, "  transitions       %s\n", inflight)
 
 	err = supervisor.Run(ctx, func(report runtime.SupervisorReport) {
@@ -354,10 +371,13 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 	if err != nil {
 		return nil, err
 	}
-	ceiling, err := c.maxConcurrentRuns()
+	// One resolution of the effective supervisor policy: the values recorded
+	// for this start are the values this supervisor is built with (B4).
+	policy, err := c.config.SupervisorPolicy()
 	if err != nil {
 		return nil, err
 	}
+	ceiling, observations := policy.MaxConcurrentRuns, policy.MaxConcurrentObservations
 	return runtime.NewSupervisor(runtime.SupervisorDependencies{
 		Store: c.store,
 		// A SUCCESSOR STARTS SHUT. It admits work when the durable record says
@@ -366,26 +386,73 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 		// predecessor that has not yet let go.
 		WorkAdmissionWithheld: withholdWork,
 		Plans:                 plans,
+		PlanRegistry:          c.currentPlanning,
 		Clock:                 runtime.RealClock{},
 		Owner:                 c.owner,
 		Liveness:              runtime.NewLockOwnerLiveness(c.config.StateDir),
 		StateDir:              c.config.StateDir,
 		Repositories:          repositories,
 		MaxConcurrentRuns:     ceiling,
-		PollInterval:          settings.PollInterval,
-		Discovery:             discovery,
-		Agents:                c.agents,
+		// The supervisor's turn envelope is the sum of both class ceilings;
+		// the engines' schedulers enforce each one durably (#85).
+		MaxConcurrentObservations: observations,
+		PollInterval:              time.Duration(policy.PollIntervalSeconds) * time.Second,
+		Discovery:                 discovery,
+		Agents:                    c.agents,
+		WorkUnitHolds:             c.store.WorkGraphHolds, // #508's seam
 		AgentProber: func(agent runtime.ResolvedAgent) runtime.AgentProber {
 			return runtime.AgentProberFor(agent, c.artifacts, operatorHome())
 		},
 		Runtime: func(repo runtime.GitHubRepo, agent runtime.ResolvedAgent) (*runtime.EngineeringRuntime, error) {
+			remote := repo.CloneURL()
+			if c.cloneRemote != nil {
+				remote = c.cloneRemote(repo)
+			}
 			return c.engineFor(runtime.RepositoryTarget{
 				Identity:      repo.String(),
-				Remote:        repo.CloneURL(),
+				Remote:        remote,
 				DefaultBranch: watchedDefaultBranch,
 			}, agent)
 		},
+		ReviewTrigger: c.reviewTrigger(),
 	})
+}
+
+// reviewTrigger builds #474 B3's automatic progression closure, or nil when
+// the operator named no reviewer (c.reviewerAgent empty): the trigger is
+// opt-in, never a silently-chosen default reviewer. It never authorizes
+// GitHub publication of the decision it reaches - #474's own gate never
+// consults publication state, so that is a separate operator decision, not
+// one this automatic path needs to make for itself.
+func (c *composition) reviewTrigger() func(context.Context, *runtime.EngineeringRuntime, runtime.EngineeringRun) error {
+	if c.reviewerAgent == "" {
+		return nil
+	}
+	return func(ctx context.Context, engine *runtime.EngineeringRuntime, run runtime.EngineeringRun) error {
+		repo, err := runtime.ParseGitHubRepo(run.Repository)
+		if err != nil {
+			return err
+		}
+		remote, err := runtime.GovernedRemote(repo.CloneURL())
+		if err != nil {
+			return err
+		}
+		port := &runtime.SupervisorReviewPort{
+			Store: c.store, GitHub: c.forge, ResolveAgent: c.agents.Agent,
+			ProviderFor: func(agent runtime.ResolvedAgent) (runtime.ExecutionProvider, error) {
+				return executionProvider(c.config, agent, c.artifacts, c.sandbox, c.permissionBypass), nil
+			},
+			StateDir: c.config.StateDir, Remote: remote, Credentials: c.credentials,
+			ControllerID: controllerIdentity(), Clock: runtime.RealClock{},
+			// #474 R6: the SAME finite, never-zero operator envelope
+			// every other unattended invocation (planning, producers)
+			// is bound to - an unattended automatic reviewer with no
+			// wall or inactivity bound is exactly the #238 shape.
+			Budgets: engine.ReviewBudget(),
+		}
+		_, _, err = engine.ReconcileReviewRemediationForRun(ctx, run.ID, port, c.reviewerAgent)
+		return err
+	}
 }
 
 // planService builds the plan lifecycle service for this composition.
@@ -395,7 +462,7 @@ func (c *composition) supervisor(repositories []runtime.GitHubRepo, withholdWork
 // decides, and a stale answer would block a plan on an agent that has since
 // become available.
 func (c *composition) planService() (runtime.PlanService, error) {
-	registry := c.planning
+	registry := c.currentPlanning()
 	agents := runtime.DescribeExecutionAgents(context.Background(), c.agents, func(agent runtime.ResolvedAgent) runtime.AgentProber {
 		return runtime.AgentProberFor(agent, c.artifacts, c.config.StateDir)
 	})
@@ -405,6 +472,7 @@ func (c *composition) planService() (runtime.PlanService, error) {
 	return runtime.PlanService{
 		Store: c.store, Clock: runtime.RealClock{}, Registry: registry,
 		Agents: agents, DefaultAgent: c.agents.Default(), Envelope: c.config.PlanEnvelope(),
+		Config: c.config.Digest,
 	}, nil
 }
 
@@ -412,7 +480,22 @@ func (c *composition) planService() (runtime.PlanService, error) {
 // a command; the endpoint exists so those commands can reach a supervisor that
 // owns the work instead of driving it in a second terminal.
 func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Supervisor, shutdown func(), request runtime.ControlRequest) runtime.ControlResponse {
+	if request.ExpectedController != "" {
+		return c.governedControl(ctx, supervisor, shutdown, request)
+	}
+	return c.dispatchControl(ctx, supervisor, shutdown, request, false)
+}
+
+// dispatchControl executes one verb. governed is set only by governedControl,
+// after the controller binding was proven on this request.
+func (c *composition) dispatchControl(ctx context.Context, supervisor *runtime.Supervisor, shutdown func(), request runtime.ControlRequest, governed bool) runtime.ControlResponse {
 	switch request.Command {
+	case runtime.ControlPlanView, runtime.ControlWorkspaceOptions, runtime.ControlAuthorityView:
+		return c.workspaceRead(ctx, supervisor, request)
+	case runtime.ControlResume, runtime.ControlRefresh:
+		return c.controlRunLifecycle(ctx, supervisor, request)
+	case runtime.ControlAuthorize:
+		return c.recordBrowserAuthority(ctx, supervisor, request)
 	case runtime.ControlPing:
 		return controlOK(map[string]string{"state_dir": c.config.StateDir, "agent": c.agent.ID})
 	case runtime.ControlCommandControllerSnapshot:
@@ -426,12 +509,64 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 			return controlError(err)
 		}
 		return controlOK(outcome)
-	case runtime.ControlStatus:
-		ceiling, err := c.maxConcurrentRuns()
+	case runtime.ControlOrchestrate:
+		view, err := supervisor.Orchestrate(ctx, request)
 		if err != nil {
 			return controlError(err)
 		}
-		fleet, err := runtime.FleetStatus(c.store, c.config.StateDir, ceiling, time.Now().UTC())
+		return controlOK(view)
+	case runtime.ControlWorkGraph:
+		view, err := supervisor.AdoptWorkGraph(ctx, request)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(view)
+	case runtime.ControlPlanningArtifactPropose:
+		payload, err := c.proposePlanningArtifact(request)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(json.RawMessage(payload))
+	case runtime.ControlPlanningReload:
+		registry, err := c.reloadPlanning()
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(map[string][]string{
+			"instruction_packs": registry.PackIDs(), "context_policies": registry.ContextPolicyIDs(),
+			"profiles": registry.ProfileIDs(), "templates": registry.TemplateIDs(),
+		})
+	case runtime.ControlIssueCreate:
+		return c.createIssue(ctx, supervisor, request, governed)
+	case runtime.ControlProductPropose:
+		if governed {
+			operator, err := c.config.ResolveOperator()
+			if err != nil {
+				return controlError(err)
+			}
+			request.Operator = operator.ID
+		}
+		adopted, err := supervisor.AdoptProduct(request)
+		if err != nil {
+			return controlError(err)
+		}
+		return controlOK(adopted)
+	case runtime.ControlWorkGraphHold, runtime.ControlResolveDecision:
+		if governed {
+			operator, err := c.config.ResolveOperator()
+			if err != nil {
+				return controlError(err)
+			}
+			request.Operator = operator.ID
+		}
+		return dispatchDecisionControl(supervisor, request) // #508, kept out of this switch's bulk
+	case runtime.ControlStatus:
+		policy, err := c.config.SupervisorPolicy()
+		if err != nil {
+			return controlError(err)
+		}
+		fleet, err := runtime.FleetStatus(c.store, c.config.StateDir, policy.MaxConcurrentRuns,
+			policy.MaxConcurrentObservations, policy.MaxConcurrentVerifications, time.Now().UTC())
 		if err != nil {
 			return controlError(err)
 		}
@@ -447,18 +582,33 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 		shutdown()
 		return controlOK(map[string]bool{"shutting_down": true})
 	case runtime.ControlStop:
-		scheduler := runtime.Scheduler{Store: c.store, Clock: runtime.RealClock{}, Owner: c.owner}
+		scheduler := runtime.Scheduler{Store: c.store, Clock: runtime.RealClock{}, Owner: c.owner, Liveness: runtime.NewLockOwnerLiveness(c.config.StateDir)}
 		outcome, err := runtime.CancelRun(c.store, scheduler, time.Now().UTC(), request.RunID, stopReason)
 		if err != nil {
 			return controlError(err)
 		}
 		return controlOK(outcome)
+	case runtime.ControlPause, runtime.ControlUnpause:
+		return c.controlPause(request, governed)
 	case runtime.ControlPlanApprove, runtime.ControlPlanReject:
 		// Under the reconciler's own lock: a decision and a plan tick both read
 		// a snapshot and then append against it, and interleaving them lets one
 		// decide from state the other is changing.
+		//
+		// A GOVERNED decision also requires the revision to still await one,
+		// checked under the same lock, so a duplicate from another client or
+		// a reject racing an approval appends nothing (#398). The CLI keeps
+		// its semantics: an operator may approve what they rejected.
 		var view runtime.PlanView
-		if err := supervisor.WithPlanLock(func() (err error) { view, err = c.decidePlan(request); return err }); err != nil {
+		if err := supervisor.WithPlanLock(func() (err error) {
+			if governed {
+				if err := (runtime.PlanService{Store: c.store}).RefuseUnlessAwaitingDecision(request.PlanID, request.Revision); err != nil {
+					return err
+				}
+			}
+			view, err = c.decidePlan(request)
+			return err
+		}); err != nil {
 			return controlError(err)
 		}
 		return controlOK(view)
@@ -480,6 +630,35 @@ func (c *composition) handleControl(ctx context.Context, supervisor *runtime.Sup
 	default:
 		return controlError(fmt.Errorf("unknown control command %q", request.Command))
 	}
+}
+
+// governedControl is a request that names the controller it was decided
+// against (#398, docs/control-plane.md "Governed actions"). The identity proof
+// and the act happen in this one request on this one connection: this
+// process's OWN measured identity must have the named binding, and the verb
+// runs inside the controller-role authority section, so a role released
+// meanwhile refuses it. Only the governed verbs are accepted; nothing else is
+// reachable this way.
+func (c *composition) governedControl(ctx context.Context, supervisor *runtime.Supervisor, shutdown func(), request runtime.ControlRequest) runtime.ControlResponse {
+	if !browserGovernedCommand(request.Command) {
+		return runtime.ControlResponse{Code: runtime.ControlCodeUnsupported, Error: fmt.Sprintf("%q is not a governed control command", request.Command)}
+	}
+	self, err := controllerSelf()
+	binding := runtime.ControllerBuildBinding(self.Build)
+	if err != nil || self.Unattested || binding == "" {
+		return runtime.ControlResponse{Code: runtime.ControlCodeControllerUnattested, Error: "this controller is unattested and cannot prove the generation the request names"}
+	}
+	if binding != request.ExpectedController {
+		return runtime.ControlResponse{Code: runtime.ControlCodeControllerMismatch, Error: "this controller is not the generation the request names"}
+	}
+	var response runtime.ControlResponse
+	if err := c.role.WithAuthority(func() error {
+		response = c.dispatchWithReceipt(ctx, supervisor, shutdown, request)
+		return nil
+	}); err != nil {
+		return controlError(err)
+	}
+	return response
 }
 
 // decidePlan applies an operator's approval or rejection inside the supervisor
@@ -597,73 +776,6 @@ func (c *composition) planBaseBranch(planID string) (string, error) {
 	return watchedDefaultBranch, nil
 }
 
-func (c *composition) revisePlan(ctx context.Context, supervisor *runtime.Supervisor, request runtime.ControlRequest) (runtime.PlanView, error) {
-	plans, err := c.planService()
-	if err != nil {
-		return runtime.PlanView{}, err
-	}
-	repository, issue, defaultBranch, err := c.planSubject(supervisor, request)
-	if err != nil {
-		return runtime.PlanView{}, err
-	}
-	repo, err := runtime.ParseGitHubRepo(repository)
-	if err != nil {
-		return runtime.PlanView{}, err
-	}
-	// Derived from the plan's own repository IDENTITY, exactly as the local
-	// command derives it when a repository is named explicitly.
-	//
-	// An earlier attempt at this ran `git remote get-url origin` in the STATE
-	// DIRECTORY, which is not a checkout of anything: usually it errors and the
-	// fallback silently assumed a default branch, and where the state directory
-	// happens to sit inside some unrelated git repository it succeeded and bound
-	// a governed-remote system to that repository's origin. A supervisor governs
-	// several repositories; the plan says which one, and nothing about the
-	// process's own working directory does.
-	target := runtime.RepositoryTarget{
-		Identity: repo.String(), Remote: repo.CloneURL(), DefaultBranch: defaultBranch,
-	}
-	engine, err := c.engine(target)
-	if err != nil {
-		return runtime.PlanView{}, err
-	}
-	composed := &planComposition{
-		built: c, engine: engine, service: plans, target: target, release: func() {},
-	}
-	flags := autonomyFlags{
-		Template: request.Template, Deterministic: request.Deterministic,
-		SubstituteHuman: request.SubstituteHuman, Note: request.Note,
-	}
-	// A first proposal has no id yet. It is derived exactly as the local path
-	// derives it - from the issue, deterministically - so the view returned
-	// afterwards is of the plan this call created rather than of nothing.
-	planID := request.PlanID
-	if planID == "" {
-		if planID, err = engine.PlanID(issue); err != nil {
-			return runtime.PlanView{}, err
-		}
-	}
-	serialize := supervisor.WithPlanLock
-	if flags.SubstituteHuman != "" {
-		if request.PlanID == "" {
-			return runtime.PlanView{}, errors.New("substituting a human names the plan whose stage is being substituted")
-		}
-		// The substitution compiles deterministically - no provider call - so
-		// the whole of it is short enough to serialize.
-		if err := serialize(func() error {
-			_, err := substituteHumanWithComposition(ctx, composed, flags, request.PlanID, io.Discard)
-			return err
-		}); err != nil {
-			return runtime.PlanView{}, err
-		}
-		return plans.View(request.PlanID)
-	}
-	if _, err := proposeSerialized(ctx, composed, flags, issue, planID, io.Discard, serialize); err != nil {
-		return runtime.PlanView{}, err
-	}
-	return plans.View(planID)
-}
-
 func controlOK(payload any) runtime.ControlResponse {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -673,7 +785,7 @@ func controlOK(payload any) runtime.ControlResponse {
 }
 
 func controlError(err error) runtime.ControlResponse {
-	return runtime.ControlResponse{Error: err.Error()}
+	return runtime.ControlResponse{Error: err.Error(), Code: runtime.ControlCode(err)}
 }
 
 // maxConcurrentRuns is the operator's effective run ceiling, resolved in ONE
@@ -688,11 +800,30 @@ func controlError(err error) runtime.ControlResponse {
 // to report the error, and a function four callers now trust to state the
 // ceiling must not be able to invent one.
 func (c *composition) maxConcurrentRuns() (int, error) {
-	settings, err := c.config.WatchSettings()
-	if err != nil {
-		return 0, err
-	}
-	return settings.MaxConcurrentRuns, nil
+	policy, err := c.config.SupervisorPolicy()
+	return policy.MaxConcurrentRuns, err
+}
+
+// maxConcurrentObservations is the observation-class ceiling (#85), from the
+// same effective supervisor policy every driving process records (B4).
+func (c *composition) maxConcurrentObservations() (int, error) {
+	policy, err := c.config.SupervisorPolicy()
+	return policy.MaxConcurrentObservations, err
+}
+
+// maxConcurrentVerifications is the verification ceiling (#490), from the same
+// effective supervisor policy.
+func (c *composition) maxConcurrentVerifications() (int, error) {
+	policy, err := c.config.SupervisorPolicy()
+	return policy.MaxConcurrentVerifications, err
+}
+
+// recordPolicyGeneration records, before this process drives any run, the
+// configuration identity and the effective supervisor policy it drives under
+// (ADR-0003 B4). It refuses under a configuration the governing authority
+// does not govern, so no S value ever drives work that no durable record names.
+func (c *composition) recordPolicyGeneration() (runtime.SupervisorStart, error) {
+	return runtime.RecordSupervisorStart(c.store, c.config, time.Now().UTC())
 }
 
 // ---------------------------------------------------------------------------
@@ -773,11 +904,12 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 	}
 	defer built.release()
 
-	ceiling, err := built.maxConcurrentRuns()
+	policy, err := built.config.SupervisorPolicy()
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
-	fleet, err := runtime.FleetStatus(built.store, built.config.StateDir, ceiling, time.Now().UTC())
+	fleet, err := runtime.FleetStatus(built.store, built.config.StateDir, policy.MaxConcurrentRuns,
+		policy.MaxConcurrentObservations, policy.MaxConcurrentVerifications, time.Now().UTC())
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
@@ -795,12 +927,16 @@ func autonomyFleet(flags autonomyFlags, overrides autonomyOverrides, stdout io.W
 	// The ceiling bounds workers, not runs, so the two counts are printed as
 	// the two facts they are rather than as one ratio that is true of neither.
 	fmt.Fprintf(stdout, "Supervisor: %s   Workers: %d / %d executing\n", supervisor, fleet.Executing, fleet.Capacity)
-	fmt.Fprintf(stdout, "Runs:       %d nonterminal\n\n", fleet.Active)
+	fmt.Fprintf(stdout, "Runs:       %d nonterminal: %d working / %d, %d observing / %d, %d runnable, %d waiting, %d paused, %d unavailable\n",
+		fleet.Active, fleet.Working, fleet.Capacity, fleet.Observing, fleet.ObservationCapacity, fleet.Runnable, fleet.Waiting, fleet.Paused, fleet.Unavailable)
+	// A verification is work, so this line refines the counts above (#490).
+	fmt.Fprintf(stdout, "Verify:     %d verifying / %d, %d awaiting a verification slot\n\n",
+		fleet.Verifying, fleet.VerificationCapacity, fleet.AwaitingVerification)
 	fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n", "ISSUE", "AGENT", "STATE", "BRANCH / PR", "ELAPSED", "REASON")
 	for _, run := range fleet.Runs {
 		fmt.Fprintf(stdout, "%-8s %-10s %-18s %-24s %-10s %s\n",
 			issueLabel(run), orDash(run.Agent), stateLabel(run), locationLabel(run),
-			elapsedLabel(run.Elapsed), run.Reason)
+			elapsedLabel(run.Elapsed), reasonLabel(run))
 	}
 	// PLANS, beside the runs. A plan awaiting approval is the runtime waiting on
 	// a PERSON, and that has to be visible where an operator looks to see
@@ -861,6 +997,19 @@ func stateLabel(run runtime.RunSummary) string {
 		return string(run.Disposition) + ":" + run.Operation
 	}
 	return string(run.Disposition)
+}
+
+// reasonLabel puts an operator pause (#86) beside the run's own reason, which
+// a pause never replaces.
+func reasonLabel(run runtime.RunSummary) string {
+	if run.Paused == nil {
+		return run.Reason
+	}
+	paused := fmt.Sprintf("paused (%s) since %s", terminalSafe(run.Paused.Reason), run.Paused.Since.Format(time.RFC3339))
+	if run.Reason == "" {
+		return paused
+	}
+	return paused + "; " + run.Reason
 }
 
 func locationLabel(run runtime.RunSummary) string {
@@ -1042,13 +1191,16 @@ func autonomyStopAll(flags autonomyFlags, overrides autonomyOverrides, stdout io
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
-	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner}
+	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner, Liveness: runtime.NewLockOwnerLiveness(built.config.StateDir)}
 	var outcomes []runtime.Outcome
 	for _, run := range runs {
 		if run.Disposition == runtime.Completed || run.Disposition == runtime.Failed || run.Disposition == runtime.Cancelled {
 			continue
 		}
 		outcome, err := runtime.CancelRun(built.store, scheduler, time.Now().UTC(), run.ID, reason)
+		if runtime.IsRunTerminal(err) {
+			continue // finished after the listing; its outcome stands
+		}
 		if err != nil {
 			return runtime.ExitFailed, err
 		}
@@ -1220,5 +1372,19 @@ func (c *composition) controllerSnapshot(supervisor *runtime.Supervisor) runtime
 	default:
 		snapshot.WorkAdmission = runtime.AdmissionClosed
 	}
+	if supervisor != nil {
+		if update, ok := supervisor.ControllerUpdate(); ok {
+			snapshot.Update = &update
+		}
+	}
 	return snapshot
+}
+
+// ceilingOf is the resolved work ceiling this start applies, for the banner.
+func ceilingOf(c *composition) int {
+	ceiling, err := c.maxConcurrentRuns()
+	if err != nil {
+		return 0
+	}
+	return ceiling
 }

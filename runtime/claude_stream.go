@@ -33,18 +33,27 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/domain"
 )
 
 // The progress oracles an adapter's inactivity bound can be supervised by.
 // Recorded in InvocationProvenance so incident review can tell which one
 // measured a stalled attempt.
 const (
-	progressByteOutput             = "byte_output"
-	progressStructuredClaudeEvents = "structured_claude_events"
+	progressByteOutput                          = "byte_output"
+	progressByteOutputExcludingTransportChatter = "byte_output_excluding_transport_chatter"
+	progressStructuredClaudeEvents              = "structured_claude_events"
 )
+
+// ProgressStructuredClaudeEvents is the recorded progress mode under which an
+// attempt's permission denials are observable at all, exported so a reader of
+// recorded provenance decides from the record rather than from live config.
+const ProgressStructuredClaudeEvents = progressStructuredClaudeEvents
 
 // maxClaudeEventBytes bounds one NDJSON line. A longer line - a huge tool
 // result, say - is a protocol anomaly: it does not refresh the bound, it does
@@ -62,21 +71,20 @@ const maxClaudeOpenTools = 256
 //
 // It is written to on the os/exec copy goroutine, so Write never blocks on
 // anything slower than its own mutex. The in-memory refresh happens inline; the
-// durable progress write is handed to one coalescing recorder goroutine, so a
-// slow or contended state write can never backpressure Claude's stdout pipe
-// and manufacture the silence it would then diagnose.
+// durable state is handed to the watch's coalescing recorder, which never
+// blocks, so a slow or contended state write can never backpressure Claude's
+// stdout pipe and manufacture the silence it would then diagnose.
 type claudeStream struct {
 	attempt int
 
 	// LOCK ORDER: inactivityWatch.expire holds w.mu and then takes this mu
-	// (holdsOpenTool). Never take w.mu while holding this one.
+	// (holdsOpenTool). Never take a watch lock while holding this one.
 	mu    sync.Mutex
 	watch *inactivityWatch
-	// pending carries the latest accepted count to the recorder goroutine. It
-	// holds at most one value: a newer count replaces an unrecorded older one,
-	// which is all the durable fingerprint needs.
-	pending    chan int64
-	detachOnce sync.Once
+	// progressAt is when the last event was accepted, and openedAt when the
+	// main-thread open-tool set last became non-empty (zero while it is
+	// empty). They are what the durable row is told (#352).
+	progressAt, openedAt time.Time
 	// line holds the current partial line. discarding means the line in
 	// progress already exceeded maxClaudeEventBytes and is being skipped to its
 	// newline.
@@ -96,13 +104,33 @@ type claudeStream struct {
 	open map[string]struct{}
 	turn string
 
-	sawResult bool
-	isError   bool
-	denials   int
+	// backgroundStarts is sticky for explicit Bash background requests and
+	// tool-owned automatic detachment (#388). A later poll, kill request or
+	// final answer cannot establish that all detached work completed.
+	// bash tracks main-thread Bash identities only while their results are
+	// outstanding; identities and result contents never enter durable state.
+	bash             map[string]struct{}
+	backgroundStarts int
+
+	sawResult   bool
+	isError     bool
+	denials     int
+	deniedTools []string
+	// answer is Claude's own semantic final answer text, decoded exactly once
+	// out of a successful final result's "result" field. hasAnswer
+	// distinguishes "no valid final result, or it was an error" from "the
+	// result held the empty string" - both leave answer at its zero value, but
+	// only the latter is a real (if useless) answer.
+	answer    string
+	hasAnswer bool
+	// unreachable is an is_error final result whose whole text is the CLI's
+	// own #380 connectivity envelope. is_error is set by the CLI, never by the
+	// model, and the match is exact, so no quoted prose can reach it.
+	unreachable bool
 }
 
 func newClaudeStream(attempt int) *claudeStream {
-	return &claudeStream{attempt: attempt, open: map[string]struct{}{}}
+	return &claudeStream{attempt: attempt, open: map[string]struct{}{}, bash: map[string]struct{}{}}
 }
 
 type claudeStreamKey struct{}
@@ -125,49 +153,25 @@ func claudeStreamFrom(ctx context.Context) *claudeStream {
 // provider_no_progress.
 type stdoutObservingExecutor interface{ observesStdout() }
 
-// attach binds the watch this stream refreshes and starts the durable
-// recorder. Either may be nil.
+// attach binds the watch this stream refreshes and records through. Either may
+// be nil.
 func (s *claudeStream) attach(watch *inactivityWatch) {
 	if s == nil || watch == nil {
 		return
 	}
 	s.mu.Lock()
 	s.watch = watch
-	s.pending = make(chan int64, 1)
 	s.mu.Unlock()
 	watch.stream = s
-	// The recorder keeps the watch's quarter-window throttle and the
-	// attempt-qualified key. It outlives the process only as long as one
-	// in-flight write: detach closes the channel and nothing waits on it, so a
-	// slow state write cannot hold the invocation either.
-	go func(pending <-chan int64) {
-		for count := range pending {
-			watch.record(fmt.Sprintf("%d:", s.attempt), count)
-		}
-	}(s.pending)
-}
-
-// detach ends the recorder once the process's output is fully copied. It is
-// idempotent and nil-safe.
-func (s *claudeStream) detach() {
-	if s == nil {
-		return
-	}
-	s.detachOnce.Do(func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.pending != nil {
-			close(s.pending)
-			s.pending = nil
-		}
-	})
 }
 
 // Write consumes an arbitrary chunk of stdout. It always reports success: the
 // parser is an observer and must never give the child an I/O error.
 func (s *claudeStream) Write(p []byte) (int, error) {
+	now := time.Now()
 	s.mu.Lock()
-	before := s.accepted
+	defer s.mu.Unlock()
+	before, openedBefore := s.accepted, s.openedAt
 	for rest := p; len(rest) > 0; {
 		newline := bytes.IndexByte(rest, '\n')
 		chunk := rest
@@ -187,22 +191,36 @@ func (s *claudeStream) Write(p []byte) (int, error) {
 		if newline >= 0 {
 			if !s.discarding {
 				s.handle(s.line)
+				// Per EVENT, not per chunk (#355): tool A's result and tool
+				// B's call can share one pipe read, and B's suspension starts
+				// at B, not at A.
+				if len(s.open) == 0 {
+					s.openedAt = time.Time{}
+				} else if s.openedAt.IsZero() {
+					s.openedAt = now
+				}
 			}
 			s.line, s.discarding = s.line[:0], false
 		}
 	}
-	// The DURABLE half is only enqueued here, never written: see pending. The
-	// key is qualified by the physical attempt, because RecordProviderProgress
-	// ignores a key equal to the stored one and a bare event count restarts at
-	// 1 after an abandoned attempt is re-adopted.
-	if s.accepted != before && s.pending != nil {
-		select {
-		case <-s.pending:
-		default:
-		}
-		s.pending <- s.accepted
+	// The DURABLE half is handed to the recorder. The key is qualified by the
+	// physical attempt, because RecordProviderProgress ignores a key equal to
+	// the stored one and a bare event count restarts at 1 after an abandoned
+	// attempt is re-adopted. An open-tool transition is recorded too, even
+	// with no new progress - the final result closes tools without being
+	// progress - so the durable suspension follows the one the watchdog reads
+	// (#352). tool_progress and every other unaccepted event change neither.
+	//
+	// It is handed over UNDER this lock, so observations reach the recorder in
+	// stream order and an older suspension state can never be queued behind a
+	// newer one (#355). That keeps the LOCK ORDER: observe takes only the
+	// recorder's own leaf lock and never blocks, and no watch lock is taken.
+	if s.accepted != before {
+		s.progressAt = now
 	}
-	s.mu.Unlock()
+	if s.accepted != before || !s.openedAt.Equal(openedBefore) {
+		s.watch.record(fmt.Sprintf("%d:%d", s.attempt, s.accepted), s.progressAt, s.openedAt)
+	}
 	return len(p), nil
 }
 
@@ -227,12 +245,27 @@ type claudeEvent struct {
 	// which it allocates before it discovers the mismatch).
 	IsError           json.RawMessage   `json:"is_error"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
+	// Answer is the JSON field literally named "result" on a result event: this
+	// invocation's SEMANTIC final answer, exactly as Claude wrote it before the
+	// stream-json transport wrapped it in this event's own JSON encoding. It
+	// stays raw here for the same reason IsError does - decoded strictly, only
+	// once a valid final result is otherwise established - so a missing or
+	// type-drifted value never promotes to an answer.
+	Answer        json.RawMessage `json:"result"`
+	ToolUseResult json.RawMessage `json:"tool_use_result"`
 }
 
 type claudeContentBlock struct {
 	Type      string `json:"type"`
 	ID        string `json:"id"`
 	ToolUseID string `json:"tool_use_id"`
+	// Name and Input are read ONLY for a tool_use block, and ONLY their typed
+	// shape: the tool's own NAME, and - off Input - the typed boolean
+	// run_in_background flag the Bash tool's schema defines. Never the
+	// command string, never the tool's prose result. See
+	// claudeStartsBackgroundShell.
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
 }
 
 // handle applies one complete line. Called with s.mu held.
@@ -271,12 +304,29 @@ func (s *claudeStream) handle(line []byte) {
 			if id := event.Message.ID; id != "" && id != s.turn {
 				if s.turn != "" {
 					clear(s.open)
+					clear(s.bash)
+					s.openedAt = time.Time{} // the previous turn's tools ended
 				}
 				s.turn = id
 			}
 			for _, block := range blocks {
-				if block.Type == "tool_use" && block.ID != "" && len(s.open) < maxClaudeOpenTools {
+				if block.Type != "tool_use" {
+					continue
+				}
+				if block.ID != "" && len(s.open) < maxClaudeOpenTools {
 					s.open[block.ID] = struct{}{}
+					if block.Name == "Bash" {
+						s.bash[block.ID] = struct{}{}
+					}
+				}
+				// THE TYPED SHAPE ONLY (#384, #385): a tool NAME and, off
+				// Bash's own input schema, a typed boolean. Never the
+				// command, never any tool_result content - see the
+				// backgroundStarts comment for why neither a BashOutput poll
+				// nor a KillShell call is read here: neither carries typed
+				// evidence this parser can act on.
+				if block.Name == "Bash" && claudeStartsBackgroundShell(block.Input) {
+					s.backgroundStarts++
 				}
 			}
 		}
@@ -291,6 +341,10 @@ func (s *claudeStream) handle(line []byte) {
 			// Nested/subagent results never touch the suspension set; an
 			// unknown id is simply absent from it.
 			if mainThread {
+				if _, bash := s.bash[block.ToolUseID]; bash && claudeDetachedToolResult(event.ToolUseResult) {
+					s.backgroundStarts++
+				}
+				delete(s.bash, block.ToolUseID)
 				delete(s.open, block.ToolUseID)
 			}
 		}
@@ -317,9 +371,24 @@ func (s *claudeStream) handle(line []byte) {
 		}
 		s.sawResult, s.isError = true, *isError
 		s.denials = len(event.PermissionDenials)
+		s.deniedTools = deniedToolNames(event.PermissionDenials)
+		// THE SEMANTIC ANSWER, read only off a result the two typed fields above
+		// already established as a valid, non-error final result. A malformed or
+		// error result must never promote to an answer, so this is reached only
+		// past that gate - and a wrong-typed or missing "result" field simply
+		// leaves hasAnswer false, exactly like every other optional field here.
+		var answer *string
+		if json.Unmarshal(event.Answer, &answer) == nil && answer != nil {
+			if !s.isError {
+				s.answer, s.hasAnswer = *answer, true
+			} else {
+				s.unreachable = normalizeDiagnostic(strings.TrimSpace(*answer)) == "api error: "+claudeUnreachableEnvelope
+			}
+		}
 		// The final result ends every turn. An oversized last tool_result line
 		// must not leave a stale open tool in the provenance of a clean run.
 		clear(s.open)
+		clear(s.bash)
 	}
 }
 
@@ -366,9 +435,9 @@ func claudeRetryClass(event claudeEvent) FailureClass {
 		}
 	}
 	// No HTTP response at all, stated as such: the dead-network shape #238
-	// exists to bound.
+	// exists to bound, and transport loss rather than endpoint capacity.
 	if status == nil && len(event.NoResponse) > 0 && string(event.NoResponse) != "null" {
-		return FailureProviderUnavailable
+		return FailureConnectivity
 	}
 	return FailureUnknown
 }
@@ -385,6 +454,23 @@ type claudeStreamOutcome struct {
 	Failed                                  bool
 	Accepted                                int64
 	OpenTools, PermissionDenials, Anomalies int
+	// FinalResult reports that a valid final result was read. The denial
+	// count and DeniedTools come from it, so without one they are unknown.
+	FinalResult bool
+	// UnresolvedBackgroundWork includes both explicit and automatic main-thread
+	// Bash detachment and is never cleared by subsequent stream events.
+	UnresolvedBackgroundWork bool
+	// DeniedTools is the bounded set of typed tool identifiers the final
+	// result's permission_denials named.
+	DeniedTools []string
+	// Answer is Claude's own semantic final answer text - the transport's
+	// stream-json encoding decoded exactly once, never the raw transcript bytes
+	// re-scanned by a consumer that has to guess where the model's prose ends
+	// and its transport framing begins. AnswerObserved is set only alongside a
+	// successful FinalResult; a failed or missing one never reaches here at
+	// all, so this can never promote a malformed answer into a valid one.
+	Answer         string
+	AnswerObserved bool
 }
 
 // outcome reads the final state. A result is REQUIRED only when the process
@@ -403,12 +489,54 @@ func (s *claudeStream) outcome(exitedZero bool) claudeStreamOutcome {
 	if s.retrySeq > s.progressSeq {
 		condition = s.retry
 	}
+	if condition == FailureUnknown && s.sawResult && s.isError && s.unreachable {
+		condition = FailureConnectivity
+	}
 	return claudeStreamOutcome{
 		Condition: condition,
 		Failed:    exitedZero && (!s.sawResult || s.isError),
 		Accepted:  s.accepted, OpenTools: len(s.open),
 		PermissionDenials: s.denials, Anomalies: s.anomalies,
+		FinalResult: s.sawResult, DeniedTools: s.deniedTools,
+		UnresolvedBackgroundWork: s.backgroundStarts > 0,
+		Answer:                   s.answer, AnswerObserved: s.hasAnswer,
 	}
+}
+
+// claudeStartsBackgroundShell reads ONLY the Bash tool's own typed
+// run_in_background boolean off a tool_use block's input. A missing,
+// type-drifted or false value is "no" - the fail-closed reading for a flag
+// that, misread as true, would wrongly accuse an ordinary foreground command
+// of being abandoned background work.
+func claudeStartsBackgroundShell(input json.RawMessage) bool {
+	var decoded struct {
+		RunInBackground bool `json:"run_in_background"`
+	}
+	return json.Unmarshal(input, &decoded) == nil && decoded.RunInBackground
+}
+
+// deniedToolNames reads ONLY the typed tool_name of each permission denial:
+// never its input, its arguments or any denial text. The result is a sorted,
+// de-duplicated set of at most domain.MaxPermissionDeniedTools identifiers, and
+// a name that is not a short identifier is skipped rather than recorded, so a
+// provider cannot write prose - or anything that needs escaping - into a
+// durable row through it.
+func deniedToolNames(denials []json.RawMessage) []string {
+	var names []string
+	for _, raw := range denials {
+		var denial struct {
+			ToolName string `json:"tool_name"`
+		}
+		if json.Unmarshal(raw, &denial) != nil || !domain.IsInvocationIdentifier(denial.ToolName) || slices.Contains(names, denial.ToolName) {
+			continue
+		}
+		names = append(names, denial.ToolName)
+	}
+	slices.Sort(names)
+	if len(names) > domain.MaxPermissionDeniedTools {
+		names = names[:domain.MaxPermissionDeniedTools]
+	}
+	return names
 }
 
 // MinProviderInactivitySeconds is the smallest provider inactivity window the
@@ -456,11 +584,8 @@ func withInvocationEnv(env, extra []string) ([]string, error) {
 	}
 	for _, entry := range extra {
 		key, _, _ := strings.Cut(entry, "=")
-		upper := strings.ToUpper(key)
-		for _, secret := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"} {
-			if strings.Contains(upper, secret) {
-				return nil, fmt.Errorf("refused invocation environment variable %s: provider specs may add non-secret controls only", key)
-			}
+		if credentialShapedName(key) {
+			return nil, fmt.Errorf("refused invocation environment variable %s: provider specs may add non-secret controls only", key)
 		}
 		if key == "" || present[key] {
 			return nil, fmt.Errorf("refused invocation environment variable %q: it would replace the runtime's own environment", key)
@@ -468,4 +593,33 @@ func withInvocationEnv(env, extra []string) ([]string, error) {
 		present[key] = true
 	}
 	return append(append([]string(nil), env...), extra...), nil
+}
+
+// claudeDetachedToolResult reads provider metadata, never tool-result prose.
+// Automatic detachment requires the typed identity and positive timeout together.
+func claudeDetachedToolResult(raw json.RawMessage) bool {
+	var fields struct {
+		BackgroundTaskID json.RawMessage `json:"backgroundTaskId"`
+		TimedOutAfterMS  json.RawMessage `json:"timedOutAfterMs"`
+	}
+	if json.Unmarshal(raw, &fields) != nil {
+		return false
+	}
+	var id string
+	var timeout int64
+	return (json.Unmarshal(fields.BackgroundTaskID, &id) == nil && id != "") &&
+		(json.Unmarshal(fields.TimedOutAfterMS, &timeout) == nil && timeout > 0)
+}
+
+// claudeBashTimeoutEnv uses the remaining absolute attempt authority, not the
+// inactivity window (which is suspended while foreground tools are attached).
+// Reserve one millisecond for delivery and round down; never emit zero, which
+// could acquire provider-specific unlimited semantics. Explicit shorter model
+// timeouts remain possible and the typed detachment detector is authoritative.
+func claudeBashTimeoutEnv(remaining time.Duration) ([]string, error) {
+	timeout := (remaining - time.Millisecond).Milliseconds()
+	if timeout < 1 {
+		return nil, fmt.Errorf("remaining attempt authority %s cannot bound Claude Bash", remaining)
+	}
+	return []string{fmt.Sprintf("BASH_DEFAULT_TIMEOUT_MS=%d", timeout), fmt.Sprintf("BASH_MAX_TIMEOUT_MS=%d", timeout)}, nil
 }

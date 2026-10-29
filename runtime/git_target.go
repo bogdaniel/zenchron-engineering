@@ -35,9 +35,6 @@ import (
 	"strings"
 )
 
-// GitTargetClass is the resource a Git invocation resolves to.
-type GitTargetClass string
-
 const (
 	// GitTargetCandidate is the governed candidate workspace. Everything #241
 	// refuses here is still refused.

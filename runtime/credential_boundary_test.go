@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // Synthetic credential-shaped fixtures are ASSEMBLED, never written out.
@@ -163,7 +165,7 @@ func (p *countingProvider) Isolation() ProviderIsolation {
 
 func (p *countingProvider) Execute(context.Context, ExecutionRequest) (ExecutionResult, error) {
 	p.calls++
-	return ExecutionResult{ProviderID: "counting", Outcome: Succeeded}, nil
+	return ExecutionResult{ProviderID: "counting", Outcome: execution.Succeeded}, nil
 }
 
 // TestProviderAdmissionRefusesCredentialMaterialBeforeInference is matrix F, G,

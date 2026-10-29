@@ -203,7 +203,7 @@ standing permission is itself a posture.
 
 ## Invocation provenance
 
-Every attempt records, without secrets:
+Every attempt that reaches a provider records, without secrets:
 
 ```text
 agent id, provider kind, trust mode, model
@@ -213,17 +213,170 @@ whether a bypass was authorized and requested
 observed auth mode and how it was observed
 whether the workspace was bound by flag or by working directory
 whether workspace instruction files were suppressed
-the security-relevant argv, with the prompt replaced by its digest
+the security-relevant argv, with the prompt element replaced by the literal
+  placeholder [prompt], and the prompt's digest as prompt_sha256
+the effective provider-control environment, as provider_environment (below)
+execution deadline, start, completion, elapsed, and whether it overran
+termination cause (provider_returned, deadline_reached,
+  provider_inactivity_limit_reached, run_stopped), process id, and whether it ran
+  under the brokered candidate Git guard
 the inactivity window and the progress mode that measured it
-  (byte_output, or structured_claude_events)
+  (byte_output; byte_output_excluding_transport_chatter for Codex, where a
+  line matching its known reconnect/transport chatter does not refresh the
+  window, never classifies a failure, and an inactivity kill is always
+  provider_no_progress; or structured_claude_events)
 for Claude Code: accepted structured progress events, main-thread tool calls
   still open at exit, permission denials in the final result, and malformed
-  or oversized stream lines - counts only, never provider text
+  or oversized stream lines - counts only, never provider text - plus at
+  most 8 denied tool identifiers read from the typed
+  permission_denials[].tool_name (never a tool input or denial text).
+  final_result_observed says whether a final result was read at all: the
+  denial count and tool names come from it, so without one - an attempt
+  killed at its deadline, typically - they are UNKNOWN, recorded as absent
+  and shown as "unknown (no final result)", never as 0; for a provider
+  without the structured stream (a byte_output mode) it is shown as
+  "n/a (provider reports none)", decided from the recorded progress mode
 ```
 
-The prompt is excluded from the durable record and referenced by digest: it
+The prompt text is excluded from the durable record: its argv slot holds the
+placeholder `[prompt]` and its SHA-256 is recorded as `prompt_sha256`. It
 carries untrusted third-party text and is unbounded, while every
 security-relevant flag is short and is kept verbatim.
+
+**`provider_environment` (#391).** The environment the runtime actually passed
+to the provider process, read from the exact slice handed to it after every
+addition (the toolchain grant, the scratch, Claude's deadline-derived Bash
+timeouts), never from the supervisor's own environment. It is restricted to an
+explicit non-secret allowlist and is never the whole environment:
+
+```text
+every native CLI: PATH HOME GOENV GIT_DIR GOMODCACHE GOTOOLCHAIN GOPROXY
+                  GOSUMDB GOFLAGS TMPDIR GOTMPDIR GOCACHE GOPATH
+plus the provider's state variable: CODEX_HOME, CLAUDE_CONFIG_DIR, QWEN_HOME
+plus Claude Code's controls: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS
+                  BASH_DEFAULT_TIMEOUT_MS BASH_MAX_TIMEOUT_MS
+```
+
+That set is CLOSED: validation and the schema accept exactly these names, so a
+case variant (`home`) or an unlisted name (`XDG_CONFIG_HOME`) is refused.
+
+USER is passed to the provider (keychain lookup) but is deliberately NOT
+recorded: it is host/operator identity, not a governance input.
+
+It is an ordered list of `{name, value, sha256, value_bounded}`, one entry per
+allowlisted name. An entry with neither `value` nor `sha256` means the runtime
+did not pass the variable; otherwise exactly one is present, including for an
+empty value. Absent and empty are never collapsed, and `status` prints them as
+`NAME (absent)` and `NAME=""` (or `NAME=sha256:<12 hex>`).
+
+**Host paths are recorded by identity only.** Every variable whose value is a
+host path never appears literally: PATH, HOME, GIT_DIR (the Git guard
+sentinel), TMPDIR, GOTMPDIR, GOCACHE, GOPATH, GOMODCACHE and the provider's
+state variable. Each records `sha256`, the lowercase hex SHA-256 of
+`"zenchron/provider-env/<NAME>/v1" + NUL + value` over the exact, untruncated
+passed value; an empty value records the identity of `""`, an absent one
+records nothing. Every other name records only `value`. Validation and the
+schema refuse a literal value on a hash-only name and a `sha256` on a literal
+one. The recorded environment therefore holds no host path except the null
+device GOENV names. It answers "was this the same PATH/HOME/cache as before"
+without copying host-account or scratch paths into the permanent journal. The
+raw PATH is not kept even truncated: a 200-byte prefix is no reproducibility
+evidence and the full value stays in the operator's own shell. (The argv is a
+separate #327 member; it names runtime-owned paths by role, see below, #464.)
+
+The construction is the one #84 specifies for `home_identity` (a tag, NUL, the
+value), but the TAGS ARE SEPARATE AND STAY SEPARATE: `zenchron/provider-env/...`
+here, #84's own tag for agent posture. Environment provenance (what one attempt
+was given) and posture binding (what an agent is bound to) are different facts,
+so the same HOME is deliberately a different identity in each.
+
+A name shaped like a
+credential (containing KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or AUTH) is
+never recorded, URL userinfo in a value (`scheme://user:token@host`) is
+redacted, values pass through the same token redaction and 200-byte field
+bound as every other detail, and `value_bounded` marks a value that was redacted
+or cut. The record stays inside the journal and
+`autonomy status`/`events`; the control-plane HTTP API projects no invocation
+provenance, so these local paths do not cross it.
+
+**Paths in recorded argv are logical references (#464).** The provider runs
+with the real host paths; the durable argv names each runtime-owned directory
+by the role the runtime gave it, never by its host spelling:
+
+```text
+invocation scratch root          $SCRATCH
+typed-result directory           $RESULT
+candidate workspace              $CANDIDATE/<relative>
+anything else under StateDir     $STATE/<relative>
+any other absolute path          <host-path>
+```
+
+So Codex records `-c sandbox_workspace_write.writable_roots=["$SCRATCH"]` and
+`--cd $CANDIDATE`, and Claude Code records `--add-dir $SCRATCH --add-dir
+$RESULT`. The record is built from the invocation's structured path roles - the
+provider spec's own argument builder applied to the invocation with each
+path-bearing field replaced by its reference - not by scrubbing strings, so the
+spec that knows a value is the scratch directory is the only thing that decides
+where `$SCRATCH` appears. Roots match on whole path components (`/tmp/ab` is not
+under `/tmp/a`), under both the given and the symlink-resolved spelling (macOS
+`/tmp` is `/private/tmp`), with Windows drive roots and separators normalized;
+the most specific role wins. A recorded argv is therefore the same when the
+state directory moves to another machine or home.
+
+An absolute path under no runtime-owned root - an operator-configured model
+path or tool path, say - is recorded as `<host-path>`. The loss is explicit
+rather than silent, and the invocation is never refused for it: a diagnostic
+projection does not get to block real work. The journal refuses, at append, an
+argv element that is itself a raw POSIX, drive-rooted or UNC path, as a
+backstop for a projection defect. Artifact references are unaffected; they are
+already runtime-relative identities.
+
+**Where it is recorded.** For a run attempt - initial execution, remediation or
+continuation, whether it succeeded, failed, hit its deadline, was ended for
+inactivity or was cancelled - the record is one immutable
+`execution.attempt_provenance` journal event, bound to the operation id and the
+physical `attempt_identity`, appended before that operation's
+`operation.after`. Two attempts of one operation are two events. Refused
+destructive candidate Git operations are not repeated there: they stay counted,
+with the latest one shaped, on the operation result. `autonomy events RUN`
+shows the event, and `autonomy status RUN` (text, and `--json` field
+`execution_attempt_provenance`) shows the latest execution attempt's record from
+the journal alone, after any restart and without reading a transcript. An
+attempt that never reached a provider records none, and status says so rather
+than showing zeros.
+
+The event is bounded by the 8 KiB canonical payload ceiling. Every field is
+bounded where it is produced; argv, the one member long enough to reach the
+ceiling in aggregate, has its tail trimmed in that case and then ends in
+`[argv truncated]` - never silently, and never for an ordinary invocation. If
+even that cannot fit (for example configuration strings full of control
+characters, which canonical JSON escapes six-fold), the record falls back to a
+fixed-size core - bounds, times, counters, termination cause and progress mode -
+marked `provenance_truncated`. The record is never dropped, and never made
+unappendable.
+
+For a planning invocation the same explanatory core is persisted with the plan
+revision, as `provenance.reasoning.invocation` (the `invocation_observation`
+definition in `schemas/planning-vocabulary.schema.json`). Planning has no run
+operation or physical attempt, so it records no `operation_id`,
+`attempt_identity` or refused-operation list; a revision whose provider
+reported no provenance, or that predates it, has no `invocation` member. A
+planning attempt that is REFUSED - including one killed at its deadline - has no
+revision, so its `plan.attempt_refused` journal event carries the same record in
+`reasoning.invocation`, fitted to that event's ceiling alongside everything else
+the attempt records; a refusal already at the ceiling that cannot take even the
+fixed-size core says `invocation_dropped_for_size` instead, so a dropped record
+is never mistaken for one the provider never reported. A proposed revision's
+journal event does not repeat it: the
+revision document is its one home.
+
+Planning provenance carries host-local and time-bound facts (paths, a process
+id, timestamps). It enters only the plan revision's own content digest - which
+an approval pins, so the operator approves what was recorded - and no plan id,
+attempt id, proposal id, idempotency key or run identity is derived from it.
+
+This record is observation. Nothing routes, classifies, authorizes or budgets
+from it.
 
 `workspace_instructions_suppressed` is a real difference between providers.
 Codex, Claude Code and Qwen expose a flag that keeps a candidate repository's own
@@ -434,6 +587,45 @@ clears by repairing the installation, never a provider fault, because nothing
 about the worker, the work, the account or the network is wrong. A deliberately
 unguarded composition — a unit test, a probe, an embedder driving one
 invocation — remains possible and is recorded truthfully as `GitGuarded=false`.
+
+An execution attempt claims the candidate's writer lock
+(`<candidate>.writer.lock`, beside the candidate, never in it) before it reads,
+restores or scans the candidate, and holds it through dispatch. The provider
+inherits the lock's descriptor, so every descendant that keeps it keeps the
+candidate locked — including a tool command that left the provider's process
+group and survived a supervisor killed with SIGKILL, which the owner-death
+guard cannot reach (#168).
+
+- A claim that finds the lock held waits a bounded settle period (three times
+  the default guard grace) and is then refused before anything touches the
+  candidate as `candidate_writer_alive`: a typed, non-spending wait an
+  operator clears by stopping the stale writer (`lsof <candidate>.writer.lock`
+  names it). The settle is paid once: a run already waiting on
+  `candidate_writer_alive` re-probes once per pass without sleeping. A
+  controller shutdown (the attempt's parent context ending) interrupts the
+  settle and is recorded as `controller_shutdown`, never as a live writer. A
+  durable `stop RUN` is not observed during the settle; it is observed just
+  before the provider would start, as for any attempt. A lock that cannot be
+  checked at all is `candidate_guard_unavailable`.
+- When a provider returns normally, a lock still held by its own process
+  group (a backgrounded command) is stopped with the usual TERM-then-KILL, so
+  an attempt's own leftovers never refuse the next attempt. A holder that
+  survives that left the group, and is attributed to that attempt as
+  `provider_background_work_unresolved`.
+- Garbage collection does not delete a candidate whose lock is held, and
+  removes the lock file with the candidate.
+
+**It is cooperative, not a security boundary.** It sees only processes that
+kept the inherited descriptor; a provider can release it (`flock -u 3`), close
+it, or, unsandboxed, unlink the lock file. Whether tool commands inherit it is
+a property of each provider:
+
+| Provider kind | Tool commands inherit the lock descriptor |
+|---|---|
+| `codex_cli` | verified in review against codex 0.157.0, including a backgrounded `nohup` command |
+| node-based CLIs | no: node does not pass inherited descriptors to its children |
+| `claude_code` | unverified (a Bun-compiled binary) |
+| others | unverified |
 
 The boundary grants the worker no new command surface. It adds no tool to any
 provider's allowlist, so a stage that was obliged nothing is still obliged

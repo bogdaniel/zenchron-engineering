@@ -258,6 +258,30 @@ func (s *SQLiteOperationStore) PlanRevision(id string, revision int) (domain.Eng
 	return plan, err == nil, err
 }
 
+// BindPlanConfig records the controller-effective configuration a plan was
+// first claimed under. The first binding wins and is never rewritten: a plan
+// proposed under one configuration does not become another's by being revised
+// under it.
+func (s *SQLiteOperationStore) BindPlanConfig(planID string, config ConfigDigest) error {
+	digest, err := Digest(config)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE plans SET config_digest = ? WHERE id = ? AND config_digest = ''`, digest, planID)
+	return err
+}
+
+// planConfig is the configuration digest a plan recorded, empty when it
+// predates the record, and whether the plan exists at all.
+func (s *SQLiteOperationStore) planConfig(planID string) (string, bool, error) {
+	var digest string
+	err := s.db.QueryRow(`SELECT config_digest FROM plans WHERE id = ?`, planID).Scan(&digest)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	return digest, err == nil, err
+}
+
 // Plans lists every plan at its highest stored revision, oldest first.
 func (s *SQLiteOperationStore) Plans() ([]domain.EngineeringPlan, error) {
 	rows, err := s.db.Query(`SELECT r.document FROM plans p
@@ -296,7 +320,14 @@ func (s *SQLiteOperationStore) AppendPlanEvent(e EngineeringEvent) (EngineeringE
 	if !planEventTypes[e.Type] {
 		return EngineeringEvent{}, fmt.Errorf("event type %q does not belong to the plan stream", e.Type)
 	}
-	return s.appendToStream(e, journalStream{
+	return s.appendToStream(e, planStream(e))
+}
+
+// planStream is the journal stream a plan event is appended to. It is a function
+// so a caller that must commit something else in the SAME transaction (a charge
+// committed with the epoch it pays for) can extend the stream it appends through.
+func planStream(e EngineeringEvent) journalStream {
+	return journalStream{
 		kind: streamPlan, id: e.PlanID,
 		// A refused planning attempt is the one plan event whose payload
 		// carries an identity derived from what the stream already holds, so it
@@ -320,14 +351,14 @@ func (s *SQLiteOperationStore) AppendPlanEvent(e EngineeringEvent) (EngineeringE
 			snapshot, err := ReducePlan(e.PlanID, events)
 			return snapshot.StateSHA256, err
 		},
-		insert: func(tx *sql.Tx, event EngineeringEvent, canonical string) error {
-			_, err := tx.Exec(`INSERT INTO events (`+sqlitePlanEventColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		insert: func(tx *sql.Tx, event EngineeringEvent, canonical string, globalSequence int64) error {
+			_, err := tx.Exec(`INSERT INTO events (`+sqlitePlanEventInsertColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				event.ID, "", event.Sequence, event.Type, event.OperationID, event.PreviousEventID,
 				event.PreviousEventHash, event.StateBefore, event.StateAfter, event.EventHash, canonical,
-				streamPlan, event.PlanID)
+				streamPlan, event.PlanID, globalSequence)
 			return err
 		},
-	})
+	}
 }
 
 // PlanEvents returns one plan's events in sequence order.
@@ -341,6 +372,10 @@ func (s *SQLiteOperationStore) PlanEvents(planID string) ([]EngineeringEvent, er
 // cache and no stored counter contributes, so a supervisor restarted mid-plan
 // reconstructs the same approval state, the same assignments, the same gate
 // satisfaction and the same consumed budget it had before.
+//
+// The one fact it reads beside the journal is which run is CURRENT for a
+// remediated stage (followRemediationEpochs), so every reader - the reconciler,
+// the operator view, the fleet summary - agrees on it.
 func (s *SQLiteOperationStore) ReplayPlan(planID string) (PlanSnapshot, error) {
 	var exists int
 	if err := s.db.QueryRow(`SELECT COUNT(1) FROM plans WHERE id = ?`, planID).Scan(&exists); err != nil {
@@ -353,7 +388,11 @@ func (s *SQLiteOperationStore) ReplayPlan(planID string) (PlanSnapshot, error) {
 	if err != nil {
 		return PlanSnapshot{}, err
 	}
-	return ReducePlan(planID, events)
+	snapshot, err := ReducePlan(planID, events)
+	if err != nil {
+		return snapshot, err
+	}
+	return s.followRemediationEpochs(snapshot)
 }
 
 func validatePlanIdentity(plan domain.EngineeringPlan) error {

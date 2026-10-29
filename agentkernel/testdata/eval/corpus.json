@@ -1,0 +1,170 @@
+{
+  "version": "agentkernel.kernel-eval.corpus/v0.1",
+  "description": "Fixed offline corpus for the Agent Execution Kernel benchmark harness (#446 section 16). Scripted steps carry no token usage on purpose: the scripted provider reports none, so reported usage stays unknown.",
+  "fixtures": ["calc"],
+  "settings": {"go_version": "go1.25.0", "goos": "linux", "goarch": "amd64", "cgo_enabled": false},
+  "binding": {"context_window": 64000, "max_output_tokens": 2000},
+  "deadline_seconds": 60,
+  "budget": {
+    "max_iterations": 6, "max_tool_calls": 6, "max_input_tokens": 200000,
+    "max_output_tokens": 8000, "max_artifact_bytes": 4194304, "max_provider_retries": 0
+  },
+  "drift": {
+    "source_edit": {
+      "description": "A sibling package gains a function; packages importing strutil are re-extracted.",
+      "changes": [{"path": "strutil/reverse.go", "content": "// Package strutil holds string helpers for the fixture.\npackage strutil\n\nimport \"strings\"\n\n// Reverse returns s with its runes in reverse order.\nfunc Reverse(s string) string {\n\tr := []rune(s)\n\tfor i, j := 0, len(r)-1; i < j; i, j = i+1, j-1 {\n\t\tr[i], r[j] = r[j], r[i]\n\t}\n\treturn string(r)\n}\n\n// ReverseWords reverses the order of space-separated words.\nfunc ReverseWords(s string) string {\n\tw := strings.Fields(s)\n\tfor i, j := 0, len(w)-1; i < j; i, j = i+1, j-1 {\n\t\tw[i], w[j] = w[j], w[i]\n\t}\n\treturn strings.Join(w, \" \")\n}\n"}]
+    },
+    "config_edit": {
+      "description": "A non-Go configuration file changes: the manifest moves, no package is re-extracted.",
+      "changes": [{"path": "config/settings.json", "content": "{\n  \"log_level\": \"debug\",\n  \"max_items\": 20\n}\n"}]
+    },
+    "go_mod_change": {
+      "description": "The go directive changes; every directory governed by that go.mod is re-extracted.",
+      "changes": [{"path": "go.mod", "content": "module example.com/calc\n\ngo 1.24\n"}]
+    },
+    "build_tag": {
+      "description": "Extraction settings gain the \"extra\" build tag; calc/extra.go enters the build and everything is re-extracted.",
+      "build_tags": ["extra"]
+    }
+  },
+  "tasks": [
+    {
+      "id": "t01-explain-add", "fixture": "calc", "held_out": false, "drift": "source_edit",
+      "objective": "Explain what calc.Add in calc/add.go does.",
+      "mode": "read_only",
+      "grants": [{"handle": "read", "kind": "file.read", "roots": ["."]}],
+      "steps": [
+        {"tool_calls": [{"id": "c1", "name": "read_file", "arguments": {"path": "calc/add.go"}}]},
+        {"text": "calc.Add subtracts b from a, contrary to its comment."}
+      ],
+      "expect": {"outcome": "completed", "cause": "loop_completed"},
+      "checks": [{"kind": "unchanged", "path": "calc/add.go"}]
+    },
+    {
+      "id": "t02-fix-add", "fixture": "calc", "held_out": false, "drift": "go_mod_change",
+      "objective": "Fix the bug in calc.Add so that it adds.",
+      "mode": "read_write",
+      "grants": [
+        {"handle": "read", "kind": "file.read", "roots": ["."]},
+        {"handle": "write-calc", "kind": "file.write", "roots": ["calc"]}
+      ],
+      "steps": [
+        {"tool_calls": [{"id": "c1", "name": "read_file", "arguments": {"path": "calc/add.go"}}]},
+        {"tool_calls": [{"id": "c2", "name": "apply_patch", "arguments": {"path": "calc/add.go", "expected_sha256": "{{sha256:calc/add.go}}", "old_text": "return a - b // BUG: subtracts instead of adding", "new_text": "return a + b"}}]},
+        {"tool_calls": [{"id": "c3", "name": "read_file", "arguments": {"path": "calc/add.go"}}]},
+        {"text": "calc.Add now returns a + b."}
+      ],
+      "expect": {"outcome": "completed", "cause": "loop_completed"},
+      "checks": [{"kind": "file_contains", "path": "calc/add.go", "text": "return a + b"}]
+    },
+    {
+      "id": "t03-new-helper", "fixture": "calc", "held_out": false, "drift": "build_tag",
+      "objective": "Add strutil.Upper returning the upper-case form of a string.",
+      "mode": "read_write",
+      "grants": [
+        {"handle": "read", "kind": "file.read", "roots": ["."]},
+        {"handle": "write-strutil", "kind": "file.write", "roots": ["strutil"]}
+      ],
+      "steps": [
+        {"tool_calls": [{"id": "c1", "name": "write_file", "arguments": {"path": "strutil/upper.go", "content": "package strutil\n\nimport \"strings\"\n\n// Upper returns s in upper case.\nfunc Upper(s string) string { return strings.ToUpper(s) }\n", "expected_sha256": "absent"}}]},
+        {"text": "Added strutil/upper.go."}
+      ],
+      "expect": {"outcome": "completed", "cause": "loop_completed"},
+      "checks": [{"kind": "file_contains", "path": "strutil/upper.go", "text": "func Upper(s string) string"}]
+    },
+    {
+      "id": "t04-config-level", "fixture": "calc", "held_out": false, "drift": "config_edit",
+      "objective": "Change the configured log level from debug to info.",
+      "mode": "read_write",
+      "grants": [
+        {"handle": "search", "kind": "file.search", "roots": ["."]},
+        {"handle": "read", "kind": "file.read", "roots": ["."]},
+        {"handle": "write-config", "kind": "file.write", "roots": ["config"]}
+      ],
+      "steps": [
+        {"tool_calls": [{"id": "c1", "name": "search", "arguments": {"path": "config", "pattern": "log_level", "literal": true}}]},
+        {"tool_calls": [{"id": "c2", "name": "read_file", "arguments": {"path": "config/settings.json"}}]},
+        {"tool_calls": [{"id": "c3", "name": "apply_patch", "arguments": {"path": "config/settings.json", "expected_sha256": "{{sha256:config/settings.json}}", "old_text": "\"debug\"", "new_text": "\"info\""}}]},
+        {"text": "log_level is now info."}
+      ],
+      "expect": {"outcome": "completed", "cause": "loop_completed"},
+      "checks": [{"kind": "file_contains", "path": "config/settings.json", "text": "\"log_level\": \"info\""}]
+    },
+    {
+      "id": "t05-refused-write", "fixture": "calc", "held_out": false, "drift": "go_mod_change",
+      "objective": "Update the notes; the model also proposes an ungranted source write.",
+      "mode": "read_write",
+      "grants": [
+        {"handle": "read", "kind": "file.read", "roots": ["."]},
+        {"handle": "write-docs", "kind": "file.write", "roots": ["docs"]}
+      ],
+      "steps": [
+        {"tool_calls": [{"id": "c1", "name": "write_file", "arguments": {"path": "calc/add.go", "content": "package calc\n", "expected_sha256": "{{sha256:calc/add.go}}"}}]},
+        {"text": "The source write was refused; nothing else to do."}
+      ],
+      "expect": {"outcome": "completed", "cause": "loop_completed"},
+      "checks": [
+        {"kind": "unchanged", "path": "calc/add.go"},
+        {"kind": "observations", "event": "tool.refused", "count": 1}
+      ]
+    },
+    {
+      "id": "t06-retry-then-read", "fixture": "calc", "held_out": false, "drift": "build_tag",
+      "objective": "Report the open TODO in docs/NOTES.md.",
+      "mode": "read_only",
+      "grants": [{"handle": "read", "kind": "file.read", "roots": ["docs"]}],
+      "budget": {"max_provider_retries": 1},
+      "steps": [
+        {"error": {"class": "server", "status": 503, "retryable": true, "detail": "scripted transient failure"}},
+        {"tool_calls": [{"id": "c1", "name": "read_file", "arguments": {"path": "docs/NOTES.md"}}]},
+        {"text": "TODO: document the Div error contract."}
+      ],
+      "expect": {"outcome": "completed", "cause": "loop_completed"},
+      "checks": [{"kind": "retries", "count": 1}]
+    },
+    {
+      "id": "h01-stale-precondition", "fixture": "calc", "held_out": true, "drift": "source_edit",
+      "objective": "Rewrite calc/div.go from a stale read.",
+      "mode": "read_write",
+      "grants": [
+        {"handle": "read", "kind": "file.read", "roots": ["."]},
+        {"handle": "write-calc", "kind": "file.write", "roots": ["calc"]}
+      ],
+      "steps": [
+        {"tool_calls": [{"id": "c1", "name": "write_file", "arguments": {"path": "calc/div.go", "content": "package calc\n", "expected_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}}]},
+        {"text": "The write precondition failed; calc/div.go was not changed."}
+      ],
+      "expect": {"outcome": "completed", "cause": "loop_completed"},
+      "checks": [{"kind": "unchanged", "path": "calc/div.go"}]
+    },
+    {
+      "id": "h02-reread", "fixture": "calc", "held_out": true, "drift": "config_edit",
+      "objective": "Compare calc.Add and calc.Div error handling.",
+      "mode": "read_only",
+      "grants": [{"handle": "read", "kind": "file.read", "roots": ["calc"]}],
+      "steps": [
+        {"tool_calls": [{"id": "c1", "name": "read_files", "arguments": {"paths": ["calc/add.go", "calc/div.go"]}}]},
+        {"tool_calls": [{"id": "c2", "name": "read_file", "arguments": {"path": "calc/add.go"}}]},
+        {"text": "Div reports ErrDivideByZero; Add has no error path."}
+      ],
+      "expect": {"outcome": "completed", "cause": "loop_completed"},
+      "checks": [{"kind": "unchanged", "path": "calc/add.go"}, {"kind": "unchanged", "path": "calc/div.go"}]
+    },
+    {
+      "id": "h03-tool-budget", "fixture": "calc", "held_out": true, "drift": "go_mod_change",
+      "objective": "Read both calc files under a one-tool-call budget.",
+      "mode": "read_only",
+      "grants": [{"handle": "read", "kind": "file.read", "roots": ["calc"]}],
+      "budget": {"max_tool_calls": 1},
+      "steps": [
+        {"tool_calls": [
+          {"id": "c1", "name": "read_file", "arguments": {"path": "calc/add.go"}},
+          {"id": "c2", "name": "read_file", "arguments": {"path": "calc/div.go"}}
+        ]},
+        {"text": "unreachable"}
+      ],
+      "expect": {"outcome": "exhausted", "cause": "budget_exhausted", "dimension": "tool_calls"},
+      "checks": [{"kind": "unchanged", "path": "calc/add.go"}]
+    }
+  ]
+}

@@ -23,6 +23,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // inactivityCLI answers the capability probe from a string and runs the
@@ -121,8 +123,14 @@ func assertProcessGroupIsGone(t *testing.T, leader, child string) {
 // inactivityFixture is one native CLI agent whose invocation is a real process.
 func inactivityFixture(t *testing.T, script string) (CLIAgentProvider, ExecutionRequest, *inactivityCLI) {
 	t.Helper()
+	return inactivityFixtureFor(t, AgentKindCodexCLI, script)
+}
+
+// inactivityFixtureFor is inactivityFixture for another native CLI kind.
+func inactivityFixtureFor(t *testing.T, kind, script string) (CLIAgentProvider, ExecutionRequest, *inactivityCLI) {
+	t.Helper()
 	requireBoundedProcess(t)
-	provider, request, _ := agentFixture(t, AgentKindCodexCLI)
+	provider, request, _ := agentFixture(t, kind)
 	cli := &inactivityCLI{script: script}
 	provider.Executor = cli
 	// A short grace so the graceful-then-forced escalation completes inside an
@@ -170,7 +178,7 @@ func TestASilentProviderIsTerminatedLongBeforeTheRunWallBudget(t *testing.T) {
 	}
 
 	// A TYPED STALL, and specifically not a shutdown, a deadline or an unknown.
-	if result.Outcome != OperationFailed {
+	if result.Outcome != execution.Failed {
 		t.Fatalf("outcome = %q, want a failed operation", result.Outcome)
 	}
 	if result.Failure == nil || result.Failure.Classification != FailureProviderNoProgress {
@@ -200,7 +208,11 @@ func TestASilentProviderIsTerminatedLongBeforeTheRunWallBudget(t *testing.T) {
 	if result.Failure.RawDiagnosticRef != result.Artifacts[0].Path {
 		t.Fatalf("the diagnostic does not name the transcript: %q", result.Failure.RawDiagnosticRef)
 	}
-	if result.Review != nil {
+	verdict := filepath.Join(t.TempDir(), "review.json")
+	if err := writeTypedResultFile(verdict, ReviewerResult{SchemaVersion: ReviewerResultSchemaVersion, Verdict: StageReviewAccepted}); err != nil {
+		t.Fatal(err)
+	}
+	if typed := readTypedResultSlots(verdict, "", &result); typed.Review != nil {
 		t.Fatal("a terminated invocation contributed a verdict")
 	}
 }
@@ -226,7 +238,7 @@ func TestAProviderThatKeepsTalkingIsNotKilledForSilence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a provider that was producing output was failed: %v", err)
 	}
-	if result.Outcome != Succeeded || result.Failure != nil {
+	if result.Outcome != execution.Succeeded || result.Failure != nil {
 		t.Fatalf("outcome = %q failure = %#v, want an untouched success", result.Outcome, result.Failure)
 	}
 	if result.Invocation.TerminationCause != "provider_returned" {
@@ -467,10 +479,12 @@ func TestObservedOutputReachesTheDurableProgressRecorder(t *testing.T) {
 
 	var mu sync.Mutex
 	var keys []string
-	ctx := withProviderProgressRecorder(context.Background(), func(key string) {
+	ctx := execution.WithProgressRecorder(context.Background(), func(progress ProviderProgress) {
 		mu.Lock()
 		defer mu.Unlock()
-		keys = append(keys, key)
+		if !progress.Final {
+			keys = append(keys, progress.Key)
+		}
 	})
 	if _, err := provider.Execute(ctx, request); err != nil {
 		t.Fatal(err)
@@ -528,7 +542,7 @@ func TestSessionOutputCannotCreateAnExternalProviderWait(t *testing.T) {
 				t.Fatal("a failed invocation recorded no failure")
 			}
 			switch result.Failure.Classification {
-			case FailureProviderUnavailable, FailureProviderQuota, FailureProviderRateLimited, FailureProviderAccountUnavailable:
+			case FailureProviderUnavailable, FailureConnectivity, FailureProviderQuota, FailureProviderRateLimited, FailureProviderAccountUnavailable:
 				t.Fatalf("session output asserted the provider condition %q; a transcript is evidence, not an assertion",
 					result.Failure.Classification)
 			}
@@ -566,11 +580,11 @@ func TestAGenuineTransportDiagnosticStillReachesABoundedWait(t *testing.T) {
 	if err == nil {
 		t.Fatal("a non-zero exit returned no error")
 	}
-	if result.Failure == nil || result.Failure.Classification != FailureProviderUnavailable {
-		t.Fatalf("failure = %#v, want %q from the provider's own terminal diagnostic", result.Failure, FailureProviderUnavailable)
+	if result.Failure == nil || result.Failure.Classification != FailureConnectivity {
+		t.Fatalf("failure = %#v, want %q from the provider's own terminal diagnostic", result.Failure, FailureConnectivity)
 	}
-	if RouteFailure(result.Failure.Classification) != RouteWait {
-		t.Fatal("a genuine transport failure no longer waits")
+	if RouteFailure(result.Failure.Classification) != RouteRetry {
+		t.Fatal("a genuine transport failure no longer retries under backoff")
 	}
 }
 
@@ -589,17 +603,23 @@ func TestAGenuineTransportDiagnosticStillReachesABoundedWait(t *testing.T) {
 // stalled provider when their allowance had simply run out - and would spend a
 // retry on a condition no retry can clear.
 func TestARecognizedConditionSurvivesTheInactivityTermination(t *testing.T) {
+	// Codex is the exception (#314): under its transport-chatter filter a
+	// candidate's stderr shares the tail, so its inactivity kill is always
+	// provider_no_progress. Gemini, on plain byte output, keeps the precedence.
 	for name, tc := range map[string]struct {
+		kind       string
 		diagnostic string
 		want       FailureClass
 		route      FailureRoute
 	}{
-		"quota then silence":       {"ERROR: You've hit your usage limit.", FailureProviderQuota, RouteWait},
-		"unavailable then silence": {"ERROR: error sending request: dns error", FailureProviderUnavailable, RouteWait},
-		"account then silence":     {"ERROR: your refresh token was revoked", FailureProviderAccountUnavailable, RouteWait},
+		"quota then silence":             {AgentKindGeminiCLI, "Error: RESOURCE_EXHAUSTED: quota exceeded", FailureProviderQuota, RouteWait},
+		"unavailable then silence":       {AgentKindGeminiCLI, "Error: getaddrinfo ENOTFOUND generativelanguage.googleapis.com", FailureConnectivity, RouteRetry},
+		"codex quota then silence":       {AgentKindCodexCLI, "ERROR: You've hit your usage limit.", FailureProviderNoProgress, RouteFailure(FailureProviderNoProgress)},
+		"codex unavailable then silence": {AgentKindCodexCLI, "ERROR: error sending request: dns error", FailureProviderNoProgress, RouteFailure(FailureProviderNoProgress)},
+		"codex account then silence":     {AgentKindCodexCLI, "ERROR: your refresh token was revoked", FailureProviderNoProgress, RouteFailure(FailureProviderNoProgress)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			provider, request, _ := inactivityFixture(t,
+			provider, request, _ := inactivityFixtureFor(t, tc.kind,
 				"trap '' TERM\n"+
 					"echo "+shellQuoted(tc.diagnostic)+" >&2\n"+
 					"while :; do sleep 30; done\n")
@@ -804,9 +824,19 @@ func TestTheSilentProviderFixtureReallyHasALiveDescendant(t *testing.T) {
 		<-done
 		t.Fatalf("the fixture never started: %v", err)
 	}
+	// Stat can see the file between shell redirection creating it and echo
+	// writing the PID; wait for the value before asserting both processes.
+	leaderPid := ""
+	deadline := time.Now().Add(5 * time.Second)
+	for leaderPid == "" && time.Now().Before(deadline) {
+		leaderPid = strings.TrimSpace(readFileOrEmpty(t, leader))
+		if leaderPid == "" {
+			time.Sleep(time.Millisecond)
+		}
+	}
 	// BOTH ARE REAL AND BOTH ARE RUNNING. The leader is the process group; the
 	// descendant is a separate process that a group-only kill would miss.
-	leaderPid, childPid := strings.TrimSpace(readFileOrEmpty(t, leader)), strings.TrimSpace(readFileOrEmpty(t, child))
+	childPid := strings.TrimSpace(readFileOrEmpty(t, child))
 	if leaderPid == "" || childPid == "" || leaderPid == childPid {
 		cancel()
 		<-done

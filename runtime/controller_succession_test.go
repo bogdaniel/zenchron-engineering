@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -530,4 +531,146 @@ func TestSuccessionAdmissionBelongsToTheRunStream(t *testing.T) {
 	}); err == nil {
 		t.Fatal("the registered validator accepted a refused decision")
 	}
+}
+
+// #89 ACCEPTANCE 3 AND 8: A COMPATIBLE SUCCESSOR RESUMES THE SAME LOGICAL RUN
+// AND REPEATS NOTHING THE PREDECESSOR ALREADY DID. The run is driven to a
+// published pull request under adopted controller A; an adopted descendant B
+// on the identical configuration is admitted through an activated transition
+// and then reconciles, repeatedly, as a serving successor would.
+//
+// Satisfied operations are bound to run state, never to the controller that
+// performed them, so the controller change alone must not re-invoke the
+// provider, re-commit, re-push or re-publish. The change itself is recorded
+// exactly once, as the admission event, and the run row keeps naming A.
+func TestAnAdmittedSuccessorResumesWithoutRepeatingSatisfiedWork(t *testing.T) {
+	fixture := newPhase8Fixture(t)
+	deps := fixture.deps
+	deps.ControllerBuild = attestedBuild(ControllerAdopted, predecessorRevision, "tree-a", strings.Repeat("ab", 32))
+	predecessor := fixture.newRuntime(deps)
+	fixture.runtime = predecessor
+	runID := fixture.start()
+	fixture.reconcile(runID)
+
+	published := fixture.state(runID)
+	if published.projection.PullRequest == nil {
+		t.Fatalf("the predecessor did not publish: %v", journalTypes(published.events))
+	}
+	providerCalls := len(fixture.provider.requests)
+	creates := countMethod(fixture.forge.Calls, "CreatePullRequest")
+	pushes := countGitPushes(t, fixture, runID)
+	commits := countType(published.events, EventCandidateCommitted)
+	if providerCalls == 0 || creates != 1 || pushes == 0 || commits != 1 {
+		t.Fatalf("fixture did not reach a published candidate: provider=%d prs=%d pushes=%d commits=%d",
+			providerCalls, creates, pushes, commits)
+	}
+	// Effect handlers also reconcile against remote state, so counting effects
+	// alone would not notice a successor that RE-PLANS satisfied work and is
+	// merely rescued by the probe. The operations themselves must not repeat.
+	operationsBefore := satisfiedWorkOperations(t, fixture.store, runID)
+
+	successorDeps := deps
+	successorDeps.ControllerBuild = attestedBuild(ControllerAdopted, successorRevision, "tree-b", strings.Repeat("cd", 32))
+	successor := fixture.newRuntime(successorDeps)
+
+	// Unadmitted, B is a stranger: the run parks and nothing is performed.
+	if outcome, err := successor.Reconcile(context.Background(), runID); err != nil {
+		t.Fatal(err)
+	} else if outcome.Reason != "controller_changed" {
+		t.Fatalf("an unadmitted successor was not refused: %#v", outcome)
+	}
+
+	decision := EvaluateControllerSuccession(ControllerSuccessionInput{
+		Run: published.run, Events: published.events,
+		Predecessor: ControllerBinding{Controller: deps.ControllerID, Build: &deps.ControllerBuild, Config: deps.ConfigDigest},
+		Successor:   ControllerBinding{Controller: successorDeps.ControllerID, Build: &successorDeps.ControllerBuild, Config: successorDeps.ConfigDigest},
+		TrustedMain: RevisionRecord{Revision: successorRevision, Tree: "tree-b"},
+		IsAncestor:  ancestorAlways,
+	})
+	if decision.Result != SuccessionCompatible {
+		t.Fatalf("decision refused: %v", decision.Refusals())
+	}
+	decision.HandoffID = "handoff-resume"
+	successorDigest, err := decision.Successor.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition := ControllerHandoff{
+		ID: decision.HandoffID, Phase: HandoffSuccessorAcquired,
+		Predecessor:   HandoffParty{Binding: decision.Predecessor},
+		Successor:     HandoffParty{Binding: decision.Successor},
+		RecoveryOwner: published.run.ControllerSHA256, UpdatedAt: fixture.clock.Now(),
+	}
+	if wrote, err := fixture.store.PutControllerHandoff(transition, ""); err != nil || !wrote {
+		t.Fatalf("record the transition: %v wrote=%v", err, wrote)
+	}
+	if err := predecessor.AdmitControllerSuccession(runID, decision); err != nil {
+		t.Fatal(err)
+	}
+	activated := transition
+	activated.Phase, activated.RecoveryOwner = HandoffActivated, successorDigest
+	if wrote, err := fixture.store.PutControllerHandoff(activated, HandoffSuccessorAcquired); err != nil || !wrote {
+		t.Fatalf("activate the transition: %v wrote=%v", err, wrote)
+	}
+
+	// The same logical run, not a new one.
+	resumed, err := successor.StartOrResumeIssueRun(context.Background(), fixture.issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed != runID {
+		t.Fatalf("the successor started %q instead of resuming %q", resumed, runID)
+	}
+	for i := 0; i < 3; i++ {
+		outcome, err := successor.Reconcile(context.Background(), runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if outcome.Reason == "controller_changed" {
+			t.Fatalf("an admitted successor is still parked: %#v", outcome)
+		}
+	}
+
+	after := fixture.state(runID)
+	if got := len(fixture.provider.requests); got != providerCalls {
+		t.Fatalf("the successor re-invoked the provider %d time(s)", got-providerCalls)
+	}
+	if got := countMethod(fixture.forge.Calls, "CreatePullRequest"); got != creates {
+		t.Fatalf("the successor created %d extra pull request(s)", got-creates)
+	}
+	if got := countGitPushes(t, fixture, runID); got != pushes {
+		t.Fatalf("the successor performed %d extra push(es)", got-pushes)
+	}
+	if got := countType(after.events, EventCandidateCommitted); got != commits {
+		t.Fatalf("the successor produced %d extra candidate commit(s)", got-commits)
+	}
+	if got := satisfiedWorkOperations(t, fixture.store, runID); got != operationsBefore {
+		t.Fatalf("the successor re-planned satisfied work: %s -> %s", operationsBefore, got)
+	}
+	if got := countType(after.events, EventControllerSuccessionAdmitted); got != 1 {
+		t.Fatalf("the controller change is recorded %d times, want exactly once", got)
+	}
+	if after.run.ControllerSHA256 != published.run.ControllerSHA256 {
+		t.Fatal("the run stopped naming the controller that created it")
+	}
+}
+
+// satisfiedWorkOperations counts the durable operations that produce work:
+// everything except the observation kinds a serving controller legitimately
+// keeps polling.
+func satisfiedWorkOperations(t *testing.T, store *SQLiteOperationStore, runID string) string {
+	t.Helper()
+	operations, err := store.Operations(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, op := range operations {
+		switch op.Kind {
+		case OpSourceObserve, OpGitHubObserve:
+			continue
+		}
+		counts[op.Kind]++
+	}
+	return fmt.Sprint(counts)
 }

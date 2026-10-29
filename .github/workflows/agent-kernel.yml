@@ -1,0 +1,82 @@
+name: agent-kernel
+
+# The Agent Execution Kernel (#446) is a nested Go module. The root CI's
+# `go vet ./...` and `go test ./...` never enter it, so it carries its own
+# checks. This workflow only runs when the module or this file changes, and it
+# never replaces or weakens the root `go` check.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agentkernel/**"
+      - ".github/workflows/agent-kernel.yml"
+  pull_request:
+    paths:
+      - "agentkernel/**"
+      - ".github/workflows/agent-kernel.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: agentkernel
+
+env:
+  GOWORK: "off"
+
+jobs:
+  module:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentkernel/go.mod
+          cache: false
+
+      - name: Formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Supported-platform compile and vet
+        run: |
+          for p in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+            GOOS="${p%/*}" GOARCH="${p#*/}" go vet ./...
+          done
+
+      - name: Test
+        run: go test -count=1 -timeout 10m ./...
+
+      - name: Race (budgets, storage, events, overlays)
+        run: go test -race -count=1 -timeout 15m ./...
+
+      - name: Dependency closure
+        run: bash scripts/check-imports.sh
+
+      - name: Extraction outside the checkout
+        run: bash scripts/extract.sh
+
+      - name: Relocation to a synthetic module path
+        run: bash scripts/relocate.sh
+
+      - name: Offline benchmark fixtures
+        run: go run ./cmd/kernel-eval -corpus testdata/eval -trials 3 -out "$RUNNER_TEMP/kernel-eval.json"
+
+  # Scope enforcement applies to the #446 feature lane only. Unrelated PRs that
+  # touch other directories are never rejected because this module exists;
+  # they still get module conformance above when they touch the module.
+  feature-scope:
+    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'claude/446-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gate A write allowlist
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: bash scripts/check-scope.sh

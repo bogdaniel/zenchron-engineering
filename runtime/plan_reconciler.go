@@ -27,8 +27,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -113,6 +111,14 @@ func (r PlanReconciler) now() time.Time {
 // Reconcile advances one plan by one pass.
 func (r PlanReconciler) Reconcile(ctx context.Context, planID string) (PlanTickReport, error) {
 	report := PlanTickReport{PlanID: planID}
+	// OLD-CONFIGURATION WORK IS NOT CARRIED ACROSS A RE-ADOPTION (#307). A run
+	// records its controller and parks as controller_changed; a plan is checked
+	// against the configuration it recorded before anything is settled, invoked
+	// or started.
+	if held, err := planConfigurationHold(r.Store, planID, r.Service.Config); err != nil || held != "" {
+		report.Waiting = held
+		return report, err
+	}
 	snapshot, err := r.Store.ReplayPlan(planID)
 	if err != nil {
 		return report, err
@@ -441,8 +447,10 @@ func (r PlanReconciler) stopRetiredRun(runID, reason string) (bool, error) {
 	if run.Plan == nil || run.Disposition == Cancelled || terminalDisposition(run.Disposition) {
 		return false, nil
 	}
-	scheduler := Scheduler{Store: r.Store, Clock: r.Clock, Owner: run.ControllerSHA256}
-	if _, err := CancelRun(r.Store, scheduler, r.now(), runID, reason); err != nil {
+	scheduler := Scheduler{Store: r.Store, Clock: r.Clock, Owner: run.ControllerSHA256, Liveness: NewLockOwnerLiveness(r.StateDir)}
+	if _, err := CancelRun(r.Store, scheduler, r.now(), runID, reason); IsRunTerminal(err) {
+		return false, nil // finished after the read above: already settled (#439)
+	} else if err != nil {
 		return false, err
 	}
 	return true, nil
@@ -719,7 +727,13 @@ func (r PlanReconciler) movedUpstream(assignment domain.AgentAssignment) (string
 		if !found {
 			continue
 		}
-		if _, settled := runSettled(run); !settled {
+		// A terminal failure leaves a last head, not a replacement input
+		// that dependent work can consume.
+		outcome, settled, err := r.settledRun(run)
+		if err != nil {
+			return "", err
+		}
+		if !settled || outcome != "completed" {
 			continue
 		}
 		head := run.Candidate.Revision
@@ -1170,7 +1184,11 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		if !found {
 			continue
 		}
-		if _, settled := runSettled(run); !settled {
+		_, settled, err := r.settledRun(run)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !settled {
 			return nil, &PlanStageBlock{
 				StageID: stage.ID, Kind: "upstream",
 				Reason: boundedDetail(fmt.Sprintf("stage %s is producing a different candidate; this stage starts against the head it settles on", upstream.StageID)),
@@ -1237,7 +1255,7 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 	if err != nil {
 		return nil, &PlanStageBlock{StageID: stage.ID, Kind: "agent", Reason: boundedDetail(err.Error())}, nil
 	}
-	upstreamBaseRevision, upstreamCandidate, err := r.upstreamBase(assignment)
+	upstreamBaseRevision, upstreamCandidate, err := r.objectiveStageBase(plan, stage, assignment)
 	if err != nil {
 		return nil, &PlanStageBlock{StageID: stage.ID, Kind: "upstream", Reason: boundedDetail(err.Error())}, nil
 	}
@@ -1262,7 +1280,7 @@ func (r PlanReconciler) startAgentStage(ctx context.Context, plan domain.Enginee
 		// bindings and can outspend the remainder before anything settles.
 		StageBudget: remainingHeadroom(plan, snapshot).tighten(assignment.Budget),
 	}
-	outcome, err := engine.StartPlanStageRun(ctx, r.Issue, binding)
+	outcome, err := r.startObjectiveStage(ctx, engine, plan, stage, binding)
 	if err != nil {
 		return nil, &PlanStageBlock{StageID: stage.ID, Kind: "run", Reason: boundedDetail(err.Error())}, nil
 	}
@@ -1380,9 +1398,17 @@ func (r PlanReconciler) upstreamBase(assignment domain.AgentAssignment) (string,
 	if err != nil {
 		return "", nil, fmt.Errorf("upstream stage %q run %s could not be projected: %w", subject.StageID, subject.RunID, err)
 	}
-	if projection.PullRequest != nil {
-		// Published: the governed remote already has this commit, so the
-		// ordinary clone reaches it and nothing needs transferring.
+	if projection.PullRequest != nil && !projection.PullRequest.Stale && projection.PullRequest.HeadRevision == subject.Candidate {
+		// Published: the governed remote has a live pull request whose head IS
+		// the exact candidate this stage froze, so the ordinary clone reaches it
+		// and nothing needs transferring.
+		//
+		// A stale observation, or one whose head has moved past this frozen
+		// candidate, is not proof of anything about THIS commit - a producer
+		// that published candidate A and later produced unpublished candidate B
+		// leaves a pull request the remote can resolve, but not at B. Treating
+		// that PR as proof for B would select a base the remote cannot actually
+		// serve, so the unpublished-candidate transport below is used instead.
 		return subject.Candidate, nil, nil
 	}
 	// NOT PUBLISHED, which is not the same as not available. The commit exists
@@ -1471,21 +1497,23 @@ func (r PlanReconciler) upstreamSubject(assignment domain.AgentAssignment) (*dom
 
 // containsAll reports whether one candidate has every other as an ancestor.
 //
-// The proof runs in the CANDIDATE'S OWN runtime-owned workspace, which is the
-// only place both objects are guaranteed to exist: a sibling producer's commit
-// was never fetched anywhere else. A workspace that has been reclaimed, or an
-// object that is genuinely absent, proves nothing and therefore answers false -
-// the caller refuses rather than assuming a relationship it could not check.
+// The proof runs in the candidate's run's verified subject store (#437), which
+// holds the candidate's whole history re-hashed - never in its provider-
+// writable object database, where a graft or a swapped commit could relate
+// two siblings. A sibling's commit is an ancestor only if it is in that
+// history. A store that cannot be had, or an object that is genuinely absent,
+// proves nothing and therefore answers false - the caller refuses rather than
+// assuming a relationship it could not check.
 func (r PlanReconciler) containsAll(candidate domain.UpstreamOutput, all []domain.UpstreamOutput) (bool, error) {
-	dir := candidateDir(r.StateDir, candidate.RunID)
-	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+	store, err := subjectStore(candidateDir(r.StateDir, candidate.RunID), candidate.Candidate)
+	if err != nil {
 		return false, nil
 	}
 	for _, other := range all {
 		if other.Candidate == candidate.Candidate {
 			continue
 		}
-		if _, err := runGit(dir, "merge-base", "--is-ancestor", other.Candidate, candidate.Candidate); err != nil {
+		if _, err := runGit(store, "merge-base", "--is-ancestor", other.Candidate, candidate.Candidate); err != nil {
 			return false, nil
 		}
 	}
@@ -1576,6 +1604,24 @@ func (r PlanReconciler) settleFinishedStages(plan domain.EngineeringPlan, snapsh
 		if _, err := r.attributeRunSpend(plan, snapshot, stage.ID, projection.RunID); err != nil {
 			return settled, err
 		}
+		// A reviewer whose INVOCATION failed reached no verdict. It is performed
+		// once more under a new generation instead of settling failed (#669); see
+		// plan_reviewer_recovery.go for what is preserved and what bounds it.
+		if outcome == string(Failed) {
+			retry, err := r.retryFailedReviewer(plan, stage, projection, run)
+			if err != nil {
+				return settled, err
+			}
+			if retry != "" {
+				if err := r.appendPlan(plan.ID, EventPlanStageSettled, PlanStageSettledPayload{
+					StageID: stage.ID, Outcome: planStageInvalidated, Revision: plan.Revision, Reason: retry,
+				}); err != nil {
+					return settled, err
+				}
+				settled = append(settled, stage.ID)
+				continue
+			}
+		}
 		if err := r.appendPlan(plan.ID, EventPlanStageSettled, PlanStageSettledPayload{
 			StageID: stage.ID, Outcome: outcome, Reason: boundedDetail(stageSettlementReason(outcome, run)),
 		}); err != nil {
@@ -1639,6 +1685,11 @@ func (r PlanReconciler) stageAcceptance(plan domain.EngineeringPlan, stage domai
 	case terminalDisposition(run.Disposition):
 		return "failed", true, nil
 	case run.Disposition == Waiting && run.Reason == ReasonGoalStateReached:
+		// A run that has asked a human, or is about to have its question
+		// admitted, has not produced a head this stage may settle on.
+		if awaiting, err := r.awaitsHumanDecision(run); err != nil || awaiting {
+			return "", false, err
+		}
 	default:
 		return "", false, nil
 	}
@@ -1653,7 +1704,7 @@ func (r PlanReconciler) stageAcceptance(plan domain.EngineeringPlan, stage domai
 	// answers "is this change acceptable". A reviewer that changed nothing has
 	// still done its job, and re-running the producer's own tests over the
 	// producer's own tree is not an independent answer to the review question.
-	if stage.Role == domain.RoleReviewer {
+	if stage.Role.ProducesReviewVerdict() {
 		return r.reviewAcceptance(plan, stage, projection)
 	}
 	events, err := r.Store.Events(run.ID)
@@ -1707,7 +1758,10 @@ func (r PlanReconciler) reviewAcceptance(plan domain.EngineeringPlan, stage doma
 	if !found {
 		return "", false, nil
 	}
-	subject, ok := r.reviewSubject(assignment)
+	subject, ok, err := r.reviewSubject(assignment)
+	if err != nil {
+		return "", false, err
+	}
 	if !ok {
 		// A reviewer with no frozen upstream has nothing it was asked to judge.
 		// Settling it either way would be inventing a subject for a verdict.
@@ -1746,8 +1800,8 @@ func (r PlanReconciler) stageWorkStopped(projection PlanStageProjection) (bool, 
 	if err != nil || !found {
 		return false, err
 	}
-	_, stopped := runSettled(run)
-	return stopped, nil
+	_, stopped, err := r.settledRun(run)
+	return stopped, err
 }
 
 // deliverBlockingReviews hands each blocking reviewer verdict to the run that
@@ -1848,12 +1902,21 @@ func unreachableUpstream(stage domain.PlanStage, assignment domain.AgentAssignme
 // the LAST frozen upstream is the head that combination settles on - the same
 // one upstreamBase materializes the workspace from, so the verdict and the
 // workspace are answers about one tree by construction.
-func (r PlanReconciler) reviewSubject(assignment domain.AgentAssignment) (domain.UpstreamOutput, bool) {
+//
+// A subject-selection failure - divergent upstream siblings with no single one
+// containing the others - is returned rather than folded into "no subject".
+// upstreamBase propagates that same error; collapsing it here would leave a
+// reviewer stage pending with no operator-visible reason once containment
+// becomes unprovable, the one case this is meant to surface rather than hide.
+func (r PlanReconciler) reviewSubject(assignment domain.AgentAssignment) (domain.UpstreamOutput, bool, error) {
 	subject, err := r.upstreamSubject(assignment)
-	if err != nil || subject == nil {
-		return domain.UpstreamOutput{}, false
+	if err != nil {
+		return domain.UpstreamOutput{}, false, err
 	}
-	return *subject, true
+	if subject == nil {
+		return domain.UpstreamOutput{}, false, nil
+	}
+	return *subject, true, nil
 }
 
 // stageSettlementReason is what an operator reads beside a settled stage.
@@ -1880,6 +1943,9 @@ func (r PlanReconciler) providerInvocations(runID string) (int, error) {
 		if operation.Kind == OpExecutionInvoke {
 			total += operation.Attempt
 		}
+		if repairReachedProvider(operation) {
+			total++
+		}
 	}
 	return total, nil
 }
@@ -1892,6 +1958,12 @@ func (r PlanReconciler) providerInvocations(runID string) (int, error) {
 func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanGateSatisfiedPayload, bool, error) {
 	payload := PlanGateSatisfiedPayload{StageID: stage.ID, Kind: string(stage.Kind), Claims: stage.RequiredClaims}
 	runs := upstreamRuns(stage, plan, snapshot)
+	if stage.Kind == domain.StageHumanDecisionGate && stage.Action != nil && stage.Action.Type == PublicationActionType {
+		runs = publicationCandidateRuns(stage, plan, snapshot)
+		if len(runs) != 1 {
+			return payload, false, nil
+		}
+	}
 	if len(runs) == 0 {
 		// A gate with no upstream run has nothing to be satisfied BY. It waits
 		// rather than being treated as vacuously true: a gate that passes
@@ -1933,7 +2005,25 @@ func (r PlanReconciler) gateSatisfaction(stage domain.PlanStage, plan domain.Eng
 			payload.ProvingRuns = append(payload.ProvingRuns, runID)
 			payload.ProvenHeads = append(payload.ProvenHeads, runID+"@"+projected.Head())
 		case domain.StageHumanDecisionGate:
-			decision, satisfied := humanDecision(events, stage.Action, projected.Head())
+			run, found, err := r.Store.Run(runID)
+			if err != nil {
+				return payload, false, err
+			}
+			if !found {
+				continue
+			}
+			runSnapshot, err := Reduce(run, events)
+			if err != nil {
+				return payload, false, err
+			}
+			runSnapshot.Candidate = Candidate{
+				Branch: candidateBranch(runID), Revision: projected.CandidateRevision, Tree: projected.CandidateTree,
+			}
+			runSnapshot.Contract = projected.Contract
+			if runSnapshot.Contract == (Ref{}) {
+				runSnapshot.Contract = run.Contract
+			}
+			decision, satisfied := humanDecision(events, stage.Action, runSnapshot)
 			if !satisfied {
 				continue
 			}
@@ -1996,98 +2086,12 @@ func answersClaims(decision humanDecisionReference, required []string) bool {
 	return true
 }
 
-// humanDecision reports whether A PERSON decided this gate for this run.
-//
-// It reads the run's recorded human authority evidence and nothing else. An
-// authorized #7 decision is NOT accepted in its place: authority is authorized
-// whenever nothing is missing, which ordinary machine evidence can reach on its
-// own, so a producing run's auto-authorized publication could discharge the
-// very gate that stood in for a blocked independence obligation. A gate that
-// says a person decided has to be able to name the person's evidence.
-//
-// The evidence is the kernel's existing HumanAuthorityRecorded record - pinned
-// to a request, a candidate, a contract and a state digest - so the plan
-// invents no second approval system.
-func humanDecision(events []EngineeringEvent, action *domain.Action, head string) (humanDecisionReference, bool) {
-	for i := len(events) - 1; i >= 0; i-- {
-		event := events[i]
-		if event.Type != EventHumanAuthorityRecorded {
-			continue
-		}
-		var payload HumanAuthorityRecordedPayload
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			// An unreadable decision is not an absent one. Walking past it
-			// reaches an OLDER approval of the same head and satisfies the
-			// gate - an error answering the question "did a person approve
-			// this", which is the class this file swept elsewhere.
-			return humanDecisionReference{}, false
-		}
-		if action != nil && payload.Action != *action {
-			continue
-		}
-		// The decision has to be about THIS candidate. A person approves a
-		// change, not a run: carrying an approval of head A onto head B is the
-		// rule the run-level authority binding exists to prevent, and reading
-		// raw events here bypassed it - the gate re-opened when the head moved
-		// and then re-satisfied itself from the same stale approval, stamping
-		// it onto work nobody had seen.
-		if head != "" && payload.Candidate.Revision != head {
-			continue
-		}
-		// The NEWEST matching decision governs. Skipping a rejection to keep
-		// looking would let a gate be satisfied by an approval the person has
-		// since reversed, which is the opposite of what a human decision gate
-		// is for.
-		if payload.Decision != "approve" {
-			return humanDecisionReference{}, false
-		}
-		return humanDecisionReference{
-			decision:        Ref{ID: payload.Request.ID, Revision: payload.Request.Revision},
-			humanEvidenceID: payload.EvidenceID,
-			claims:          payload.Requires,
-		}, true
-	}
-	return humanDecisionReference{}, false
-}
-
 func (r PlanReconciler) runProjection(runID string) (RunProjection, error) {
 	events, err := r.Store.Events(runID)
 	if err != nil {
 		return RunProjection{}, err
 	}
 	return Project(events)
-}
-
-// upstreamRuns are the child runs a gate judges: the runs of the agent stages
-// it transitively depends on. Transitive, because a gate placed after another
-// gate still judges the work, and the work is upstream of both.
-func upstreamRuns(stage domain.PlanStage, plan domain.EngineeringPlan, snapshot PlanSnapshot) []string {
-	seen := map[string]bool{}
-	var walk func(id string)
-	walk = func(id string) {
-		if seen[id] {
-			return
-		}
-		seen[id] = true
-		current, ok := plan.Stage(id)
-		if !ok {
-			return
-		}
-		for _, dependency := range current.DependsOn {
-			walk(dependency)
-		}
-	}
-	for _, dependency := range stage.DependsOn {
-		walk(dependency)
-	}
-	ids := make([]string, 0, len(seen))
-	for id := range seen {
-		if projection, ok := snapshot.Stages[id]; ok && projection.RunID != "" {
-			ids = append(ids, projection.RunID)
-		}
-	}
-	sort.Strings(ids)
-	return ids
 }
 
 // dependenciesSatisfied is the whole of dependency gating: a stage is ready
@@ -2111,6 +2115,48 @@ func planDependenciesSatisfied(stage domain.PlanStage, snapshot PlanSnapshot) (b
 		}
 	}
 	return true, ""
+}
+
+// planConfigurationHold says why a plan belongs to a controller-effective
+// configuration other than current, or "" when it does not (or does not exist).
+// Such a plan was proposed, resolved and budgeted under a configuration that no
+// longer governs, and its remaining stages would otherwise become new runs under
+// this one - carried across the #307 boundary without anyone sanctioning it.
+// It is held, not rewritten.
+//
+// A plan records the digest it was first claimed under. A plan from before that
+// record is judged by its identity instead: PlanID is derived from the
+// configuration, so a legacy plan whose id is not the one this configuration
+// derives for its source was not proposed under it. A legacy plan with any
+// other id is held too - fail closed. The way out is the same in every case:
+// `autonomy plan issue N` under the current configuration derives a different
+// id, so it is a new plan rather than this one.
+func planConfigurationHold(store *SQLiteOperationStore, planID string, current ConfigDigest) (string, error) {
+	recorded, found, err := store.planConfig(planID)
+	if err != nil || !found {
+		return "", err
+	}
+	held := fmt.Sprintf("configuration_changed: plan %s was proposed under a different controller-effective configuration; "+
+		"it is not carried across that boundary - propose the issue again under the current configuration", planID)
+	if recorded != "" {
+		want, err := Digest(current)
+		if err != nil || recorded == want {
+			return "", err
+		}
+		return held, nil
+	}
+	repository, issue, _, err := store.PlanSource(planID)
+	if err != nil {
+		return "", err
+	}
+	if issue <= 0 {
+		return held, nil
+	}
+	derived, err := derivePlanID(repository, issue, current)
+	if err != nil || derived == planID {
+		return "", err
+	}
+	return held, nil
 }
 
 // terminalStageState is a stage this plan will not touch again.
@@ -2356,4 +2402,16 @@ func (s *SQLiteOperationStore) PlanAssignment(planID string, revision, generatio
 		return domain.AgentAssignment{}, false, fmt.Errorf("decode durable assignment: %w", err)
 	}
 	return assignment, true, nil
+}
+
+// planServiceForReconcile is deps.Plans with its Registry refreshed from
+// PlanRegistry when wired (ADR-0008 reload), so the background reconciler
+// never resolves a stage against a startup snapshot once an operator writes
+// and reloads the artifact it was blocked on.
+func (s *Supervisor) planServiceForReconcile() PlanService {
+	service := s.deps.Plans
+	if s.deps.PlanRegistry != nil {
+		service.Registry = s.deps.PlanRegistry()
+	}
+	return service
 }

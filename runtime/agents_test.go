@@ -46,7 +46,7 @@ func (f *fakeAgentExecutor) Run(ctx context.Context, name string, args []string,
 	f.record(name, args, dir, env)
 	if f.block {
 		<-ctx.Done()
-		return CommandOutput{}, ctx.Err()
+		return CommandOutput{Owner: ownerOfCancellation(ctx)}, ctx.Err()
 	}
 	var out CommandOutput
 	if len(f.outputs) > 0 {
@@ -121,7 +121,9 @@ const capableHelp = `Options:
       --permission-mode <MODE>
       --approval-mode <MODE>    (choices: default, auto-edit, plan, yolo)
       --safe-mode
+      --disallowedTools <tools...>
       --output-format <format>  (choices: "text", "json", "stream-json")
+      --output-last-message <FILE>
       --verbose
       --extensions <NAME>
   -m, --model <MODEL>
@@ -510,10 +512,12 @@ func TestNativeAgentEnvironmentIsAnAllowlistWithoutBillingOverrides(t *testing.T
 					name, value, _ := strings.Cut(entry, "=")
 					// PATH so tools resolve, HOME so the CLI finds its own
 					// state, USER so a CLI whose credential lives in the OS
-					// keychain knows whose keychain to ask. All three are
-					// non-secret; the list is closed and every addition to it
-					// has to argue for itself here.
-					if name != "PATH" && name != "HOME" && name != "USER" {
+					// keychain knows whose keychain to ask, and GOENV at the
+					// null device so a worker cannot persist Go settings into
+					// the operator's config (#430). All are non-secret; the
+					// list is closed and every addition to it has to argue
+					// for itself here.
+					if name != "PATH" && name != "HOME" && name != "USER" && entry != "GOENV="+os.DevNull {
 						t.Fatalf("environment is not an allowlist: %q reached %s", name, kind)
 					}
 					if strings.Contains(value, "leaked-value-9c3") {

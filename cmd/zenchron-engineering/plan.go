@@ -117,10 +117,10 @@ func delegatePlanRevision(flags autonomyFlags, overrides autonomyOverrides, plan
 		repository, defaultBranch = target.Identity, target.DefaultBranch
 	}
 	delegated, payload, err := delegatePayload(stateDir, runtime.ControlRequest{
-		Command: runtime.ControlPlanRevise, PlanID: planID, Issue: issue,
-		Repository: repository, DefaultBranch: defaultBranch, Template: flags.Template,
+		Command: runtime.ControlPlanRevise, PlanID: planID, Issue: issue, Agent: flags.Agent,
+		Repository: repository, DefaultBranch: defaultBranch, Template: flags.Template, AcceptanceFeature: flags.AcceptanceFeature,
 		Deterministic: flags.Deterministic, SubstituteHuman: flags.SubstituteHuman,
-		Note: flags.Note, Operator: requester.ID,
+		Note: flags.Note, Operator: requester.ID, ObjectiveWorkflow: true,
 	})
 	if !delegated {
 		return false, 0, nil
@@ -166,7 +166,7 @@ func reportDelegatedDecision(flags autonomyFlags, overrides autonomyOverrides, p
 	if err != nil {
 		return runtime.ExitFailed, cause
 	}
-	decided, applied := decisionEventFor(events, verb, revision, digest)
+	decided, applied := runtime.DecisionEventFor(events, verb, revision, digest)
 	if !applied {
 		return runtime.ExitFailed, fmt.Errorf("%w (the decision was NOT applied: no %s of revision %d at digest %s is recorded)",
 			cause, verb, revision, digest)
@@ -174,38 +174,6 @@ func reportDelegatedDecision(flags autonomyFlags, overrides autonomyOverrides, p
 	fmt.Fprintf(stdout, "plan %s revision %d %s by %s\n", terminalSafe(planID), decided.Revision, terminalSafe(string(decided.Status)), terminalSafe(decided.Operator))
 	fmt.Fprintf(stdout, "the supervisor applied it but its reply did not arrive (%s); the durable record above is what happened\n", terminalSafe(cause.Error()))
 	return runtime.ExitCompleted, nil
-}
-
-// decisionEventFor finds the durable decision this invocation asked for, by
-// revision, digest and verb. It reads the journal rather than a projection
-// because a projection answers about the present and this question is about the
-// past: a later proposal, a later decision, or a supersession all move the
-// present without unmaking what already happened.
-func decisionEventFor(events []runtime.EngineeringEvent, verb string, revision int, digest string) (runtime.PlanApproval, bool) {
-	want := runtime.EventPlanApproved
-	status := domain.ApprovalApproved
-	if verb == "reject" {
-		want, status = runtime.EventPlanRejected, domain.ApprovalRejected
-	}
-	for _, event := range events {
-		if event.Type != want {
-			continue
-		}
-		var payload runtime.PlanDecisionPayload
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			// An unreadable decision record is not this decision. It is also
-			// not a reason to claim one landed.
-			continue
-		}
-		if payload.Revision != revision || payload.Digest != digest {
-			continue
-		}
-		return runtime.PlanApproval{
-			Revision: payload.Revision, Digest: payload.Digest,
-			Status: status, Operator: payload.Operator, Note: payload.Note,
-		}, true
-	}
-	return runtime.PlanApproval{}, false
 }
 
 // renderDelegatedPlan prints a supervisor's answer exactly as a locally applied
@@ -227,7 +195,7 @@ func renderDelegatedPlan(flags autonomyFlags, payload []byte, decided bool, stdo
 		}
 		return runtime.ExitCompleted, nil
 	}
-	return planOutput(flags, view, stdout, "proposed")
+	return renderObjectivePlan(flags, view, stdout, "proposed")
 }
 
 // planComposition is the wiring one plan command needs: the shared composition,
@@ -267,6 +235,10 @@ func openPlanReader(flags autonomyFlags, overrides autonomyOverrides) (*planRead
 	if err != nil {
 		return nil, err
 	}
+	if config, err = runtime.ResolveConfigIdentity(store, config); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	registry, err := planning.LoadRegistry(config.PlanningDir)
 	if err != nil {
 		_ = store.Close()
@@ -289,6 +261,7 @@ func openPlanReader(flags autonomyFlags, overrides autonomyOverrides) (*planRead
 		service: runtime.PlanService{
 			Store: store, Clock: runtime.RealClock{}, Registry: registry,
 			Agents: described, DefaultAgent: agents.Default(), Envelope: config.PlanEnvelope(),
+			Config: config.Digest,
 		},
 		release: func() { _ = store.Close() },
 	}, nil
@@ -326,7 +299,7 @@ func buildPlanComposition(flags autonomyFlags, overrides autonomyOverrides) (*pl
 		service: runtime.PlanService{
 			Store: built.store, Clock: runtime.RealClock{}, Registry: registry,
 			Agents: agents, DefaultAgent: built.agents.Default(),
-			Envelope: built.config.PlanEnvelope(),
+			Envelope: built.config.PlanEnvelope(), Config: built.config.Digest,
 		},
 	}, nil
 }
@@ -370,6 +343,13 @@ func proposeWithComposition(ctx context.Context, composed *planComposition, flag
 // every run in the fleet - the reconciler takes the same lock before it drives
 // anything - so the long part runs unlocked and only the append is serialized.
 func proposeSerialized(ctx context.Context, composed *planComposition, flags autonomyFlags, issue int, planID string, stdout io.Writer, under func(func() error) error) (int, error) {
+	// A revision of a plan held for a configuration change is refused before
+	// anything - a forge read, a planning invocation - is spent on it.
+	if planID != "" {
+		if err := composed.service.RefuseConfigurationHold(planID); err != nil {
+			return runtime.ExitInvalid, err
+		}
+	}
 	intent, err := composed.engine.CompilePlanIntent(ctx, issue)
 	if err != nil {
 		return runtime.ExitFailed, err
@@ -380,9 +360,9 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 		}
 	}
 	input := runtime.ProposeInput{
-		PlanID: planID, Objective: intent.Objective, Subject: intent.Subject,
+		PlanID: planID, Objective: intent.Objective, Subject: intent.Subject, AcceptanceFeature: flags.AcceptanceFeature,
 		Repository: composed.target.Identity, Contract: intent.Contract,
-		Model: intent.Model, Facts: intent.Facts, Template: flags.Template, Issue: issue,
+		Model: intent.Model, Facts: intent.Facts, Template: flags.Template, Profile: flags.Profile, Issue: issue,
 		// The OBSERVED trusted base, from the same intent compilation that read
 		// it through the governed remote. This is the only path in the product
 		// that can authorize a plan moving onto a newer base, and it can do so
@@ -436,7 +416,7 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 		}
 	}
 	var plan domain.EngineeringPlan
-	write := func() (err error) { plan, err = composed.service.Propose(ctx, input); return err }
+	write := func() (err error) { plan, err = proposePlanAndGraph(ctx, composed, input, flags); return err }
 	if under != nil {
 		err = under(write)
 	} else {
@@ -449,7 +429,7 @@ func proposeSerialized(ctx context.Context, composed *planComposition, flags aut
 	if err != nil {
 		return runtime.ExitFailed, err
 	}
-	return planOutput(flags, view, stdout, "proposed")
+	return renderObjectivePlan(flags, view, stdout, "proposed")
 }
 
 // recordPlanningRefusal preserves a refused reasoning invocation and returns the
@@ -517,7 +497,7 @@ func reasonAboutPlan(ctx context.Context, composed *planComposition, intent runt
 		ControllerID:          composed.engine.ControllerIdentityID(),
 		AvailableRoles:        domain.EngineeringRoles(),
 		AvailableCapabilities: domain.EngineeringCapabilities(),
-		Artifacts:             composed.engine.PlanningArtifacts(),
+		Artifacts:             composed.engine.PlanningArtifacts(), Budgets: composed.engine.PlanningBudget(0),
 		// The referenced same-repository issues, pinned by the runtime through
 		// the governed forge boundary before this invocation. The provider
 		// makes no network request of its own; it is SHOWN this text, as
@@ -748,6 +728,13 @@ func planAttemptsOutput(flags autonomyFlags, view runtime.PlanAttemptsView, stdo
 			fmt.Fprintf(stdout, "  workspace       %s (%s -> %s)\n",
 				map[bool]string{true: "unchanged", false: "CHANGED"}[reasoning.WorkspaceUnchanged],
 				terminalSafe(short(reasoning.WorkspaceDigestBefore)), terminalSafe(short(reasoning.WorkspaceDigestAfter)))
+			if inv := reasoning.Invocation; inv != nil {
+				fmt.Fprintf(stdout, "  invocation      termination=%s progress_mode=%s elapsed=%s structured_events=%d permission_denials=%s\n",
+					terminalSafe(orUnknown(inv.TerminationCause)), terminalSafe(orUnknown(inv.ProgressMode)), inv.Elapsed,
+					inv.StructuredEvents, permissionDenials(*inv))
+			} else if reasoning.InvocationDroppedForSize {
+				fmt.Fprintln(stdout, "  invocation      reported, but dropped: it did not fit this attempt record")
+			}
 		}
 		// WHAT IT WAS BOUND TO, on both sides, whenever the record holds them.
 		// A refusal about a subject relationship whose record shows neither
@@ -1203,13 +1190,19 @@ func writePlanBudget(stdout io.Writer, view runtime.PlanView) {
 		view.Envelope.MaxConcurrency)
 	// RE-PERFORMANCE HEADROOM, said out loud. A stage whose upstream candidate
 	// is replaced is performed again as a new execution generation, and that
-	// needs a child run - so an envelope with exactly one child run per agent
-	// stage is legal, approvable, and blocks on budget the first time anything
-	// upstream moves. An operator reading the envelope cannot see that from the
-	// numbers alone.
+	// needs a child run - so an envelope with exactly one child run per
+	// run-creating agent stage is legal, approvable, and blocks on budget the
+	// first time anything upstream moves. An operator reading the envelope
+	// cannot see that from the numbers alone.
+	//
+	// A planner-role stage never counts here: it performs its work through a
+	// verified non-mutating planning invocation and never becomes an
+	// EngineeringRun (see PlanReconciler's own check on InvocationMode), so it
+	// spends no child_run from the envelope. Counting it as demand warned an
+	// operator to raise a ceiling that was already adequate.
 	agentStages := 0
 	for _, stage := range view.Plan.Stages {
-		if stage.Kind == domain.StageAgent {
+		if stage.Kind == domain.StageAgent && stage.InvocationMode != domain.InvocationModeNonMutatingPlanning {
 			agentStages++
 		}
 	}

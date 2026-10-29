@@ -20,7 +20,6 @@ type ReviewContinuationGrant struct {
 func (s *runState) outstandingReviewKeys() []string {
 	outstanding := map[string]bool{}
 	consumed := map[string]bool{}
-	delivered := map[string][]string{}
 	completed := map[string]string{}
 	publishedHead := ""
 	for _, e := range s.events {
@@ -45,7 +44,6 @@ func (s *runState) outstandingReviewKeys() []string {
 			if decodeJSON(e.Payload, &p) == nil {
 				for _, key := range p.Keys {
 					consumed[key] = true
-					delivered[p.OperationID] = append(delivered[p.OperationID], key)
 				}
 			}
 		case EventOperationAfter:
@@ -53,12 +51,21 @@ func (s *runState) outstandingReviewKeys() []string {
 			if decodeJSON(e.Payload, &op) != nil || op.State != Succeeded {
 				continue
 			}
-			// A successful no-change response leaves the already verified and
-			// published subject intact. It needs no new commit or PR update.
+			// An EXPLICIT no-change resolution, bound to this attempt's exact
+			// delivered keys and exact subject, leaves the already verified and
+			// published subject intact: it needs no new commit or PR update.
+			//
+			// This reads ResolvedFeedback and nothing else (#376). The
+			// provider simply returning success with an unchanged workspace is
+			// NOT read as a resolution: that shape is indistinguishable from an
+			// invocation that deferred unfinished background work and exited,
+			// and treating it as completion is the defect this field exists to
+			// close. A legitimate no-change outcome must be stated through
+			// AdmitFeedbackResolution, never inferred here.
 			if op.Kind == OpExecutionInvoke && publishedHead != "" && completed[op.ID] == publishedHead {
 				var result mutationResult
-				if decodeJSON(op.Result, &result) == nil && result.ProviderExecuted && !result.Mutated {
-					for _, key := range delivered[op.ID] {
+				if decodeJSON(op.Result, &result) == nil {
+					for _, key := range result.ResolvedFeedback {
 						delete(outstanding, key)
 					}
 				}
@@ -95,7 +102,7 @@ func (s *runState) reviewContinuationRemaining(now time.Time) time.Duration {
 	if !ok {
 		return 0
 	}
-	spent := s.activeElapsed(now) - grant.ActiveBaseline
+	spent := s.executionElapsed(now) - grant.ActiveBaseline
 	if spent < 0 {
 		spent = 0
 	}
@@ -118,8 +125,8 @@ func (r *EngineeringRuntime) grantReviewContinuation(s *runState) error {
 		return nil
 	}
 	limit := s.budgets().WallLimit
-	elapsed := s.activeElapsed(r.deps.Clock.Now())
-	if limit <= 0 || elapsed <= limit {
+	elapsed := s.executionElapsed(r.deps.Clock.Now())
+	if !runBudgetSpent(limit, elapsed) {
 		return nil
 	}
 	allowance := limit
@@ -142,7 +149,7 @@ func (s *runState) reviewContinuationDelivered() bool {
 		return false
 	}
 	for _, spec := range operationSpecs {
-		if observationKinds[spec.kind] {
+		if OperationCapacityClass(spec.kind) == CapacityObservation {
 			continue
 		}
 		key, wanted := spec.bind(s)

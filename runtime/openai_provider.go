@@ -49,6 +49,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 const openaiProviderID = "openai-responses"
@@ -65,52 +67,6 @@ const priorAttemptPreamble = "UNTRUSTED PRIOR-ATTEMPT OBSERVATIONS (runtime-supp
 // satisfies it; no dependency is added.
 type Doer interface {
 	Do(*http.Request) (*http.Response, error)
-}
-
-// ProviderStop is the typed reason a bounded reasoning loop ended. Every exit
-// from the loop carries one, so exhaustion is diagnosable and never silent.
-type ProviderStop string
-
-const (
-	StopCompleted        ProviderStop = "completed"
-	StopIterationBudget  ProviderStop = "iteration_budget_exhausted"
-	StopToolCallBudget   ProviderStop = "tool_call_budget_exhausted"
-	StopTokenBudget      ProviderStop = "token_budget_exhausted"
-	StopDeadlineExceeded ProviderStop = "deadline_exceeded"
-	StopNoProgress       ProviderStop = "no_progress"
-	StopCancelled        ProviderStop = "cancelled"
-	StopProviderError    ProviderStop = "provider_error"
-	// StopCostBudgetUnenforceable means the request named a MaxCostMicros
-	// ceiling but no trusted cost oracle is configured. The Responses API
-	// reports token usage, not money, and there is no authoritative source of
-	// monetary cost here: a requested ceiling that cannot be checked is refused
-	// rather than silently honored as if it were enforced.
-	StopCostBudgetUnenforceable ProviderStop = "cost_budget_unenforceable"
-)
-
-// ProviderStopError is the diagnosable outcome of a bounded loop. ExecutionResult
-// has no field for a stop reason and adapters.go is shared, so the reason is
-// carried as a typed error the caller matches with errors.As.
-type ProviderStopError struct {
-	Reason ProviderStop
-	Detail string
-	// Status and Code are the SAFE control-plane facts about an HTTP exchange
-	// that actually happened: the response status, and the provider's own error
-	// code when it returned one. Both are absent when no exchange occurred.
-	// Neither is credential-bearing, and the response BODY is deliberately not
-	// here - it belongs in the redacted transcript artifact, never in a caller's
-	// durable diagnostic.
-	Status int
-	Code   string
-	// Param names WHICH request field the provider rejected. It is a short,
-	// provider-authored field path (the observed 400 named "tools[0].name"),
-	// never a message body: without it an operator has to open the raw
-	// transcript to learn what was actually wrong with the request.
-	Param string
-}
-
-func (e *ProviderStopError) Error() string {
-	return string(e.Reason) + ": " + e.Detail
 }
 
 type OpenAIProvider struct {
@@ -437,6 +393,7 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 	stop, detail := StopCompleted, ""
 	classification := FailureUnknown
 	httpStatus, providerCode, providerParam := 0, "", ""
+	exchanged := false
 
 	for iteration := 1; ; iteration++ {
 		if iteration > maxIterations {
@@ -457,13 +414,18 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 			if response.Error != nil {
 				providerCode, providerParam = response.Error.Code, response.Error.Param
 			}
-			if ctxErr := ctx.Err(); ctxErr != nil {
+			// The call ended BECAUSE its context ended only when the call's own
+			// error is that cancellation. An unrelated failure that merely
+			// coincides with a stop keeps its own class and stop reason.
+			if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(callErr, ctxErr) {
 				stop, detail = cancellationStop(ctxErr)
+				classification = cancellationOwner(ctx)
 			} else {
 				classification = classifyOpenAIFailure(providerCode, raw)
 			}
 			break
 		}
+		exchanged = true
 		if response.Model != "" {
 			model = response.Model
 		}
@@ -489,6 +451,7 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 		for _, call := range calls {
 			if err := ctx.Err(); err != nil {
 				stop, detail = cancellationStop(err)
+				classification = cancellationOwner(ctx)
 				break
 			}
 			toolCalls++
@@ -535,16 +498,16 @@ func (p OpenAIProvider) Execute(ctx context.Context, request ExecutionRequest) (
 	// attempt must not turn one redaction pass into a shared one.
 	artifacts, artifactErr := p.ArtifactStore.StoreExecutionAttemptTranscript(openaiProviderID, request.AttemptRef(), redactCredential(transcript.Bytes(), key), nil)
 	if artifactErr != nil {
-		return ExecutionResult{}, artifactErr
+		return ExecutionResult{Executed: exchanged}, artifactErr
 	}
 	// The result is an observation only: it makes no acceptance claim.
-	result := ExecutionResult{ProviderID: openaiProviderID, Model: model, AuthMode: p.AuthMode, Attempt: request.Attempt, Outcome: Succeeded, Tokens: &tokens, Artifacts: artifacts, PriorContext: priorContext}
+	result := ExecutionResult{ProviderID: openaiProviderID, Model: model, AuthMode: p.AuthMode, Attempt: request.Attempt, Outcome: execution.Succeeded, Tokens: &tokens, Artifacts: artifacts, PriorContext: priorContext, Executed: exchanged}
 	if stop == StopCompleted {
 		return result, nil
 	}
-	result.Outcome = OperationFailed
+	result.Outcome = execution.Failed
 	if stop == StopCancelled || stop == StopDeadlineExceeded {
-		result.Outcome = OperationCancelled
+		result.Outcome = execution.Cancelled
 	}
 	result.Failure = &ProviderFailure{Classification: classification, RawDiagnosticRef: artifacts[0].Path}
 	return result, &ProviderStopError{Reason: stop, Detail: detail, Status: httpStatus, Code: providerCode, Param: providerParam}
@@ -572,6 +535,16 @@ func classifyOpenAIFailure(code string, raw []byte) FailureClass {
 	return ClassifyProviderFailure(raw, nil)
 }
 
+// cancellationOwner is the class of a loop this provider ended because its
+// context ended, decided at that instant (#213): an operator stop is
+// run_cancelled; any other cause keeps the unknown it always had.
+func cancellationOwner(ctx context.Context) FailureClass {
+	if ownerOfCancellation(ctx) == OwnerOperatorStop {
+		return FailureRunCancelled
+	}
+	return FailureUnknown
+}
+
 func cancellationStop(err error) (ProviderStop, string) {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return StopDeadlineExceeded, "operation timeout reached"
@@ -591,11 +564,19 @@ func (p OpenAIProvider) call(ctx context.Context, key string, body []byte) (open
 	httpRequest.Header.Set("Authorization", "Bearer "+key)
 	httpResponse, err := p.HTTP.Do(httpRequest)
 	if err != nil {
+		// Only the context's own error is carried: it says the request ended
+		// because the context did, and it holds no provider text.
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return openaiResponse{}, 0, nil, fmt.Errorf("provider request failed: %w", ctxErr)
+		}
 		return openaiResponse{}, 0, nil, fmt.Errorf("provider request failed")
 	}
 	defer httpResponse.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(httpResponse.Body, 8<<20))
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return openaiResponse{}, httpResponse.StatusCode, raw, fmt.Errorf("provider response unreadable: %w", ctxErr)
+		}
 		return openaiResponse{}, httpResponse.StatusCode, raw, fmt.Errorf("provider response unreadable")
 	}
 	if httpResponse.StatusCode != http.StatusOK {

@@ -39,13 +39,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 // PermissionBypassRefusedError is the typed refusal for an unsafe
@@ -125,17 +126,11 @@ type cliInvocation struct {
 	// Bypass reports that the unsafe permission mode was explicitly authorized
 	// AND explicitly requested for this invocation.
 	Bypass bool
-	// ResultDir is the runtime-owned directory holding this invocation's typed
-	// result slot, or empty when the stage emits no typed result.
-	//
-	// It exists because the slot is deliberately OUTSIDE the candidate
-	// workspace - that placement is what stops repository content pre-seeding
-	// or predicting it - and a sandboxed CLI confines writes to the directories
-	// it was given. The first live reviewer completed its review, reached a
-	// BLOCK verdict, and could not write it: "requested permissions … but you
-	// haven't granted it yet". The runtime therefore names that ONE directory
-	// to the provider, and nothing else about the sandbox changes.
+	// ResultDir is the runtime-owned output directory for mutating typed results.
 	ResultDir string
+	// ReviewerResultPath is the host-captured final response, or Codex's
+	// last-message output path, for a read-only reviewer.
+	ReviewerResultPath string
 	// ScratchDir is runtime-owned validation state outside candidate source.
 	ScratchDir string
 	// RequiredTools are the executables this invocation's contract obliges the
@@ -231,16 +226,29 @@ type cliAgentSpec struct {
 	ReadOnly *cliReadOnlyMode
 	// ProgressMode is the oracle that supervises this CLI's inactivity bound.
 	// Empty is progressByteOutput: any stdout or stderr byte refreshes it.
+	// progressByteOutputExcludingTransportChatter is byte output where a line
+	// matching InactivityNonProgress or a Signals Match does not refresh it
+	// (#314, transport_chatter.go).
 	// progressStructuredClaudeEvents supervises it from Claude's stream-json
 	// events instead (#322, claude_stream.go), which requires an executor that
 	// tees stdout to the parser and a per-physical-attempt window.
 	ProgressMode string
+	// InactivityNonProgress are lowercase substrings of this CLI's own
+	// transport-retry chatter. A matching output line does not refresh the
+	// inactivity window. It is NOT a diagnostic: nothing here is ever read by
+	// classifyAgentFailure, so a match can withhold a refresh and never grant a
+	// failure class.
+	InactivityNonProgress []string
 	// InvocationEnv returns non-secret provider controls for the MAIN
 	// invocation only, from the CONFIGURED per-attempt inactivity window
 	// (ProviderBudget.InactivityWindow), never from a remainder.
 	// Probes never receive them, and withInvocationEnv refuses any credential-
 	// shaped name or any name the allowlisted environment already sets.
 	InvocationEnv func(inactivityWindow time.Duration) ([]string, error)
+	// ControlEnv names this provider's own non-secret control variables, so
+	// invocation provenance records them - present or absent - beside the
+	// runtime's common allowlist (#391). HomeEnv is recorded too.
+	ControlEnv []string
 	// PromptArgIndex is the position of the prompt in the vector Args builds,
 	// counted from the END so a leading-flag change cannot silently shift it.
 	// Provenance replaces exactly that element, so the prompt - which carries
@@ -325,7 +333,9 @@ type CLIAgentProvider struct {
 	// GitBroker is the argv that decides one provider Git command - the
 	// controller's own executable and its broker subcommand. See git_guard.go
 	// for why it is a parameter and not something the boundary discovers.
-	GitBroker []string
+	GitBroker          []string
+	VerificationBroker []string
+	verificationBin    string
 	// RequireGitGuard makes the #241 boundary a PRECONDITION of dispatch
 	// rather than a best effort.
 	//
@@ -350,6 +360,10 @@ type CLIAgentProvider struct {
 	// provider builds - including the ones it builds while probing - has to
 	// agree about it. A nil guard is a no-op at every call site it reaches.
 	gitGuard *GitGuard
+	// frontendEnv and frontendCache are the offline npm environment and its
+	// provenance for the invocation in flight, set by Execute like gitGuard.
+	frontendEnv   []string
+	frontendCache *domain.FrontendCacheObservation
 }
 
 func (p CLIAgentProvider) spec() (cliAgentSpec, error) { return specForKind(p.Agent.Kind) }
@@ -485,8 +499,22 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 	// spelling fail closed rather than reach the candidate repository. See
 	// git_guard.go, including what it does not claim.
 	env := []string{"PATH=" + p.gitGuard.SearchPath(searchPath)}
+	if p.verificationBin != "" {
+		env[0] = "PATH=" + p.verificationBin + string(os.PathListSeparator) + p.gitGuard.SearchPath(searchPath)
+	}
 	env = append(env, p.gitGuard.Env()...)
 	env = append(env, p.toolchainEnv()...)
+	env = append(env, p.frontendEnv...)
+	// GOENV IS THE NULL DEVICE FOR EVERY WORKER, toolchain or not, scratch or
+	// not (#430). Unset, Go reads and `go env -w` WRITES the operator's own
+	// os.UserConfigDir()/go/env under the HOME below. GOENV=off did not stop
+	// that either (go1.27.1 on darwin still wrote the default file). With the
+	// null device a plain `go env -w` from a worker is discarded.
+	//
+	// This is hygiene, not a boundary: a worker that sets its own GOENV, or
+	// writes the file directly, still reaches the operator's HOME. Isolating
+	// HOME is out of scope here.
+	env = append(env, "GOENV="+os.DevNull)
 	if home == "" {
 		return env
 	}
@@ -514,6 +542,121 @@ func (p CLIAgentProvider) env(spec cliAgentSpec, home string) []string {
 		env = append(env, spec.HomeEnv+"="+home)
 	}
 	return env
+}
+
+// providerControlNames is the runtime's NON-SECRET allowlist of the
+// provider-control variables env() and toolchainEnv() can set (#391). Only
+// these, plus the spec's HomeEnv and ControlEnv, are ever recorded; a name
+// that is not here is not recorded whatever the process received.
+var providerControlNames = []string{
+	"PATH", "HOME", "GOENV", brokeredGitDirEnv,
+	"GOMODCACHE", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GOFLAGS",
+	"TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH",
+	"NPM_CONFIG_USERCONFIG", "NPM_CONFIG_GLOBALCONFIG",
+}
+
+// providerEnvNotRecorded is what env() passes and provenance deliberately
+// omits. USER is host/operator identity, not a governance input.
+var providerEnvNotRecorded = []string{"USER"}
+
+// recordedEnvNames is the closed set of names provider_environment may carry:
+// the common allowlist plus every spec's HomeEnv and ControlEnv, nothing else
+// (no case variant, no unlisted name).
+func recordedEnvNames(spec cliAgentSpec) []string {
+	names := slices.Clone(providerControlNames)
+	if spec.HomeEnv != "" {
+		names = append(names, spec.HomeEnv)
+	}
+	return append(names, spec.ControlEnv...)
+}
+
+// recordedEnvName reports whether any adapter records name.
+func recordedEnvName(name string) bool {
+	for _, spec := range cliAgentSpecs {
+		if slices.Contains(recordedEnvNames(spec), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// hashedProviderEnvNames are the common host-path names hashedEnvName covers.
+var hashedProviderEnvNames = []string{"PATH", "HOME", brokeredGitDirEnv, "TMPDIR", "GOTMPDIR", "GOCACHE", "GOPATH", "GOMODCACHE", "NPM_CONFIG_USERCONFIG", "NPM_CONFIG_GLOBALCONFIG"}
+
+// hashedEnvName reports the names whose value is recorded only as an
+// identity: every variable whose value is a host path - PATH, HOME, the Git
+// guard sentinel, the scratch and Go cache locations, and every provider
+// state-home variable. The durable record keeps same/different identity,
+// never the literal path.
+func hashedEnvName(name string) bool {
+	if slices.Contains(hashedProviderEnvNames, name) {
+		return true
+	}
+	for _, spec := range cliAgentSpecs {
+		if spec.HomeEnv != "" && spec.HomeEnv == name {
+			return true
+		}
+	}
+	return false
+}
+
+// domainSeparatedSHA256 is the identity construction #84's home_identity
+// specifies: lowercase hex SHA-256 of tag + NUL + value. A distinct tag per
+// use keeps one value's identity in one place from matching it in another.
+func domainSeparatedSHA256(tag, value string) string {
+	sum := sha256.Sum256([]byte(tag + "\x00" + value))
+	return hex.EncodeToString(sum[:])
+}
+
+// providerEnvIdentityTag is the domain tag of one recorded variable.
+func providerEnvIdentityTag(name string) string { return "zenchron/provider-env/" + name + "/v1" }
+
+// credentialShapedName is the one test for an environment NAME that may carry
+// a credential; such a name is never added and never recorded.
+func credentialShapedName(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, secret := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"} {
+		if strings.Contains(upper, secret) {
+			return true
+		}
+	}
+	return false
+}
+
+// urlUserinfo matches the userinfo of a URL (scheme://user:token@host), the
+// shape a credential takes inside an otherwise non-secret value such as a
+// GOPROXY list. The match is greedy up to the LAST @ before the first /, so a
+// raw @ inside a password does not leave the password's tail behind.
+var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/\s]+@`)
+
+// providerEnvironment records the allowlisted names from the environment the
+// process was actually given. A name not passed is recorded with neither a
+// value nor an identity; a hashed name records only its identity (of "" when
+// passed empty); other values are redacted and bounded exactly as other
+// provenance detail is.
+func providerEnvironment(env []string, spec cliAgentSpec) []domain.EnvironmentEntry {
+	passed := map[string]string{}
+	for _, entry := range env {
+		if name, value, ok := strings.Cut(entry, "="); ok {
+			passed[name] = value // os/exec keeps the last duplicate too
+		}
+	}
+	names := recordedEnvNames(spec)
+	recorded := make([]domain.EnvironmentEntry, 0, len(names))
+	for _, name := range names {
+		if credentialShapedName(name) {
+			continue
+		}
+		entry := domain.EnvironmentEntry{Name: name}
+		if value, ok := passed[name]; ok && hashedEnvName(name) {
+			entry.SHA256 = domainSeparatedSHA256(providerEnvIdentityTag(name), value)
+		} else if ok {
+			bounded := sanitizedDetail(urlUserinfo.ReplaceAllString(value, "${1}[REDACTED]@"))
+			entry.Value, entry.Bounded = &bounded, bounded != value
+		}
+		recorded = append(recorded, entry)
+	}
+	return recorded
 }
 
 // probe requires the installed CLI to advertise every capability the runtime
@@ -575,114 +718,6 @@ func (p CLIAgentProvider) probeCapability(ctx context.Context, capability cliHel
 		}
 	}
 	return nil
-}
-
-// cliFlagChoice is one value a flag must advertise.
-type cliFlagChoice struct{ Flag, Value string }
-
-// advertisesChoice reports whether help output offers a value AS A CHOICE of a
-// flag. The value must appear as a whole word within the flag's own description
-// - the text from the flag name up to the next flag or blank line - so a
-// mention of the word elsewhere in the help output proves nothing about the
-// flag this adapter is about to pass.
-//
-// Only an occurrence that OPENS a help row counts (#322). Claude Code's help
-// mentions `--output-format=stream-json` inside the descriptions of three other
-// options before it reaches the --output-format row itself, so matching the
-// first occurrence anywhere accepted `stream-json` from a sentence about a
-// different flag - and the structured-progress probe would have passed against
-// a binary whose --output-format no longer offered it.
-func advertisesChoice(advertised, flag, value string) bool {
-	for offset := 0; ; {
-		index := strings.Index(advertised[offset:], flag)
-		if index < 0 {
-			return false
-		}
-		at := offset + index
-		start := at + len(flag)
-		if opensHelpRow(advertised, at, flag) && advertisesToken(flagDescription(advertised[start:]), value) {
-			return true
-		}
-		offset = start
-	}
-}
-
-// opensHelpRow reports whether the flag at index `at` is the option a help row
-// describes: it sits in the option column - at most six columns of indentation,
-// which covers commander's two and clap's two or six - optionally after a short
-// alias such as `-c, `, and it is neither the prefix of a longer flag nor the
-// `--flag=value` spelling prose uses. A wrapped description line is indented
-// much deeper, and the real Claude help wraps one onto a line that begins
-// `--output-format=stream-json)`.
-func opensHelpRow(text string, at int, flag string) bool {
-	lineStart := strings.LastIndexByte(text[:at], '\n') + 1
-	prefix := strings.TrimLeft(text[lineStart:at], " ")
-	indent := at - lineStart - len(prefix)
-	if len(prefix) == 4 && prefix[0] == '-' && wordCharacter(prefix, 1) && prefix[2:] == ", " {
-		prefix = ""
-	}
-	end := at + len(flag)
-	return prefix == "" && indent <= 6 && !wordCharacter(text, end) && (end >= len(text) || text[end] != '=')
-}
-
-// flagDescription is the run of help text belonging to one flag: everything up
-// to the next flag or the next blank line, whichever comes first.
-func flagDescription(text string) string {
-	// Normalized first: a CRLF help output would otherwise never match any of
-	// the cuts below and the whole remainder would count as one flag's
-	// description.
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	end := len(text)
-	cut := func(marker string) {
-		if next := strings.Index(text, marker); next >= 0 && next < end {
-			end = next
-		}
-	}
-	cut("\n  -")
-	cut("\n-")
-	// clap indents long-only flags by six spaces. Without this the "possible
-	// values" exception below can carry a description across the NEXT flag, and
-	// the choice check then accepts a value that belongs to a different flag -
-	// the exact association this function exists to require.
-	cut("\n      --")
-	cut("\n    --")
-	// A blank line ends the description UNLESS the next block is this flag's
-	// own value list. clap prints "Possible values:" as an indented block after
-	// a blank line, so cutting at the blank line put the choices outside the
-	// description and withheld a capability the binary advertises.
-	if blank := strings.Index(text, "\n\n"); blank >= 0 && blank < end {
-		rest := text[blank:]
-		if values := strings.Index(rest, "ossible values"); values < 0 || (end-blank) < values {
-			end = blank
-		}
-	}
-	return text[:end]
-}
-
-// advertisesToken reports whether help output contains a token as a whole word.
-// It deliberately does not assume quoting: a CLI may print its choices quoted,
-// bracketed, comma-separated or bare, and all of those are word boundaries.
-func advertisesToken(advertised, token string) bool {
-	for offset := 0; ; {
-		index := strings.Index(advertised[offset:], token)
-		if index < 0 {
-			return false
-		}
-		start := offset + index
-		end := start + len(token)
-		if !wordCharacter(advertised, start-1) && !wordCharacter(advertised, end) {
-			return true
-		}
-		offset = start + 1
-	}
-}
-
-func wordCharacter(text string, at int) bool {
-	if at < 0 || at >= len(text) {
-		return false
-	}
-	c := text[at]
-	return c == '-' || c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // version reads the CLI's own version. It is best effort: a CLI that does not
@@ -791,144 +826,13 @@ func (p CLIAgentProvider) Probe(ctx context.Context) AgentReadiness {
 }
 
 // missingTools is the declared required tools this worker's environment cannot
-// resolve, in declaration order.
-//
-// Resolution happens against the BROKERED path when one is declared. An
-// operator who declares required tools without a path is asking about the
-// inherited environment, which is answered honestly rather than refused: the
-// two halves of the toolchain are independently useful.
+// resolve, in declaration order, looked up through this adapter's executor.
 func (p CLIAgentProvider) missingTools() []string {
-	var missing []string
-	for _, tool := range p.Toolchain.RequiredTools {
-		if tool = strings.TrimSpace(tool); tool == "" {
-			continue
-		}
-		if !p.resolvesTool(tool) {
-			missing = append(missing, tool)
-		}
-	}
-	return missing
+	return missingToolchainTools(p.Toolchain, p.executor().LookPath)
 }
 
 func (p CLIAgentProvider) resolvesTool(tool string) bool {
-	if len(p.Toolchain.Path) > 0 {
-		for _, dir := range p.Toolchain.Path {
-			if strings.TrimSpace(dir) == "" {
-				continue
-			}
-			// An absolute candidate confines lookup to the declared directory.
-			candidate, err := filepath.Abs(filepath.Join(dir, tool))
-			if err != nil {
-				continue
-			}
-			if resolvesDeclaredExecutable(candidate) {
-				return true
-			}
-		}
-		return false
-	}
-	return p.executor().LookPath(tool) == nil
-}
-
-// resolvesDeclaredExecutable checks the declared toolchain's executable files.
-// On Unix, retain the file-mode readiness check: LookPath additionally uses
-// access syscalls on some platforms, which can be denied by the supervisor's
-// sandbox even when the worker's execution environment permits the tool.
-// Windows requires native extension lookup (PATHEXT), not Unix mode bits.
-func resolvesDeclaredExecutable(candidate string) bool {
-	if runtime.GOOS == "windows" {
-		_, err := exec.LookPath(candidate)
-		return err == nil
-	}
-	info, err := os.Stat(candidate)
-	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
-}
-
-// InvocationProvenance is the durable, non-secret record of HOW one attempt was
-// invoked. It is what makes a constrained native run and an explicitly
-// authorized bypass run distinguishable forever.
-//
-// Argv is the effective argument vector with the prompt element replaced by a
-// digest reference. The prompt carries untrusted third-party text and is
-// unbounded; every security-relevant flag is short and is kept verbatim.
-type InvocationProvenance struct {
-	AgentID      string    `json:"agent_id"`
-	ProviderKind string    `json:"provider_kind"`
-	TrustMode    TrustMode `json:"trust_mode"`
-	Model        string    `json:"model,omitempty"`
-	Executable   string    `json:"executable"`
-	Version      string    `json:"provider_version,omitempty"`
-	// SandboxMode is empty when the provider exposes no selectable sandbox.
-	SandboxMode    string `json:"sandbox_mode,omitempty"`
-	PermissionMode string `json:"permission_mode,omitempty"`
-	// PermissionBypass records an explicitly authorized unsafe invocation. It
-	// is omitempty, so its ABSENCE in every ordinary attempt is the norm and
-	// its presence is conspicuous.
-	PermissionBypass bool   `json:"permission_bypass,omitempty"`
-	AuthMode         string `json:"auth_mode,omitempty"`
-	AuthModeSource   string `json:"auth_mode_source,omitempty"`
-	// WorkspaceBound reports that the invocation named the runtime-owned
-	// candidate directory explicitly with a working-directory flag. Only one
-	// of the supported CLIs offers one; for the rest the workspace is the
-	// bounded process's working directory, which is equally exact and is
-	// recorded as such rather than claimed as a flag that was not passed.
-	WorkspaceBound bool `json:"workspace_bound"`
-	// WorkspaceInstructionsSuppressed reports whether instruction files inside
-	// the candidate tree were kept out of the CLI's own context.
-	WorkspaceInstructionsSuppressed bool     `json:"workspace_instructions_suppressed"`
-	Argv                            []string `json:"argv,omitempty"`
-	PromptSHA256                    string   `json:"prompt_sha256,omitempty"`
-
-	// THE AUTHORITY THIS INVOCATION ACTUALLY RAN UNDER, and what it did with
-	// it. None of these authorize anything; they exist so that an invocation
-	// which outlives its bound explains itself from the journal instead of
-	// costing a forensic reconstruction of timestamps and transcripts.
-	Deadline        *time.Time    `json:"execution_deadline,omitempty"`
-	StartedAt       *time.Time    `json:"execution_started_at,omitempty"`
-	CompletedAt     *time.Time    `json:"execution_completed_at,omitempty"`
-	Elapsed         time.Duration `json:"observed_wall_elapsed,omitempty"`
-	OverranDeadline bool          `json:"overran_deadline,omitempty"`
-	// TerminationCause is why the process stopped: it returned on its own, the
-	// runtime ended it at the deadline, or the runtime ended it because it had
-	// produced no recognized progress for the whole inactivity window.
-	TerminationCause string `json:"termination_cause,omitempty"`
-	// InactivityLimit is the no-progress window this invocation ran under, and
-	// zero when none was in force. It is recorded beside the deadline because
-	// it is the same kind of fact - a bound the runtime imposed - and an
-	// operator reading a stalled invocation needs to know which window it was
-	// measured against.
-	InactivityLimit time.Duration `json:"inactivity_limit,omitempty"`
-	// ProgressMode is the oracle that measured progress against that window:
-	// byte_output, or structured_claude_events (#322).
-	ProgressMode string `json:"progress_mode,omitempty"`
-	// Bounded observations from a structured stream, recorded so an
-	// inactivity termination explains itself without the raw transcript: how
-	// many events counted as progress, how many main-thread tool calls were
-	// still open when the process ended, how many permission denials the final
-	// result listed, and how many lines were malformed or oversized. They are
-	// diagnostics, never authority, and carry no provider text.
-	StructuredEvents  int64 `json:"structured_progress_events,omitempty"`
-	OpenToolsAtExit   int   `json:"open_tools_at_exit,omitempty"`
-	PermissionDenials int   `json:"permission_denials,omitempty"`
-	ProtocolAnomalies int   `json:"protocol_anomalies,omitempty"`
-	// ProcessID is the pid - and, because every bounded process is started with
-	// Setpgid, the process-GROUP id - the runtime owned.
-	ProcessID int `json:"process_id,omitempty"`
-
-	// GitGuarded reports that this invocation ran under the brokered Git
-	// boundary of #241. It is recorded because its ABSENCE matters: a
-	// composition that prepared no guard produced a worker that could discard
-	// dirty candidate work, and that must be a durable fact rather than
-	// something an operator has to infer from the configuration.
-	GitGuarded bool `json:"git_guarded,omitempty"`
-	// GitRefusals are the destructive Git operations the runtime refused during
-	// this invocation, bounded and carrying no provider-chosen operand.
-	//
-	// They are OBSERVATION, not failure. A provider that reached for a
-	// destructive recovery, was refused, and then did the work properly
-	// succeeded - and the refusal is still the most interesting thing that
-	// happened, because it is where expensive reasoning was nearly lost.
-	GitRefusals []GitRefusal `json:"git_refusals,omitempty"`
+	return toolchainResolves(p.Toolchain, tool, p.executor().LookPath)
 }
 
 // maxProvenanceArgs bounds the recorded vector. Every native CLI the runtime
@@ -987,7 +891,10 @@ func agentPrompt(request ExecutionRequest) string {
 // Execute runs the bounded worker. The result is an OBSERVATION: it makes no
 // acceptance claim, and whether the candidate actually changed is established
 // from the workspace by the caller, never from what the worker said.
-func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest) (observed ExecutionResult, executeErr error) {
+	// Taken off the context so no probe below is ever handed the lock.
+	writer := candidateWriterFrom(ctx)
+	ctx = withCandidateWriter(ctx, nil)
 	spec, err := p.spec()
 	if err != nil {
 		return ExecutionResult{}, err
@@ -1038,6 +945,11 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		}
 		p.ExecScratchDir = scratch
 	}
+	frontendEnv, frontendCache, err := provisionFrontendCache(p.Agent.FrontendCacheDir, request.CandidateDir, p.ExecScratchDir)
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	p.frontendEnv, p.frontendCache = frontendEnv, frontendCache
 	// THE GUARD IS PREPARED BEFORE THE CAPABILITY PROBE, so that even the
 	// probe runs under the same brokered Git environment the invocation will.
 	// A boundary that only covered the main command would be a boundary with a
@@ -1056,6 +968,26 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		}
 	}
 	p.gitGuard = guard
+	if v, ok := verificationExecutionFrom(ctx); ok && len(request.RequiredTools) != 0 {
+		searchPath := p.Toolchain.SearchPath()
+		if searchPath == "" {
+			searchPath = os.Getenv("PATH")
+		}
+		p.verificationBin, err = prepareVerificationTools(v, request.RequiredTools, p.VerificationBroker, p.gitGuard.SearchPath(searchPath), request.ScratchDir)
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		var grant verificationToolGrant
+		if err := readVerificationMessage(filepath.Join(filepath.Dir(p.verificationBin), "grant.json"), &grant); err != nil {
+			return ExecutionResult{}, err
+		}
+		var stop func() error
+		ctx, stop, err = serveVerificationTools(ctx, v, grant)
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		defer func() { executeErr = errors.Join(executeErr, stop()) }()
+	}
 	if err := p.probe(ctx, spec, home); err != nil {
 		return ExecutionResult{}, err
 	}
@@ -1067,9 +999,10 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		// directory its typed result goes in, and the executables its contract
 		// obliges it to run. Both are runtime-owned facts; neither widens the
 		// sandbox beyond them.
-		ResultDir:     resultDirFor(request.ReviewerResultPath),
-		RequiredTools: request.RequiredTools,
-		ScratchDir:    request.ScratchDir,
+		ResultDir:          resultDirFor(firstNonEmpty(request.ReviewerResultPath, request.FeedbackResolutionPath, request.HandoffPath)),
+		ReviewerResultPath: request.ReviewerResultPath,
+		RequiredTools:      request.RequiredTools,
+		ScratchDir:         request.ScratchDir,
 	}
 	// The invocation MODE decides which argument vector is built, and a
 	// non-mutating request is refused outright when this adapter has no
@@ -1113,20 +1046,29 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		}
 	}
 	progressMode := spec.ProgressMode
-	if progressMode == "" {
+	// An executor that does not observe output cannot apply the chatter
+	// filter, so provenance records what it will actually do: byte output.
+	if _, observes := p.executor().(stdoutObservingExecutor); progressMode == "" ||
+		(progressMode == progressByteOutputExcludingTransportChatter && !observes) {
 		progressMode = progressByteOutput
 	}
 	authMode, authSource := p.observeAuthMode(spec, home)
 	provenance := InvocationProvenance{
 		AgentID: p.Agent.ID, ProviderKind: p.Agent.Kind, TrustMode: p.Agent.TrustMode,
-		Model: invocation.Model(), Executable: p.command(), Version: p.version(ctx, spec, home),
-		SandboxMode: sandboxMode, PermissionMode: permissionMode,
-		PermissionBypass: p.PermissionBypass, AuthMode: authMode, AuthModeSource: authSource,
-		WorkspaceBound:                  spec.WorkingDirectoryFlag,
-		WorkspaceInstructionsSuppressed: spec.SuppressesWorkspaceInstructions,
-		Argv:                            redactedArgv(args, spec.PromptArgFromEnd),
-		PromptSHA256:                    promptDigest(invocation.Prompt),
-		ProgressMode:                    progressMode,
+		// Operator-configured strings are bounded like every other durable
+		// field: a configured command path or model name is not a licence to
+		// grow a journal row.
+		Model: boundedDetail(invocation.Model()),
+		InvocationObservation: domain.InvocationObservation{
+			Executable: boundedDetail(p.command()), Version: p.version(ctx, spec, home),
+			SandboxMode: sandboxMode, PermissionMode: permissionMode,
+			PermissionBypass: p.PermissionBypass, AuthMode: boundedDetail(authMode), AuthModeSource: authSource,
+			WorkspaceBound:                  spec.WorkingDirectoryFlag,
+			WorkspaceInstructionsSuppressed: spec.SuppressesWorkspaceInstructions,
+			Argv:                            recordedArgv(buildArgs, invocation, p.StateDir, spec.PromptArgFromEnd),
+			PromptSHA256:                    promptDigest(invocation.Prompt),
+			ProgressMode:                    progressMode,
+		},
 	}
 	// The invocation's WALL BOUND is applied here, where the process actually
 	// runs. It was carried all the way into the request and read by nobody on
@@ -1154,7 +1096,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// the one that runs unattended in a read-only mode - cannot drift apart
 	// about whether a stalling provider is bounded at all.
 	if limit := request.Budgets.InactivityLimit; limit > 0 {
-		bounded, release := withProviderInactivity(ctx, limit, providerProgressRecorder(ctx))
+		bounded, release := withProviderInactivity(ctx, limit, execution.ProgressRecorder(ctx))
 		defer release()
 		ctx = bounded
 	}
@@ -1167,22 +1109,88 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 		defer cancel()
 		ctx = bounded
 	}
+	if p.Agent.Kind == AgentKindClaudeCode {
+		if deadline, bounded := ctx.Deadline(); bounded {
+			extra, err := claudeBashTimeoutEnv(time.Until(deadline))
+			if err == nil {
+				env, err = withInvocationEnv(env, extra)
+			}
+			if err != nil {
+				return ExecutionResult{}, err
+			}
+		}
+	}
+	if progressMode == progressByteOutputExcludingTransportChatter {
+		ctx = withTransportChatter(ctx, transportChatterPatterns(spec))
+	}
 	var stream *claudeStream
 	if progressMode == progressStructuredClaudeEvents {
 		stream = newClaudeStream(request.Attempt)
 		ctx = withClaudeStream(ctx, stream)
 	}
+	// THE CANDIDATE WRITER LOCK (#168) reaches the provider's own process
+	// only. A runtime attempt claimed it before touching the candidate and
+	// hands it over; any other caller (the planner, an embedder) is claimed
+	// for here.
+	if writer == nil {
+		claimed, err := claimCandidateWriter(ctx, request.CandidateDir, candidateWriterSettle)
+		if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			notStarted := &ProviderNotStartedError{Cause: context.Cause(ctx)}
+			return execution.NotStartedResult(p.Agent.ID, invocation.Model(), authMode, request.Attempt, notStarted), notStarted
+		}
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		defer claimed.Close()
+		writer = claimed
+	}
+	// Read from the exact slice handed to the process, after every addition.
+	provenance.ProviderEnvironment = providerEnvironment(env, spec)
+	provenance.FrontendCache = p.withToolVersions(ctx, env)
 	startedAt := time.Now()
-	output, runErr := p.executor().Run(ctx, p.command(), args, request.CandidateDir, env, p.grace())
+	output, runErr := p.executor().Run(withCandidateWriter(ctx, writer), p.command(), args, request.CandidateDir, env, p.grace())
 	completedAt := time.Now()
+	// WHAT ENDED THE PROCESS is fixed at the instant it exited, and it has
+	// exactly one owner. The contexts stay live while the transcript is stored
+	// below, and a stop or shutdown landing then must not turn a process that
+	// exited on its own, or one a runtime bound killed, into something it was
+	// not (#213).
+	//
+	// The executor commits the owner when it is decided (output.Owner) and
+	// this adapter consumes it; it is never re-derived from a context or from
+	// durable state after the process returned. An executor that reports no
+	// owner reports no EXTERNAL owner: nothing the runtime did ended it.
+	//
+	// NOT STARTED is not a termination at all: the executor refused to start
+	// the process because its context had already ended. No invocation
+	// happened, so no provenance or transcript is invented for it; the
+	// executor's recorded cause says only why nothing ran.
+	var notStarted *ProviderNotStartedError
+	if errors.As(runErr, &notStarted) {
+		return execution.NotStartedResult(p.Agent.ID, invocation.Model(), authMode, request.Attempt, notStarted), runErr
+	}
+	owner := output.Owner
+	killed := owner != OwnerUndecided && owner != OwnerProviderExited
+	stopped := owner == OwnerOperatorStop
+	// A deadline the executor killed for is THIS invocation's own unless the
+	// parent carried the same or an earlier deadline - structural, so nothing
+	// cancelled later can make it look inherited.
+	ownDeadline := true
+	if bound, ok := ctx.Deadline(); ok {
+		if inherited, parentBounded := parent.Deadline(); parentBounded && !bound.Before(inherited) {
+			ownDeadline = false
+		}
+	}
 	// WHAT THE STRUCTURED STREAM ESTABLISHED, read once the process returned.
 	// A final result is required only of a process that exited 0.
 	streamed := claudeStreamOutcome{Condition: FailureUnknown}
 	if stream != nil {
-		streamed = stream.outcome(runErr == nil && ctx.Err() == nil)
+		streamed = stream.outcome(runErr == nil && !killed)
 		provenance.StructuredEvents = streamed.Accepted
 		provenance.OpenToolsAtExit = streamed.OpenTools
 		provenance.PermissionDenials = streamed.PermissionDenials
+		provenance.FinalResultObserved = streamed.FinalResult
+		provenance.PermissionDeniedTools = streamed.DeniedTools
 		provenance.ProtocolAnomalies = streamed.Anomalies
 	}
 	// WHAT THIS INVOCATION ACTUALLY DID WITH ITS AUTHORITY. Recorded whether it
@@ -1212,16 +1220,16 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	// and "which no-progress window was this running under" is not
 	// reconstructible from a transcript.
 	provenance.InactivityLimit = providerInactivityLimit(ctx)
-	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		provenance.TerminationCause = "deadline_reached"
+	if owner == OwnerDeadline {
+		provenance.TerminationCause = TerminationDeadlineReached
 	}
 	// THE STALL IS NAMED BEFORE THE SHUTDOWN. An inactivity kill cancels this
 	// context, so through ctx.Err() alone it is indistinguishable from a
 	// supervisor draining - and those mean opposite things: one is a provider
 	// that stopped moving, the other is a pause the run resumes from.
-	inactive := providerInactivityCause(ctx)
+	inactive := owner == OwnerInactivity
 	if inactive {
-		provenance.TerminationCause = "provider_inactivity_limit_reached"
+		provenance.TerminationCause = TerminationProviderInactivity
 	}
 	artifacts, artifactErr := p.ArtifactStore.StoreExecutionAttemptTranscript(p.Agent.ID, request.AttemptRef(), output.Stdout, output.Stderr)
 	if artifactErr != nil {
@@ -1229,11 +1237,33 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 	}
 	result := ExecutionResult{
 		ProviderID: p.Agent.ID, Model: invocation.Model(), AuthMode: authMode,
-		Attempt: request.Attempt, Outcome: Succeeded, Artifacts: artifacts,
+		Attempt: request.Attempt, Outcome: execution.Succeeded, Artifacts: artifacts,
 		Invocation: &provenance,
 	}
-	if runErr != nil || ctx.Err() != nil {
-		result.Outcome = OperationFailed
+	// THE SEMANTIC ANSWER, exposed only when the structured stream itself
+	// decoded one off a valid, non-error final result (claude_stream.go). It
+	// is redacted exactly as the stored transcript is - the same secret
+	// patterns, the same replacement - so a consumer reading this field sees
+	// what every other reader of this invocation's output is allowed to see,
+	// never a step earlier.
+	if streamed.AnswerObserved {
+		result.Answer = string(redactTranscript([]byte(streamed.Answer)))
+	}
+	// No exit status or final result can resolve explicit or tool-owned automatic
+	// Bash detachment (#384, #388). Refuse before trusting a structured verdict
+	// for any invocation purpose; polling and kill requests never clear it.
+	// A descendant that left the provider's process group and still holds
+	// the candidate writer lock after the group was stopped is background
+	// work this invocation walked away from, writing the candidate (#168).
+	if streamed.UnresolvedBackgroundWork || (output.EscapedWriter && !killed) {
+		result.Outcome = execution.Failed
+		result.Failure = &ProviderFailure{
+			Classification: FailureProviderBackgroundWorkUnresolved, RawDiagnosticRef: artifacts[0].Path,
+		}
+		return result, runErr
+	}
+	if runErr != nil || killed {
+		result.Outcome = execution.Failed
 		// The typed condition the PROVIDER ITSELF stated, read only from the
 		// narrow terminal surface. FailureUnknown here means the CLI named
 		// nothing this runtime recognizes, which is the fail-closed answer and
@@ -1247,7 +1277,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			RawDiagnosticRef: artifacts[0].Path,
 		}
 		switch {
-		case inactive && recognized != FailureUnknown:
+		case inactive && recognized != FailureUnknown && progressMode != progressByteOutputExcludingTransportChatter:
 			// THE PROVIDER SAID WHAT WAS WRONG AND THEN WENT QUIET. Both facts
 			// are true and they are recorded separately: the CONDITION is the
 			// one the provider named, and how the process ENDED is already in
@@ -1265,6 +1295,16 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// A phrase the model wrote into its session output never reaches
 			// here at all, so preserving it cannot become a way for untrusted
 			// text to outrank a bound the runtime actually enforced.
+			//
+			// NOT UNDER THE CHATTER FILTER (#314). There the inactivity kill is
+			// reached BECAUSE matching lines were withheld, and on Codex a
+			// candidate's own stderr (a test retrying `connection refused`)
+			// lands in the same tail. Preserving the tail would let matched
+			// candidate text turn into provider_unavailable and a RouteWait, so
+			// that kill is provider_no_progress. A genuine #317 reconnect loop
+			// therefore retries under the existing attempt authority rather
+			// than waiting; a provider that EXITS on its own is still
+			// classified from the tail exactly as before.
 		case inactive:
 			// The PROVIDER STOPPED MOVING and the runtime ended it, with
 			// nothing recognized to say why. The process group is already gone
@@ -1274,7 +1314,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// had authority left), not a shutdown (the controller is fine), and
 			// not an unknown (nothing about the BOUND is undiagnosed).
 			result.Failure.Classification = FailureProviderNoProgress
-		case ctx.Err() != nil && parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded):
+		case owner == OwnerDeadline && ownDeadline:
 			// THIS INVOCATION ran out of its own wall bound. Nothing stopped,
 			// and saying "the controller stopped" was affirmatively false: it
 			// routed to RouteWait, so a provider that always overruns its bound
@@ -1283,7 +1323,17 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// preserved, which is what execution_incomplete means, and that
 			// routes to a bounded retry.
 			result.Failure.Classification = FailureExecutionIncomplete
-		case ctx.Err() != nil:
+		case stopped:
+			// The OPERATOR stopped this run, and the executor began
+			// terminating the still-running process because of it (#213). It
+			// is neither a shutdown, which leaves the run resumable, nor a
+			// failure of the work: it is the stop, recorded as the stop. A
+			// provider that had already exited is OwnerProviderExited and
+			// never reaches here, however long its pipes stayed open.
+			result.Outcome = execution.Cancelled
+			result.Failure.Classification = FailureRunCancelled
+			provenance.TerminationCause = TerminationRunStopped
+		case killed:
 			// The CONTROLLER stopped, not the work. Recording this as
 			// FailureUnknown routed it to RouteStop and terminalized a run that
 			// a shutdown is supposed to leave resumable.
@@ -1291,7 +1341,7 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// This does not weaken `stop RUN`: operator cancellation is a
 			// separate durable act that journals run.cancelled, and the
 			// Cancelled disposition takes precedence over every wait.
-			result.Outcome = OperationCancelled
+			result.Outcome = execution.Cancelled
 			result.Failure.Classification = FailureControllerShutdown
 		}
 		// The PRIMARY failure is returned untouched, and the structured result
@@ -1312,32 +1362,22 @@ func (p CLIAgentProvider) Execute(ctx context.Context, request ExecutionRequest)
 			// a usage limit may be stated only on stderr, never as a typed field.
 			recognized = classifyAgentFailure(spec, terminalDiagnostic(output.Stderr))
 		}
-		result.Outcome = OperationFailed
+		result.Outcome = execution.Failed
 		result.Failure = &ProviderFailure{Classification: recognized, RawDiagnosticRef: artifacts[0].Path}
 		return result, nil
 	}
-	// THE STRUCTURED VERDICT, read only once the PROCESS itself succeeded.
-	//
-	// It comes from the runtime-owned path and nowhere else: the transcript is
-	// evidence and is never consulted for a verdict, so a worker that talked
-	// about accepting has not accepted, and a transcript that happens to
-	// contain verdict-shaped JSON is still just a transcript.
-	//
-	// A malformed result on a SUCCESSFUL invocation still fails it. A reviewer
-	// that tried to answer and produced something unreadable has not silently
-	// declined to answer, and treating the two the same would hide a broken
-	// protocol behind a stage that merely never settles.
-	if request.ReviewerResultPath != "" {
-		review, reviewErr := ReadReviewerResult(request.ReviewerResultPath)
-		if reviewErr != nil {
-			result.Outcome = OperationFailed
-			result.Failure = &ProviderFailure{
-				Classification: FailureVerification, RawDiagnosticRef: artifacts[0].Path,
-			}
+	if request.ReviewerResultPath != "" && streamed.AnswerObserved {
+		if len(result.Answer) > maxReviewerResultBytes {
+			result.Outcome = execution.Failed
+			result.Failure = &ProviderFailure{Classification: FailureReviewerProtocolIncomplete, RawDiagnosticRef: artifacts[0].Path}
 			return result, nil
 		}
-		result.Review = review
+		if err := os.WriteFile(request.ReviewerResultPath, []byte(result.Answer), 0o600); err != nil {
+			return ExecutionResult{}, fmt.Errorf("capture reviewer final response: %w", err)
+		}
 	}
+	// The typed result slots are read by the HOST, not here (#521):
+	// readTypedResultSlots, right after Execute returns.
 	return result, runErr
 }
 
@@ -1364,6 +1404,16 @@ func validateExecutionBinding(request ExecutionRequest) error {
 		// and get an editing invocation by leaving a field unset.
 		if request.Mode != domain.InvocationModeNonMutatingPlanning {
 			return fmt.Errorf("a planning invocation requires the %q mode", domain.InvocationModeNonMutatingPlanning)
+		}
+	case InvocationHandoffRepair:
+		// It writes exactly one file - the slot - so it cannot be read-only,
+		// and an invocation with no slot would have nothing to repair into.
+		if request.Mode == domain.InvocationModeNonMutatingPlanning || request.HandoffPath == "" || !request.DenyPermissionBypass {
+			return fmt.Errorf("a handoff repair requires the mutating mode, its runtime-owned slot and a denied permission bypass")
+		}
+	case InvocationIndependentReview:
+		if err := validateIndependentReviewBinding(request); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("invalid invocation purpose")
@@ -1428,7 +1478,17 @@ func terminalDiagnostic(stderr []byte) string {
 	if len(stderr) > maxTerminalDiagnosticBytes {
 		stderr = stderr[len(stderr)-maxTerminalDiagnosticBytes:]
 	}
-	return strings.ToLower(string(stderr))
+	// A CLI may print its statement with a typographic apostrophe (U+2019);
+	// the signals are written in ASCII. Observed live (#87): Codex's quota
+	// statement used U+2019, so the configured quota signal never matched and
+	// the run stopped as unknown instead of waiting.
+	return normalizeDiagnostic(string(stderr))
+}
+
+// normalizeDiagnostic is the one comparison form for a CLI's own statements:
+// lower case, with a typographic apostrophe (U+2019) read as ASCII.
+func normalizeDiagnostic(text string) string {
+	return strings.ReplaceAll(strings.ToLower(text), "\u2019", "'")
 }
 
 // classifyAgentFailure classifies a failed native-CLI invocation from the
@@ -1515,7 +1575,7 @@ func (p CLIAgentProvider) toolchainEnv() []string {
 	// alone do not make a directory writable. TMPDIR keeps test fixtures here
 	// too, including temporary repositories that must never become gitlinks.
 	if scratch := strings.TrimSpace(p.ExecScratchDir); scratch != "" {
-		env = append(env, "TMPDIR="+scratch, "GOTMPDIR="+scratch, "GOCACHE="+filepath.Join(scratch, "cache"), "GOPATH="+filepath.Join(scratch, "gopath"), "GOENV=off")
+		env = append(env, "TMPDIR="+scratch, "GOTMPDIR="+scratch, "GOCACHE="+filepath.Join(scratch, "cache"), "GOPATH="+filepath.Join(scratch, "gopath"))
 	}
 	return env
 }
@@ -1552,49 +1612,6 @@ func prepareValidationScratch(candidate, scratch string) error {
 		}
 	}
 	return os.MkdirAll(filepath.Join(build, "cache"), 0700)
-}
-
-// ExecCapableScratchBase answers where THIS execution boundary allows the
-// runtime to create scratch that Go may execute from.
-//
-// An environment that has already published runtime-owned exec-capable scratch
-// wins: the verifier sandbox mounts one and names it in GOTMPDIR, and a future
-// sandboxed worker would do the same. The variable is read from the runtime's
-// OWN process environment, which is set by the operator or by the sandbox that
-// launched it - never by a candidate, which has no way to reach it.
-//
-// Otherwise the caller's runtime-owned directory is used, and only if there is
-// none does this fall back to the process default.
-func ExecCapableScratchBase(preferred string) string {
-	if published := strings.TrimSpace(os.Getenv("GOTMPDIR")); published != "" {
-		return published
-	}
-	if trimmed := strings.TrimSpace(preferred); trimmed != "" {
-		return trimmed
-	}
-	return os.TempDir()
-}
-
-// ExecutionScratchDir composes the per-attempt scratch path for one invocation.
-//
-// It is built from scheduler identity exactly as the attempt transcript and the
-// reviewer result are, so two attempts never share a build directory and a
-// replay arrives at the same path from the journal alone.
-//
-// It lives under the RUN, beside the candidate workspace and the assurance
-// checkouts, because that is where the collector already looks. Scratch is not
-// evidence and nothing reads it after the invocation ends, but it holds a Go
-// build cache that a remediation attempt re-uses - deleting it per invocation
-// would make every retry recompile the world, and this workload is bounded by
-// wall time. It is retired with the run instead.
-func ExecutionScratchDir(stateDir string, attempt ExecutionAttemptRef) (string, error) {
-	if err := attempt.Validate(); err != nil {
-		return "", err
-	}
-	return filepath.Join(ExecCapableScratchBase(stateDir), "runs",
-		encodePathComponent(attempt.RunID), executionScratchDir,
-		encodePathComponent(attempt.OperationID),
-		fmt.Sprintf("attempt-%d", attempt.Attempt)), nil
 }
 
 // ToolchainObligationError is the typed refusal for an invocation whose contract

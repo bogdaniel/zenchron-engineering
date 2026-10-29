@@ -1,0 +1,3398 @@
+{
+  "source": "Chromium accessibility tree; manual screen-reader speech remains unqualified",
+  "nodes": [
+    {
+      "role": "RootWebArea",
+      "name": "Zenchron · Engineering OS",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "link",
+      "name": "Skip to main content",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "status",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Skip to main content",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "banner",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "RUNTIME",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Observed API data",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "Refresh",
+      "ignored": false
+    },
+    {
+      "role": "main",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "contentinfo",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "navigation",
+      "name": "Mobile navigation",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Skip to main content",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "button",
+      "name": "Open navigation",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Engineering OS · isolated controller test data",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "button",
+      "name": "Switch to light theme",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "RUNTIME",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Observed API data",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Refresh",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "form",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "complementary",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Browser received 2026-10-14T09:16:53.347Z",
+      "ignored": false
+    },
+    {
+      "role": "link",
+      "name": "Overview",
+      "ignored": false
+    },
+    {
+      "role": "link",
+      "name": "Objectives",
+      "ignored": false
+    },
+    {
+      "role": "link",
+      "name": "Decisions",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "More navigation",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "☰",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Engineering OS · isolated controller test ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "data",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "☀",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Refresh",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "zenchron/seeded · plan r2",
+      "ignored": false
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "link",
+      "name": "Review human request",
+      "ignored": false
+    },
+    {
+      "role": "LabelText",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "Inspect revision",
+      "ignored": false
+    },
+    {
+      "role": "link",
+      "name": "Latest revision",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "group",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "button",
+      "name": "AGENT implementation State not recorded After: No stage dependency ↓",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "ASSURANCE_GATE assurance State not recorded After: implementation",
+      "ignored": false
+    },
+    {
+      "role": "region",
+      "name": "Selected stage",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "heading",
+      "name": "No decision receipt on this revision",
+      "ignored": false
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "list",
+      "name": "plan event history",
+      "ignored": false
+    },
+    {
+      "role": "group",
+      "name": "Event pagination",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Browser received 2026-10-14T09:16:53.347Z",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Overview",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Objectives",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Decisions",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "More",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "☰",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "☀",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "OBJECTIVE / GOVERNED PLAN CONTEXT",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "zenchron/seeded · plan r2",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "zenchron/seeded",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " · shown r",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "2",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "unapproved",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " · governing",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "none",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Review human request",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Plan revision",
+      "ignored": false
+    },
+    {
+      "role": "spinbutton",
+      "name": "Plan revision",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Inspect revision",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Latest revision",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "Engineering lifecycle",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Current controller projection:",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "awaiting_approval",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " · approved revision ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "none",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": ".",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Awaiting an operator decision on this exact plan revision.",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "A proposal does not govern execution. Only agent stages create runs; assurance and human gates reference existing evidence and authority.",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "DisclosureTriangle",
+      "name": "Revision change preview",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "heading",
+      "name": "Plan dependency inspection",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Plan stages · separate from WorkGraph",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "AGENT",
+      "ignored": false
+    },
+    {
+      "role": "strong",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "State not recorded",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "After: ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "No stage dependency",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "ASSURANCE_GATE",
+      "ignored": false
+    },
+    {
+      "role": "strong",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "State not recorded",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "After: ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "implementation",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "implementation",
+      "ignored": false
+    },
+    {
+      "role": "DescriptionList",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "WorkGraph",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Explicit objective binding · ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "plan-5eea25f673a44e1b1179681df255feb4",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " · r",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "2",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "LabelText",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "combobox",
+      "name": "Inspect unit",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "button",
+      "name": "IMPLEMENTER · #41 Execute approved plan stage implementation ready · frontier After: No dependency",
+      "ignored": false
+    },
+    {
+      "role": "group",
+      "name": "WorkUnit pagination",
+      "ignored": false
+    },
+    {
+      "role": "region",
+      "name": "Selected WorkUnit",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "Decision receipt",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "No decision receipt on this revision",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Inspect the plan journal below. An absent receipt grants no authority.",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "Plan activity",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Journal metadata · no payloads",
+      "ignored": false
+    },
+    {
+      "role": "listitem",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "listitem",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "listitem",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "listitem",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "4 events · after 0",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "Previous events",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "Next events",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "Refresh events",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "DescriptionList",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "group",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "button",
+      "name": "Refresh controller preview",
+      "ignored": false
+    },
+    {
+      "role": "group",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "checkbox",
+      "name": "Use deterministic revision",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "button",
+      "name": "Review & approve",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "Review plan revision",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Overview",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Objectives",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Decisions",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "More",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "OBJECTIVE / GOVERNED PLAN CONTEXT",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "zenchron/seeded · plan r2",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "zenchron/seeded",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " · shown r",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "2",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "unapproved",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " · governing",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "none",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Review human request",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Plan revision",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Inspect revision",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Latest revision",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Engineering lifecycle",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Current controller projection:",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "awaiting_approval",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " · ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "approved revision ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "none",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": ".",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Awaiting an operator decision on this exact plan ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "revision.",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "A proposal does not govern execution. Only agent ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "stages create runs; assurance and human gates ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "reference existing evidence and authority.",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Revision change preview",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Plan dependency inspection",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Plan stages · separate from ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "WorkGraph",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "AGENT",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "implementation",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "State not recorded",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "After: ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "No stage ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "dependency",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "↓",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "↓",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "ASSURANCE_GATE",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "assurance",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "State not recorded",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "After: ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "implementation",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "implementation",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Required role",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Bound profile",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Required profile",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Context policy",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Assignment identity",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Execution agent",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Provider / trust",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Run",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "WorkGraph",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Explicit objective binding · ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "plan-",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "5eea25f673a44e1b1179681df255feb4",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " · r",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "2",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "WorkUnit dependency graph",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " units · ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " frontier",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Edges are recorded dependencies; readiness comes from the controller.",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Select a unit to inspect its exact output and blockers.",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Inspect unit",
+      "ignored": false
+    },
+    {
+      "role": "MenuListPopup",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "IMPLEMENTER",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " · #",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "41",
+      "ignored": false
+    },
+    {
+      "role": "strong",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "ready",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "· frontier",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "After: ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "No dependency",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " loaded · offset ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "Previous",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "Next",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "Execute approved plan stage implementation",
+      "ignored": false
+    },
+    {
+      "role": "DescriptionList",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "DescriptionList",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "DescriptionList",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "list",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Decision receipt",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "No decision receipt on this revision",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Inspect the plan journal below. An absent receipt ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "grants no authority.",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Plan activity",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Journal metadata · no payloads",
+      "ignored": false
+    },
+    {
+      "role": "time",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "strong",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "time",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "strong",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "time",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "strong",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "time",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "strong",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "4 events · after 0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Previous events",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Next events",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Refresh events",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "Budget envelope",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Child runs",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Invocations",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Cost",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Concurrency ceiling",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Wall seconds",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "Exact subject",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "DisclosureTriangle",
+      "name": "Technical binding",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "heading",
+      "name": "Plan approval & revision",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Refresh controller preview",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "DisclosureTriangle",
+      "name": "Controller-resolved plan & prospective assignments",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Review & approve",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Review plan revision",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "2",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Engineering lifecycle",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Revision change preview",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Plan dependency ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "inspection",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "implementation",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "↓",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "assurance",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "implementation",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Required role",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "implementer",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Bound profile",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Not recorded",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Required profile",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "No explicit profile required",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Context policy",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Not recorded",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Assignment identity",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Not recorded",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Execution agent",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Not recorded",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Provider / trust",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Unknown",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " / ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Unknown",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Run",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Run not recorded",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "WorkGraph",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "WorkUnit dependency graph",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " units · ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " frontier",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Edges are recorded dependencies; readiness ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "comes from the controller.",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Select a unit to inspect ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "its exact output and blockers.",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Inspect unit",
+      "ignored": false
+    },
+    {
+      "role": "option",
+      "name": "Execute approved plan stage implementation · ready",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "IMPLEMENTER",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " · #",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "41",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Execute approved plan stage implementation",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "ready",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "· frontier",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "After: ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "No dependency",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " loaded · offset ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Previous",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Next",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Execute approved plan stage implementation",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Unit identity",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Role / execution kind",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Observed state",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Blocker",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Dependencies",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Readiness hold",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Independent review",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Run not recorded; no worker execution is inferred.",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "Runtime counts",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "awaiting_decision",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "blocked",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "completed",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "failed",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "handoff_pending",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "invalidated",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "ready",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "running",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "stopped",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "total",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "unknown",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "Scope & identity",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Graph",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Repository",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "term",
+      "name": "Execution agent",
+      "ignored": false
+    },
+    {
+      "role": "definition",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "No product association recorded.",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "Runnable frontier",
+      "ignored": false
+    },
+    {
+      "role": "listitem",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Frontier membership does not grant execution or acceptance authority.",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Decision receipt",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Plan activity",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "2026-10-14",
+      "ignored": false
+    },
+    {
+      "role": "LineBreak",
+      "name": "\n",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "09:16:42",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " UTC",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "plan.proposed",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Sequence ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "2026-10-14",
+      "ignored": false
+    },
+    {
+      "role": "LineBreak",
+      "name": "\n",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "09:16:42",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " UTC",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "plan.validated",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Sequence ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "2",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "2026-10-14",
+      "ignored": false
+    },
+    {
+      "role": "LineBreak",
+      "name": "\n",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "09:16:49",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " UTC",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "plan.proposed",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Sequence ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "3",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "2026-10-14",
+      "ignored": false
+    },
+    {
+      "role": "LineBreak",
+      "name": "\n",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "09:16:49",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " UTC",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "plan.validated",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Sequence ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "4",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Previous events",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Next events",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Refresh events",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Budget envelope",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Child runs",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " / ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "4",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Invocations",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " / ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "8",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Cost",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Unknown",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Concurrency ceiling",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Wall seconds",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " / ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "No ceiling recorded",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Exact subject",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Technical binding",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Plan approval & revision",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Refresh controller preview",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Controller-resolved plan & prospective assignments",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Review & approve",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Review plan revision",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "2",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Required role",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "implementer",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Bound profile",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Not recorded",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Required profile",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "No explicit profile required",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Context policy",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Not recorded",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Assignment identity",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Not recorded",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Execution agent",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Not recorded",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Provider / trust",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Unknown",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " / ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Unknown",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Run",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Run not recorded",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "WorkUnit dependency graph",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Execute approved plan stage implementation",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Previous",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Next",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Execute approved plan stage implementation",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Unit identity",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "implementation",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Role / execution kind",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "implementer / Not recorded",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Observed state",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "ready",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Blocker",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "None reported",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Dependencies",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "No dependencies",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Readiness hold",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "None reported",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Independent review",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Not required by this unit",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Run not recorded; no worker execution is inferred.",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Runtime counts",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "awaiting_decision",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "blocked",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "completed",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "failed",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "handoff_pending",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "invalidated",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "ready",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "running",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "stopped",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "total",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "unknown",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Scope & identity",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Graph",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "graph-e7bf44f5bfe3ebc9e0cfd2738f1aee1e",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Repository",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "zenchron/seeded",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Execution agent",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "openai-responses",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "No product association recorded.",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Runnable frontier",
+      "ignored": false
+    },
+    {
+      "role": "ListMarker",
+      "name": "• ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "implementation",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Frontier membership does not grant execution or ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "acceptance authority.",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "2026-10-14",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "\n",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "09:16:42",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "UTC",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "plan.proposed",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Sequence ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "2026-10-14",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "\n",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "09:16:42",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "UTC",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "plan.validated",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Sequence ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "2",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "2026-10-14",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "\n",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "09:16:49",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "UTC",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "plan.proposed",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Sequence ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "3",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "2026-10-14",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "\n",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "09:16:49",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "UTC",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "plan.validated",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Sequence ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "4",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Budget envelope",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Child runs",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " / ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "4",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Invocations",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " / ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "8",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Cost",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Unknown",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Concurrency ceiling",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Wall seconds",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " / ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "No ceiling recorded",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Exact subject",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Technical binding",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Plan approval & revision",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Controller-resolved plan & prospective assignments",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Unit identity",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "implementation",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Role / execution kind",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "implementer / Not recorded",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Observed state",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "ready",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Blocker",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "None reported",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Dependencies",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "No dependencies",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Readiness hold",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "None reported",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Independent review",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Not required by this unit",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Runtime counts",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "awaiting_decision",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "blocked",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "completed",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "failed",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "handoff_pending",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "invalidated",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "ready",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "running",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "stopped",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "total",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "unknown",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Scope & identity",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Graph",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "graph-e7bf44f5bfe3ebc9e0cfd2738f1aee1e",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Repository",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "zenchron/seeded",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Execution agent",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "openai-responses",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Runnable frontier",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "implementation",
+      "ignored": false
+    }
+  ]
+}

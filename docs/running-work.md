@@ -51,6 +51,11 @@ controller created it)`, then drives the run until it settles.
 - adoption is refused when a DIFFERENT controller build or configuration created
   the live generation: reconciling it here would drive another controller's work
   under this one.
+- an ordinary start is also refused when the issue's live run lives in another
+  identity space - created under a previous configuration, or by a plan stage or
+  an orchestration batch - because a configuration change is not authority to
+  run the same issue twice. The refusal names that run. `--new-generation` is
+  the deliberate way to start fresh work beside it.
 - `--dangerous-permission-bypass` requests the provider's unsafe permission
   mode for this invocation. It is refused before any process starts unless that
   agent's configuration also sets `allow_permission_bypass`. Two independent
@@ -132,7 +137,9 @@ parses.
 
 Timing in status separates `active consumed` (`active_elapsed` in JSON),
 `external wait` (`external_wait_elapsed`), and `lifecycle age` (`elapsed`).
-Only active consumed time spends the run wall budget. An optional lifecycle
+For split accounting, execution elapsed spends the run wall budget and
+assurance has its own allowance. Legacy accounting charges all active consumed
+time to the run wall budget; observed assurance overlaps the execution charge. An optional lifecycle
 deadline bounds calendar age independently. A completed operation's active
 consumption is fixed at its journalled completion; it does not grow while the
 run waits for review. Polling during an external wait adds only the observation
@@ -214,6 +221,10 @@ the successor generation in the same command.
 
 `stop` is the only thing that cancels a run WITHOUT replacing it. It is durable, idempotent, and
 journalled with the reason `operator_stop`; a second stop appends nothing.
+`stop` on a run that already `completed` or `failed` is refused with exit
+status 64 and never rewrites that outcome: nothing is journalled and the run
+keeps its disposition and reason. It only releases a lease whose owner is
+provably dead.
 Killing the process, closing the terminal, or shutting down a supervisor cancels
 nothing.
 
@@ -241,6 +252,33 @@ zenchron-engineering autonomy run issue 42 --agent claude --new-generation
 
 ## What a stop means
 
+`autonomy stop RUN` (and `stop-all`) cancels a run durably: it journals
+`run.cancelled`, and no operation of that run is leased afterwards. If the run
+is inside an `execution.invoke` when the stop lands, the controller notices
+the durable stop while the provider process runs (#213) and terminates it;
+when the stop is what ended it, the attempt is journalled `cancelled` with
+failure class
+`run_cancelled` (and, for CLI agents, termination cause `run_stopped`).
+`status` shows that diagnostic. A stop already durable just before the
+provider would start means it never starts.
+
+Only the provider is watched. A completed provider execution retains the
+termination owner established by the event that actually ended or initiated
+termination of that physical execution. Later run-level cancellation or
+authority revocation does not rewrite it. The stop is acted on only after the
+run is actually read as cancelled; a state database the watcher cannot read
+never kills a provider, and the failed reads are noted in the attempt's
+diagnostic when it has one. A provider that ignores cancellation and returns anyway still
+has its result refused.
+
+That is the whole of what a stop interrupts. `candidate.commit`,
+`candidate.push`, `pull_request.create` and publication already under way
+when a stop lands are not interrupted or skipped by it; whether a stop should
+gate those runtime effects is a separate question (#215) that this does not
+define. A stop is also neither a `drain` (which lets started work finish) nor a
+`shutdown` (which interrupts the invocation as `controller_shutdown` and leaves
+the run resumable); see [supervisor.md](supervisor.md).
+
 Waiting reasons, in the vocabulary `status` prints:
 
 | Reason | Meaning | What clears it |
@@ -252,6 +290,7 @@ Waiting reasons, in the vocabulary `status` prints:
 | `execution_provider_rate_limited` | the provider asked to be called less often | wait; repeated rate limiting means the configured concurrency is above what that account tolerates |
 | `execution_provider_account_unavailable` | the provider refused at its own account boundary before any reasoning happened | repair the account, then `resume` |
 | `assurance_dependency_unavailable` | the verifier's environment is not there: no toolchain in the image, a missing or empty module cache, or a module the offline cache does not hold | provision it, then `resume`; the same run re-derives assurance against the same commit and tree |
+| `verification_capacity_unavailable` | the next operation is a host verification and every `max_concurrent_verifications` slot is held by another run; nothing was started and no attempt was spent | nothing: it runs when a slot frees. Not a verification failure; raise the ceiling only if the host can carry more |
 | `state_storage_exhausted` | the local state ceiling was reached before a candidate clone was allocated | free space or raise `storage.max_state_bytes`; nothing is ever reclaimed automatically to make room |
 | `github_auth_required` | the forge credential is gone | `gh auth login`, then `resume` |
 | `opt_in_removed` | the opt-in label was removed, withdrawing consent | restore the label; resuming does not restore consent |

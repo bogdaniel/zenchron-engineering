@@ -56,7 +56,8 @@ type CompileInput struct {
 	Model    domain.ProjectModel
 	Facts    []domain.EngineeringFact
 	// Template is the operator's reusable process, or nil.
-	Template *domain.EngineeringPlanTemplate
+	Template         *domain.EngineeringPlanTemplate
+	PreferredProfile string
 	// Envelope is the OPERATOR ceiling. A template may tighten it; nothing may
 	// widen it here.
 	Envelope domain.PlanBudgetEnvelope
@@ -67,13 +68,25 @@ type CompileInput struct {
 	// Reasoning is the provenance of the invocation that produced Proposed.
 	Reasoning *domain.PlanReasoningProvenance
 	// Previous is the revision this compilation replaces, when it is a
-	// revision rather than a first plan.
+	// revision rather than a first plan. It is recorded as this plan's
+	// Provenance.PreviousRevision and checked for document continuity; it is
+	// NOT what the privilege ratchet is measured against - see
+	// RatchetBaseline.
 	Previous *domain.EngineeringPlan
+	// RatchetBaseline is the latest operator-approved revision, when one
+	// exists, forwarded to ValidationInput.RatchetBaseline unchanged. See its
+	// doc comment: a rejected or still-pending Previous grants no privilege
+	// floor.
+	RatchetBaseline *domain.EngineeringPlan
 	// Consumed is what that plan has already spent. A revision may tighten the
 	// remaining envelope and may never claim back consumption, and passing it
 	// here is what makes that refusal reachable rather than theoretical.
 	Consumed   domain.PlanConsumption
 	ProposalID string
+	// AcceptanceFeature is the OPERATOR's declared final-integration feature
+	// acceptance, from the governed planning request - never from a proposal.
+	// Empty declares none.
+	AcceptanceFeature string
 }
 
 // Compile produces a validated plan revision.
@@ -94,12 +107,17 @@ func Compile(input CompileInput) (domain.EngineeringPlan, error) {
 	if err != nil {
 		return domain.EngineeringPlan{}, err
 	}
+	stages = preferProfile(stages, input.PreferredProfile)
 	stages = ensureAssuranceGate(stages, input.Contract)
 	stages, err = fillStageDefaults(stages, input)
 	if err != nil {
 		return domain.EngineeringPlan{}, err
 	}
 	stages = canonicalOrder(stages)
+	stages, err = bindAcceptanceFeature(stages, input.AcceptanceFeature)
+	if err != nil {
+		return domain.EngineeringPlan{}, err
+	}
 
 	envelope, err := resolveEnvelope(input, stages)
 	if err != nil {
@@ -133,6 +151,7 @@ func Compile(input CompileInput) (domain.EngineeringPlan, error) {
 	}
 	if err := Validate(plan, ValidationInput{
 		Contract: input.Contract, Envelope: input.Envelope, Previous: input.Previous,
+		RatchetBaseline: input.RatchetBaseline,
 		// What the plan has ALREADY spent. Without it the consumed-budget
 		// refusals in envelopeViolations saw zero on the only path that
 		// compiles a real revision, so a revision could claim a ceiling below
@@ -185,9 +204,13 @@ func (input CompileInput) validate() error {
 // an architect or a security reviewer that no obligation asked for would be the
 // rigid workflow #64 exists to avoid.
 func (input CompileInput) baseStages() ([]domain.PlanStage, error) {
+	proposed, err := withoutEchoedAcceptanceFeature(input.Proposed, input.AcceptanceFeature)
+	if err != nil {
+		return nil, err
+	}
 	switch {
-	case len(input.Proposed) > 0:
-		return append([]domain.PlanStage{}, input.Proposed...), nil
+	case len(proposed) > 0:
+		return proposed, nil
 	case input.Template != nil:
 		return templateStages(*input.Template, input.Facts), nil
 	}
@@ -198,7 +221,7 @@ func (input CompileInput) baseStages() ([]domain.PlanStage, error) {
 		Objective: input.Objective,
 		Rationale: "the objective requires a change, and nothing in policy or a template asked for more",
 	}}
-	if claims := contractClaims(input.Contract); len(claims) > 0 {
+	if claims := assuranceClaims(input.Contract); len(claims) > 0 {
 		stages = append(stages, domain.PlanStage{
 			ID:             stageAssurance,
 			Kind:           domain.StageAssuranceGate,
@@ -221,6 +244,7 @@ func templateStages(template domain.EngineeringPlanTemplate, facts []domain.Engi
 			ID:                   stage.ID,
 			Kind:                 stage.Kind,
 			Role:                 stage.Role,
+			ExecutionKind:        stage.ExecutionKind,
 			Objective:            stage.Objective,
 			DependsOn:            stage.DependsOn,
 			RequiresCapabilities: stage.RequiresCapabilities,
@@ -237,58 +261,15 @@ func templateStages(template domain.EngineeringPlanTemplate, facts []domain.Engi
 
 // contractClaims are the claim ids the work contract requires, in canonical
 // order. A gate references them; it does not invent a second evidence model.
-func contractClaims(contract domain.EngineeringWorkContract) []string {
+func assuranceClaims(contract domain.EngineeringWorkContract) []string {
 	claims := make([]string, 0, len(contract.RequiredClaims))
-	for id := range contract.RequiredClaims {
-		claims = append(claims, id)
+	for id, claim := range contract.RequiredClaims {
+		if claim.EvidenceClass != "human_approval" {
+			claims = append(claims, id)
+		}
 	}
 	sort.Strings(claims)
 	return claims
-}
-
-// SubstituteHumanReview replaces one agent stage with a human decision gate.
-//
-// It is the operator's answer to an independence shortage that POLICY permits a
-// human to fill: no eligible independent worker exists, policy said a person may
-// review instead, and the operator decided to do that. The conversion is
-// deterministic and it is not applied here - it produces the stages for a new
-// revision, which goes through the ordinary validation and approval boundary
-// like any other.
-//
-// It refuses where policy did not permit the substitution. A plan cannot grant
-// itself a substitution, and neither can an operator: the permission comes from
-// the obligation that required the independence in the first place.
-func SubstituteHumanReview(plan domain.EngineeringPlan, stageID string, claims []string) ([]domain.PlanStage, error) {
-	stage, found := plan.Stage(stageID)
-	if !found {
-		return nil, fmt.Errorf("plan %s has no stage %q", plan.ID, stageID)
-	}
-	if stage.Kind != domain.StageAgent {
-		return nil, fmt.Errorf("stage %q is a %s: only an agent stage can be replaced by a human decision", stageID, stage.Kind)
-	}
-	if stage.Independence == nil || !stage.Independence.HumanSubstitutionPermitted {
-		return nil, fmt.Errorf("stage %q does not carry a policy-permitted human substitution: the permission comes from the obligation that required the independence, and nothing else may grant it", stageID)
-	}
-	if len(claims) == 0 {
-		return nil, fmt.Errorf("a human decision gate states what the person is deciding, and no required claim was given")
-	}
-	stages := make([]domain.PlanStage, 0, len(plan.Stages))
-	for _, existing := range plan.Stages {
-		if existing.ID != stageID {
-			stages = append(stages, existing)
-			continue
-		}
-		stages = append(stages, domain.PlanStage{
-			ID:              existing.ID,
-			Kind:            domain.StageHumanDecisionGate,
-			DependsOn:       existing.DependsOn,
-			RequiredClaims:  mergeStrings(existing.RequiredClaims, claims),
-			SubstitutesRole: existing.Role,
-			Rationale: fmt.Sprintf("operator decision: no eligible worker is independent of %s in dimension %q, and policy permits an independent human review in its place",
-				strings.Join(existing.Independence.DifferentFrom, ", "), existing.Independence.Dimension),
-		})
-	}
-	return stages, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +327,12 @@ func applyRoleObligation(stages []domain.PlanStage, requirement domain.RoleRequi
 		stage.TrustRequirement = requirement.TrustRequirement
 	}
 	if requirement.Independence != nil {
-		strengthened, err := strengthenIndependence(stage.Independence, *requirement.Independence, producers, stage, planID)
+		// producersExcept, not the raw producer list: a policy obligation that
+		// names no peer is the same ambiguous shorthand fillStageDefaults
+		// completes for a proposal, and it is refused the same way here - a
+		// producer already downstream of this stage is never a candidate for it,
+		// for the identical reason.
+		strengthened, err := strengthenIndependence(stage.Independence, *requirement.Independence, producersExcept(stages, stage.ID), stage, planID)
 		if err != nil {
 			return nil, err
 		}
@@ -481,7 +467,7 @@ func applyCapabilityObligations(stages []domain.PlanStage, capabilities []domain
 func applyGateObligation(stages []domain.PlanStage, gate domain.GateRequirement, contract domain.EngineeringWorkContract) []domain.PlanStage {
 	claims := gate.RequiredClaims
 	if len(claims) == 0 && gate.Kind == domain.StageAssuranceGate {
-		claims = contractClaims(contract)
+		claims = assuranceClaims(contract)
 	}
 	for i, stage := range stages {
 		if stage.Kind != gate.Kind || !sameAction(stage.Action, gate.Action) {
@@ -513,7 +499,7 @@ func applyGateObligation(stages []domain.PlanStage, gate domain.GateRequirement,
 // the contract requires outside the plan an operator approved - which is not a
 // smaller plan, it is a plan that says less than the truth.
 func ensureAssuranceGate(stages []domain.PlanStage, contract domain.EngineeringWorkContract) []domain.PlanStage {
-	claims := contractClaims(contract)
+	claims := assuranceClaims(contract)
 	if len(claims) == 0 {
 		return stages
 	}
@@ -559,7 +545,7 @@ func fillStageDefaults(stages []domain.PlanStage, input CompileInput) ([]domain.
 			// requires nothing, the refusal stands - there would be nothing to
 			// prove.
 			if stage.Kind == domain.StageAssuranceGate && len(stage.RequiredClaims) == 0 {
-				stage.RequiredClaims = contractClaims(input.Contract)
+				stage.RequiredClaims = assuranceClaims(input.Contract)
 			}
 			stages[i] = stage
 			continue
@@ -790,17 +776,57 @@ func shareBudget(stages []domain.PlanStage, envelope domain.PlanBudgetEnvelope) 
 // Small helpers
 // ---------------------------------------------------------------------------
 
-// producersExcept is the material producers other than one stage. A reviewer
-// that produced nothing is independent of itself trivially, and naming itself
-// would make the obligation unsatisfiable.
+// producersExcept is the material producers other than one stage, and never
+// one that already depends on it, directly or transitively.
+//
+// A reviewer that produced nothing is independent of itself trivially, and
+// naming itself would make the obligation unsatisfiable - that is the "except"
+// this function is named for. But a producer DOWNSTREAM of the stage (an
+// integrator that depends on this reviewer's approval, say) is excluded for a
+// different reason: binding it would need this stage to depend on the
+// producer, which reverses an edge the plan already states and manufactures a
+// cycle nobody proposed. #368 is this exact shape - a reviewer's empty
+// different_from tried to bind an integrator that already depended on it.
 func producersExcept(stages []domain.PlanStage, self string) []string {
+	dependsOn := dependencyIndex(stages)
 	var producers []string
 	for _, id := range materialProducerStages(stages) {
-		if id != self {
-			producers = append(producers, id)
+		if id == self || reaches(dependsOn, id, self) {
+			continue
 		}
+		producers = append(producers, id)
 	}
 	return producers
+}
+
+// dependencyIndex is a stage id's stated dependencies, for a reachability walk
+// that does not need the rest of what a stage carries.
+func dependencyIndex(stages []domain.PlanStage) map[string][]string {
+	index := make(map[string][]string, len(stages))
+	for _, stage := range stages {
+		index[stage.ID] = stage.DependsOn
+	}
+	return index
+}
+
+// reaches reports whether stage "from" depends on stage "to", directly or
+// transitively through DependsOn edges.
+func reaches(dependsOn map[string][]string, from, to string) bool {
+	visited := map[string]bool{from: true}
+	frontier := append([]string(nil), dependsOn[from]...)
+	for len(frontier) > 0 {
+		next := frontier[0]
+		frontier = frontier[1:]
+		if next == to {
+			return true
+		}
+		if visited[next] {
+			continue
+		}
+		visited[next] = true
+		frontier = append(frontier, dependsOn[next]...)
+	}
+	return false
 }
 
 func materialProducerStages(stages []domain.PlanStage) []string {

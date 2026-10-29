@@ -47,12 +47,6 @@ import (
 	"strings"
 )
 
-// GitActorOrigin is the actor that directly originated a governed Git
-// operation. The vocabulary is deliberately generic and provider-neutral: a
-// provider adapter may later prove a finer subsystem identity, and the
-// evidence schema must not have to learn one vendor's internals to record it.
-type GitActorOrigin string
-
 const (
 	// GitOriginModelTool is Git invoked by the model's own tool execution
 	// context - the process the provider creates to run one tool call.

@@ -171,6 +171,10 @@ type DoctorInput struct {
 	// failure as a deliberate design choice.
 	ControllerBuild      ControllerBuild
 	ControllerBuildError error
+	// ControllerUpdate is the serving controller's latest trusted-main update,
+	// read from its live snapshot; ControllerUpdateError is why none could be.
+	ControllerUpdate      *ControllerUpdate
+	ControllerUpdateError error
 
 	// ControllerRoot is where adopted generations and the "current" stable
 	// projection live - the same value `controller status`, `controller
@@ -185,6 +189,9 @@ type DoctorInput struct {
 	// is what a real shell would resolve, and answering it from anything else
 	// would not be answering that question.
 	EntrypointPathEnv string
+	// GoEnvFile is the Go env file the operator's host processes read, from
+	// OperatorGoEnvFile at the composition boundary. Empty means unknown.
+	GoEnvFile string
 }
 
 // Doctor answers every check independently and returns the report. It never
@@ -200,6 +207,7 @@ func Doctor(ctx context.Context, in DoctorInput) DoctorReport {
 	checks = append(checks, doctorConfig(in)...)
 	checks = append(checks, doctorGovernance(in))
 	checks = append(checks, doctorController(in))
+	checks = append(checks, doctorTrust(in))
 	checks = append(checks, doctorEntrypoint(in)...)
 	checks = append(checks, doctorAgents(in)...)
 	checks = append(checks, doctorControlEndpoint(in))
@@ -395,7 +403,91 @@ func doctorState(in DoctorInput) []DoctorCheck {
 		doctorStateSQLite(in),
 		doctorStateLock(in),
 		doctorStateLiveness(in),
+		doctorStateGoEnv(in),
 	}
+}
+
+// OperatorGoEnvFile names the Go env file host processes read: goenv (the
+// operator's $GOENV) when it is a real file, else os.UserConfigDir()/go/env.
+// GOENV=off or the null device in THIS process says nothing about the default
+// file every other process still reads - and `go env -w` under off writes it.
+func OperatorGoEnvFile(goenv string) string {
+	if goenv != "" && goenv != "off" && goenv != os.DevNull {
+		return goenv
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "go", "env")
+}
+
+// pathUnder reports whether path is root or inside it. Both sides are
+// symlink-resolved through their longest existing prefix (/tmp vs
+// /private/tmp; a deleted scratch dir under a live state dir), falling back
+// to the cleaned spelling.
+func pathUnder(root, path string) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	resolve := func(p string) string {
+		p = filepath.Clean(p)
+		for dir, rest := p, ""; ; {
+			if real, err := filepath.EvalSymlinks(dir); err == nil {
+				return filepath.Join(real, rest)
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				return p
+			}
+			dir, rest = parent, filepath.Join(filepath.Base(dir), rest)
+		}
+	}
+	rel, err := filepath.Rel(resolve(root), resolve(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// doctorStateGoEnv reports (#430) an operator Go env file whose build or module
+// locations point into runtime state: every later Go command on the host would
+// then write into a run directory that retention may delete. It only reads the
+// file; the remedy is the operator's own `go env -u`.
+func doctorStateGoEnv(in DoctorInput) DoctorCheck {
+	const id = "state.go_env"
+	file := strings.TrimSpace(in.GoEnvFile)
+	switch {
+	case file == "":
+		return warn(doctorGroupState, id, "the operator's Go env file could not be located, so it was not checked for runtime state paths")
+	case strings.TrimSpace(in.StateDir) == "":
+		return warn(doctorGroupState, id, "no state directory is configured, so the Go env file "+file+" was not checked against it")
+	}
+	data, err := os.ReadFile(file)
+	if os.IsNotExist(err) {
+		return pass(doctorGroupState, id, "no Go env file exists at "+file)
+	}
+	if err != nil {
+		return warn(doctorGroupState, id, "the Go env file "+file+" could not be read: "+err.Error())
+	}
+	var polluted []string
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "GOCACHE", "GOTMPDIR", "GOMODCACHE", "GOPATH":
+			for _, path := range filepath.SplitList(value) {
+				if pathUnder(in.StateDir, path) {
+					polluted = append(polluted, key)
+					break
+				}
+			}
+		}
+	}
+	if len(polluted) > 0 {
+		return warn(doctorGroupState, id, fmt.Sprintf("the operator Go env file %s sets %s under the Zenchron state directory %s, so every Go command on this host writes into runtime state; run `go env -u %s` (not done automatically)",
+			file, strings.Join(polluted, ", "), in.StateDir, strings.Join(polluted, " ")))
+	}
+	return pass(doctorGroupState, id, "the Go env file "+file+" points no build or module location under the state directory")
 }
 
 // doctorStateDir deliberately does not create the directory. A preflight that
@@ -433,7 +525,7 @@ func doctorStateSchema(in DoctorInput) DoctorCheck {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return pass(doctorGroupState, id, fmt.Sprintf("no database exists yet; the first run creates it at schema version %d", sqliteSchemaVersion))
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", sqliteFileURI(path)+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return warn(doctorGroupState, id, "the schema version could not be read from "+path+": "+err.Error())
 	}
@@ -667,6 +759,8 @@ func doctorGitIsolation() DoctorCheck {
 		"GIT_ATTR_NOSYSTEM=1",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_LITERAL_PATHSPECS=1",
+		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_GRAFT_FILE=" + os.DevNull,
 		"PATH=" + trustedPATH,
 	} {
 		if !containsExact(env, required) {
@@ -797,7 +891,7 @@ const doctorGroupAssurance = "assurance"
 func doctorAssurance(ctx context.Context, in DoctorInput) []DoctorCheck {
 	// The frozen diagnosis is called exactly once; the three Docker-derived
 	// fields are separate questions and are reported separately.
-	diagnosis := DiagnoseSandbox(in.Codex, in.Sandbox)
+	diagnosis := DiagnoseSandbox(ctx, in.Codex, in.Sandbox)
 	return []DoctorCheck{
 		doctorDockerEndpoint(in),
 		doctorAssuranceImage(in),
@@ -945,6 +1039,9 @@ func doctorAssuranceImage(in DoctorInput) DoctorCheck {
 
 func doctorVerifierSandbox(diagnosis SandboxDoctor) DoctorCheck {
 	const id = "assurance.verifier_sandbox"
+	if diagnosis.VerifierSandboxReason != "" {
+		return fail(doctorGroupAssurance, id, "the verifier sandbox is unavailable: "+diagnosis.VerifierSandboxReason+". Without a Docker daemon that answers, no candidate can be verified, so no run can complete.")
+	}
 	if diagnosis.VerifierSandbox != "enforceable" {
 		return fail(doctorGroupAssurance, id, "the verifier sandbox is "+diagnosis.VerifierSandbox+": Docker is missing, the daemon is unreachable, or the pinned assurance image is not present locally. Without it no candidate can be verified, so no run can complete.")
 	}
@@ -1482,6 +1579,12 @@ func doctorControlEndpoint(in DoctorInput) DoctorCheck {
 // operator's ceiling. Parallel candidate clones make disk an operator-level
 // resource, and the honest failure is a typed refusal before allocation rather
 // than ENOSPC in the middle of a clone.
+// heldStorageNote points at the held-workspace count. Doctor deliberately does
+// not open the durable store, and only the journal knows which workspaces are
+// held (#203), so the count comes from gc, which does.
+const heldStorageNote = "Candidate workspaces holding budget-stranded material are never reclaimed by gc; " +
+	"`autonomy gc --dry-run` reports their count and size under \"held\""
+
 func doctorStateStorage(in DoctorInput) DoctorCheck {
 	const id = "state.storage"
 	if strings.TrimSpace(in.StateDir) == "" {
@@ -1502,12 +1605,12 @@ func doctorStateStorage(in DoctorInput) DoctorCheck {
 		// problem has nothing to repair.
 		return pass(doctorGroupState, id, fmt.Sprintf(
 			"the state directory holds %d bytes and no ceiling is configured. Each concurrent run adds a full candidate clone, "+
-				"so set storage.max_state_bytes to get a typed refusal before the disk fills rather than an error mid-clone", used))
+				"so set storage.max_state_bytes to get a typed refusal before the disk fills rather than an error mid-clone. "+heldStorageNote, used))
 	}
 	if err := storage.Admit(); err != nil {
 		return fail(doctorGroupState, id, err.Error())
 	}
 	return pass(doctorGroupState, id, fmt.Sprintf(
-		"the state directory holds %d bytes against an operator ceiling of %d, with room for another candidate workspace",
+		"the state directory holds %d bytes against an operator ceiling of %d, with room for another candidate workspace. "+heldStorageNote,
 		used, storage.CeilingBytes))
 }

@@ -289,6 +289,9 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 			SourceRevision: strings.Repeat("a", 40), SourceTree: strings.Repeat("b", 40),
 			BinarySHA256: strings.Repeat("c", 64),
 		},
+		// ...and whose serving controller stands on trusted main, unheld.
+		ControllerUpdate: &ControllerUpdate{State: UpdateIdle, Subject: RevisionRecord{Revision: strings.Repeat("a", 40)},
+			Trust: &TrustReport{Floor: strings.Repeat("a", 40), TrustedMain: strings.Repeat("a", 40), MainHead: strings.Repeat("a", 40)}},
 		// A healthy environment can also say WHO it publishes as: doctor reports
 		// the resolved account rather than inferring distinctness from the
 		// credential mode, so the fixture has to supply one.
@@ -321,6 +324,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		// generation, and nothing else on PATH shadowing it.
 		ControllerRoot:    f.controllerRoot,
 		EntrypointPathEnv: f.entrypointBin,
+		GoEnvFile:         filepath.Join(root, "absent-go-env"),
 	}
 	return f
 }
@@ -461,7 +465,7 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 	// The list is asserted so a check cannot quietly disappear and leave the
 	// preflight passing on a question it stopped asking.
 	want := []string{
-		"state.dir", "state.schema", "state.sqlite", "state.lock", "state.liveness",
+		"state.dir", "state.schema", "state.sqlite", "state.lock", "state.liveness", "state.go_env",
 		"git.binary", "git.features", "git.remote", "git.credential", "git.isolation",
 		"provider.isolation", "provider.credential",
 		"assurance.docker_endpoint", "assurance.image", "assurance.verifier_sandbox",
@@ -470,7 +474,7 @@ func TestDoctorHealthyEnvironmentPassesEveryCheck(t *testing.T) {
 		"github.credential", "github.publication_identity", "github.governance", "github.identity", "github.rate_limit",
 		"config.global", "config.repository", "config.tighten", "config.watch",
 		"governance.publication_scope",
-		"controller.build",
+		"controller.build", "controller.trusted_main",
 		"install.entrypoint", "install.path_shadowing",
 		"agent.openai", "agents.usable", "provider.toolchain",
 		"supervisor.endpoint", "state.storage",
@@ -600,7 +604,7 @@ func TestDoctorReportsExhaustedAndUnreportedRateLimit(t *testing.T) {
 func TestDoctorFailsOnUnsupportedNewerSQLiteSchema(t *testing.T) {
 	f := newDoctorFixture(t)
 	path := filepath.Join(f.stateDir, "runtime.db")
-	db, err := sql.Open("sqlite", "file:"+path)
+	db, err := sql.Open("sqlite", sqliteFileURI(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,6 +623,23 @@ func TestDoctorFailsOnUnsupportedNewerSQLiteSchema(t *testing.T) {
 	}
 }
 
+// TestDoctorReadsTheSchemaOfAStateDirContainingAPercent is #331: SQLite
+// percent-decodes a "file:" URI, so a raw "file:"+path made doctor open a
+// different, nonexistent file under a worker's %XX-shaped TMPDIR.
+func TestDoctorReadsTheSchemaOfAStateDirContainingAPercent(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "run%3Aexec%23initial%7C1")
+	store, err := OpenSQLiteOperationStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if check := doctorStateSchema(DoctorInput{StateDir: stateDir}); check.Status != DoctorPass {
+		t.Fatalf("state.schema is %s under a %%-containing state dir: %s", check.Status, check.Reason)
+	}
+}
+
 func TestDoctorFailsOnWorldReadableStateDir(t *testing.T) {
 	f := newDoctorFixture(t)
 	if err := os.Chmod(f.stateDir, 0o755); err != nil {
@@ -633,6 +654,81 @@ func TestDoctorFailsWhenStateDirIsMissing(t *testing.T) {
 	report := f.run()
 	for _, id := range []string{"state.dir", "state.schema", "state.sqlite", "state.lock", "state.liveness"} {
 		requireCheck(t, report, id, DoctorFail)
+	}
+}
+
+// TestDoctorReportsAGoEnvPointingIntoState is #430: a worker's `go env -w`
+// left GOCACHE/GOTMPDIR naming a run's scratch. Doctor reports it, names the
+// remedy, and leaves the file exactly as it found it.
+func TestDoctorReportsAGoEnvPointingIntoState(t *testing.T) {
+	f := newDoctorFixture(t)
+	scratch := filepath.Join(f.stateDir, "runs", "run-x", "scratch", "attempt-1")
+	polluted := "GOCACHE=" + scratch + "/gocache\nGOFLAGS=-mod=readonly\nGOTMPDIR=" + scratch + "/tmp\nGOPATH=/elsewhere" + string(os.PathListSeparator) + scratch + "/gopath\n"
+	file := filepath.Join(f.root, "go-env")
+	if err := os.WriteFile(file, []byte(polluted), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.input.GoEnvFile = file
+	requireCheck(t, f.run(), "state.go_env", DoctorWarn, "GOCACHE, GOTMPDIR, GOPATH", "go env -u GOCACHE GOTMPDIR GOPATH")
+	if got, _ := os.ReadFile(file); string(got) != polluted {
+		t.Fatalf("doctor edited the operator Go env file: %q", got)
+	}
+
+	// Negative: locations outside state, including a sibling sharing its
+	// prefix, are the operator's own business.
+	clean := "GOCACHE=" + f.stateDir + "-sibling/cache\nGOMODCACHE=/opt/mod\n"
+	if err := os.WriteFile(file, []byte(clean), 0600); err != nil {
+		t.Fatal(err)
+	}
+	requireCheck(t, f.run(), "state.go_env", DoctorPass)
+}
+
+// TestDoctorGoEnvEdgeCases: GOENV=off in doctor's own process still checks the
+// default file other processes read; a state path spelled through a symlink
+// (/tmp vs /private/tmp) still matches; unknown or unreadable files WARN.
+func TestDoctorGoEnvEdgeCases(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "real", "state")
+	if err := os.MkdirAll(state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(filepath.Join(root, "real"), link); err != nil {
+		t.Fatal(err)
+	}
+	check := func(in DoctorInput) DoctorCheck { return doctorStateGoEnv(in) }
+
+	config := filepath.Join(root, "config")
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", config)
+	t.Setenv("AppData", config)
+	defaultFile := OperatorGoEnvFile("off")
+	if defaultFile == "" || OperatorGoEnvFile(os.DevNull) != defaultFile {
+		t.Fatalf("GOENV=off/null must resolve to the default file, got %q", defaultFile)
+	}
+	if err := os.MkdirAll(filepath.Dir(defaultFile), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Spelled through the symlink, while StateDir is the real path.
+	if err := os.WriteFile(defaultFile, []byte("GOTMPDIR="+filepath.Join(link, "state", "runs", "tmp")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := check(DoctorInput{StateDir: state, GoEnvFile: defaultFile}); got.Status != DoctorWarn || !strings.Contains(got.Reason, "GOTMPDIR") {
+		t.Fatalf("polluted default file under GOENV=off / via symlink: %s %s", got.Status, got.Reason)
+	}
+	// And the reverse spelling: StateDir through the link, file the real path.
+	if err := os.WriteFile(defaultFile, []byte("GOCACHE="+filepath.Join(state, "c")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := check(DoctorInput{StateDir: filepath.Join(link, "state"), GoEnvFile: defaultFile}); got.Status != DoctorWarn {
+		t.Fatalf("state dir spelled via symlink was not matched: %s %s", got.Status, got.Reason)
+	}
+
+	if got := check(DoctorInput{StateDir: state}); got.Status != DoctorWarn {
+		t.Fatalf("empty Go env path: %s %s", got.Status, got.Reason)
+	}
+	if got := check(DoctorInput{StateDir: state, GoEnvFile: root}); got.Status != DoctorWarn || !strings.Contains(got.Reason, "could not be read") {
+		t.Fatalf("unreadable Go env file: %s %s", got.Status, got.Reason)
 	}
 }
 
