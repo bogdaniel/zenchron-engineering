@@ -15,7 +15,7 @@ import (
 func TestSelfhostIssuePublishesVerifiedHandoff(t *testing.T) {
 	commands := newFakeCommands(t)
 	var output bytes.Buffer
-	if err := selfhostIssue("4", commands, &output); err != nil {
+	if err := selfhostIssueWithModels("4", nil, commands, &output); err != nil {
 		t.Fatal(err)
 	}
 	if len(commands.prompts) != 1 {
@@ -92,7 +92,7 @@ func TestSelfhostIssueRefusesUnsafeState(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			commands := newFakeCommands(t)
 			test.edit(commands)
-			err := selfhostIssue("4", commands, &bytes.Buffer{})
+			err := selfhostIssueWithModels("4", nil, commands, &bytes.Buffer{})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want containing %q", err, test.want)
 			}
@@ -108,7 +108,7 @@ func TestSelfhostIssueRefusesUnformattedUntrackedGoFile(t *testing.T) {
 	commands.goFiles = "changed.go\x00new.go\x00"
 	commands.formatOutput = "new.go"
 
-	err := selfhostIssue("4", commands, &bytes.Buffer{})
+	err := selfhostIssueWithModels("4", nil, commands, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "harness verification \"format\" failed") {
 		t.Fatalf("error = %v, want format verification failure", err)
 	}
@@ -132,7 +132,7 @@ func TestSelfhostIssueAcceptsDockerExecutorObservationWhenHarnessVerifiesChecks(
 		{ID: "vet", Command: "docker run golang:1.25 go vet ./...", Result: "pass"},
 		{ID: "test", Command: "docker run golang:1.25 go test ./...", Result: "pass"},
 	}
-	if err := selfhostIssue("4", commands, &bytes.Buffer{}); err != nil {
+	if err := selfhostIssueWithModels("4", nil, commands, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(commands.comment, `"command": "docker run golang:1.25 go test ./..."`) {
@@ -144,7 +144,7 @@ func TestSelfhostIssueRetriesTransientCapacityWithCompatibleFallback(t *testing.
 	commands := newFakeCommands(t)
 	commands.codexErrors = []error{errors.New("ERROR: Selected model is at capacity. Please try a different model."), nil}
 	var output bytes.Buffer
-	if err := selfhostIssue("4", commands, &output); err != nil {
+	if err := selfhostIssueWithModels("4", nil, commands, &output); err != nil {
 		t.Fatal(err)
 	}
 	calls := strings.Join(commands.calls, "\n")
@@ -183,7 +183,7 @@ func TestSelfhostIssueStopsRetryWhenFailedAttemptChangesState(t *testing.T) {
 	commands := newFakeCommands(t)
 	commands.codexErrors = []error{errors.New("model is at capacity"), nil}
 	commands.statusAfterCodexFailure = "?? partial.go"
-	err := selfhostIssue("4", commands, &bytes.Buffer{})
+	err := selfhostIssueWithModels("4", nil, commands, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "candidate state was preserved and retry stopped") {
 		t.Fatalf("error = %v, want preserved-state refusal", err)
 	}
@@ -195,7 +195,7 @@ func TestSelfhostIssueStopsRetryWhenFailedAttemptChangesState(t *testing.T) {
 func TestSelfhostIssueRequiresExplicitAPIModel(t *testing.T) {
 	commands := newFakeCommands(t)
 	commands.codexLoginStatus = "Logged in using an API key"
-	err := selfhostIssue("4", commands, &bytes.Buffer{})
+	err := selfhostIssueWithModels("4", nil, commands, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "requires explicit --model") {
 		t.Fatalf("error = %v, want explicit API model requirement", err)
 	}
@@ -263,7 +263,7 @@ func TestSelfhostResumeRetainsSuccessfulExecutionProvenance(t *testing.T) {
 	commands.codexErrors = []error{errors.New("selected model is at capacity"), nil}
 	commands.formatOutput = "changed.go"
 
-	err := selfhostIssue("4", commands, &bytes.Buffer{})
+	err := selfhostIssueWithModels("4", nil, commands, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "harness verification") {
 		t.Fatalf("initial execution error = %v, want harness verification failure", err)
 	}
