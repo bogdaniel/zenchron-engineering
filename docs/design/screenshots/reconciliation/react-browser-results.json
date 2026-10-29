@@ -1,0 +1,29 @@
+{
+  "checks": [
+    "React login and routing-safe keyboard skip after login/route changes",
+    "Controller-owned installed agents, profiles and templates",
+    "Create one deterministic objective from an existing issue; no execution approval",
+    "Exact assignment refusal uses the real controller; fresh approval records one durable receipt",
+    "Revision through the governed planner keeps a new proposal unapproved",
+    "Typed graph decision resolves through the controller and retains historical context/focus",
+    "Publication exact subject, real evidence recording, lost response reconciliation without resend",
+    "Pause/unpause use durable run state; resume/refresh refuse unowned input",
+    "Controller-created run resumes and refreshes through the existing scheduler admission path",
+    "Dark/light responsive and accessible actual application compositions"
+  ],
+  "posts": [
+    "/v1/objectives",
+    "/v1/plans/plan-025e50896a051ba9caabda9b75c24c46/approve",
+    "/v1/plans/plan-025e50896a051ba9caabda9b75c24c46/approve",
+    "/v1/plans/plan-5eea25f673a44e1b1179681df255feb4/revise",
+    "/v1/decisions/workgraph-hold-b88d1daac7a9a7ab205160d6326aea8e/resolve",
+    "/v1/runs/run-c8f9ad29141f4d93e118e4d175a1819d/authorize",
+    "/v1/runs/browser-run/pause",
+    "/v1/runs/browser-run/unpause",
+    "/v1/runs/browser-run/resume",
+    "/v1/runs/browser-run/refresh",
+    "/v1/runs/run-c8f9ad29141f4d93e118e4d175a1819d/resume",
+    "/v1/runs/run-c8f9ad29141f4d93e118e4d175a1819d/refresh"
+  ],
+  "errors": []
+}

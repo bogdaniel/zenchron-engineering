@@ -38,6 +38,7 @@ type invalidExpectation struct {
 }
 
 var invalidExpectations = map[string]invalidExpectation{
+	"string-material.engineering-policy.json":                   {"/rules/RULE-REVIEW/effect/obligations/review/material", "type"},
 	"ambiguous-unknown.engineering-fact.json":                   {"/value", "oneOf"},
 	"array-evidence-basis.authority-decision.json":              {"/basis/evidence_bundles", "type"},
 	"array-identities.engineering-policy.json":                  {"/rules", "type"},
@@ -83,6 +84,9 @@ var invalidExpectations = map[string]invalidExpectation{
 	"agent-workflow-obligation.engineering-policy.json": {"/rules/RULE-001/effect/engineering_requirements/roles/0", "additionalProperties"},
 	// A gate is not an agent stage. Only `agent` stages become EngineeringRuns.
 	"agent-gate-requirement.engineering-work-contract.json": {"/plan_requirements/gates/0/kind", "enum"},
+	// Planning invocation provenance names a denied TOOL, never what it was
+	// asked to do (#327): a tool input is not an identifier.
+	"denied-tool-input.engineering-plan.json": {"/provenance/reasoning/invocation/permission_denied_tools/1", "pattern"},
 }
 
 func TestSchemasCompile(t *testing.T) {
@@ -90,11 +94,10 @@ func TestSchemasCompile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Every schema is either a document type with fixtures, or the shared
-	// vocabulary those documents reference. A file that is neither is a schema
-	// nothing validates against and nothing refers to.
-	if want := len(fixtureSchemas) + 1; len(files) != want {
-		t.Fatalf("found %d schemas, want %d (the document types plus the planning vocabulary)", len(files), want)
+	// Twenty-five Control Plane contracts include the operational React reads
+	// and exact request/receipt projections, validated against actual HTTP/SSE bytes.
+	if want := len(fixtureSchemas) + 1 + 25; len(files) != want {
+		t.Fatalf("found %d schemas, want %d (documents, vocabulary and Control Plane wire contracts)", len(files), want)
 	}
 
 	for _, file := range files {
@@ -274,5 +277,41 @@ func TestTheSchemaVocabularyMatchesTheDomainCatalogue(t *testing.T) {
 	}
 	if !slices.Equal(vocabulary.Defs.Capability.Enum, capabilities) {
 		t.Fatalf("the schema capability catalogue is %v and the domain catalogue is %v", vocabulary.Defs.Capability.Enum, capabilities)
+	}
+}
+
+// #391: a host path carries only an identity, every other name only a value.
+func TestProviderEnvironmentSchemaSeparatesHashedFromLiteral(t *testing.T) {
+	body, err := os.ReadFile("planning-vocabulary.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("planning-vocabulary.schema.json", document); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile("planning-vocabulary.schema.json#/$defs/invocation_observation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("ab", 32)
+	for entry, valid := range map[string]bool{
+		`{"name":"GOCACHE","sha256":"` + digest + `"}`: true,
+		`{"name":"GOFLAGS","value":""}`:                true,
+		`{"name":"HOME"}`:                              true,
+		`{"name":"GOCACHE","value":"/x"}`:              false,
+		`{"name":"GOFLAGS","sha256":"` + digest + `"}`: false,
+		`{"name":"GOCACHE","value_bounded":true}`:      false,
+		`{"name":"home"}`:                              false,
+		`{"name":"XDG_CONFIG_HOME","value":"x"}`:       false,
+	} {
+		observation, _ := jsonschema.UnmarshalJSON(strings.NewReader(`{"executable":"x","workspace_bound":false,"workspace_instructions_suppressed":false,"provider_environment":[` + entry + `]}`))
+		if err := schema.Validate(observation); (err == nil) != valid {
+			t.Errorf("%s: valid=%t, want %t (%v)", entry, err == nil, valid, err)
+		}
 	}
 }

@@ -205,8 +205,8 @@ func TestProviderAccountUnavailableWaitsInsteadOfFailing(t *testing.T) {
 
 // TestRepeatedTicksDuringProviderAccountWaitDoNotBurnAttempts is the watch
 // proof. A run left waiting on an external account must survive being polled:
-// each pass may ask the provider once, because there is no free way to observe
-// an account, but the run's execution budget must not shrink for it.
+// each durable probe (#87) may ask the provider once, because there is no free
+// way to observe an account, but the run's execution budget must not shrink.
 func TestRepeatedTicksDuringProviderAccountWaitDoNotBurnAttempts(t *testing.T) {
 	fixture := newPhase8Fixture(t)
 	runID := fixture.start()
@@ -228,12 +228,13 @@ func TestRepeatedTicksDuringProviderAccountWaitDoNotBurnAttempts(t *testing.T) {
 		if op.Attempt >= op.MaxAttempts {
 			t.Fatalf("tick %d burned the execution budget: attempt %d of %d", tick, op.Attempt, op.MaxAttempts)
 		}
+		fixture.clock.at = op.RetryNotBefore
 	}
 	events := journalOf(t, fixture.runtime, runID)
 	if countType(events, EventRunFailed) != 0 {
 		t.Fatalf("polling a waiting run failed it: %v", journalTypes(events))
 	}
-	// Exactly one provider attempt per pass, never two in one pass: there is no
+	// Exactly one provider attempt per probe, never two in one pass: there is no
 	// free way to observe an account, so a pass asks once and then waits.
 	if attempts := countExecutionAttempts(events); attempts != ticks {
 		t.Fatalf("%d execution attempts over %d passes; a pass must make exactly one", attempts, ticks)
@@ -290,6 +291,7 @@ func TestProviderAccountWaitResumesAfterTheAccountIsRestored(t *testing.T) {
 		scriptedFinalMessage(t, "resume-done", 10))
 	useRealProvider(t, fixture, runID, api, func(p *OpenAIProvider) { p.MaxIterations = 4 })
 	callsBefore := api.callCount()
+	fixture.clock.at = executionOperation(t, fixture.store, runID).RetryNotBefore
 	fixture.reconcile(runID)
 	if api.callCount() <= callsBefore {
 		t.Fatal("resume never reached the provider: the wait was permanent")

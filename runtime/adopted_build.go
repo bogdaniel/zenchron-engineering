@@ -71,9 +71,16 @@ type AdoptedBuildRequest struct {
 // set none of them; they exist because the refusals below must be reachable in
 // a test without a real repository, a real GitHub, or a real trusted main.
 type AdoptedBuildDeps struct {
-	Rulesets func(context.Context, GitHubRepo) ([]TrustedMainRuleset, error)
-	RefSHA   func(context.Context, GitHubRepo, string) (RefObservation, error)
-	Git      func(dir string, args ...string) (string, error)
+	// Governance is the read-only governance-observation seam. It is a whole
+	// interface rather than a bare Rulesets function because the builder needs
+	// two things from it that must not be separable: the trust root, and the
+	// provenance of the identity that disclosed it. A build that recorded the
+	// first without the second would be evidence that cannot be audited - the
+	// reader could not tell whether the gate was observed by an identity
+	// entitled to see it, which after #219 is the question.
+	Governance ForgeGovernance
+	RefSHA     func(context.Context, GitHubRepo, string) (RefObservation, error)
+	Git        func(dir string, args ...string) (string, error)
 	// Fetch is separate from Git because it is the one step that reaches the
 	// network, and it must be bound to the governed remote exactly like every
 	// other remote operation the runtime performs.
@@ -117,85 +124,45 @@ type BuildEnvironment struct {
 	Digest      string   `json:"digest"`
 }
 
-// AdoptedBuildProvenance is the deterministic record. It is the artifact, and
-// it is also the return value: a caller that wants to know what was built asks
-// the same object the file holds.
-type AdoptedBuildProvenance struct {
-	SchemaVersion string           `json:"schema_version"`
-	Repository    string           `json:"repository"`
-	TrustRoot     TrustRootRecord  `json:"trust_root"`
-	TrustedMain   RevisionRecord   `json:"trusted_main"`
-	Source        RevisionRecord   `json:"source"`
-	Containment   string           `json:"containment_proof"`
-	Kind          string           `json:"controller_kind"`
-	Version       string           `json:"version"`
-	GOOS          string           `json:"goos"`
-	GOARCH        string           `json:"goarch"`
-	BuildFlags    []string         `json:"build_flags"`
-	BuildEnv      BuildEnvironment `json:"build_environment"`
-	BinarySHA256  string           `json:"binary_sha256"`
-	BuiltAt       string           `json:"built_at"`
-	Builder       BuilderRecord    `json:"builder"`
-	OutputPath    string           `json:"output_path"`
-	SelfProbe     SelfProbeRecord  `json:"self_probe"`
-}
-
-// SelfProbeRecord is the binary's own account of itself, checked against what
-// was asked for. There is no "not probed" state: an unprobed build is refused,
-// never recorded.
-type SelfProbeRecord struct {
-	Kind         string `json:"kind"`
-	Version      string `json:"version"`
-	Revision     string `json:"source_revision"`
-	Tree         string `json:"source_tree"`
-	BinarySHA256 string `json:"binary_sha256"`
-	Matched      bool   `json:"matched"`
-}
-
-type TrustRootRecord struct {
-	RulesetID   int64       `json:"ruleset_id"`
-	Name        string      `json:"name"`
-	Digest      string      `json:"digest"`
-	Policy      TrustPolicy `json:"policy"`
-	Enforcement string      `json:"enforcement"`
-}
-
-type RevisionRecord struct {
-	Revision string `json:"revision"`
-	Tree     string `json:"tree"`
-}
-
-// BuilderRecord is the identity of the tool that produced the artifact. It may
-// truthfully be unattested - the builder need not itself be adopted - but it
-// must not LIE: a builder whose own attestation could not be resolved records
-// that fact rather than laundering it into "unattested", which would claim a
-// deliberate absence of provenance where there is a failed measurement.
-type BuilderRecord struct {
-	Version         string `json:"version"`
-	SourceRevision  string `json:"source_revision"`
-	Kind            string `json:"kind"`
-	ResolutionError string `json:"resolution_error,omitempty"`
-}
-
-const adoptedBuildSchemaVersion = "adopted-build/1"
-
 // BuildAdoptedController performs the whole proof, then the build, then
 // publishes. Any refusal returns before anything is installed.
 func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, deps AdoptedBuildDeps, self BuilderRecord) (AdoptedBuildProvenance, error) {
 	deps = deps.withDefaults()
 	var out AdoptedBuildProvenance
+	// The operator-supplied output root is resolved to an absolute host path
+	// HERE, once, at the boundary where the request is accepted - not at each
+	// site that later reads request.OutputRoot. A relative root is only
+	// meaningful relative to this process's working directory; the staging
+	// directory built from it is handed to Docker as a bind-mount source, and
+	// the daemon does not share that working directory. Resolving once here
+	// means a later mount cannot reintroduce the defect by reading the
+	// unresolved field.
+	resolvedOutput, err := filepath.Abs(request.OutputRoot)
+	if err != nil {
+		return out, fmt.Errorf("the output root %q could not be resolved to an absolute path: %w", request.OutputRoot, err)
+	}
+	request.OutputRoot = resolvedOutput
 	// The production dependencies have no honest default: guessing a forge or
 	// a ref observer would be inventing the trust root. Missing ones are a
 	// typed refusal, never a panic.
-	if deps.Rulesets == nil || deps.RefSHA == nil {
+	if deps.Governance == nil || deps.RefSHA == nil {
 		return out, fmt.Errorf("the builder has no way to observe the trust root or trusted main, so nothing may be called adopted")
 	}
-	// The adoption policy is FROZEN, not a parameter. A caller that could
-	// weaken the trusted ref, the required check, the allowed merge methods or
-	// the strict-check rule and still receive an artifact labelled adopted
-	// would make the label mean whatever the caller wanted. There is exactly
-	// one adoption policy, and this is where it comes from.
-	policy := DefaultTrustPolicy()
+	// FAIL CLOSED on the provenance of the observation itself. An observer that
+	// will not name the role it observed under is not thereby trusted: the
+	// whole reason this seam exists is that one identity class can see the
+	// trust root and another cannot, so an unattributed observation is an
+	// observation of unknown standing, which is not a fact.
+	observedBy := deps.Governance.GovernanceProvenance()
+	if observedBy.Role != CredentialRoleGovernance || strings.TrimSpace(observedBy.Method) == "" {
+		return out, fmt.Errorf("the governance observer does not identify itself as a %s credential, so the trust root it reports is of unknown standing and nothing may be called adopted", CredentialRoleGovernance)
+	}
+	// The adoption policies are FROZEN, not parameters. A caller that could
+	// weaken the trusted ref, the allowed merge methods, the T2 producer or the
+	// search bound and still receive an artifact labelled adopted would make
+	// the label mean whatever the caller wanted. There is exactly one pair of
+	// adoption policies, and this is where they come from.
+	policy := DefaultBranchIntegrityPolicy()
 	// A cross-target build cannot be asked what it thinks it is, and an
 	// unprobed adopted artifact is refused. Cross-compiling stays available
 	// for unattested builds, which is where it belongs.
@@ -217,17 +184,18 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 		return out, err
 	}
 
-	// 2. Trusted main as GITHUB reports it, not as the local clone remembers.
+	// 2. Trusted main, RESOLVED (ADR-0007): main_head as GITHUB reports it,
+	// not as the local clone remembers, then the newest commit on its
+	// first-parent chain with accepted exact-revision T2 evidence. main_head
+	// itself is never the default source.
 	branch := strings.TrimPrefix(policy.Ref, "refs/heads/")
-	trustedMain, err := observeTrustedMain(ctx, deps, request.Repository, branch)
+	resolution, err := resolveTrustedMain(ctx, deps, request.Repository, request.RepositoryDir, branch)
 	if err != nil {
 		return out, err
 	}
+	trustedMain := resolution.TrustedMain
 
-	// 3. Fetch that exact revision, then prove containment against it.
-	if err := deps.Fetch(request.RepositoryDir, trustedMain, branch); err != nil {
-		return out, fmt.Errorf("the trusted revision could not be fetched: %w", err)
-	}
+	// 3. Prove containment against trusted main, not main_head.
 	source := strings.TrimSpace(request.Revision)
 	if source == "" {
 		source = trustedMain
@@ -261,7 +229,7 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	// same-filesystem atomic rename rather than a copy that can half-finish.
 	version := strings.TrimSpace(request.Version)
 	if version == "" {
-		version = "main-" + shortSHA(source)
+		version = AdoptedVersionName(source)
 	}
 	final := filepath.Join(request.OutputRoot, version)
 	if err := os.MkdirAll(request.OutputRoot, 0700); err != nil {
@@ -331,15 +299,11 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	if finalDigest != startingDigest {
 		return out, fmt.Errorf("the trust root changed while the build ran (%s -> %s); refusing to publish under a gate that is not the one proven", startingDigest, finalDigest)
 	}
-	finalMain, err := observeTrustedMain(ctx, deps, request.Repository, branch)
+	atPublication, err := resolveTrustedMain(ctx, deps, request.Repository, request.RepositoryDir, branch)
 	if err != nil {
-		return out, fmt.Errorf("trusted main could not be revalidated before publication: %w", err)
+		return out, fmt.Errorf("trusted main could not be re-resolved before publication: %w", err)
 	}
-	if finalMain != trustedMain {
-		if err := deps.Fetch(request.RepositoryDir, finalMain, branch); err != nil {
-			return out, fmt.Errorf("trusted main moved to %s and could not be re-fetched: %w", finalMain, err)
-		}
-	}
+	finalMain := atPublication.TrustedMain
 	if err := proveContained(deps, request.RepositoryDir, source, finalMain); err != nil {
 		return out, err
 	}
@@ -347,17 +311,28 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 	if err != nil {
 		return out, fmt.Errorf("the trusted main tree could not be established: %w", err)
 	}
+	headTree, err := revisionTree(deps, request.RepositoryDir, atPublication.MainHead)
+	if err != nil {
+		return out, fmt.Errorf("the main_head tree could not be established: %w", err)
+	}
+	revisionPolicy := DefaultTrustedRevisionPolicy()
 
 	out = AdoptedBuildProvenance{
 		SchemaVersion: adoptedBuildSchemaVersion,
 		Repository:    request.Repository.String(),
 		TrustRoot: TrustRootRecord{
 			RulesetID: finalRoot.ID, Name: finalRoot.Name, Digest: finalDigest,
-			Policy: policy, Enforcement: finalRoot.Enforcement,
+			Policy: policy.record(), Enforcement: finalRoot.Enforcement, ObservedBy: observedBy,
+			Bypass: describeBypass(finalRoot),
 		},
-		TrustedMain:  RevisionRecord{Revision: finalMain, Tree: mainTree},
-		Source:       RevisionRecord{Revision: source, Tree: tree},
-		Containment:  fmt.Sprintf("ancestry: %s is an ancestor of trusted main %s, re-derived from the remote-observed head at publication rather than a local ref", source, finalMain),
+		TrustedMain:           RevisionRecord{Revision: finalMain, Tree: mainTree},
+		MainHead:              &RevisionRecord{Revision: atPublication.MainHead, Tree: headTree},
+		TrustedRevisionPolicy: &revisionPolicy,
+		TrustEvidence:         &TrustEvidenceRecord{Kind: TrustEvidenceT2, Observation: &atPublication.Evidence},
+		Skipped:               atPublication.Skipped,
+		Source:                RevisionRecord{Revision: source, Tree: tree},
+		Containment: fmt.Sprintf("ancestry: %s is an ancestor of trusted main %s, resolved at publication from the remote-observed main_head %s "+
+			"by exact-revision T2 evidence on its first-parent chain", source, finalMain, atPublication.MainHead),
 		Kind:         ControllerAdopted,
 		Version:      version,
 		GOOS:         spec.GOOS,
@@ -395,8 +370,60 @@ func BuildAdoptedController(ctx context.Context, request AdoptedBuildRequest, de
 }
 
 // observeTrustRoot reads the gate and refuses anything that is not one.
-func observeTrustRoot(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, policy TrustPolicy) (TrustedMainRuleset, error) {
-	rulesets, err := deps.Rulesets(ctx, repo)
+// ObserveTrustedMainRevision answers what trusted main IS right now: the
+// newest revision on main's first-parent chain with accepted exact-revision T2
+// evidence (ADR-0007) - never merely the revision the forge reports for the
+// branch - and the tree recomputed from a local clone that holds it.
+//
+// THE TRUST ROOT IS CHECKED FIRST, exactly as a build checks it. An updater
+// that followed the branch without it would be following whatever main says
+// under a gate that may have been removed this morning, and would discover
+// that only after spending minutes of container time being refused.
+//
+// The tree is recomputed rather than reported, for the same reason the build
+// recomputes it: a revision is what the forge says, and a tree is what the
+// object actually contains.
+func ObserveTrustedMainRevision(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, repositoryDir string) (RevisionRecord, error) {
+	view, err := ObserveTrustedMain(ctx, deps, repo, repositoryDir)
+	return view.TrustedMain, err
+}
+
+// TrustedMainView is one observation of the two facts ADR-0007 keeps apart:
+// where main is, and which revision on it is trusted, with the reason every
+// newer commit is not.
+type TrustedMainView struct {
+	TrustedMain RevisionRecord        `json:"trusted_main"`
+	MainHead    string                `json:"main_head"`
+	Skipped     []SkippedRevision     `json:"skipped"`
+	Evidence    T2EvidenceObservation `json:"evidence"`
+}
+
+// ObserveTrustedMain is ObserveTrustedMainRevision with the whole answer.
+func ObserveTrustedMain(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, repositoryDir string) (TrustedMainView, error) {
+	deps = deps.withDefaults()
+	if deps.Governance == nil || deps.RefSHA == nil {
+		return TrustedMainView{}, fmt.Errorf("the trust root and trusted main cannot be observed, so no revision may be called trusted")
+	}
+	policy := DefaultBranchIntegrityPolicy()
+	if _, err := observeTrustRoot(ctx, deps, repo, policy); err != nil {
+		return TrustedMainView{}, err
+	}
+	branch := strings.TrimPrefix(policy.Ref, "refs/heads/")
+	resolution, err := resolveTrustedMain(ctx, deps, repo, repositoryDir, branch)
+	view := TrustedMainView{MainHead: resolution.MainHead, Skipped: resolution.Skipped, Evidence: resolution.Evidence}
+	if err != nil {
+		return view, err
+	}
+	tree, err := revisionTree(deps, repositoryDir, resolution.TrustedMain)
+	if err != nil {
+		return view, err
+	}
+	view.TrustedMain = RevisionRecord{Revision: resolution.TrustedMain, Tree: tree}
+	return view, nil
+}
+
+func observeTrustRoot(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, policy BranchIntegrityPolicy) (TrustedMainRuleset, error) {
+	rulesets, err := deps.Governance.Rulesets(ctx, repo)
 	if err != nil {
 		return TrustedMainRuleset{}, fmt.Errorf("the trust root could not be observed, so nothing may be called adopted: %w", err)
 	}
@@ -410,13 +437,18 @@ func observeTrustRoot(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRep
 	return root, nil
 }
 
-func observeTrustedMain(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, branch string) (string, error) {
+func observeMainHead(ctx context.Context, deps AdoptedBuildDeps, repo GitHubRepo, branch string) (string, error) {
 	observed, err := deps.RefSHA(ctx, repo, branch)
 	if err != nil {
-		return "", fmt.Errorf("trusted main could not be observed: %w", err)
+		return "", fmt.Errorf("main_head could not be observed: %w", err)
 	}
 	if !observed.Exists || observed.SHA == "" {
-		return "", fmt.Errorf("trusted main %s does not exist in %s", branch, repo)
+		return "", fmt.Errorf("main branch %s does not exist in %s", branch, repo)
+	}
+	// The forge's answer reaches git argv and a forge URL: only an exact
+	// commit name is accepted.
+	if !isCommitSHA(observed.SHA) {
+		return "", fmt.Errorf("the forge reported main_head %q, which is not an exact commit", observed.SHA)
 	}
 	return observed.SHA, nil
 }
@@ -729,13 +761,32 @@ func runAdoptedBuild(ctx context.Context, spec AdoptedBuildSpec) (BuildEnvironme
 
 	sandbox := spec.Sandbox
 	sandbox.OperationID = "adopted-build-" + spec.Revision
+	// EXCLUSIVE OWNERSHIP of this revision's build, for everything below: the
+	// controller's updater and a manual `controller build-adopted` of the same
+	// revision share a deterministic container name, and only the holder may
+	// reconcile a leftover container (#674 review). A build that cannot take it
+	// reports that another is in progress and touches nothing.
+	claim, err := claimAdoptedBuild(sandbox.StateDir, spec.Revision)
+	if err != nil {
+		return BuildEnvironment{}, err
+	}
+	defer claim.Release()
 
 	toolchain, err := adoptedBuildToolchain(ctx, sandbox, spec)
 	if err != nil {
 		return BuildEnvironment{}, err
 	}
 
-	if _, err := sandbox.run(ctx, adoptedBuildArgs(spec)); err != nil {
+	// The container's own stderr is the only account of WHY the compiler
+	// refused - a read-only --output, a module missing from the offline
+	// cache, an image that cannot run - and the caller has no run journal to
+	// fall back on, since none exists yet. runAdoptedStep returns it as an
+	// AdoptedBuildFailure naming the step, the attempts and the Docker
+	// operation, and retries only an infrastructure failure of the Docker
+	// lifecycle itself (#674), never a compile error.
+	if _, err := runAdoptedStep(ctx, sandbox, "build", func() (CommandOutput, error) {
+		return sandbox.run(ctx, adoptedBuildArgs(spec))
+	}); err != nil {
 		return BuildEnvironment{}, err
 	}
 
@@ -783,6 +834,18 @@ func adoptedBuildArgs(spec AdoptedBuildSpec) []string {
 		"-ldflags", ldflags, "-o", "/out/"+filepath.Base(spec.Output), "./cmd/zenchron-engineering")
 }
 
+// compilerFailureDetail prefers stderr, since that is where `go build` writes
+// a compile failure, and falls back to stdout for a toolchain that used it
+// instead. It returns "" rather than the bare process error when the
+// container produced no output at all - a sandbox that never started has
+// nothing to add beyond what the caller's own error already says.
+func compilerFailureDetail(out CommandOutput) string {
+	if detail := strings.TrimSpace(string(out.Stderr)); detail != "" {
+		return detail
+	}
+	return strings.TrimSpace(string(out.Stdout))
+}
+
 // adoptedBuildToolchain records WHICH compiler ran, measured from the pinned
 // image rather than assumed from its tag.
 func adoptedBuildToolchain(ctx context.Context, sandbox DockerSandbox, spec AdoptedBuildSpec) (string, error) {
@@ -792,9 +855,13 @@ func adoptedBuildToolchain(ctx context.Context, sandbox DockerSandbox, spec Adop
 	args = append(args, sandbox.Image, "go", "version")
 	probe := sandbox
 	probe.OperationID = "adopted-build-toolchain-" + spec.Revision
-	out, err := probe.run(ctx, args)
+	// THE SAME LAW AS THE BUILD ITSELF. This phase's failure determines the
+	// sandbox result too - an image that cannot run, a platform mismatch, a
+	// daemon that refused - and "exit status 125" tells an operator none of
+	// it. There is no run journal to fall back on here either.
+	out, err := runAdoptedStep(ctx, probe, "toolchain", func() (CommandOutput, error) { return probe.run(ctx, args) })
 	if err != nil {
-		return "", fmt.Errorf("the pinned build toolchain could not be identified: %w", err)
+		return "", err
 	}
 	return strings.TrimSpace(string(out.Stdout)), nil
 }

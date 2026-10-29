@@ -136,14 +136,41 @@ decoding. A repository that wants a lower ceiling for itself writes
 never raise — and because the effective bound is the stricter of the two, that
 tightening still holds.
 
-Each tick drives the active runs oldest first and caps the number driven at the
-ceiling, ROTATING the starting point between ticks. The rotation is the part
-that matters: a run stays non-terminal for its whole lifetime, not only while it
-is being reconciled, so a fixed prefix would make a ceiling of one mean "the
-oldest run, forever" and every later submission would wait for it to finish. The
-ceiling is a rate limit, not a queue position. The scheduler enforces the
-same ceiling durably; the supervisor bound exists so the process does not start
-work it cannot lease. A per-run failure is REPORTED inside the tick report and
+Each tick is a scheduling PASS: it starts as many runs as the ceiling still has
+room for, oldest first, ROTATING the starting point between passes, and then
+returns without waiting for them. A run holds its slot for as long as it is
+being driven - a provider that takes half an hour holds one for half an hour -
+and the remaining slots stay available the whole time, so a task submitted while
+another is executing starts on the next pass rather than when that provider
+finishes.
+
+The rotation decides who gets a free slot: a run stays non-terminal for its
+whole lifetime, not only while it is being reconciled, so a fixed prefix would
+make the oldest runs the only ones ever driven. The rotation sweeps the whole
+active fleet and steps over whatever is in flight, which is what gives every run
+a turn.
+
+A free slot goes first to runs that are MOVING: runs whose journal moved within
+the last two poll intervals, and runs that have not had a first turn yet. A run
+that has been driven before and whose journal has not moved since is QUIET - a
+parked evidence generation, a pull request waiting for review. Both are read
+from the durable journal, so the order is the same right after a restart as in
+steady state. A quiet run gets a turn at most every 4 poll intervals, and once it
+has waited that long it competes with the moving runs, so every run is observed
+at least every 4 polls however busy its siblings are. Each run gets at most one
+turn per poll interval, and a slot freed between passes is handed on at once
+rather than at the next poll, so ten parked runs cost a runnable one seconds,
+not ten passes. This decides only who goes first, never what a run may do.
+
+**At a ceiling of one, work is still a queue.** One long-running task holds the
+single work slot until it is done and no other run does work, which is what the
+default ceiling of one means. Observation is not queued behind it: it has its
+own ceiling, `max_concurrent_observations` (default 2), so a run waiting on
+review still notices the review and shows as runnable until the slot frees
+(see [capacity classes](supervisor.md#capacity-classes)); raise `max_concurrent_runs` to work on several tasks at
+once. Above one, the ceiling is a rate limit on how many run at a time and never
+a fixed ordering. The scheduler enforces the same ceiling durably; the
+supervisor bound exists so the process does not start work it cannot lease. A per-run failure is REPORTED inside the tick report and
 never propagated: one run whose forge call failed, whose provider is unavailable
 or whose workspace is broken must not take its siblings down, and that isolation
 is the whole reason several tasks share one process.
@@ -239,14 +266,15 @@ zenchron-engineering autonomy stop-all --reason "..."     # actually cancel ever
 | --- | --- | --- |
 | `drain` | accepts no submissions and starts nothing new; work already inside a reconcile finishes | no |
 | `shutdown` | stops scheduling and unwinds in-flight work through the cancellation providers and the Docker sandbox already honour; every run stays exactly as resumable as its journal says | no |
-| `stop-all` | cancels every non-terminal run, journalled per run through the same single cancellation path `stop RUN` uses | yes |
+| `stop-all` | cancels every non-terminal run, journalled per run through the same single cancellation path `stop RUN` uses; a run that completed or failed, even one that finished after the listing, is skipped and keeps its outcome | yes |
 
 `drain` and `shutdown` are instructions TO a supervisor and are refused with `no
 supervisor is running on <state_dir>; start one with
 zenchron-engineering serve` when there is none — saying so is better than
 silently succeeding. `stop-all` works either way: with a supervisor it is
 delegated so the process holding the leases performs it, without one it runs
-through the same cancellation path locally. A drain is not reversible except by
+through the same cancellation path locally. `stop RUN` on a completed or
+failed run is refused with exit status 64 and never rewrites its outcome. A drain is not reversible except by
 restarting the supervisor, which is deliberate: un-draining silently would make
 the instruction meaningless.
 
@@ -263,8 +291,15 @@ label from a live run's issue withdraws consent and the run waits at
 `opt_in_removed`. `autonomy watch` runs the discovery loop on its own, without
 the supervisor, for an operator who wants intake and nothing else.
 
+Discovery decides from the issue's whole history, under every configuration it
+was ever worked under (#58). Only an issue with no run at all gets one; an issue
+whose runs have all finished stays finished; and an issue with live work in
+another identity space is reported, not paralleled. A configuration change is
+never itself a reason to start an issue again.
+
 ## See also
 
+- [orchestration.md](orchestration.md) — `autonomy orchestrate`: one explicit issue batch, mandatory handoffs, one status
 - [running-work.md](running-work.md) — one run in detail
 - [github-feedback.md](github-feedback.md) — reviews reaching a live worker
 - [configuration.md](configuration.md) — `supervisor`, `watch`, `storage`

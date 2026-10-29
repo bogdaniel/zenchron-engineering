@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/execution"
 )
 
 const fixtureAPIKey = "sk-zenchron-fixture-provider-credential-9c3"
@@ -154,7 +156,7 @@ func TestOpenAIProviderDrivesEveryToolThroughTheBroker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("brokered reasoning loop failed: %v", err)
 	}
-	if result.ProviderID != openaiProviderID || result.Outcome != Succeeded || result.Model != "gpt-fixture" {
+	if result.ProviderID != openaiProviderID || result.Outcome != execution.Succeeded || result.Model != "gpt-fixture" {
 		t.Fatalf("provider observation is wrong: %#v", result)
 	}
 	if result.Tokens == nil || *result.Tokens != 60 {
@@ -253,7 +255,7 @@ func TestOpenAIProviderReturnsToolRefusalsToTheModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refusals must be recoverable, not fatal: %v", err)
 	}
-	if result.Outcome != Succeeded {
+	if result.Outcome != execution.Succeeded {
 		t.Fatalf("the loop recovered but did not complete: %#v", result)
 	}
 	body := string(api.requests[len(api.requests)-1])
@@ -290,7 +292,7 @@ func TestOpenAIProviderEndsOnEveryBound(t *testing.T) {
 		if got := stopReason(t, err); got != StopIterationBudget {
 			t.Fatalf("iteration bound did not end the loop: %s", got)
 		}
-		if len(api.requests) != 3 || result.Outcome != OperationFailed || result.Failure == nil {
+		if len(api.requests) != 3 || result.Outcome != execution.Failed || result.Failure == nil {
 			t.Fatalf("iteration bound was not enforced at the configured ceiling: %d %#v", len(api.requests), result)
 		}
 	})
@@ -325,7 +327,7 @@ func TestOpenAIProviderEndsOnEveryBound(t *testing.T) {
 		if got := stopReason(t, err); got != StopDeadlineExceeded {
 			t.Fatalf("operation timeout did not end the loop: %s", got)
 		}
-		if result.Outcome != OperationCancelled {
+		if result.Outcome != execution.Cancelled {
 			t.Fatalf("a timed-out loop is not reported as cancelled: %#v", result)
 		}
 	})
@@ -348,7 +350,7 @@ func TestOpenAIProviderEndsOnEveryBound(t *testing.T) {
 		if got := stopReason(t, err); got != StopCancelled {
 			t.Fatalf("cancellation did not end the loop: %s", got)
 		}
-		if result.Outcome != OperationCancelled {
+		if result.Outcome != execution.Cancelled {
 			t.Fatalf("a cancelled loop is not reported as cancelled: %#v", result)
 		}
 	})
@@ -416,7 +418,7 @@ func TestOpenAIProviderRefusesUnenforceableCostBudget(t *testing.T) {
 	if got := stopReason(t, err); got != StopCostBudgetUnenforceable {
 		t.Fatalf("an unenforceable cost ceiling was not refused with a typed stop: %s", got)
 	}
-	if result.Outcome == Succeeded {
+	if result.Outcome == execution.Succeeded {
 		t.Fatalf("a refused cost ceiling must not be reported as success: %#v", result)
 	}
 }
@@ -435,7 +437,7 @@ func TestOpenAIProviderZeroCostCeilingPermitsExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a zero cost ceiling must not block execution: %v", err)
 	}
-	if result.Outcome != Succeeded || len(api.requests) != 1 {
+	if result.Outcome != execution.Succeeded || len(api.requests) != 1 {
 		t.Fatalf("a zero cost ceiling did not permit normal execution: %#v requests=%d", result, len(api.requests))
 	}
 }
@@ -605,5 +607,57 @@ func TestOpenAIProviderReachesTheRealAPIWhenConfigured(t *testing.T) {
 		if strings.Contains(string(data), strings.TrimSpace(string(key))) {
 			t.Fatalf("the real credential was written into artifact %s", artifact.Path)
 		}
+	}
+}
+
+// stopDuringCall commits an operator stop while a request is in flight, then
+// either fails the request because of that cancellation or answers with an
+// unrelated server error.
+type stopDuringCall struct {
+	stop      func()
+	cancelled bool
+}
+
+func (d *stopDuringCall) Do(request *http.Request) (*http.Response, error) {
+	d.stop()
+	if d.cancelled {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	}
+	return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(strings.NewReader(`{"error":{"type":"server_error","code":"server_error"}}`)), Header: http.Header{}}, nil
+}
+
+// The OpenAI loop attributes run_cancelled only to a call that failed BECAUSE
+// the stop cancelled it; an unrelated failure that merely coincides with a
+// stop keeps its own class and stop reason (#213).
+func TestOpenAIRunCancelledOnlyWhenTheStopEndedTheCall(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		cancelled bool
+		want      FailureClass
+		reason    ProviderStop
+	}{
+		{"the stop cancelled the call", true, FailureRunCancelled, StopCancelled},
+		{"an unrelated failure coincided with a stop", false, "", StopProviderError},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			provider, request, _, _ := openaiFixture(t, &fakeResponsesAPI{})
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			provider.HTTP = &stopDuringCall{stop: func() { cancel(execution.ErrRunStopped) }, cancelled: c.cancelled}
+			result, err := provider.Execute(ctx, request)
+			if got := stopReason(t, err); got != c.reason {
+				t.Fatalf("stop reason = %q, want %q", got, c.reason)
+			}
+			if result.Failure == nil {
+				t.Fatal("no failure recorded")
+			}
+			if c.want == FailureRunCancelled && result.Failure.Classification != FailureRunCancelled {
+				t.Fatalf("class = %q, want run_cancelled", result.Failure.Classification)
+			}
+			if c.want == "" && result.Failure.Classification == FailureRunCancelled {
+				t.Fatal("an unrelated failure that coincided with a stop was attributed to the stop")
+			}
+		})
 	}
 }

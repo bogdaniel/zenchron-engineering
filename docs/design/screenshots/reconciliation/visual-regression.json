@@ -1,0 +1,217 @@
+{
+  "source": "Frozen approved /design checkpoint; PNG-byte comparison, not runtime pixel approval",
+  "compared": 52,
+  "identical": [
+    "actions-1440-dark-full.png",
+    "actions-1440-dark.png",
+    "actions-1440-light.png",
+    "actions-1920-dark-full.png",
+    "actions-1920-dark.png",
+    "actions-390-binding-expanded.png",
+    "actions-390-dark-full.png",
+    "actions-390-dark.png",
+    "actions-disconnected-1440.png",
+    "actions-disconnected-390.png",
+    "actions-failed-execution-390.png",
+    "actions-permission-refused-390.png",
+    "actions-stale-1440.png",
+    "actions-stale-390.png",
+    "confirmation-1440-dark.png",
+    "confirmation-390-binding-expanded.png",
+    "confirmation-390-dark.png",
+    "overview-1440-dark-full.png",
+    "overview-1440-dark.png",
+    "overview-1920-dark-full.png",
+    "overview-390-dark-full.png",
+    "overview-390-dark.png",
+    "portfolio-1440-dark-full.png",
+    "portfolio-1440-dark.png",
+    "portfolio-1440-light.png",
+    "portfolio-1920-dark-full.png",
+    "portfolio-1920-dark.png",
+    "portfolio-390-dark-full.png",
+    "portfolio-390-dark.png",
+    "state-disconnected-1440.png",
+    "state-error-1440.png",
+    "state-loading-1440.png",
+    "workspace-1440-dark.png",
+    "workspace-1440-light.png",
+    "workspace-1920-dark-full.png",
+    "workspace-1920-dark.png",
+    "workspace-390-dark-full.png",
+    "workspace-390-dark.png",
+    "workspace-failed-execution-1440.png"
+  ],
+  "changed": [
+    "actions-failed-execution-1440.png",
+    "actions-permission-refused-1440.png",
+    "actions-rejected-1440.png",
+    "actions-rejected-390.png",
+    "actions-resolved-1440.png",
+    "actions-resolved-390.png",
+    "overview-1440-light.png",
+    "overview-1920-dark.png",
+    "runtime-overview-1440.png",
+    "runtime-overview-390.png",
+    "state-empty-1440.png",
+    "state-stale-1440.png",
+    "workspace-1440-dark-full.png"
+  ],
+  "pixelChanges": [
+    {
+      "name": "actions-failed-execution-1440.png",
+      "pixels": 118885,
+      "ratio": 0.07129449721742467,
+      "bbox": [
+        0,
+        360,
+        1439,
+        1157
+      ]
+    },
+    {
+      "name": "actions-permission-refused-1440.png",
+      "pixels": 118885,
+      "ratio": 0.07129449721742467,
+      "bbox": [
+        0,
+        360,
+        1439,
+        1157
+      ]
+    },
+    {
+      "name": "actions-rejected-1440.png",
+      "pixels": 1406,
+      "ratio": 0.0008417145593869732,
+      "bbox": [
+        860,
+        562,
+        1093,
+        574
+      ]
+    },
+    {
+      "name": "actions-rejected-390.png",
+      "pixels": 1395,
+      "ratio": 0.002389394172961307,
+      "bbox": [
+        54,
+        671,
+        287,
+        683
+      ]
+    },
+    {
+      "name": "actions-resolved-1440.png",
+      "pixels": 1633,
+      "ratio": 0.0009481837606837607,
+      "bbox": [
+        860,
+        562,
+        1093,
+        574
+      ]
+    },
+    {
+      "name": "actions-resolved-390.png",
+      "pixels": 1633,
+      "ratio": 0.0026996644017920615,
+      "bbox": [
+        54,
+        671,
+        287,
+        683
+      ]
+    },
+    {
+      "name": "overview-1440-light.png",
+      "pixels": 18,
+      "ratio": 7.383343177790904e-06,
+      "bbox": [
+        248,
+        270,
+        1407,
+        1596
+      ]
+    },
+    {
+      "name": "overview-1920-dark.png",
+      "pixels": 7,
+      "ratio": 3.375771604938272e-06,
+      "bbox": [
+        280,
+        278,
+        1875,
+        952
+      ]
+    },
+    {
+      "name": "runtime-overview-1440.png",
+      "dimensionsChanged": true
+    },
+    {
+      "name": "runtime-overview-390.png",
+      "dimensionsChanged": true
+    },
+    {
+      "name": "state-empty-1440.png",
+      "pixels": 5,
+      "ratio": 3.215020576131687e-06,
+      "bbox": [
+        248,
+        557,
+        1406,
+        559
+      ]
+    },
+    {
+      "name": "state-stale-1440.png",
+      "pixels": 26,
+      "ratio": 1.0109493592136369e-05,
+      "bbox": [
+        248,
+        284,
+        1407,
+        1689
+      ]
+    },
+    {
+      "name": "workspace-1440-dark-full.png",
+      "pixels": 35,
+      "ratio": 1.4197170301142264e-05,
+      "bbox": [
+        248,
+        607,
+        1406,
+        1692
+      ]
+    }
+  ],
+  "classification": {
+    "fixtureByteIdentical": 39,
+    "fixtureCount": 50,
+    "receiptClockChanges": [
+      "actions-rejected-1440.png",
+      "actions-rejected-390.png",
+      "actions-resolved-1440.png",
+      "actions-resolved-390.png"
+    ],
+    "chromiumRasterNoiseAtMost35Pixels": [
+      "overview-1440-light.png",
+      "overview-1920-dark.png",
+      "state-empty-1440.png",
+      "state-stale-1440.png",
+      "workspace-1440-dark-full.png"
+    ],
+    "oldFullPageStickyChromeTilingArtifact": [
+      "actions-failed-execution-1440.png",
+      "actions-permission-refused-1440.png"
+    ],
+    "runtimeChangesRequireIndependentApproval": [
+      "runtime-overview-1440.png",
+      "runtime-overview-390.png"
+    ]
+  },
+  "qualification": "Differences inspected; no runtime baseline self-approved. Frozen fixture source/identity unchanged."
+}

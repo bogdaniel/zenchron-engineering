@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/product"
 )
 
 const SchemaVersion = "0.1"
@@ -83,7 +84,8 @@ const (
 	// an exact invocation. It is a separate event from admission so a crash
 	// between observing a review and acting on it can neither lose it nor
 	// deliver it twice.
-	EventFeedbackConsumed = "feedback.consumed"
+	EventFeedbackConsumed          = "feedback.consumed"
+	EventReviewContinuationGranted = "review.continuation_granted"
 	// EventFeedbackPublicationIdentity binds the account the runtime publishes
 	// as. The self-loop guard refuses feedback authored by that identity, so
 	// the binding has to be durable: a credential rotated while `serve` is
@@ -101,23 +103,54 @@ const (
 	EventOperationBefore             = "operation.before"
 	EventOperationAfter              = "operation.after"
 	EventCandidateChanged            = "candidate.changed"
-	EventCandidateCommitted          = "candidate.committed"
+	// EventHandoffReported and EventHandoffRefused record what a FINISHED
+	// worker invocation of an orchestrated run transferred through its typed
+	// handoff slot (#470): a valid report, or why there was none. Neither is
+	// evidence or authority; see handoff_slot.go.
+	EventHandoffReported = "handoff.reported"
+	EventHandoffRefused  = "handoff.refused"
+	// EventMessagesObserved records what a FINISHED orchestrated invocation
+	// wrote through its typed message slot (#473): the digest of a valid
+	// report, or why it is refused. Like the handoff observation it is never
+	// evidence, authority or a lifecycle transition; see communication_slot.go.
+	EventMessagesObserved = "messages.observed"
+	// EventDecisionsDelivered records the exact, immutable set of this run's
+	// own resolved decisions ONE physical attempt actually carried in its
+	// compiled context - never more, never less - journalled only once that
+	// attempt reached the worker (#508 P4b); see decision_resumption.go.
+	EventDecisionsDelivered = "decision.delivered"
+	// EventControllerSuccessionAdmitted records that one adopted controller
+	// may continue this run under another. It is an ADDITION to the journal
+	// and never an edit: the run row keeps naming its creator, and every
+	// earlier event stays bound to the controller that appended it. See
+	// controller_succession.go.
+	EventControllerSuccessionAdmitted = "controller.succession_admitted"
+	EventCandidateCommitted           = "candidate.committed"
 	// EventCandidateCheckpointed is a runtime-owned commit of work an
 	// interrupted producer left behind. It is deliberately NOT
 	// candidate.committed: every reader of that event treats it as an
 	// execution-complete, assurance-eligible candidate, and a checkpoint is
 	// neither. See RunProjection.CandidateComplete.
 	EventCandidateCheckpointed = "candidate.checkpointed"
+	// EventCandidateQuarantined records material a REFUSED invocation left in
+	// the workspace being moved out of it (#390): preserved in a runtime-owned
+	// quarantine, never committed, never inherited by the next attempt.
+	EventCandidateQuarantined = "candidate.quarantined"
 	// EventExecutionCompleted records that a producer invocation ended by
 	// finishing, rather than by running out of a bound. It is a producer
 	// COMPLETION OBSERVATION and nothing more: it asserts no acceptance, no
 	// evidence and no authority.
-	EventExecutionCompleted       = "execution.completed"
-	EventCandidateBaseIntegrated  = "candidate.base_integrated"
-	EventCandidateExternalChanged = "candidate.external_changed"
-	EventContractCompiled         = "contract.compiled"
-	EventReassessmentCompleted    = "reassessment.completed"
-	EventAssuranceObserved        = "assurance.observed"
+	EventExecutionCompleted = "execution.completed"
+	// EventExecutionAttemptProvenance is the immutable record of HOW one
+	// physical provider attempt ran and ended (#327), bound to the operation
+	// and the attempt identity that produced it. It is OBSERVATION: nothing
+	// routes, classifies, authorizes or budgets from it.
+	EventExecutionAttemptProvenance = "execution.attempt_provenance"
+	EventCandidateBaseIntegrated    = "candidate.base_integrated"
+	EventCandidateExternalChanged   = "candidate.external_changed"
+	EventContractCompiled           = "contract.compiled"
+	EventReassessmentCompleted      = "reassessment.completed"
+	EventAssuranceObserved          = "assurance.observed"
 	// EventSemanticAssuranceObserved is the INDEPENDENT semantic verifier's own
 	// observation. It is a distinct event because it is a distinct producer
 	// answering a distinct question: every reader that means "the automated
@@ -225,7 +258,7 @@ const (
 	EventPlanAttemptRefused = "plan.attempt_refused"
 )
 
-var eventTypes = map[string]bool{EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventExecutionCompleted: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true}
+var eventTypes = map[string]bool{EventVerificationPermitChanged: true, EventReviewContinuationGranted: true, EventPlanAttemptRefused: true, EventPlanProposed: true, EventPlanValidated: true, EventPlanApproved: true, EventPlanRejected: true, EventPlanStageAssigned: true, EventPlanRunStarted: true, EventPlanStageSettled: true, EventPlanGateSatisfied: true, EventPlanStageReviewed: true, EventPlanBudgetConsumed: true, EventPlanRevisionSuperseded: true, EventRunCreated: true, EventRunAgentAssigned: true, EventRunAgentHandoffRefused: true, EventFeedbackObserved: true, EventFeedbackConsumed: true, EventFeedbackPublicationIdentity: true, EventRunWaiting: true, EventRunCompleted: true, EventRunFailed: true, EventRunCancelled: true, EventRunPaused: true, EventRunUnpaused: true, EventSourceIntentChanged: true, EventSourceOptInRemoved: true, EventSourceOptInRestored: true, EventOperationPlanned: true, EventOperationBefore: true, EventOperationAfter: true, EventCandidateChanged: true, EventCandidateCommitted: true, EventCandidateCheckpointed: true, EventCandidateQuarantined: true, EventExecutionCompleted: true, EventExecutionAttemptProvenance: true, EventCandidateBaseIntegrated: true, EventCandidateExternalChanged: true, EventContractCompiled: true, EventReassessmentCompleted: true, EventAssuranceObserved: true, EventSemanticAssuranceObserved: true, EventAuthorityEvaluated: true, EventGitHubCIObserved: true, EventGitHubReviewObserved: true, EventGitHubPRObserved: true, EventHumanAuthorityRecorded: true, EventStageReviewBlocked: true, EventControllerSuccessionAdmitted: true, EventHandoffReported: true, EventHandoffRefused: true, EventMessagesObserved: true, EventDecisionsDelivered: true}
 
 // planEventTypes is the plan stream's own vocabulary. It exists so an event
 // cannot be appended to the wrong stream: a plan event in a run's hash chain
@@ -238,27 +271,10 @@ var planEventTypes = map[string]bool{
 	EventPlanRevisionSuperseded: true, EventPlanAttemptRefused: true, EventPlanStageReviewed: true,
 }
 
-type Ref struct {
-	ID       string `json:"id"`
-	Revision string `json:"revision"`
-}
-type Candidate struct {
-	Branch   string `json:"branch"`
-	Revision string `json:"revision"`
-	Tree     string `json:"tree"`
-}
 type Cursor struct {
 	LastSequence  int64  `json:"last_sequence"`
 	LastEventID   string `json:"last_event_id"`
 	LastEventHash string `json:"last_event_hash,omitempty"`
-}
-type Artifact struct {
-	Path        string `json:"path"`
-	SHA256      string `json:"sha256"`
-	MediaType   string `json:"media_type"`
-	LocalOnly   bool   `json:"local_only"`
-	Sanitized   bool   `json:"sanitized"`
-	Publishable bool   `json:"publishable"`
 }
 type EngineeringRun struct {
 	SchemaVersion    string      `json:"schema_version"`
@@ -301,10 +317,23 @@ type EngineeringRun struct {
 	// pack and the frozen profile configuration live in the durable
 	// AgentAssignment this points at, so the run row cannot drift from the
 	// assignment an operator approved.
-	Plan      *RunPlanBinding `json:"plan,omitempty"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
-	Cursor    Cursor          `json:"journal_cursor"`
+	Plan *RunPlanBinding `json:"plan,omitempty"`
+	// Orchestration binds this run to the orchestration batch item that
+	// created it (#470), when one did. Like Plan it is part of the run AS
+	// CREATED, a pointer with omitempty so every other run canonicalizes as it
+	// always did, and it carries an identity and nothing else. It changes no
+	// execution semantics: it is what makes the runtime give the worker a
+	// typed handoff slot and journal what the worker transferred through it.
+	Orchestration *RunOrchestrationBinding `json:"orchestration,omitempty"`
+	CreatedAt     time.Time                `json:"created_at"`
+	UpdatedAt     time.Time                `json:"updated_at"`
+	Cursor        Cursor                   `json:"journal_cursor"`
+}
+
+// RunOrchestrationBinding is the durable link from an ordinary EngineeringRun
+// back to the orchestration batch that created it.
+type RunOrchestrationBinding struct {
+	BatchID string `json:"batch_id"`
 }
 
 // RunPlanBinding is the durable link from an ordinary EngineeringRun back to
@@ -361,16 +390,63 @@ type RunPlanBinding struct {
 	// omitempty, because a run created before it existed must canonicalize
 	// exactly as it did: the genesis event is hashed against the run document.
 	StageBudget domain.StageBudget `json:"stage_budget,omitzero"`
+	// Product is the product context a plan stage run with no work-graph batch
+	// (an objective plan's reviewer stage) was created with (#480). It is
+	// frozen with the rest of the binding at run creation, and a replay adopts
+	// the stored run, so the first write stands.
+	//
+	// omitempty and nil for every stage of a graph with no product, so no
+	// existing run is re-identified.
+	Product *RunPlanProduct `json:"product,omitempty"`
+}
+
+// RunPlanProduct is the graph a plan stage run belongs to and the product
+// context pin it was created with.
+type RunPlanProduct struct {
+	GraphID string             `json:"graph_id"`
+	Pin     product.ContextPin `json:"pin"`
 }
 
 type RunOperation struct {
-	SchemaVersion    string          `json:"schema_version"`
-	ID               string          `json:"id"`
-	RunID            string          `json:"run_id"`
-	Kind             string          `json:"kind"`
-	IdempotencyKey   string          `json:"idempotency_key"`
-	State            OperationState  `json:"state"`
-	Attempt          int             `json:"attempt"`
+	Failure *OperationFailure `json:"failure,omitempty"`
+	// RetryNotBefore is purely "not eligible before"; it survives restart and
+	// carries no meaning of its own. RetryDisposition says why and how the
+	// wait is accounted (retryDispositions).
+	RetryNotBefore   time.Time        `json:"retry_not_before,omitzero"`
+	RetryDisposition RetryDisposition `json:"retry_disposition,omitempty"`
+	SchemaVersion    string           `json:"schema_version"`
+	ID               string           `json:"id"`
+	RunID            string           `json:"run_id"`
+	Kind             string           `json:"kind"`
+	IdempotencyKey   string           `json:"idempotency_key"`
+	State            OperationState   `json:"state"`
+	Attempt          int              `json:"attempt"`
+	// AttemptIdentity is the highest PHYSICAL attempt identity allocated for
+	// this operation. It is an identity, not a count of anything, and it only
+	// ever moves forward.
+	//
+	// Attempt is the BUDGET, and RestoreAttempt gives it back when a provider
+	// condition routes to an external wait: observing an account quota is not
+	// work the attempt ceiling should pay for. That makes Attempt deliberately
+	// non-monotonic, which is correct for a budget and unusable as an identity -
+	// and a provider transcript is create-once, so the identity it is filed
+	// under may never be reused. Sourcing one from the other stranded a
+	// resumable run: the second physical invocation of the same logical
+	// operation addressed the first one's transcript slot and was refused by the
+	// evidence store, correctly.
+	//
+	// It is allocated when the operation is started and RESERVED before a
+	// provider is dispatched, so it is durable before anything can write
+	// evidence under it. That ordering is what makes a crash safe: an
+	// invocation that began and produced no transcript still consumed its
+	// identity, and the next one is strictly later rather than landing on a slot
+	// that merely looks free.
+	//
+	// It advances for every operation kind. That is deliberate: it names which
+	// try of an operation this is, which is meaningful whether or not the try
+	// reaches a provider, and a scheduler that had to know which kinds file
+	// evidence would be a scheduler that knows about providers.
+	AttemptIdentity  int             `json:"attempt_identity,omitempty"`
 	MaxAttempts      int             `json:"max_attempts"`
 	DependsOn        []string        `json:"depends_on,omitempty"`
 	InputStateSHA256 string          `json:"input_state_sha256"`
@@ -380,14 +456,71 @@ type RunOperation struct {
 	StartedAt        *time.Time      `json:"started_at,omitempty"`
 	LastProgressAt   *time.Time      `json:"last_progress_at,omitempty"`
 	WallBudget       time.Duration   `json:"wall_budget,omitempty"`
-	NoProgressBudget time.Duration   `json:"no_progress_budget,omitempty"`
-	NoProgressKey    string          `json:"no_progress_key,omitempty"`
-	CancelRequested  bool            `json:"cancel_requested,omitempty"`
+	// ConsumedExecution is how much ACTIVE execution this operation has already
+	// spent, accumulated across attempts. It is the durable budget counter, and
+	// the one clock that matters: external waiting adds nothing to it.
+	ConsumedExecution time.Duration `json:"consumed_execution,omitempty"`
+	// LastAttemptExecution is what the most recent attempt added, so
+	// RestoreAttempt can give it back. A wait-routed refusal exercised no work,
+	// and charging it would let a watch loop polling a waiting run exhaust the
+	// budget without anything ever running.
+	LastAttemptExecution time.Duration `json:"last_attempt_execution,omitempty"`
+	// ActiveSince is when the attempt currently executing began, and nil
+	// whenever nothing is executing. An operation parked in an external wait is
+	// not active, which is precisely why waiting costs nothing.
+	ActiveSince *time.Time `json:"active_since,omitempty"`
+	// Deadline is the absolute instant THIS attempt's authority ends, derived
+	// when execution begins from the budget remaining at that moment, and
+	// cleared when the attempt ends.
+	//
+	// It is durable so a rehydrated controller resumes the same instant rather
+	// than minting a fresh envelope, and so the provider bound and the recorded
+	// provenance are one fact rather than two arithmetic results that can
+	// disagree. It is NOT the lifetime identity of the operation: that is
+	// ConsumedExecution against WallBudget.
+	Deadline *time.Time `json:"deadline,omitempty"`
+	// DeadlineBound names WHICH bound Deadline is (#328): the physical-attempt
+	// wall limit, or the run's remaining active work when that was smaller.
+	// It is decided once, when the attempt starts, and is empty for an
+	// operation of a run that predates the attempt limit.
+	DeadlineBound    AttemptBound  `json:"deadline_bound,omitempty"`
+	NoProgressBudget time.Duration `json:"no_progress_budget,omitempty"`
+	NoProgressKey    string        `json:"no_progress_key,omitempty"`
+	// ProgressRecorderOpen says a physical attempt's durable progress recorder
+	// wrote to this row and never closed: its process did not end under an
+	// observing controller. LastProgressAt may then trail the last progress
+	// that process actually made by up to progressRecorderLag, and only a
+	// dispatch that inherits the datum reads it, as the crash-recovery
+	// uncertainty allowance (#352).
+	ProgressRecorderOpen bool `json:"progress_recorder_open,omitempty"`
+	// InactivitySuspension is set while a structured main-thread tool of the
+	// attempt it names holds the inactivity kill suspended (#322, #352). It is
+	// observation for status, never an input to the watchdog, which reads its
+	// own in-memory stream. It is ACTIVE only while its attempt is the row's and
+	// its owner still holds the lease and is not provably dead; anything else is
+	// history (see EngineeringRuntime.inactivitySuspension).
+	InactivitySuspension *InactivitySuspension `json:"inactivity_suspension,omitempty"`
+	CancelRequested      bool                  `json:"cancel_requested,omitempty"`
+}
+
+// InactivitySuspension is a durable open-tool suspension: since when, which
+// physical attempt, and which lease owner's process opened it.
+type InactivitySuspension struct {
+	Since           time.Time `json:"since"`
+	AttemptIdentity int       `json:"attempt_identity"`
+	Owner           string    `json:"owner"`
 }
 type Lease struct {
 	Owner       string    `json:"owner"`
 	HeartbeatAt time.Time `json:"heartbeat_at"`
 	ExpiresAt   time.Time `json:"expires_at"`
+	// Grant identifies ONE acquisition (#485). It is minted fresh every time
+	// an operation is leased and nothing that renews or uses the lease changes
+	// it, so it - not an owner or a pair of timestamps, which two acquisitions
+	// can share - is what says a lease is the one a driver was granted.
+	// omitempty: a lease written before it existed has none, and canonicalizes
+	// as it always did.
+	Grant string `json:"grant,omitempty"`
 }
 type EngineeringEvent struct {
 	SchemaVersion string `json:"schema_version"`
@@ -409,15 +542,29 @@ type EngineeringEvent struct {
 	PreviousEventHash string          `json:"previous_event_hash,omitempty"`
 	Payload           json.RawMessage `json:"payload,omitempty"`
 	Artifacts         []Artifact      `json:"artifacts,omitempty"`
-	StateBefore       string          `json:"state_before,omitempty"`
-	StateAfter        string          `json:"state_after,omitempty"`
-	EventHash         string          `json:"event_hash,omitempty"`
+	// StateBefore and StateAfter are recorded transition digests: diagnostic
+	// compatibility metadata, NOT authoritative (#453). Replay never verifies
+	// them, and no cache, checkpoint, recovery path or decision may trust them
+	// in place of replaying the events. EventHash covers them, so editing one
+	// without recomputing the hash is still refused as corruption; an arbitrary
+	// but chain-consistent value is accepted and decides nothing. The JSON
+	// names stay for journal compatibility.
+	StateBefore string `json:"state_before,omitempty"`
+	StateAfter  string `json:"state_after,omitempty"`
+	EventHash   string `json:"event_hash,omitempty"`
 }
 type RunSnapshot struct {
 	EngineeringRun
-	Operations  map[string]RunOperation `json:"operations"`
-	Artifacts   []Artifact              `json:"artifacts,omitempty"`
-	StateSHA256 string                  `json:"state_sha256"`
+	Operations map[string]RunOperation `json:"operations"`
+	Artifacts  []Artifact              `json:"artifacts,omitempty"`
+	// HeldMaterial is what a budget-ended run is holding (#203), read back
+	// from its run.failed event exactly as recorded.
+	HeldMaterial *HeldMaterial `json:"held_material,omitempty"`
+	// Paused is the operator's pause in force (#86), nil when there is none.
+	// omitempty is load-bearing: every run that was never paused keeps the
+	// state digest it always had.
+	Paused      *RunPause `json:"paused,omitempty"`
+	StateSHA256 string    `json:"state_sha256"`
 }
 
 // CanonicalJSON serializes a typed runtime value to JSON, then applies RFC 8785
@@ -461,10 +608,11 @@ func Reduce(run EngineeringRun, events []EngineeringEvent) (RunSnapshot, error) 
 			return s, fmt.Errorf("broken event chain")
 		}
 		h, err := EventDigest(e)
-		if err != nil || (e.EventHash != "" && e.EventHash != h) {
+		// No empty-hash tolerance: every event a reducer sees carries its hash,
+		// including the journal's not-yet-persisted one (#462).
+		if err != nil || e.EventHash != h {
 			return s, fmt.Errorf("invalid event hash")
 		}
-		e.EventHash = h
 		for _, a := range e.Artifacts {
 			if err := ValidateArtifact(a); err != nil {
 				return s, err
@@ -481,7 +629,16 @@ func Reduce(run EngineeringRun, events []EngineeringEvent) (RunSnapshot, error) 
 			}
 			s.Operations[operation.ID] = operation
 		}
-		if e.Type == EventRunWaiting {
+		// A WAIT NEVER UN-CANCELS A RUN. Replay is otherwise last-wins, which
+		// is right for every automatic disposition - they are all re-derived
+		// from the same state on the next pass - but cancellation is not
+		// derived from anything. It is an operator's instruction, and the only
+		// way a run.waiting lands after one is a driver that read this run
+		// BEFORE the stop and settled its pass afterwards, which is a stale
+		// opinion by construction. Letting it win put the run back in the
+		// supervisor's active set and let the work the operator stopped be
+		// acquired and executed on the next tick.
+		if e.Type == EventRunWaiting && s.Disposition != Cancelled {
 			s.Disposition = Waiting
 			s.Reason = payloadReason(e.Payload)
 		}
@@ -489,14 +646,33 @@ func Reduce(run EngineeringRun, events []EngineeringEvent) (RunSnapshot, error) 
 			s.Disposition = Completed
 			s.Reason = payloadReason(e.Payload)
 		}
-		if e.Type == EventRunFailed {
+		// A FAILURE DOES NOT UN-CANCEL A RUN EITHER, for the same reason a
+		// wait does not. run.failed is appended by a pass that decided the run
+		// failed from a snapshot read before the stop existed - an exhausted
+		// budget, a refused invariant, an attempt ceiling - and none of those
+		// is a later fact about the run, only an earlier opinion about it.
+		// Letting it win reported an operator's stop as a failure.
+		//
+		// run.completed is deliberately NOT guarded. A cancelled run whose
+		// candidate merged IS completed, and conditions() already says so by
+		// consulting MergePrecedence before it consults cancellation; guarding
+		// it here would contradict that rule rather than protect anything.
+		if e.Type == EventRunFailed && s.Disposition != Cancelled {
+			var record dispositionRecord
+			_ = json.Unmarshal(e.Payload, &record) // validated at append
 			s.Disposition = Failed
-			s.Reason = payloadReason(e.Payload)
+			s.Reason = record.Reason
+			// STICKY: the first held record names the material, and a later
+			// re-settle neither replaces nor clears it.
+			if s.HeldMaterial == nil {
+				s.HeldMaterial = record.HeldMaterial
+			}
 		}
 		if e.Type == EventRunCancelled {
 			s.Disposition = Cancelled
 			s.Reason = payloadReason(e.Payload)
 		}
+		s.Paused = foldPause(s.Paused, e)
 		s.Cursor = Cursor{e.Sequence, e.ID, e.EventHash}
 		prev = e
 	}
@@ -516,18 +692,68 @@ func StableOperationKey(runID, kind string, bindings ...string) string {
 	return strings.Join(append([]string{runID, kind}, bindings...), ":")
 }
 func CanAcquire(op RunOperation, now time.Time, ownerAlive bool) bool {
+	if now.Before(op.RetryNotBefore) {
+		return false
+	}
 	if op.State == Succeeded || op.State == OperationCancelled {
 		return false
 	}
 	return op.Lease == nil || (!ownerAlive && !now.Before(op.Lease.ExpiresAt))
 }
 
-// OperationElapsed reports elapsed time only for an actively started operation.
-func OperationElapsed(op RunOperation, now time.Time) time.Duration {
-	if op.StartedAt == nil || now.Before(*op.StartedAt) {
+const (
+	BoundProviderInactivity AttemptBound = "provider_inactivity"
+	BoundAttemptWall        AttemptBound = "attempt_wall"
+	BoundRunActiveWork      AttemptBound = "run_active_work"
+	BoundAssuranceWork      AttemptBound = "assurance_work"
+)
+
+// The InvocationProvenance termination causes the runtime reads back. For
+// an inactivity kill the failure CLASS may be a condition the provider named
+// (#238, #314), so the bound is read from the cause, not the class.
+const (
+	TerminationProviderInactivity = "provider_inactivity_limit_reached"
+	TerminationDeadlineReached    = "deadline_reached"
+	// TerminationRunStopped is an invocation the runtime cancelled because an
+	// operator stopped its run while it was executing (#213).
+	TerminationRunStopped = "run_stopped"
+)
+
+// OperationRemaining is how much ACTIVE execution authority is left.
+//
+// It is what a provider invocation is bounded by, so a second attempt inherits
+// what the first did not spend rather than starting again - and an operation
+// parked in an external wait keeps all of it, however long the wait, because
+// waiting is not executing. A budget of zero means unbounded and reports zero
+// remaining rather than pretending to a limit it does not have.
+func OperationRemaining(op RunOperation, now time.Time) time.Duration {
+	if op.WallBudget <= 0 {
 		return 0
 	}
-	return now.Sub(*op.StartedAt)
+	spent := op.ConsumedExecution
+	if op.ActiveSince != nil && now.After(*op.ActiveSince) {
+		spent += now.Sub(*op.ActiveSince)
+	}
+	if remaining := op.WallBudget - spent; remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
+// OperationExpired answers whether this operation has run out of EXECUTION
+// authority - never whether wall-clock time has passed since it started.
+func OperationExpired(op RunOperation, now time.Time) bool {
+	return op.WallBudget > 0 && OperationRemaining(op, now) <= 0
+}
+
+// OperationElapsed reports cumulative active execution across attempts. Finished
+// operations retain their durable consumption; external waiting never adds time.
+func OperationElapsed(op RunOperation, now time.Time) time.Duration {
+	spent := op.ConsumedExecution
+	if op.ActiveSince != nil && now.After(*op.ActiveSince) {
+		spent += now.Sub(*op.ActiveSince)
+	}
+	return spent
 }
 
 // NoProgressExceeded is deliberately separate from wall time: a heartbeat can

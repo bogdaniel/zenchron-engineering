@@ -40,6 +40,10 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
+	"github.com/bogdaniel/zenchron-engineering/planning"
+	"github.com/bogdaniel/zenchron-engineering/product"
 )
 
 // ControlSocketName is the endpoint file inside the operator state directory.
@@ -64,7 +68,7 @@ func BoundedNote(note string) string { return boundedField(note) }
 // finishes and persists the revision either way - it only stops the operator
 // from being told. That is the worst of both: the effect without the answer.
 func ControlDeadline(command string) time.Duration {
-	if command == ControlPlanRevise {
+	if command == ControlPlanRevise || command == ControlResume {
 		return 20 * time.Minute
 	}
 	return 30 * time.Second
@@ -110,11 +114,45 @@ type ControlRequest struct {
 	// durable state or the enrolment assumption says.
 	DefaultBranch string `json:"default_branch,omitempty"`
 	Issue         int    `json:"issue,omitempty"`
+	// Issues is an orchestration batch's explicit issue list (#470). It is
+	// bounded by orchestration.MaxBatchItems where it is admitted, and by the
+	// request-line ceiling before that.
+	Issues []int `json:"issues,omitempty"`
+	// WorkGraph is a proposed WorkGraph revision (#472). It carries only the
+	// graph's name, the revision it proposes and its units: the repository,
+	// agent and composition time come from the supervisor, so a proposer
+	// cannot state them.
+	WorkGraph *orchestration.WorkGraphProposal `json:"work_graph,omitempty"`
+	// PlanningArtifact is a governed write to the planning registry (#471/#479,
+	// ADR-0008): one InstructionPack, ContextPolicy, AgentProfile or
+	// EngineeringPlanTemplate, validated by the same seal function a
+	// hand-edited file is validated with, before anything is written.
+	PlanningArtifact *planning.ArtifactWrite `json:"planning_artifact,omitempty"`
+	// Product is a proposed Product revision (#476). Identity, requester and
+	// composition time come from the supervisor; a proposer states only its
+	// name, revision and repository list.
+	Product *product.ProductProposal `json:"product,omitempty"`
+	// NewIssue is the operator-typed title and description of an issue to
+	// open on a governed repository (ControlIssueCreate).
+	NewIssue *NewIssue `json:"new_issue,omitempty"`
 	// Agent is the named execution agent, resolved against the operator's own
 	// registry. A request naming an agent the operator did not configure is
 	// refused; it cannot introduce one.
-	Agent string `json:"agent,omitempty"`
-	RunID string `json:"run_id,omitempty"`
+	Agent   string `json:"agent,omitempty"`
+	Profile string `json:"profile,omitempty"`
+	// ProductID is the product the operator selected at objective intake
+	// (#471/#479). It names an existing Product this supervisor already
+	// adopted; it is never a new product and never recorded on the plan
+	// itself - only used to associate the compiled WorkGraph with it.
+	ProductID string `json:"product_id,omitempty"`
+	// AcceptanceFeature is the operator-declared final-integration feature
+	// acceptance for an objective plan. It is the operator's statement, made
+	// here and nowhere else: a planner cannot add, remove or replace it.
+	AcceptanceFeature  string `json:"acceptance_feature,omitempty"`
+	RunID              string `json:"run_id,omitempty"`
+	AuthorityRequestID string `json:"authority_request_id,omitempty"`
+	AuthorityDigest    string `json:"authority_digest,omitempty"`
+	AuthorityDecision  string `json:"authority_decision,omitempty"`
 	// NewGeneration asks for a fresh generation rather than continuing a live
 	// one, exactly as the command-line flag does.
 	NewGeneration bool `json:"new_generation,omitempty"`
@@ -155,9 +193,35 @@ type ControlRequest struct {
 	Operator string `json:"operator,omitempty"`
 	// Template, Deterministic and SubstituteHuman are a plan REVISION request,
 	// mirroring the flags of the command that would otherwise drive it here.
-	Template        string `json:"template,omitempty"`
-	Deterministic   bool   `json:"deterministic,omitempty"`
-	SubstituteHuman string `json:"substitute_human,omitempty"`
+	Template          string `json:"template,omitempty"`
+	Deterministic     bool   `json:"deterministic,omitempty"`
+	ObjectiveWorkflow bool   `json:"objective_workflow,omitempty"`
+	SubstituteHuman   string `json:"substitute_human,omitempty"`
+	// GraphID and UnitID name one WorkGraph unit a decision hold (#508) is
+	// placed on. Neither is a permission: UnitID selects among the units the
+	// named graph's own adopted revision already names, and the supervisor
+	// refuses one it does not recognize.
+	GraphID string `json:"graph_id,omitempty"`
+	UnitID  string `json:"unit_id,omitempty"`
+	// DecisionID names the live request a decision-resolve action (#508)
+	// answers: a #473 decision_request message id, or a work-unit hold id.
+	DecisionID string `json:"decision_id,omitempty"`
+	// DecisionOutcomeKind and DecisionOutcomeValue are the bounded, typed
+	// answer (orchestration.DecisionOutcome): allow_deny, selected_option or
+	// text, prescribed by the request's own contract rather than invented by
+	// whoever answers it.
+	DecisionOutcomeKind  string `json:"decision_outcome_kind,omitempty"`
+	DecisionOutcomeValue string `json:"decision_outcome_value,omitempty"`
+	// ExpectedController is the controller binding (ControllerBuildBinding)
+	// the requester observed. When present, `serve` refuses unless its OWN
+	// measured identity has that binding, and executes the verb inside its
+	// controller-role authority section - all on this one connection, so the
+	// proof and the act cannot be split across two (#398). The CLI never sets
+	// it; a request without it behaves exactly as before.
+	ExpectedController string `json:"expected_controller,omitempty"`
+	// Optional delivery correlation, never authority or a retry entitlement.
+	OperationID   string `json:"operator_operation_id,omitempty"`
+	RequestDigest string `json:"operator_request_digest,omitempty"`
 }
 
 // Control commands. Each maps to one supervisor action.
@@ -169,14 +233,60 @@ const (
 	ControlShutdown = "shutdown"
 	ControlStop     = "stop"
 	ControlStopAll  = "stop-all"
-	ControlPing     = "ping"
+	// ControlPause and ControlUnpause carry RunID, Reason and Operator (#86).
+	ControlPause   = "pause"
+	ControlUnpause = "unpause"
+	ControlPing    = "ping"
+	// ControlOrchestrate creates (or finds) one orchestration batch: Issues,
+	// Agent, Repository and Operator (#470).
+	ControlOrchestrate = "orchestrate"
+	// ControlWorkGraph adopts (or finds) one WorkGraph revision: WorkGraph,
+	// Repository and Agent.
+	ControlWorkGraph = "workgraph"
+	// ControlPlanningArtifactPropose validates and durably writes one
+	// planning registry artifact (ADR-0008): PlanningArtifact carries its
+	// kind, id and document.
+	ControlPlanningArtifactPropose = "planning-artifact-propose"
+	// ControlPlanningReload re-reads the planning registry from its
+	// unchanged, controller-fixed directory and atomically swaps the held
+	// value (ADR-0008). It carries no identity of its own: the path never
+	// changes, only the content a later read resolves against.
+	ControlPlanningReload = "planning-reload"
+	// ControlProductPropose adopts (or finds) one Product revision (#476):
+	// Product carries the proposed name, revision and repository list.
+	ControlProductPropose = "product-propose"
+	// ControlIssueCreate opens one issue on a governed repository from an
+	// operator-typed title and description, so an objective can start from
+	// words rather than from an issue someone already wrote. Repository
+	// selects the governed repository; NewIssue carries the text.
+	ControlIssueCreate = "issue-create"
+	// ControlCommandControllerSnapshot asks the running controller for ONE
+	// coherent observation of itself: which generation it is, whether it holds
+	// the controller role, and whether it is admitting work. It is read-only
+	// and requires no authority, because losing ownership must not also cost
+	// observability - an operator diagnosing a stuck handoff needs to see the
+	// state of the thing that is stuck.
+	ControlCommandControllerSnapshot = "controller.snapshot"
 	// The plan lifecycle verbs. Each is an operator decision that already
 	// exists as a command; the endpoint exists so the decision reaches the
 	// supervisor that owns the work rather than racing it from a second
 	// process.
-	ControlPlanApprove = "plan-approve"
-	ControlPlanReject  = "plan-reject"
-	ControlPlanRevise  = "plan-revise"
+	ControlAuthorityView    = "authority-view"
+	ControlAuthorize        = "authorize"
+	ControlResume           = "resume"
+	ControlRefresh          = "refresh"
+	ControlPlanView         = "plan-view"
+	ControlWorkspaceOptions = "workspace-options"
+	ControlPlanApprove      = "plan-approve"
+	ControlPlanReject       = "plan-reject"
+	ControlPlanRevise       = "plan-revise"
+	// ControlWorkGraphHold places an operator's hold on one not-yet-activated
+	// WorkGraph unit (#508): GraphID, UnitID and, in Note, the hold's purpose.
+	ControlWorkGraphHold = "workgraph-hold"
+	// ControlResolveDecision answers one live decision request (#508):
+	// DecisionID, DecisionOutcomeKind, DecisionOutcomeValue and, in Note, the
+	// resolution's optional rationale.
+	ControlResolveDecision = "decision-resolve"
 )
 
 // ControlResponse is the answer. Payload is the command's own JSON result.
@@ -184,7 +294,44 @@ type ControlResponse struct {
 	OK      bool            `json:"ok"`
 	Error   string          `json:"error,omitempty"`
 	Payload json.RawMessage `json:"payload,omitempty"`
+	// Code is a typed refusal a client branches on instead of matching Error's
+	// prose. Empty when the refusal has no type.
+	Code string `json:"code,omitempty"`
 }
+
+// Typed refusal codes. A governed request (one carrying ExpectedController) is
+// refused with one of the first four before anything is executed.
+const (
+	ControlCodeControllerUnattested = "controller_unattested"
+	ControlCodeControllerMismatch   = "controller_mismatch"
+	ControlCodeRoleNotHeld          = "role_not_held"
+	ControlCodeUnsupported          = "unsupported_command"
+	ControlCodeRunTerminal          = "run_terminal"
+	ControlCodePlanRefused          = "plan_refused"
+	ControlCodeNotAwaitingDecision  = "not_awaiting_decision"
+)
+
+// ControlCode is the typed code for an error a control verb returned, or "".
+func ControlCode(err error) string {
+	var unheld *ControllerRoleUnheldError
+	var plan *PlanRefusedError
+	switch {
+	case IsRunTerminal(err):
+		return ControlCodeRunTerminal
+	case errors.Is(err, ErrPlanNotAwaitingDecision):
+		return ControlCodeNotAwaitingDecision
+	case errors.As(err, &unheld):
+		return ControlCodeRoleNotHeld
+	case errors.As(err, &plan):
+		return ControlCodePlanRefused
+	}
+	return ""
+}
+
+// ErrControlReplyLost is a request that WAS written to the endpoint and got no
+// readable answer. The supervisor may have applied it; only durable state can
+// say, and re-sending could apply it twice.
+var ErrControlReplyLost = errors.New("the control request was sent and its reply was lost")
 
 // ControlListener owns the endpoint for one supervisor's lifetime.
 type ControlListener struct {
@@ -300,10 +447,23 @@ func (l *ControlListener) Close() error {
 	return err
 }
 
-// maxControlRequestBytes bounds one request line. The vocabulary above
-// canonicalizes to a few hundred bytes; the ceiling exists so a local process
-// cannot make the supervisor allocate without bound.
+// maxControlRequestBytes bounds one ORDINARY command's request line. The
+// vocabulary above canonicalizes to a few hundred bytes; the ceiling exists
+// so a local process cannot make the supervisor allocate without bound. It
+// is enforced per command, after the command is known - see
+// answerControlConnection - so raising the one command that legitimately
+// carries more (below) never raises this one.
 const maxControlRequestBytes = 8 << 10
+
+// maxControlConnectionBytes is the absolute transport ceiling: the most any
+// single request line is ever read into memory, regardless of command. It
+// has to be at least planning.MaxPlanningArtifactRequestBytes, because the
+// command is not known until AFTER the line is read and unmarshaled - there
+// is no way to pick a smaller reader size for commands that do not need
+// one without knowing the command first. maxControlRequestBytes remains
+// the real limit for every command except ControlPlanningArtifactPropose,
+// enforced below once the command is known.
+const maxControlConnectionBytes = planning.MaxPlanningArtifactRequestBytes
 
 // Serve answers requests until the listener is closed. Each connection carries
 // exactly one request and one response, which keeps the protocol trivially
@@ -325,15 +485,23 @@ func (l *ControlListener) Serve(handle func(ControlRequest) ControlResponse) err
 func answerControlConnection(connection net.Conn, handle func(ControlRequest) ControlResponse) {
 	defer connection.Close()
 	_ = connection.SetDeadline(time.Now().Add(ControlDeadline("")))
-	// The ceiling is enforced by the READER, not checked afterwards.
+	// The absolute ceiling is enforced by the READER, not checked afterwards.
 	// bufio.ReadBytes grows its own buffer past the size hint, so a local
 	// process sending a line with no newline could make the supervisor allocate
 	// without bound and be refused only once it already had. One byte of
-	// headroom distinguishes "exactly at the bound" from "over it".
-	bounded := io.LimitReader(connection, maxControlRequestBytes+1)
+	// headroom distinguishes "exactly at the bound" from "over it". This
+	// catches only the absolute worst case; the per-command bound below is
+	// what actually protects every command except the one that needs more.
+	// The LIMIT is maxControlConnectionBytes (the absolute ceiling, raised
+	// for planning-artifact-propose), but the bufio BUFFER stays at the
+	// ordinary size: ReadBytes does not need its buffer to hold the whole
+	// line at once, only to find '\n' within it, so an oversized line costs
+	// extra read syscalls rather than an ~1 MiB allocation on every ordinary
+	// connection that will never send one.
+	bounded := io.LimitReader(connection, maxControlConnectionBytes+1)
 	reader := bufio.NewReaderSize(bounded, maxControlRequestBytes)
 	line, err := reader.ReadBytes('\n')
-	if len(line) > maxControlRequestBytes {
+	if len(line) > maxControlConnectionBytes {
 		writeControlResponse(connection, ControlResponse{Error: "control request exceeds the size bound"})
 		return
 	}
@@ -343,6 +511,14 @@ func answerControlConnection(connection net.Conn, handle func(ControlRequest) Co
 	var request ControlRequest
 	if err := json.Unmarshal(line, &request); err != nil {
 		writeControlResponse(connection, ControlResponse{Error: "control request is not a JSON object"})
+		return
+	}
+	// PER-COMMAND enforcement, now that the command is known: every command
+	// except the one planning-artifact writes legitimately need stays bound
+	// to the ordinary 8 KiB ceiling, never to the larger one the reader above
+	// had to allow for just in case this line was that one command.
+	if request.Command != ControlPlanningArtifactPropose && len(line) > maxControlRequestBytes {
+		writeControlResponse(connection, ControlResponse{Error: "control request exceeds the size bound"})
 		return
 	}
 	// The deadline is extended to what THIS command needs, now that the command
@@ -386,17 +562,19 @@ func SendControl(stateDir string, request ControlRequest) (ControlResponse, erro
 	if err != nil {
 		return ControlResponse{}, err
 	}
+	// From the first write on, a failure is ambiguous: part or all of the
+	// request may already have reached the supervisor.
 	if _, err := connection.Write(append(encoded, '\n')); err != nil {
-		return ControlResponse{}, err
+		return ControlResponse{}, fmt.Errorf("%w: %w", ErrControlReplyLost, err)
 	}
 	reader := bufio.NewReaderSize(connection, 1<<20)
 	line, err := reader.ReadBytes('\n')
 	if err != nil && len(line) == 0 {
-		return ControlResponse{}, err
+		return ControlResponse{}, fmt.Errorf("%w: %w", ErrControlReplyLost, err)
 	}
 	var response ControlResponse
 	if err := json.Unmarshal(line, &response); err != nil {
-		return ControlResponse{}, fmt.Errorf("control response is not a JSON object")
+		return ControlResponse{}, fmt.Errorf("%w: control response is not a JSON object", ErrControlReplyLost)
 	}
 	return response, nil
 }

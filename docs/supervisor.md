@@ -86,7 +86,7 @@ is not recovery.
 The endpoint requires a platform where owner-only permissions can be verified.
 Where they cannot, `serve` declines to offer a control path rather than
 publishing one whose exposure it cannot describe — the same conservative choice
-the ownership lock and the sandbox adapter already make. Everything else still
+the controller-instance lock and the sandbox adapter already make. Everything else still
 works there: runs are driven by the command that started them, exactly as before
 `serve` existed.
 
@@ -132,7 +132,16 @@ shutdown    stop scheduling
 stop-all    actually CANCEL the selected runs
             journalled per run, through the same single cancellation path
             `autonomy stop RUN` uses
+            a running execution.invoke is interrupted and recorded
+            `run_cancelled`, never `controller_shutdown`
 ```
+
+`autonomy pause RUN --reason T` is the per-run, durable form of `drain`: the
+run's in-flight operation finishes, nothing new is leased for it - work or
+observation - and nothing is cancelled. It survives restarts and is cleared
+only by `autonomy unpause RUN`. With a supervisor running it is applied by the
+supervisor under its controller role. See
+[`spec/runtime-v0.1.md`](spec/runtime-v0.1.md#operator-pause).
 
 Only the third is run cancellation. Signalling the process, or killing it, is a
 shutdown: no `run.cancelled` is appended, and the journal is left exactly as the
@@ -159,7 +168,194 @@ wall_limit_seconds          bounds the time the SYSTEM is working
 
 lifecycle_deadline_seconds  bounds TOTAL elapsed calendar time
                             optional, absent by default
+
+provider_inactivity_seconds bounds how long ONE provider invocation may go
+                            without recognized provider progress;
+                            finite always
+
+attempt_wall_limit_seconds  bounds ONE physical provider attempt; its deadline
+                            is min(this, remaining run work) at attempt start;
+                            absent derives to min(3h, wall_limit_seconds) for new runs
 ```
+
+Assurance work (#640) is a separate cumulative meter, frozen per run (3600
+seconds for new runs; not yet an operator configuration member) and never reset
+by retry or restart. It leaves headroom over one long verification but not two
+full ones: exhaustion is reported as `run_assurance_budget_exhausted` and a
+complete rerun is not promised. It is charged apart from `wall_limit_seconds`, so a long
+successful verification does not spend the execution budget.
+
+`wall_limit_seconds` is cumulative across every attempt; the attempt limit is
+per attempt. Status names which of the three per-attempt bounds ended an
+attempt (`provider_inactivity`, `attempt_wall`, `run_active_work`) and never
+advertises a retry or continuation the run can no longer admit. See
+[configuration.md](configuration.md#budgets).
+
+The third bound is the stall detector, and the run wall budget is not. A
+provider subprocess being alive is not evidence of progress: a host that loses
+its network keeps a coding CLI alive and silent, and until that was bounded the
+run-wide wall budget was what discovered a dead provider — in the live run that
+prompted it, 8h55m16s of "active engineering work" with zero external wait.
+Reaching the window terminates the provider's process group, preserves its
+transcript, and records `provider_no_progress`, which is a bounded retry.
+
+A restart does not refund it. Silence is measured from the last moment output
+was actually observed, and that datum is durable, so a controller that dies
+mid-invocation hands its successor the REMAINDER of the window rather than a
+fresh one — four minutes of proven silence leaves six, not ten. That is a
+different authority from the execution budget, which separately charges the
+abandoned interval in full. An attempt that was settled — observed, journalled
+and classified — does get a fresh window, because that is what a bounded retry
+is; the attempt ceiling is what ends it.
+
+Ordinary progress is written at most once per quarter of the window. Progress that
+arrives inside that interval is coalesced, not dropped: the newest observation
+waits and is written at the next due point with the instant it was observed,
+and a process that ends under a running controller writes its last observation
+as it closes. So the datum is exact whenever the process was seen to end.
+
+A structured tool opening or closing is not ordinary progress: it changes
+whether inactivity is suspended, which is what status reports. Such an edge is
+written within a sixtieth of that interval (2.5s for the default window)
+instead of waiting for the next due point, so status stops claiming a
+suspension shortly after the tool closes. Every write, edges included, still
+starts at least that spacing after the previous one, and edges arriving inside
+it coalesce into the newest state; without tool edges the rate is the ordinary
+one above. That promptness holds while the process lives: an edge the process
+outruns - it ends before the edge is written - collapses into the closing
+write, which carries its newest observation with no tool open.
+
+A controller that dies abruptly can lose the one observation still waiting.
+The row then records that its recorder never closed, and only then does
+recovering that attempt allow for it, by a fixed crash-recovery uncertainty
+allowance `L` of half the window (300s for the default 600s): the silence
+charged is the recorded silence less `L`, floored at zero. The implementation
+and its review established a worst-case durable-progress lag approaching two
+recorder intervals; with the interval `I` at a quarter of the window, the
+evidence-backed bound is `L = 2I`, half the window. That is because an
+observation made just after a write is written one interval later carrying its
+own, older instant, and one made just before the next write is due is the one a
+crash loses.
+
+`L` is not an inactivity window. Every live invocation is supervised at the
+configured limit and is killed with `provider_no_progress` after that much
+silence, not a moment later; a successor's window is never longer than the
+limit either. `L` only decides how much of an abandoned attempt's recorded
+silence a recovery charges. So a successor is never refused on the recorder's
+own lag, and never granted more than `L` beyond what the recorded silence
+leaves, nor a fresh window. The recovery bound is the last recorded progress
+plus the window plus `L`, and it is subordinate to every absolute bound: the
+attempt deadline, the run's active work, the attempt and continuation ceilings
+and cancellation are derived exactly as without it. It does not accumulate
+across repeated restarts, because only a real observed write moves the datum
+and a restart never does: every successor dispatched against the same datum
+gets the same recovery bound.
+
+Which restarts get the allowance is decided by durable state alone. A graceful
+`shutdown` cancels the in-flight invocation, which then returns
+`controller_shutdown` and is journalled and settled like any other outcome; a
+`drain` lets it finish and settle. A settled attempt's successor starts from a
+fresh datum, as every settled retry does, so neither gets an allowance. Only an
+attempt nothing settled - the controller was killed, crashed or lost power
+before it journalled the outcome, or a graceful shutdown's own unwinding was
+cut short the same way - is recovered conservatively with the allowance, and
+only if its recorder had not closed.
+
+A durable write that never returns does not hold the invocation: once the
+process ends, the recorder waits for its closing write for at most one write
+interval, and not at all once the invocation's context has ended (cancelled,
+the deadline passed, or the inactivity kill). A write still in flight then lands
+late or never. Either way it is bound to its operation and physical attempt,
+so it cannot touch a successor, and a row it never reached still says its
+recorder is open, which is the crash-recovery case above. Store latency beyond the
+interval can make the datum trail by more than `L`; that only ever errs
+towards refusing, never towards granting.
+
+Claude Code is the exception. Its window is measured by its own structured
+events, which belong to one physical process, so each new physical Claude
+attempt — after a restart too — gets the full window. What stays cumulative
+across restarts for it is the execution budget, which still charges every
+abandoned interval, and the attempt identity, which still advances; those are
+what keep repeated restarts finite. See
+[configuration.md](configuration.md#budgets).
+
+An explicit diagnostic is classified instead, but only when the CLI itself said
+so. Endpoint capacity (overloaded, 502/503/504) is `provider_unavailable`: a
+wait that gives the attempt back. Transport loss (temporary DNS, timeout, refused, reset,
+unreachable) is `connectivity_unavailable` (#380): it spends an attempt, but the
+retry runs only after a durable, restart-safe backoff (`retry_not_before`, 30 s
+doubling to a 5 min cap), and the run waits as `connectivity_backoff`, which is
+external wait and not active work. The last attempt does not back off; it
+stops as `<operation>_attempts_exhausted`. With the defaults that is one 30 s
+wait for an execution (`max_execution_attempts` 2) and 30 s + 60 s for an
+observation (3 attempts); the 5 min cap needs six or more attempts. The accounting is frozen in [the runtime spec](spec/runtime-v0.1.md#retry-dispositions).
+A typed provider condition is read from the **terminal diagnostic surface**: the
+bounded tail of the CLI's own diagnostic stream. The session rendering, where
+model text and tool output go, is never consulted. A worker quoting an error, a
+captured test log, or a documentation excerpt therefore cannot park a run on an
+external wait that pauses accounting — a transcript is evidence, not an
+assertion about the world.
+
+Where the provider did state a condition and then went quiet, both facts are
+kept: the classification is the condition the provider named, and the
+termination cause records that the inactivity policy ended the process. Silence
+is the weaker statement, so it does not overwrite the stronger one.
+
+`autonomy status` prints the pair an
+operator needs — time since recognized progress, and the window it is measured
+against:
+
+```text
+progress   last 2026-09-18T09:14:02Z silent 4m12s inactivity limit 10m0s
+```
+
+While the operation is running, this line and the `lease` line are read from
+the live operation row of that exact attempt, because recorded progress is a
+row-only observation the journal never holds. They are observation, never an
+input to any decision. If that row cannot be read or has moved to another
+attempt, status falls back to the journal and says so: `progress (journal)`,
+`lease (journal)`; JSON carries `operation.progress_source` (`row` or
+`journal`). The lease heartbeat is not renewed yet (#180), so it may read as
+the acquisition time for a healthy attempt's whole life; that alone is not
+evidence the attempt is dead.
+
+The live row trails the process by less than half the window, and only while
+newer progress is waiting to be written. Silence of half the window or more is
+therefore never an artefact of that lag.
+
+While a structured Claude tool call is open, the inactivity kill is suspended,
+and status says so instead of printing silence against a limit the watch is not
+applying. The absolute deadline still bounds the attempt and stays on its own
+line:
+
+```text
+progress   last 2026-09-18T09:14:02Z inactivity suspended — structured tool open since 2026-09-18T09:14:02Z (limit 10m0s resumes when it closes)
+deadline   2026-09-18T09:44:02Z (attempt_wall)
+```
+
+JSON carries `operation.inactivity_suspension` (`active` or `unverified`),
+`operation.inactivity_suspended_since`, `operation.deadline` and
+`operation.deadline_bound`. The suspension is written when the tool opens and
+cleared when the tool result, a new main-thread turn or the final result closes
+it, and whenever the attempt ends. `tool_progress` heartbeats neither open nor
+close it.
+
+A suspension is a claim about one process, so status reports it as active only
+while that process still owns the attempt: the row is on the suspension's
+attempt, its lease is still held by the owner that recorded it, and that owner
+is not provably dead by the same lock evidence a takeover uses (the lease
+heartbeat cannot say, see above). A controller that crashed with a tool open
+therefore stops being reported as suspended at once, and its silence is shown
+as silence. When the evidence cannot decide, status prints the silence line and
+marks the record `unverified` rather than claiming the suspension:
+
+```text
+progress   last 2026-09-18T09:14:02Z silent 12m3s inactivity limit 10m0s
+suspension unverified — a structured tool was recorded open since 2026-09-18T09:14:02Z, but the owning controller's liveness cannot be established
+```
+
+No takeover, reclaim, new attempt or settlement inherits it, and the watchdog
+never reads it: the kill is governed by the live process's own stream.
 
 These answer different questions and were the same number until a live run
 showed what that costs: a pull request reached its goal in eight minutes, waited
@@ -192,6 +388,70 @@ nobody has classified spends the budget. A new wait pauses the clock only when
 somebody decides it should, which is the safe direction for a bound whose whole
 job is to end things.
 
+### What a budget-ended run is holding
+
+A budget still ends the run; nothing extends it. But completed material work
+must not be silently made useless by that boundary (#203), so every terminal
+failure whose reason is a budget boundary (`*_exhausted`) records, in the same
+`run.failed` event, whether the run holds valuable material:
+
+```text
+verified_unpublished   execution-complete commit, assurance passed at it, no
+                       pull request carries it
+committed_unverified   execution-complete commit not yet verified
+checkpoint             runtime-owned incomplete checkpoint commit (#54)
+committed_unobserved   a runtime-owned commit candidate.commit made whose
+                       observation or reassessment then failed (#402); the
+                       revision and tree are that commit, never its parent
+unproven_head          the candidate head moved to a commit no candidate.commit
+                       attempt recorded as its own (#402); the revision and
+                       tree are that head as observed. It is NOT a runtime
+                       commit: author, message and parent prove nothing, so it
+                       is never adopted, observed or assured, and only operator
+                       release (#344) can resolve it: its next step is
+                       operator_release, and it names no producing operation.
+                       A runtime commit lost to process loss before any journal
+                       record lands here too. A moved head takes precedence
+                       over a recorded runtime commit; that commit's identity
+                       then appears only in the journal (runtime_commit)
+uncommitted            a succeeded producer's change the budget stopped before
+                       candidate.commit; identified by producing operation, path
+                       count and a content digest taken when the producer
+                       returned (no Git write was made to compute it)
+```
+
+Each record binds the exact revision (and tree when known), names the next
+lifecycle step and the budget reason it is blocked by, and, when the latest
+attempt selected a retry or continuation that cannot be admitted (#328), that
+successor and why. Its disposition is `held`: the material stays in the run's
+candidate workspace, `gc` retains that workspace, and **nothing is granted** -
+no attempt, continuation, active work, token or cost, provider deadline, Git
+operation or publication. Carrying it forward is new, governed work.
+
+The record is written once and read back from the journal, so a restart or a
+changed configuration reports the same identity and disposition. It is also
+sticky: a later re-settle of the same run keeps the original record. `autonomy
+status` prints `held material`, and prints `none (no material result)` for a
+budget failure that held nothing, so the two are never confused.
+
+**The operator path, today.** `gc` never reclaims a held workspace, so its disk
+is spent until an operator acts:
+
+1. `autonomy gc --dry-run` reports every held workspace under `retained`
+   (reason `run holds held material: …`) and their total under
+   `held: {workspaces, bytes}`. `autonomy doctor`'s `state.storage` check points
+   here.
+2. `autonomy status RUN --text` names the material: kind, revision, tree, and
+   for uncommitted work the producing operation and content digest. Inspect it
+   in the workspace path shown there.
+3. To keep the work, carry it forward as new governed work: a new run, or your
+   own branch, reviewed like any other change. The runtime publishes nothing
+   for you.
+4. To discard it, delete `<state>/runs/RUN/candidate` by hand. There is no
+   governed release yet, so this deletion is not journalled, and status keeps
+   reporting what the run held. #344 tracks an explicit, journalled release that
+   makes the workspace collectable.
+
 ## Concurrency
 
 The ceiling is operator authority:
@@ -206,15 +466,121 @@ and not merely across goroutines. A repository may tighten it and can never
 raise it; where both `supervisor.max_concurrent_runs` and the older
 `watch.max_concurrent_runs` are stated, the stricter value wins.
 
-What the ceiling bounds is **whole-run reconciliation**, not specifically the
-expensive part of it. A run being reconciled holds a slot whether it is invoking
-a coding agent or performing a cheap forge observation, so the bound is coarser
-than "N concurrent provider invocations". In practice a tick's cost is dominated
-by execution and assurance, and the rotation above means a slot is never held
-across ticks. If a deployment ever needs the finer bound - N expensive
-operations rather than N runs - that is a per-operation-kind concurrency class
-in the scheduler, and it is deliberately not built on speculation about which
-kinds would need one.
+### Capacity classes
+
+The ceiling is per **capacity class** (#85), decided transactionally by the
+scheduler's durable acquisition:
+
+| class | operations | ceiling |
+| --- | --- | --- |
+| work | every kind except the two below, including any kind added later | `max_concurrent_runs` (default 1) |
+| observation | `source.observe`, `github.observe` | `max_concurrent_observations` (default 2) |
+
+Observation reads the forge and journals what it saw; it invokes no provider or
+verifier and mutates no candidate, remote or forge state. So with
+`max_concurrent_runs = 1` and one run inside a long provider call, a run parked
+on review still observes, discovers the review, and becomes **runnable** - and
+takes the work slot only when it is released. A run holds at most one active
+operation at a time, and the same durable acquisition enforces that too: no
+process can observe a run beside the work another process is doing on it, and
+a pass that finds a run another live driver is operating writes nothing to it.
+That holds for every `Reconcile` caller - supervisor, watch, or an operator
+command: when another owner holds one of the run's operations and may not be
+taken over (it is alive, or its lease has not expired), the pass returns the
+run unchanged with the reason `driven_elsewhere`, which is never journalled.
+
+The supervisor starts at most `max_concurrent_runs + max_concurrent_observations`
+turns at once. That bounds goroutines only: a turn whose next operation's class
+is full is refused by the store and returns.
+
+**Verification capacity** (#490) is a third ceiling inside the same durable
+acquisition. A work operation that runs an expensive host verifier - today
+`assurance.go` - additionally needs one of `max_concurrent_verifications`
+(default 2) slots, counted exactly like a class ceiling: other runs holding a
+leased verification operation, in the same statement as the lease. It is not a
+second queue: the pending operation row is the queue entry and the lease is the
+slot, so a restart reconstructs occupancy from durable rows and never runs a
+held verification twice. A verification is still work, so the verification
+ceiling only narrows `max_concurrent_runs`. A refused verification starts
+nothing, spends no attempt, and leaves the run waiting with the reason
+`verification_capacity_unavailable`, an external wait that does not spend
+active-work budget; the next pass that finds a free slot runs it with its
+ordinary semantics. Provider reasoning, semantic assurance and gofmt
+remediation are not verification.
+
+**Nested tool permits** (#496) extend that same ceiling to `candidate.run` and
+the native adapter's contract-required executable grants. A provider keeps its
+existing work slot while each tool requests a durable permit bound to that
+physical provider attempt. With ten work slots and two verification slots, ten
+providers may be active and at most two host tool executions may run. Capacity
+wait occurs inside the current invocation: it creates no provider failure,
+remediation, new attempt or attempt refund. Its timestamped interval is excluded
+from active-work accounting, and resumption charges the tool's execution again.
+The current absolute attempt deadline still applies during that wait; #497 owns
+replacing it with a last-resort hard fuse.
+
+Native PATH shims use the attempt's existing scratch grant as transport to the
+controller. The controller alone grants capacity in `runtime.db`, and the tool
+accepts only controller-signed replies bound to its execution identity. This adds
+no database access, executable grant, hook, Git exception or network permission.
+Claude's `--safe-mode` remains in force. The original runtime PATH is restored
+inside the admitted tool subtree, so its subprocesses share that execution's
+permit. Deliberate absolute-path or environment bypass by an `operator_trusted`
+worker remains a residual risk; native shims are not protected isolation.
+Tools and their existing death guards retain ownership through cleanup. A restart
+releases a held permit only after expiry and proof its ownership lock is no longer
+held; container-backed work additionally uses the existing exact-container recovery.
+Unresolved tool cleanup blocks new operations for that run with
+`verification_tool_cleanup_pending`; uncertainty never permits a second attempt
+to overlap the old tool. Uncertain container cleanup retains that permit and its
+verification slot while unrelated work and observation runs remain eligible.
+The native request service also reconciles granted permits after wrapper death;
+proven cleanup and expiry release the permit durably without another scheduler
+request, restoring provider inactivity accounting. This cleanup interval remains
+charged as tool work.
+The forward SQLite migration adds permit storage without resetting existing
+budgets or backfilling grants. Older binaries refuse the newer schema; rollback
+requires a compatible reader or a pre-upgrade database backup.
+
+`status` shows the fleet as six mutually exclusive counts over nonterminal
+runs: **working** (holds a work operation), **observing** (holds an observation),
+**runnable** (holds nothing and has a pending work operation the scheduler could
+lease), **waiting** (holds nothing and is not runnable), **paused** (an operator
+paused it and it holds nothing; a paused run still settling is working or
+observing) and **unavailable** (its journal could not be replayed). They are read from durable operation rows, so
+they are the same after a restart. Runnable uses the scheduler's own
+eligibility test; the one approximation is liveness, which a read never probes,
+so an abandoned lease counts as working or observing until a scheduler
+reclaims it. Two more counts refine them and are not part of the partition:
+**verifying** (occupied assurance and nested tool slots, including unresolved
+cleanup, shown against `max_concurrent_verifications`) and **awaiting verification**
+(runnable assurance runs plus working providers waiting solely for tool capacity).
+Per-run JSON includes `verification_tools` with the bound identities, states and
+timestamps. A reasoning provider is working; only a granted tool makes it verifying.
+
+A lease is abandoned in one of two ways, and both are recovered without a
+restart. A **dead** owner's expired lease is reclaimed by any scheduler, as
+before. A lease left by **this** still-running supervisor — a driver whose pass
+returned or failed (for example on a store error) before it finished its
+operation — is given back by that driver on its way out, and if even that write
+fails, the supervisor's next scan removes it, because the supervisor knows which
+leases its own drivers hold (#485). Only the lease is removed: the operation's
+state, attempt accounting and history stay what the journal says, and a
+journalled outcome is still applied from the journal. A live owner's lease that
+one of its drivers still holds — this supervisor's or another process's — is
+never taken.
+
+What the work ceiling bounds is **reconciliation work**, not specifically the
+expensive part of it: assurance, commits and publication are work too, so the
+bound is coarser than "N concurrent provider invocations". A slot is held for as long as the run
+is being driven, which is usually several polling intervals: a tick is a
+scheduling PASS that starts work and returns, so a run whose provider takes half
+an hour keeps its slot across every pass in that half hour, and the remaining
+slots stay available to anything an operator submits meanwhile. The alternative
+- a pass that waits for everything it started - made admission as slow as the
+slowest run and is what #202 records. If a deployment ever needs a finer bound - N expensive
+operations rather than N runs - that is one more capacity class, not a
+scheduler redesign.
 
 ## Shared observation
 
@@ -292,9 +658,18 @@ advancement paths over the same runs: a freshly claimed run reconciled once by
 discovery and again by the supervisor enumerating non-terminal runs, in a single
 tick, with the operator's ceiling enforced twice over rather than once.
 
+## Automatic independent review (#474)
+
+`serve --reviewer-agent <id>` is the same opt-in convention as Discovery:
+empty (the default) disables the trigger entirely, never a silently-chosen
+default reviewer. Set, the supervisor's existing per-run tick calls #233's
+independent review and #474's remediation admission for each run's own
+published PR - see `docs/review-remediation.md` for the full mechanism.
+
 ## Related documents
 
 - [`product-architecture.md`](product-architecture.md) — where the supervisor sits
 - [`agents.md`](agents.md) — the workers it drives
 - [`running-multiple-tasks.md`](running-multiple-tasks.md) — the operator workflow
 - [`troubleshooting.md`](troubleshooting.md) — endpoint and lifecycle symptoms
+- [`review-remediation.md`](review-remediation.md) — #474's automatic independent-review trigger

@@ -72,6 +72,12 @@ func KnownRole(role EngineeringRole) bool {
 	return false
 }
 
+// ProducesReviewVerdict reports whether this role's stage output is a typed
+// independent-review verdict rather than a candidate change.
+func (role EngineeringRole) ProducesReviewVerdict() bool {
+	return role == RoleSecurityReviewer || role == RoleReviewer || role == RoleReleaseReviewer
+}
+
 // EngineeringCapability is a typed ability a stage requires and a profile or
 // agent advertises.
 //
@@ -500,30 +506,6 @@ func StageKinds() []StageKind {
 // TemplateStage is one stage a reusable template asks for. It is a planning
 // HINT and a constraint, never governance: policy may add obligations a
 // template omitted, and a template may not remove one.
-type TemplateStage struct {
-	ID                   string                   `json:"id"`
-	Kind                 StageKind                `json:"kind"`
-	Role                 EngineeringRole          `json:"role,omitempty"`
-	Objective            string                   `json:"objective,omitempty"`
-	DependsOn            []string                 `json:"depends_on,omitempty"`
-	RequiresCapabilities []EngineeringCapability  `json:"requires_capabilities,omitempty"`
-	Independence         *IndependenceRequirement `json:"independence,omitempty"`
-	// Profile is an operator preference for which installed profile performs
-	// this stage. It is a preference: policy obligations and eligibility still
-	// decide, and an ineligible preference is explained rather than obeyed.
-	Profile string `json:"profile,omitempty"`
-	// ContextPolicy narrows this stage's context. It can never widen it.
-	ContextPolicy string `json:"context_policy,omitempty"`
-	// When is a deterministic condition over the same engineering facts the
-	// policy compiler matches. It reuses PolicyCondition rather than inventing
-	// a second predicate language, and it is the ONLY conditionality a
-	// template has: there are no loops, expressions or scripts.
-	When *PolicyCondition `json:"when,omitempty"`
-	// RequiredClaims and Action mirror GateRequirement for template-declared
-	// gates.
-	RequiredClaims []string `json:"required_claims,omitempty"`
-	Action         *Action  `json:"action,omitempty"`
-}
 
 // EngineeringPlanTemplate is a reusable, versioned engineering process. It is
 // planning input: template + intent + ProjectModel + EngineeringPolicy +
@@ -596,7 +578,15 @@ type PlanStage struct {
 	Kind StageKind `json:"kind"`
 	// Role is required for an agent stage and absent for a gate: a gate is not
 	// performed by anybody, which is exactly why it creates no run.
-	Role                 EngineeringRole          `json:"role,omitempty"`
+	Role          EngineeringRole `json:"role,omitempty"`
+	ExecutionKind string          `json:"execution_kind,omitempty"`
+	// AcceptanceFeature names the final-integration feature acceptance this
+	// stage's integrated candidate must pass (browser-acceptance/<feature>.txt
+	// read from the trusted base). The OPERATOR's planning request declares it;
+	// the compiler stamps it on the one terminal integration_compose stage, so a
+	// planner can neither invent, remove nor replace it. Absent for every plan
+	// that declares none, which keeps those plans' documents and digests exact.
+	AcceptanceFeature    string                   `json:"acceptance_feature,omitempty"`
 	Objective            string                   `json:"objective,omitempty"`
 	DependsOn            []string                 `json:"depends_on,omitempty"`
 	RequiresCapabilities []EngineeringCapability  `json:"requires_capabilities,omitempty"`
@@ -651,6 +641,11 @@ type PlanReasoningProvenance struct {
 	// WorkspaceUnchanged is the conclusion. It is recorded rather than implied
 	// so a reader never has to compare two digests to learn the answer.
 	WorkspaceUnchanged bool `json:"workspace_unchanged"`
+	// Invocation is how the planning invocation ran and ended (#327), where
+	// the provider reported it. It is absent - never zero-filled - for a
+	// provider that reported no invocation provenance, and for every revision
+	// persisted before it existed.
+	Invocation *InvocationObservation `json:"invocation,omitempty"`
 }
 
 // PlanProvenance binds a plan revision to everything that produced it.

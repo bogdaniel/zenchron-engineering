@@ -137,6 +137,15 @@ message bus; a new policy language; a provider-handoff framework beyond the
 explicit semantics required; and speculative abstractions for providers nobody
 is implementing.
 
+"A hosted control plane" above names the later organization-level product at
+`ROADMAP.md` M6 (#72) — multi-repository, multi-identity, shared policy. It is
+not the local, single-operator operational console [ADR-0004](adr/0004-local-operational-control-plane.md)
+authorizes over the already-implemented runtime: that console is the concrete
+implementation this principle's own discipline requires once a failing
+acceptance case — repeated diagnosis costing several commands across several
+disjoint surfaces — proved the gap was no longer hypothetical. It stays bounded
+to what ADR-0004 states; scope beyond that bound is still YAGNI.
+
 When uncertain, take the smallest implementation that satisfies the current
 contract and leaves a clean seam. A refusal that records everything a future
 implementation would need is often that smallest implementation — see the

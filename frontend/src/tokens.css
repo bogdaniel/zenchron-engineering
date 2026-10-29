@@ -1,0 +1,147 @@
+/* source(none): this migration never puts Tailwind utility classes directly in
+   JSX (see docs/design decision - semantic class names stay in JSX, Tailwind
+   backs them via @apply in the CSS layer), so there is nothing for Tailwind's
+   automatic project-wide content scanner to usefully find; without this it
+   picks up incidental word matches (e.g. "filter", "hidden") from unrelated
+   .ts/.tsx source text as if they were utility-class usage. */
+@import "tailwindcss" source(none);
+
+/* Custom theme: these are the product's own design tokens (docs/design/README.md's
+   "factory floor" palette), not Tailwind's stock color/font scale. Values are
+   copied verbatim from the prior hand-written tokens.css. */
+/* static: layout.css/components.css/runtime.css consume these custom
+   properties directly (var(--text-sm), etc.) but are compiled as separate
+   Tailwind entries that can't see that usage, so Tailwind's per-file
+   unused-theme-key pruning would otherwise silently drop a token like
+   --text-sm that nothing in THIS file happens to reference. */
+@theme static {
+  --color-bg: #0e1010;
+  --color-shell: #111313;
+  --color-surface: #151818;
+  --color-raised: #1b1e1e;
+  --color-hover: #232727;
+  --color-grid: #202424;
+  --color-border: #343b3b;
+  --color-control-border: #687171;
+  --color-text: #f0f2ed;
+  --color-secondary: #c0c7c2;
+  --color-muted: #9ca7a0;
+  --color-orange: #ff9b62;
+  --color-orange-fill: #e77c3e;
+  --color-orange-tint: #30221b;
+  --color-green: #afcba0;
+  --color-green-tint: #222c21;
+  --color-red: #ffaaa6;
+  --color-red-tint: #352222;
+  --color-focus: #ffc799;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --text-xs: 12px;
+  --text-sm: 13px;
+}
+
+[data-theme="light"] {
+  --color-bg: #f4f4ef;
+  --color-shell: #eeeee8;
+  --color-surface: #fdfdf8;
+  --color-raised: #e9ece5;
+  --color-hover: #e0e4db;
+  --color-grid: #e8ebe3;
+  --color-border: #c3cbc0;
+  --color-control-border: #747e71;
+  --color-text: #18211b;
+  --color-secondary: #3a483e;
+  --color-muted: #53614f;
+  --color-orange: #954010;
+  --color-orange-fill: #a64817;
+  --color-orange-tint: #f6e6d8;
+  --color-green: #3a612c;
+  --color-green-tint: #e4eddd;
+  --color-red: #9c2b2b;
+  --color-red-tint: #f5e3e0;
+  --color-focus: #8a370c;
+}
+
+/* Legacy aliases: layout.css/components.css/runtime.css (and every .tsx) still
+   reference the old unprefixed custom-property names. Aliasing keeps them working
+   unchanged - custom-property indirection re-resolves live, so overriding
+   --color-* above under [data-theme="light"] already flows through these without
+   redeclaring them per theme. Remove once those files are themselves migrated to
+   reference the --color-, --font- and --text- theme keys directly. */
+:root {
+  color-scheme: dark;
+  --bg: var(--color-bg);
+  --shell: var(--color-shell);
+  --surface: var(--color-surface);
+  --raised: var(--color-raised);
+  --hover: var(--color-hover);
+  --grid: var(--color-grid);
+  --border: var(--color-border);
+  --control-border: var(--color-control-border);
+  --text: var(--color-text);
+  --secondary: var(--color-secondary);
+  --muted: var(--color-muted);
+  --orange: var(--color-orange);
+  --orange-fill: var(--color-orange-fill);
+  --orange-tint: var(--color-orange-tint);
+  --green: var(--color-green);
+  --green-tint: var(--color-green-tint);
+  --red: var(--color-red);
+  --red-tint: var(--color-red-tint);
+  --focus: var(--color-focus);
+  --sans: var(--font-sans);
+  --mono: var(--font-mono);
+  --radius: 5px;
+  --sidebar: 216px;
+}
+[data-theme="light"] {
+  color-scheme: light;
+}
+
+/* Everything below is @layer base/components, not left unlayered: once ANY
+   sibling file's rule is layered (@apply/@layer components anywhere in this
+   migration), an unlayered rule here would otherwise beat it unconditionally
+   regardless of specificity or source order - cascade layers rank strictly
+   below "no layer at all". Base (resets/element defaults) sits below
+   components by Tailwind's own convention, so a @layer components rule
+   elsewhere (e.g. components.css's `select` or `.search-input input`) can
+   still override these defaults exactly as the original unlayered cascade did. */
+@layer base {
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); }
+  button, input, select, textarea { font: inherit; }
+  button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
+  a { color: inherit; text-decoration: none; }
+  button { cursor: pointer; }
+  button, select, input, textarea { color: var(--text); }
+  button:disabled { cursor: not-allowed; }
+  a:hover { color: var(--orange); }
+  :focus-visible {
+    @apply outline-2 outline-offset-4 outline-focus;
+  }
+  h1, h2, h3, p { margin: 0; }
+  h1 { font-size: 29px; font-weight: 600; letter-spacing: -.8px; line-height: 1.25; }
+  h2 { font-size: 15px; font-weight: 600; letter-spacing: -.15px; }
+  h3 { font-size: 14px; font-weight: 600; }
+  small { font-size: 12px; }
+  [hidden] { display: none !important; }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; scroll-behavior: auto !important; transition: none !important; } }
+}
+/* Tailwind's own preflight (@layer base above) zeroes margin on every element,
+   which the original hand-written reset never did - it only normalized
+   box-sizing, leaving native browser defaults alone everywhere it didn't
+   explicitly override one. A checkbox's native UA margin is exactly that:
+   never addressed by the original CSS, so restore the browser default rather
+   than let Tailwind's broader reset silently change it. */
+input[type="checkbox"], input[type="radio"] { margin: revert; }
+@layer components {
+  .mono, code, time { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); }
+  .secondary { color: var(--secondary); }
+  .orange { color: var(--orange); }
+  .green { color: var(--green); }
+  .eyebrow { font: var(--text-xs)/1.5 var(--mono); letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+  .skip-link { position: fixed; left: 16px; top: -80px; background: var(--text); color: var(--bg); padding: 12px; z-index: 100; }
+  .skip-link:focus { top: 16px; }
+}

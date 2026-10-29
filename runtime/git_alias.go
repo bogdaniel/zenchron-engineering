@@ -1,0 +1,561 @@
+package runtime
+
+// Alias resolution, because the classifier has to be looking at the command
+// real Git is going to run.
+//
+// THE HOLE THIS CLOSES. ClassifyGitCommand read the literal verb, and
+// execRealGit then handed the original argv to real Git with the brokered
+// sentinel removed. Real Git expands aliases itself, AFTER the broker has
+// already authorized what it saw:
+//
+//	git config alias.co checkout      <- permitted; `config` is ordinary
+//	git co -- implementation.go        <- classified as `co`, permitted
+//	                                      real Git runs `checkout -- <path>`
+//
+// So a provider could author its own bypass out of two permitted commands.
+// Repository configuration could too, because .git/config is candidate content
+// and a checked-out tree can carry one.
+//
+// The invariant is therefore stated the only way that holds:
+//
+//	the command the broker classifies must be the effective Git operation
+//	real Git will execute, including alias expansion.
+//
+// TWO CONSEQUENCES OF TAKING THAT LITERALLY, both deliberate.
+//
+// First, the lookup runs under the SAME configuration real Git will use - the
+// same working directory, the same environment minus the sentinel, and the
+// same leading global options. `git -c alias.co=checkout co -- f` is otherwise
+// a second bypass one layer down: a lookup that ignored `-c` would not see the
+// alias that the execution then honours.
+//
+// Second, a resolved command is EXECUTED in its resolved form. When no alias
+// was involved that is the original argv unchanged, which is the overwhelming
+// majority of invocations. When one was, running the expansion the broker
+// actually classified is what removes the last gap - otherwise a provider
+// could rewrite the alias between the lookup and the execution and have the
+// two disagree.
+//
+// Nothing here executes alias content to find out what it means. A shell alias
+// is refused on sight.
+
+import (
+	"errors"
+	"fmt"
+	"os/exec"
+	"strings"
+	"sync"
+)
+
+// maxGitAliasExpansions bounds the chain. Git's own limit is not documented as
+// a number, so this is the runtime's: a legitimate alias is one or two hops,
+// and anything deeper is either a mistake or an attempt to exhaust the
+// resolver. Reaching it is a refusal, not a pass.
+const maxGitAliasExpansions = 8
+
+// GitAliasUnresolvableError is the fail-closed refusal for a command whose
+// effective operation could not be established.
+//
+// It exists because "I could not tell what this would do" and "this is safe"
+// are different answers, and the boundary must never return the second when it
+// means the first.
+type GitAliasUnresolvableError struct{ Verb, Detail string }
+
+func (e *GitAliasUnresolvableError) Error() string {
+	return "cannot resolve what `git " + e.Verb + "` would do: " + e.Detail
+}
+
+// GitConfigOverrideRefusedError is the fail-closed refusal for an inline
+// configuration override this boundary has not reasoned about.
+//
+// It is its own type, and its own message, because the provider has something
+// to do about it and that is the whole point: drop the override, or ask the
+// operator to allow the key. The blanket `-c` refusal it replaces said only
+// that the operation "could not be resolved", which is true and unactionable,
+// and a provider that cannot act on a refusal sends the command again.
+type GitConfigOverrideRefusedError struct{ Key string }
+
+func (e *GitConfigOverrideRefusedError) Error() string {
+	return "configuration override `-c " + e.Key + "` is not permitted here:" +
+		" Git has configuration keys whose values are programs it runs, paths it reads," +
+		" or credentials it presents, and this key is not on the runtime's inert list." +
+		" Run the same command without that override; Git's presentation and formatting" +
+		" keys are accepted, and read-only Git is unaffected."
+}
+
+// gitGlobalTakesValue names the global options whose value is a SEPARATE
+// argument, and it is the single definition every scanner uses.
+//
+// Three scanners once had their own idea of this - the alias splitter knew the
+// list, and the two that establish the execution context did not. So
+// `git -c k=v -C <dir> reset --hard` was read by the splitter as globals plus a
+// verb, and by the context scanners as ending at `k=v`: the `-C` was invisible
+// to the pin, survived into the argv, and Git applied it. A command classified
+// against a scratch repository then executed against the candidate and
+// destroyed uncommitted work. Resolution and execution must not be able to
+// disagree about where a command lands, and the cheapest way to guarantee that
+// is for them to parse with one function.
+func gitGlobalTakesValue(arg string) bool {
+	switch arg {
+	case "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+		"--super-prefix", "--config-env", "--attr-source":
+		return true
+	}
+	return false
+}
+
+// splitGitCommand separates one Git argv into its leading global options, its
+// verb, and the rest.
+//
+// The globals are kept rather than discarded because they change what the
+// command means - `-C dir` chooses the repository, `-c k=v` changes the
+// configuration the expansion is read from - so both the alias lookup and the
+// execution have to carry them.
+func splitGitCommand(args []string) (globals []string, verb string, rest []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			return args[:i], arg, args[i+1:]
+		}
+		if gitGlobalTakesValue(arg) && i+1 < len(args) {
+			i++
+		}
+	}
+	return args, "", nil
+}
+
+// refusedGitGlobals are the global options this boundary will not execute.
+//
+// They are refused because each one changes WHAT GIT RUNS or WHICH REPOSITORY
+// IT RUNS AGAINST, and the broker's whole claim is that it classified the
+// operation that was about to happen against the candidate.
+//
+// `--exec-path` is the one that makes this urgent rather than tidy.
+// ClassifyGitCommand permits verbs it does not recognize - deliberately, since
+// this is a destruction guard and not a Git allowlist - and Git resolves an
+// unknown verb by looking for `git-<verb>` on its exec path. So a provider
+// could drop a script in a directory it controls and run
+// `git --exec-path=<dir> anything`: the classifier sees an unlisted verb,
+// permits it, and execRealGit then runs that script with the brokered sentinel
+// removed, which is precisely the reach the sentinel exists to deny. The verb
+// being harmless-looking is the point.
+//
+// `-c` and `--config-env` are NOT here, and are classified by KEY instead. Git
+// has configuration keys whose values are programs it executes, so most of an
+// inline override is an execution redirect wearing different syntax - but not
+// all of it, and refusing the whole option refused ordinary engineering Git as
+// well. See gitConfigOverrideRefusal.
+//
+// `--git-dir`, `--work-tree`, `--namespace` and `--super-prefix` point the
+// command at a different repository or a different tree. The broker is the
+// CANDIDATE's Git; a command asking to be something else is not a command this
+// boundary has classified.
+//
+// `-C` is deliberately NOT here. It changes directory and cannot change which
+// program Git runs, and a destructive verb under it is still classified as
+// destructive - so refusing it would cost `git -C subdir status` for nothing.
+var refusedGitGlobals = map[string]string{
+	"--exec-path":    "it redirects where Git resolves the program it runs",
+	"--git-dir":      "it points the command at a different repository",
+	"--work-tree":    "it points the command at a different working tree",
+	"--namespace":    "it points the command at a different ref namespace",
+	"--super-prefix": "it rewrites the paths the command addresses",
+	// The broker prepends `--attr-source=<empty tree>` so that no path carries
+	// an attribute and no textconv, external diff or filter driver can be
+	// selected. A LATER --attr-source wins, so leaving this executable would
+	// make that neutralization advisory - the same defect `--no-textconv` had,
+	// which is why the attribute source was chosen over it. Demonstrated:
+	// `--attr-source=HEAD` against a repository whose committed tree carries
+	// .gitattributes restored textconv execution.
+	"--attr-source": "it chooses which attributes apply, and attributes select programs Git runs",
+}
+
+// refusedGitGlobal reports the first global option this boundary will not
+// execute, in either its separate or its `--x=y` form.
+func refusedGitGlobal(args []string) (string, string, bool) {
+	for _, arg := range args {
+		if arg == "--" {
+			return "", "", false
+		}
+		name := arg
+		if equals := strings.Index(arg, "="); equals > 0 {
+			name = arg[:equals]
+		}
+		if reason, refused := refusedGitGlobals[name]; refused {
+			return name, reason, true
+		}
+	}
+	return "", "", false
+}
+
+// inertGitConfigKeys are the configuration keys an inline `-c` override may
+// set, and it is an ALLOWLIST: a key that is not named here is refused, so a
+// key nobody has reasoned about fails closed rather than arriving permitted.
+//
+// WHY THERE IS A LIST AT ALL. Refusing every `-c` was correct about what it
+// refused and wrong about what it cost. Claude Code prefixes its Git argv with
+// `-c`, so run run-ca6aecf437c10bc6d2983fe978c5c00a met this boundary 67 times
+// in one attempt - 58 of them an ordinary `commit`, the rest `log`, `ls-files`
+// and `remote`, none of which can discard anything. The worker could not read
+// its own repository, read the refusal as a problem with its invocation, and
+// retried until its inactivity window closed. A boundary that refuses
+// engineering work it has no objection to is not a stricter boundary; it is the
+// same boundary with a denial of service attached. See #248.
+//
+// WHAT EARNS A PLACE. A key here must be unable to name a program, redirect a
+// path, reach a network, or change which repository or identity the command
+// acts as - for ANY value, because only the key is classified. That is why
+// `core.pager`, `core.editor`, `core.fsmonitor`, `core.hooksPath`,
+// `core.sshCommand`, `core.askPass`, `credential.helper`, `gpg.program`,
+// `filter.*`, `diff.external`, `http.*`, `protocol.*`, `url.*`, `safe.*`,
+// `include.path`, `includeIf.*` and `alias.*` are all absent and stay absent:
+// each of them is an execution, transport or authority redirect, and
+// `core.pager` in particular is the exact escape git_guard_test.go already
+// proves - `-c core.pager=<script> log` runs the script.
+//
+// The signing keys are here and the signing PROGRAM is not, which is the
+// distinction the whole list turns on: `commit.gpgsign=false` chooses whether
+// to sign, and `gpg.program` chooses what to execute.
+// WHAT IS NOT HERE, AND WHY, because the exclusions are the law:
+//
+//   - gc.auto and maintenance.auto. They read as "turn the background work
+//     off", and `gc.auto=0` is exactly what a tool sets - but the key is
+//     classified for EVERY value, and `gc.auto=1` asks Git to run automatic
+//     housekeeping that repacks objects and expires reflogs inside a workspace
+//     whose metadata the runtime holds a digest of. Being unable to prove a
+//     side effect impossible is the same answer as knowing it is possible.
+//
+//   - the signing keys. commit.gpgsign, tag.gpgsign and log.showsignature read
+//     as booleans that choose WHETHER to sign or verify, with the program named
+//     by gpg.program, which is refused. That separation only holds while
+//     gpg.program cannot be set - and #251 is open: a provider can persist
+//     gpg.program into .git/config, where the inline allowlist does not reach
+//     it. `log.showSignature=true` then makes an ordinary `git log` run it.
+//     Commit and tag are runtime-owned now, but cherry-pick, revert, merge,
+//     rebase and am are not, and every one of them honours commit.gpgsign. A
+//     key whose safety depends on another boundary being closed is not inert;
+//     it is inert conditionally, which is a thing this list cannot express.
+//
+//   - a whole `advice.` section. Allowing a section by prefix is the opposite
+//     of an allowlist: an advice key added by a future Git would arrive
+//     permitted without anybody having looked at it. No `advice.` key appears
+//     in the observed provider argv either, so listing one would be inventing
+//     a requirement.
+//
+// The list grows by evidence and review, one key at a time, and a refusal names
+// the key precisely so that growing it is a decision somebody can make.
+var inertGitConfigKeys = map[string]bool{
+	"core.quotepath": true, "core.abbrev": true, "core.checkstat": true,
+	"core.trustctime": true, "core.precomposeunicode": true,
+	"log.date": true, "color.ui": true,
+}
+
+func inertGitConfigKey(key string) bool {
+	return inertGitConfigKeys[strings.ToLower(key)]
+}
+
+// deferredGitConfigKeys are the two overrides whose authority DEPENDS ON THE
+// TARGET rather than being decidable from the key alone.
+//
+// A repository's committer identity is meaningless outside the repository it is
+// set on. It names no program, reads no path, presents no credential, and
+// cannot redirect discovery - so unlike every other key here it carries no
+// intrinsic capability, and the only question it raises is WHOSE history a
+// commit would be written into.
+//
+// That question has no answer until the target is known. So these are neither
+// refused at parse time nor admitted: they are carried through as DEFERRED and
+// become authoritative only for a repository the attempt itself created. On the
+// candidate they are refused exactly as before, because a provider must not
+// choose the identity of candidate history.
+//
+// Two keys, and not a precedent for a general target-aware config model.
+// core.pager, core.hooksPath, core.fsmonitor, credential.helper, gpg.program,
+// diff.external and core.sshCommand execute programs or move authority whatever
+// repository they are pointed at, and stay refused everywhere.
+var deferredGitConfigKeys = map[string]bool{"user.name": true, "user.email": true}
+
+func deferredGitConfigKey(key string) bool { return deferredGitConfigKeys[strings.ToLower(key)] }
+
+// gitConfigOverrideKeys walks the global options and reports every `-c` or
+// `--config-env` key, plus whether one was written with nothing to set.
+//
+// One walker, two consumers, so the refusal and the deferral cannot come to
+// disagree about which keys an argv carries.
+//
+// Both spellings are parsed, in both their joined and separated forms, because
+// `git -c k=v`, `git -c` `k=v` and `git --config-env=k=VAR` are the same act.
+// `--config-env` names an environment variable rather than a value, so its
+// value is opaque here - which changes nothing, because the KEY is what decides.
+func gitConfigOverrideKeys(globals []string) (keys []string, dangling bool) {
+	for i := 0; i < len(globals); i++ {
+		arg := globals[i]
+		setting := ""
+		switch {
+		case arg == "-c" || arg == "--config-env":
+			if i+1 >= len(globals) {
+				// An override with nothing to override is not resolvable.
+				return keys, true
+			}
+			i++
+			setting = globals[i]
+		case strings.HasPrefix(arg, "--config-env="):
+			setting = strings.TrimPrefix(arg, "--config-env=")
+		default:
+			continue
+		}
+		// `-c key` with no `=` is Git's shorthand for `key=true`. It is still a
+		// key, and it is classified as one.
+		key := setting
+		if equals := strings.Index(setting, "="); equals >= 0 {
+			key = setting[:equals]
+		}
+		keys = append(keys, key)
+	}
+	return keys, false
+}
+
+// gitConfigOverrideRefusal reports the first key this boundary will not accept
+// AT ANY TARGET, and names it.
+//
+// Naming the key is not decoration. A provider told only that `-c` is refused
+// has no way to learn which part of its own invocation to drop, and the one in
+// #248 responded by sending the same command again; a provider told that
+// `core.pager` is the objection can send the command without it.
+func gitConfigOverrideRefusal(globals []string) (string, bool) {
+	keys, dangling := gitConfigOverrideKeys(globals)
+	if dangling {
+		return "-c", true
+	}
+	for _, key := range keys {
+		if !inertGitConfigKey(key) && !deferredGitConfigKey(key) {
+			return key, true
+		}
+	}
+	return "", false
+}
+
+// DeferredGitConfigOverrides reports the identity keys an argv carries, whose
+// admission waits on the target.
+func DeferredGitConfigOverrides(globals []string) []string {
+	keys, _ := gitConfigOverrideKeys(globals)
+	var deferred []string
+	for _, key := range keys {
+		if deferredGitConfigKey(key) {
+			deferred = append(deferred, key)
+		}
+	}
+	return deferred
+}
+
+// ResolveGitCommand expands args through the effective Git configuration and
+// returns the command real Git will actually run.
+//
+// It fails closed: a shell alias, a cycle, an unreadable configuration, a
+// malformed alias value or a chain that will not terminate all produce an
+// error, and the caller refuses. An argv with no alias in it is returned
+// unchanged, which is what happens for essentially every real invocation.
+func ResolveGitCommand(candidateDir string, args []string) ([]string, error) {
+	seen := map[string]bool{}
+	for hop := 0; ; hop++ {
+		globals, verb, rest := splitGitCommand(args)
+		// REFUSED BEFORE ANYTHING IS RESOLVED OR RUN. A global that redirects
+		// what Git executes defeats the boundary whatever the verb turns out to
+		// be, so it is answered here rather than being carried into a
+		// classification that would then be about the wrong thing.
+		if name, reason, refused := refusedGitGlobal(globals); refused {
+			return nil, &GitAliasUnresolvableError{Verb: name, Detail: reason}
+		}
+		// The same question for the option that is classified by KEY rather
+		// than refused outright.
+		if key, refused := gitConfigOverrideRefusal(globals); refused {
+			return nil, &GitConfigOverrideRefusedError{Key: key}
+		}
+		if verb == "" {
+			return args, nil
+		}
+		// A VERB GIT IMPLEMENTS IS NOT AN ALIAS, and Git will not expand one:
+		// an alias whose name collides with a command is ignored. Mirroring
+		// that is what keeps `git status` from being refused because somebody
+		// once wrote `alias.status` into a config file.
+		if gitImplements(candidateDir, verb) {
+			return args, nil
+		}
+		if hop >= maxGitAliasExpansions {
+			return nil, &GitAliasUnresolvableError{Verb: verb,
+				Detail: fmt.Sprintf("the alias chain did not terminate within %d expansions", maxGitAliasExpansions)}
+		}
+		if seen[verb] {
+			return nil, &GitAliasUnresolvableError{Verb: verb, Detail: "the alias expands to itself"}
+		}
+		seen[verb] = true
+
+		value, defined, err := gitAliasValue(candidateDir, globals, verb)
+		if err != nil {
+			return nil, &GitAliasUnresolvableError{Verb: verb, Detail: err.Error()}
+		}
+		if !defined {
+			// Not an alias and not a command Git advertises. Whatever it is,
+			// real Git will decide - and it cannot be a destructive operation
+			// this boundary classifies, because those are all commands.
+			return args, nil
+		}
+		if strings.HasPrefix(strings.TrimSpace(value), "!") {
+			// A SHELL ALIAS. Its meaning is whatever a shell makes of it, and
+			// the one way to find that out is to run it - which is exactly what
+			// a boundary deciding whether to permit it must not do. So it is
+			// refused, and the refusal says why.
+			return nil, &GitAliasUnresolvableError{Verb: verb,
+				Detail: "it is a shell alias, and determining what it does would mean executing it"}
+		}
+		words, err := splitGitAliasValue(value)
+		if err != nil {
+			return nil, &GitAliasUnresolvableError{Verb: verb, Detail: err.Error()}
+		}
+		if len(words) == 0 {
+			return nil, &GitAliasUnresolvableError{Verb: verb, Detail: "the alias expands to nothing"}
+		}
+		// Git appends the remaining arguments to the expansion, so
+		// `git co -- f` with `alias.co = checkout` is `checkout -- f`.
+		next := make([]string, 0, len(globals)+len(words)+len(rest))
+		next = append(next, globals...)
+		next = append(next, words...)
+		next = append(next, rest...)
+		args = next
+	}
+}
+
+// splitGitAliasValue splits an alias value the way Git's own split_cmdline
+// does: whitespace separates, single and double quotes group, and a backslash
+// escapes inside double quotes.
+//
+// An unbalanced quote is an ERROR rather than a best guess. Git treats it as a
+// bad configuration value and so does this: a value nobody can parse the same
+// way twice is not something to authorize a decision on.
+func splitGitAliasValue(value string) ([]string, error) {
+	var words []string
+	var current strings.Builder
+	var quote rune
+	started := false
+	for i := 0; i < len(value); i++ {
+		c := rune(value[i])
+		switch {
+		case quote == '"' && c == '\\' && i+1 < len(value):
+			i++
+			current.WriteByte(value[i])
+			started = true
+		case quote != 0 && c == quote:
+			quote = 0
+		case quote == 0 && (c == '\'' || c == '"'):
+			quote, started = c, true
+		case quote == 0 && (c == ' ' || c == '\t' || c == '\n' || c == '\r'):
+			if started {
+				words = append(words, current.String())
+				current.Reset()
+				started = false
+			}
+		default:
+			current.WriteRune(c)
+			started = true
+		}
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("the alias value has an unbalanced quote")
+	}
+	if started {
+		words = append(words, current.String())
+	}
+	return words, nil
+}
+
+// gitAliasValue reads alias.<verb> from the configuration this command will
+// actually run under.
+//
+// The globals are passed through so that a `-c alias.x=...` override is
+// visible here exactly as it will be to the execution. Exit status 1 is Git's
+// "not set", which is an answer; anything else is a configuration this code
+// could not read, which is a refusal.
+func gitAliasValue(candidateDir string, globals []string, verb string) (string, bool, error) {
+	args := make([]string, 0, len(globals)+3)
+	args = append(args, globals...)
+	args = append(args, "config", "--get", "alias."+verb)
+	out, code, err := effectiveGit(candidateDir, args...)
+	switch {
+	case err != nil && code == 0:
+		return "", false, err
+	case code == 1:
+		return "", false, nil
+	case code != 0:
+		return "", false, fmt.Errorf("git config exited %d reading alias.%s", code, verb)
+	}
+	return strings.TrimRight(out, "\r\n"), true, nil
+}
+
+// gitImplements reports whether Git advertises verb as one of its own
+// commands, which is the condition under which it ignores a same-named alias.
+//
+// The list comes from the SAME binary that will run the command, so the answer
+// is that binary's rather than this file's opinion of what Git contains. Where
+// the installed Git is too old to list its commands the answer is "no", which
+// makes an alias shadowing a command expandable here and therefore refusable -
+// the conservative direction, and one that costs nothing unless somebody has
+// written a config Git itself is ignoring.
+func gitImplements(candidateDir, verb string) bool {
+	for _, known := range gitBuiltinCommands(candidateDir) {
+		if known == verb {
+			return true
+		}
+	}
+	return false
+}
+
+// gitBuiltinCommands is memoized per candidate workspace: the answer is a
+// property of the installed binary, and the resolver asks for it once per
+// expansion hop.
+var gitBuiltins sync.Map // candidateDir -> []string
+
+func gitBuiltinCommands(candidateDir string) []string {
+	if cached, ok := gitBuiltins.Load(candidateDir); ok {
+		return cached.([]string)
+	}
+	var commands []string
+	if out, code, err := effectiveGit(candidateDir, "--list-cmds=builtins"); err == nil && code == 0 {
+		for _, line := range strings.Split(out, "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				commands = append(commands, line)
+			}
+		}
+	}
+	gitBuiltins.Store(candidateDir, commands)
+	return commands
+}
+
+// effectiveGit runs one read-only Git query under the same configuration the
+// brokered execution will use.
+//
+// It resolves the binary the way execRealGit does - from the runtime's own
+// trusted search path, never by name - because the guard directory is first on
+// the provider's path and resolving by name here would make the broker call
+// itself. The environment comes from brokerGitEnv, the single definition the
+// execution also uses, so the configuration this reads cannot drift from the
+// configuration that will apply.
+func effectiveGit(candidateDir string, args ...string) (string, int, error) {
+	binary, err := gitBinary()
+	if err != nil {
+		return "", 0, err
+	}
+	cmd := exec.Command(binary, args...)
+	cmd.Dir = candidateDir
+	cmd.Env = brokerGitEnv()
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	runErr := cmd.Run()
+	if runErr != nil {
+		var exit *exec.ExitError
+		if errors.As(runErr, &exit) {
+			return stdout.String(), exit.ExitCode(), nil
+		}
+		return stdout.String(), 0, runErr
+	}
+	return stdout.String(), 0, nil
+}

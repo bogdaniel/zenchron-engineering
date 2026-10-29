@@ -113,10 +113,31 @@ type DoctorInput struct {
 	// GitHub is the forge adapter. Nil means no read-only forge check is safe
 	// to make, which is reported as WARN, not PASS.
 	GitHub GitHubAdapter
+	// Governance is the separately authorized, read-only adoption observer.
+	// It is never derived from the publication adapter or credential.
+	Governance ForgeGovernance
 	// DiscoveryLabel is the opt-in label. Empty means DefaultDiscoveryLabel.
 	DiscoveryLabel string
 	// GitHubCredentialMode is the operator's declared mode.
 	GitHubCredentialMode string
+	// OperatorGitHub resolves the HUMAN operator's own GitHub identity through
+	// their local `gh` login, which is a DIFFERENT credential from the one the
+	// runtime publishes with.
+	//
+	// It exists because the publication-identity check could previously only
+	// name the account the runtime publishes as and ask the operator to compare
+	// it themselves. #82's stated operator UX is the comparison, not the half
+	// of it the runtime already knew: the two logins have to be resolved to say
+	// whether the review loop actually works.
+	//
+	// Nil is a truthful answer - the comparison is reported as unmade - and it
+	// is never a publication credential: doctor asks this adapter who the
+	// OPERATOR is and nothing else.
+	OperatorGitHub ForgeViewer
+	// Feedback is the operator's admission rule. It is read for its permission
+	// threshold, so doctor judges the human's permission against the bar
+	// admission will actually apply rather than against a default.
+	Feedback FeedbackPolicy
 
 	// OperatorConfigPath and RepositoryRoot are re-read from disk: whether the
 	// two layers still load, still tighten, and still validate IS the check.
@@ -150,6 +171,27 @@ type DoctorInput struct {
 	// failure as a deliberate design choice.
 	ControllerBuild      ControllerBuild
 	ControllerBuildError error
+	// ControllerUpdate is the serving controller's latest trusted-main update,
+	// read from its live snapshot; ControllerUpdateError is why none could be.
+	ControllerUpdate      *ControllerUpdate
+	ControllerUpdateError error
+
+	// ControllerRoot is where adopted generations and the "current" stable
+	// projection live - the same value `controller status`, `controller
+	// build-adopted` and succession itself already use. The entrypoint checks
+	// read it to know what a canonical PATH entry must point at; it names no
+	// authority of its own.
+	ControllerRoot string
+	// EntrypointPathEnv is the operator's shell PATH, read once at the
+	// composition boundary rather than inside the check, so a diagnosis is
+	// reproducible from a value a test can set directly. This is the one
+	// place Doctor deliberately reads ambient state: the question being asked
+	// is what a real shell would resolve, and answering it from anything else
+	// would not be answering that question.
+	EntrypointPathEnv string
+	// GoEnvFile is the Go env file the operator's host processes read, from
+	// OperatorGoEnvFile at the composition boundary. Empty means unknown.
+	GoEnvFile string
 }
 
 // Doctor answers every check independently and returns the report. It never
@@ -165,6 +207,8 @@ func Doctor(ctx context.Context, in DoctorInput) DoctorReport {
 	checks = append(checks, doctorConfig(in)...)
 	checks = append(checks, doctorGovernance(in))
 	checks = append(checks, doctorController(in))
+	checks = append(checks, doctorTrust(in))
+	checks = append(checks, doctorEntrypoint(in)...)
 	checks = append(checks, doctorAgents(in)...)
 	checks = append(checks, doctorControlEndpoint(in))
 	checks = append(checks, doctorStateStorage(in))
@@ -248,6 +292,105 @@ func doctorController(in DoctorInput) DoctorCheck {
 }
 
 // ---------------------------------------------------------------------------
+// PATH entrypoint
+// ---------------------------------------------------------------------------
+
+const doctorGroupInstall = "install"
+
+// doctorEntrypoint answers #319: is there ONE canonical local install, and
+// does the operator's shell actually reach it?
+//
+// It never mutates anything - `controller install` is the one place that
+// does - and it never guesses which of several PATH entries an operator
+// meant. A stale copy earlier on PATH is reported as exactly that, even when
+// a canonical entrypoint also exists further along: the shell would resolve
+// the stale one, and a report that looked past it to the healthy entry
+// further down would be a green diagnosis of a broken installation.
+//
+// The diagnosis is computed once, against the SAME durable controller
+// authority `controller status` and `controller install` already consult,
+// and handed to both checks below: two independently-opened stores could in
+// principle observe two different moments of the same database, which is
+// exactly the kind of second opinion #319 must not introduce.
+func doctorEntrypoint(in DoctorInput) []DoctorCheck {
+	if strings.TrimSpace(in.ControllerRoot) == "" {
+		return []DoctorCheck{
+			warn(doctorGroupInstall, "install.entrypoint", "no controller root is configured, so the canonical PATH entrypoint cannot be diagnosed"),
+			warn(doctorGroupInstall, "install.path_shadowing", "no controller root is configured, so PATH shadowing cannot be diagnosed"),
+		}
+	}
+	if strings.TrimSpace(in.StateDir) == "" {
+		reason := "no state directory is configured, so durable controller authority cannot be consulted to diagnose the PATH entrypoint"
+		return []DoctorCheck{
+			warn(doctorGroupInstall, "install.entrypoint", reason),
+			warn(doctorGroupInstall, "install.path_shadowing", reason),
+		}
+	}
+	store, err := OpenSQLiteOperationStore(in.StateDir)
+	if err != nil {
+		reason := "the runtime database could not be opened to diagnose the PATH entrypoint: " + err.Error()
+		return []DoctorCheck{
+			warn(doctorGroupInstall, "install.entrypoint", reason),
+			warn(doctorGroupInstall, "install.path_shadowing", reason),
+		}
+	}
+	defer store.Close()
+	diagnosis := DiagnoseEntrypoint(in.EntrypointPathEnv, in.ControllerRoot, store)
+	return []DoctorCheck{doctorEntrypointCanonical(diagnosis), doctorEntrypointShadowing(diagnosis)}
+}
+
+// doctorEntrypointCanonical states the canonical public entrypoint path, the
+// path the shell actually resolves, the adopted target it should reach, and
+// whether it does.
+func doctorEntrypointCanonical(diagnosis EntrypointDiagnosis) DoctorCheck {
+	const id = "install.entrypoint"
+	if diagnosis.Winner == nil {
+		return warn(doctorGroupInstall, id, fmt.Sprintf(
+			"no %s is on PATH; the canonical entrypoint would be a symlink to %s. Run `controller install` to establish it",
+			EntrypointExecutableName, diagnosis.CanonicalTarget))
+	}
+	if !diagnosis.Canonical {
+		return fail(doctorGroupInstall, id, fmt.Sprintf(
+			"the %s that resolves on PATH is %s, and it is not the canonical entrypoint: %s. Canonical target: %s. Run `controller install` to replace the resolved entry with a symlink to it",
+			EntrypointExecutableName, diagnosis.Winner.Path, diagnosis.Detail, diagnosis.CanonicalTarget))
+	}
+	if !diagnosis.AuthorityConsistent {
+		return fail(doctorGroupInstall, id, fmt.Sprintf(
+			"the canonical entrypoint %s is a symlink through %s, and durable controller authority does not support it: %s",
+			diagnosis.Winner.Path, diagnosis.CanonicalTarget, diagnosis.Detail))
+	}
+	if !diagnosis.ReachesAdopted {
+		return fail(doctorGroupInstall, id, fmt.Sprintf(
+			"the canonical entrypoint %s does not reach the adopted target %s: %s",
+			diagnosis.Winner.Path, diagnosis.CanonicalTarget, diagnosis.Detail))
+	}
+	return pass(doctorGroupInstall, id, fmt.Sprintf(
+		"the %s that resolves on PATH (%s) is the canonical entrypoint and reaches the adopted target %s",
+		EntrypointExecutableName, diagnosis.Winner.Path, diagnosis.CanonicalTarget))
+}
+
+// doctorEntrypointShadowing names every PATH entry other than the one that
+// wins, so a stale or duplicate copy is visible even when it happens not to
+// be the one the shell currently resolves.
+func doctorEntrypointShadowing(diagnosis EntrypointDiagnosis) DoctorCheck {
+	const id = "install.path_shadowing"
+	if diagnosis.Winner == nil {
+		return pass(doctorGroupInstall, id, fmt.Sprintf("no %s is on PATH at all, so there is nothing to shadow", EntrypointExecutableName))
+	}
+	shadowed := diagnosis.Shadowed()
+	if len(shadowed) == 0 {
+		return pass(doctorGroupInstall, id, fmt.Sprintf("%s appears at exactly one place on PATH (%s)", EntrypointExecutableName, diagnosis.Winner.Path))
+	}
+	paths := make([]string, len(shadowed))
+	for i, candidate := range shadowed {
+		paths[i] = candidate.Path
+	}
+	return warn(doctorGroupInstall, id, fmt.Sprintf(
+		"%s also exists later on PATH at %s, shadowed by the resolved %s; remove the stale entries so they cannot be reached by a different PATH order",
+		EntrypointExecutableName, strings.Join(paths, ", "), diagnosis.Winner.Path))
+}
+
+// ---------------------------------------------------------------------------
 // Runtime state
 // ---------------------------------------------------------------------------
 
@@ -260,7 +403,91 @@ func doctorState(in DoctorInput) []DoctorCheck {
 		doctorStateSQLite(in),
 		doctorStateLock(in),
 		doctorStateLiveness(in),
+		doctorStateGoEnv(in),
 	}
+}
+
+// OperatorGoEnvFile names the Go env file host processes read: goenv (the
+// operator's $GOENV) when it is a real file, else os.UserConfigDir()/go/env.
+// GOENV=off or the null device in THIS process says nothing about the default
+// file every other process still reads - and `go env -w` under off writes it.
+func OperatorGoEnvFile(goenv string) string {
+	if goenv != "" && goenv != "off" && goenv != os.DevNull {
+		return goenv
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "go", "env")
+}
+
+// pathUnder reports whether path is root or inside it. Both sides are
+// symlink-resolved through their longest existing prefix (/tmp vs
+// /private/tmp; a deleted scratch dir under a live state dir), falling back
+// to the cleaned spelling.
+func pathUnder(root, path string) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	resolve := func(p string) string {
+		p = filepath.Clean(p)
+		for dir, rest := p, ""; ; {
+			if real, err := filepath.EvalSymlinks(dir); err == nil {
+				return filepath.Join(real, rest)
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				return p
+			}
+			dir, rest = parent, filepath.Join(filepath.Base(dir), rest)
+		}
+	}
+	rel, err := filepath.Rel(resolve(root), resolve(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// doctorStateGoEnv reports (#430) an operator Go env file whose build or module
+// locations point into runtime state: every later Go command on the host would
+// then write into a run directory that retention may delete. It only reads the
+// file; the remedy is the operator's own `go env -u`.
+func doctorStateGoEnv(in DoctorInput) DoctorCheck {
+	const id = "state.go_env"
+	file := strings.TrimSpace(in.GoEnvFile)
+	switch {
+	case file == "":
+		return warn(doctorGroupState, id, "the operator's Go env file could not be located, so it was not checked for runtime state paths")
+	case strings.TrimSpace(in.StateDir) == "":
+		return warn(doctorGroupState, id, "no state directory is configured, so the Go env file "+file+" was not checked against it")
+	}
+	data, err := os.ReadFile(file)
+	if os.IsNotExist(err) {
+		return pass(doctorGroupState, id, "no Go env file exists at "+file)
+	}
+	if err != nil {
+		return warn(doctorGroupState, id, "the Go env file "+file+" could not be read: "+err.Error())
+	}
+	var polluted []string
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "GOCACHE", "GOTMPDIR", "GOMODCACHE", "GOPATH":
+			for _, path := range filepath.SplitList(value) {
+				if pathUnder(in.StateDir, path) {
+					polluted = append(polluted, key)
+					break
+				}
+			}
+		}
+	}
+	if len(polluted) > 0 {
+		return warn(doctorGroupState, id, fmt.Sprintf("the operator Go env file %s sets %s under the Zenchron state directory %s, so every Go command on this host writes into runtime state; run `go env -u %s` (not done automatically)",
+			file, strings.Join(polluted, ", "), in.StateDir, strings.Join(polluted, " ")))
+	}
+	return pass(doctorGroupState, id, "the Go env file "+file+" points no build or module location under the state directory")
 }
 
 // doctorStateDir deliberately does not create the directory. A preflight that
@@ -298,7 +525,7 @@ func doctorStateSchema(in DoctorInput) DoctorCheck {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return pass(doctorGroupState, id, fmt.Sprintf("no database exists yet; the first run creates it at schema version %d", sqliteSchemaVersion))
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", sqliteFileURI(path)+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return warn(doctorGroupState, id, "the schema version could not be read from "+path+": "+err.Error())
 	}
@@ -337,7 +564,7 @@ func doctorStateLock(in DoctorInput) DoctorCheck {
 	if strings.TrimSpace(in.StateDir) == "" {
 		return fail(doctorGroupState, id, "no state directory is configured, so the ownership lock cannot be taken")
 	}
-	lock, err := AcquireOwnershipLock(in.StateDir, NewRuntimeOwner())
+	lock, err := AcquireControllerInstanceLock(in.StateDir, NewRuntimeOwner())
 	if err != nil {
 		return fail(doctorGroupState, id, "the runtime ownership lock could not be taken: "+err.Error()+"; another process may already own this state directory")
 	}
@@ -357,7 +584,7 @@ func doctorStateLiveness(in DoctorInput) DoctorCheck {
 		return fail(doctorGroupState, id, "no state directory is configured, so owner liveness has no evidence to read")
 	}
 	owner := NewRuntimeOwner()
-	lock, err := AcquireOwnershipLock(in.StateDir, owner)
+	lock, err := AcquireControllerInstanceLock(in.StateDir, owner)
 	if err != nil {
 		return fail(doctorGroupState, id, "owner liveness could not be probed because the ownership lock could not be taken: "+err.Error())
 	}
@@ -532,6 +759,8 @@ func doctorGitIsolation() DoctorCheck {
 		"GIT_ATTR_NOSYSTEM=1",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_LITERAL_PATHSPECS=1",
+		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_GRAFT_FILE=" + os.DevNull,
 		"PATH=" + trustedPATH,
 	} {
 		if !containsExact(env, required) {
@@ -662,7 +891,7 @@ const doctorGroupAssurance = "assurance"
 func doctorAssurance(ctx context.Context, in DoctorInput) []DoctorCheck {
 	// The frozen diagnosis is called exactly once; the three Docker-derived
 	// fields are separate questions and are reported separately.
-	diagnosis := DiagnoseSandbox(in.Codex, in.Sandbox)
+	diagnosis := DiagnoseSandbox(ctx, in.Codex, in.Sandbox)
 	return []DoctorCheck{
 		doctorDockerEndpoint(in),
 		doctorAssuranceImage(in),
@@ -810,6 +1039,9 @@ func doctorAssuranceImage(in DoctorInput) DoctorCheck {
 
 func doctorVerifierSandbox(diagnosis SandboxDoctor) DoctorCheck {
 	const id = "assurance.verifier_sandbox"
+	if diagnosis.VerifierSandboxReason != "" {
+		return fail(doctorGroupAssurance, id, "the verifier sandbox is unavailable: "+diagnosis.VerifierSandboxReason+". Without a Docker daemon that answers, no candidate can be verified, so no run can complete.")
+	}
 	if diagnosis.VerifierSandbox != "enforceable" {
 		return fail(doctorGroupAssurance, id, "the verifier sandbox is "+diagnosis.VerifierSandbox+": Docker is missing, the daemon is unreachable, or the pinned assurance image is not present locally. Without it no candidate can be verified, so no run can complete.")
 	}
@@ -866,7 +1098,74 @@ const doctorGroupGitHub = "github"
 func doctorGitHub(ctx context.Context, in DoctorInput) []DoctorCheck {
 	credential := doctorGitHubCredential(in)
 	identity, rate := doctorGitHubRead(ctx, in, credential)
-	return []DoctorCheck{credential, doctorPublicationIdentity(in), identity, rate}
+	return []DoctorCheck{credential, doctorPublicationIdentity(ctx, in), doctorGitHubGovernance(ctx, in), identity, rate}
+}
+
+// doctorGitHubGovernance probes disclosure, not whether repository policy is
+// sufficient for adoption. Raw adapter errors and provenance details are never
+// reported: they can contain credential or response data.
+func doctorGitHubGovernance(ctx context.Context, in DoctorInput) DoctorCheck {
+	const id = "github.governance"
+	if in.Governance == nil {
+		return fail("github", id, "no governance observer is configured; set github.governance_credential_mode to github-cli for controller build-adopted; serve does not require it")
+	}
+	if in.Governance.GovernanceProvenance().Role != CredentialRoleGovernance {
+		return fail("github", id, "the observer does not identify as governance-observation; configure a separate governance credential")
+	}
+	repo, err := ParseGitHubRepo(in.Repository.Identity)
+	if err != nil {
+		return warn("github", id, "governance visibility was not probed; select a valid repository with --repo owner/name")
+	}
+	rulesets, err := in.Governance.Rulesets(ctx, repo)
+	if err != nil {
+		return fail("github", id, "governance observation failed; verify the configured governance credential resolves and can read repository rulesets and bypass_actors")
+	}
+	if len(rulesets) == 0 {
+		return warn("github", id, "governance read succeeded but no rulesets were returned; bypass_actors visibility remains unverified")
+	}
+	for _, ruleset := range rulesets {
+		if !ruleset.BypassActorsKnown {
+			return fail("github", id, "governance credential cannot disclose bypass_actors for every ruleset; authorize an identity with governance visibility before controller build-adopted")
+		}
+	}
+	return pass("github", id, "governance credential resolved and disclosed rulesets including bypass_actors; adoption policy is validated by controller build-adopted")
+}
+
+// doctorViewer resolves the account the runtime publishes as, when the adapter
+// can answer. It is a read; doctor makes no write.
+func doctorViewer(adapter any, identity string) (GitHubActor, bool) {
+	viewer, ok := adapter.(ForgeViewer)
+	if !ok || viewer == nil || strings.TrimSpace(identity) == "" {
+		return GitHubActor{}, false
+	}
+	repo, err := ParseGitHubRepo(identity)
+	if err != nil {
+		return GitHubActor{}, false
+	}
+	actor, err := viewer.Viewer(context.Background(), repo)
+	if err != nil || strings.TrimSpace(actor.Login) == "" {
+		return GitHubActor{}, false
+	}
+	return actor, true
+}
+
+// doctorPermission resolves one login's current repository permission.
+// PermissionUnresolved is the answer whenever the question could not be asked,
+// and it is never read as an admission.
+func doctorPermission(ctx context.Context, in DoctorInput, login string) GitHubPermission {
+	permissions, ok := in.GitHub.(ForgeActorPermissions)
+	if !ok {
+		return PermissionUnresolved
+	}
+	repo, err := ParseGitHubRepo(in.Repository.Identity)
+	if err != nil {
+		return PermissionUnresolved
+	}
+	permission, err := permissions.RepositoryPermission(ctx, repo, login)
+	if err != nil {
+		return PermissionUnresolved
+	}
+	return permission
 }
 
 // doctorPublicationIdentity answers whether the operator can give their own
@@ -883,54 +1182,72 @@ func doctorGitHub(ctx context.Context, in DoctorInput) []DoctorCheck {
 // it to the exact head, and recorded "authored by this runtime, so admitting it
 // would let the system feed itself" about a human being. This states it up
 // front, before an operator spends a subscription discovering it.
-//
-// It is a WARN rather than a FAIL because runs still execute, publish and
-// verify; what is unavailable is the remediation loop. The fix is a separate
-// publication identity, not a weaker guard.
-// doctorViewer resolves the account the runtime publishes as, when the adapter
-// can answer. It is a read; doctor makes no write.
-func doctorViewer(in DoctorInput) (GitHubActor, bool) {
-	viewer, ok := in.GitHub.(ForgeViewer)
-	if !ok || strings.TrimSpace(in.Repository.Identity) == "" {
-		return GitHubActor{}, false
-	}
-	repo, err := ParseGitHubRepo(in.Repository.Identity)
-	if err != nil {
-		return GitHubActor{}, false
-	}
-	actor, err := viewer.Viewer(context.Background(), repo)
-	if err != nil || strings.TrimSpace(actor.Login) == "" {
-		return GitHubActor{}, false
-	}
-	return actor, true
-}
-
-func doctorPublicationIdentity(in DoctorInput) DoctorCheck {
+func doctorPublicationIdentity(ctx context.Context, in DoctorInput) DoctorCheck {
 	const id = "github.publication_identity"
 	switch in.GitHubCredentialMode {
 	case GitHubCredentialNone:
 		return warn(doctorGroupGitHub, id, "github.credential_mode is \"none\", so the runtime publishes nothing and no publication identity exists")
-	case GitHubCredentialToken:
-		// The mode proves a SEPARATE CREDENTIAL, not a separate account: a
-		// personal access token for the operator's own login sits in that file
-		// just as happily as a dedicated runtime account's. Claiming
-		// distinctness from the mode alone would be the same kind of untrue
-		// statement this check exists to make.
-		if actor, ok := doctorViewer(in); ok {
-			return pass(doctorGroupGitHub, id, fmt.Sprintf(
-				"the runtime publishes as %q from its own operator-provisioned token. Compare that with your own GitHub login: where they differ, your "+
-					"reviews are admissible feedback and the runtime's own are refused by identity; where they are the SAME account, the runtime is still "+
-					"acting as you and your reviews will not reach a worker", actor.Login))
-		}
-		return warn(doctorGroupGitHub, id,
-			"the runtime is configured with its own publication token, but the account it authenticates as could not be resolved, so this check cannot "+
-				"say whether it is a different actor from you - and feedback admission fails closed until that identity resolves")
+	case GitHubCredentialToken, GitHubCredentialApp:
+		return doctorSeparatedIdentities(ctx, in, id)
 	}
 	return warn(doctorGroupGitHub, id,
 		"the runtime publishes with your own `gh` credential, so it acts as YOU on GitHub. Feedback authored by the publishing identity is refused so the "+
 			"system cannot feed itself - which means your own reviews and comments will not reach a worker, and the review loop is unavailable. Give the "+
-			"runtime an identity of its own with github.credential_mode \"token\" and github.token_path (a GitHub App installation token or a dedicated "+
-			"runtime account); nothing here weakens the self-loop guard")
+			"runtime an identity of its own with github.credential_mode \""+GitHubCredentialApp+"\" (a GitHub App installation, which is a machine account "+
+			"rather than a second person) or \""+GitHubCredentialToken+"\" with github.token_path (a dedicated runtime account's token); nothing here "+
+			"weakens the self-loop guard")
+}
+
+// doctorSeparatedIdentities answers #82's operator question - can this operator
+// give their own workers feedback - by resolving BOTH halves and comparing them.
+//
+// The mode proves a separate CREDENTIAL, not a separate ACCOUNT: a personal
+// access token for the operator's own login sits in that file just as happily
+// as a dedicated runtime account's. Claiming distinctness from the mode alone
+// would be the same kind of untrue statement this check exists to make, and
+// naming only the publishing account - which is what this check used to do -
+// left the comparison to an operator who has no way to know it matters.
+//
+// It is a WARN rather than a FAIL because runs still execute, publish and
+// verify; what is unavailable is the remediation loop.
+func doctorSeparatedIdentities(ctx context.Context, in DoctorInput, id string) DoctorCheck {
+	publication, resolved := doctorViewer(in.GitHub, in.Repository.Identity)
+	if !resolved {
+		return warn(doctorGroupGitHub, id,
+			"the runtime is configured with a publication identity of its own, but the account it authenticates as could not be resolved, so this check "+
+				"cannot say whether it is a different actor from you - and feedback admission fails closed until that identity resolves")
+	}
+	operator, operatorResolved := doctorViewer(in.OperatorGitHub, in.Repository.Identity)
+	if !operatorResolved {
+		return warn(doctorGroupGitHub, id, fmt.Sprintf(
+			"publication identity %q; human feedback actor UNRESOLVED - your own GitHub login could not be read from your local `gh` session, so the two "+
+				"halves cannot be compared. Run `gh auth login`; the self-loop guard stays active either way", publication.Login))
+	}
+	permission := doctorPermission(ctx, in, operator.Login)
+	facts := fmt.Sprintf("publication identity %q; human feedback actor %q (permission: %s); self-loop guard active",
+		publication.Login, operator.Login, permission)
+	threshold := in.Feedback.threshold()
+	switch {
+	case strings.EqualFold(publication.Login, operator.Login):
+		return warn(doctorGroupGitHub, id, facts+fmt.Sprintf(
+			" - but those are the SAME account. The runtime is still acting as you, so your own reviews are refused as self-authored and will not reach a "+
+				"worker. The credential is separate; the identity is not. Point github.credential_mode %q at a GitHub App installation, or %q at a "+
+				"dedicated runtime account's token", GitHubCredentialApp, GitHubCredentialToken))
+	case permission == PermissionUnresolved:
+		return warn(doctorGroupGitHub, id, facts+fmt.Sprintf(
+			" - the two accounts are distinct, so the runtime's own comments are refused by identity, but your permission on %s could not be resolved and "+
+				"an unresolved permission is never an admission. Your reviews will not reach a worker until it answers. If the runtime publishes as a "+
+				"GitHub App, the likely cause is that the App's repository permissions do not cover the collaborator-permission lookup: widen them, "+
+				"approve the change on the installation, and run this again", in.Repository.Identity))
+	case !permission.AtLeast(threshold):
+		return warn(doctorGroupGitHub, id, facts+fmt.Sprintf(
+			" - the two accounts are distinct, so the runtime's own comments are refused by identity, but your login holds %q where feedback admission "+
+				"requires %q. Grant your account that permission on %s, or lower feedback.min_permission deliberately",
+			permission, threshold, in.Repository.Identity))
+	}
+	return pass(doctorGroupGitHub, id, facts+
+		" - the two are distinct accounts and you clear the feedback permission threshold, so the runtime's own comments are refused by identity while "+
+		"your reviews are admitted as engineering feedback")
 }
 
 // doctorGitHubCredential reports the typed github_auth_required outcome rather
@@ -1155,7 +1472,7 @@ func doctorAgents(in DoctorInput) []DoctorCheck {
 		return []DoctorCheck{warn(doctorGroupAgents, "agents.configured",
 			"no named execution agents were resolved, so per-agent readiness was not evaluated. "+
 				"A configuration written before the agent registry existed is diagnosed by the provider checks instead; "+
-				"add an `agents` registry to name the coding CLIs you have installed")}
+				"add an `agents` registry to name the coding CLIs you have installed"), doctorWorkerToolchain(in)}
 	}
 	checks := make([]DoctorCheck, 0, len(in.Agents)+1)
 	usable := 0
@@ -1262,6 +1579,12 @@ func doctorControlEndpoint(in DoctorInput) DoctorCheck {
 // operator's ceiling. Parallel candidate clones make disk an operator-level
 // resource, and the honest failure is a typed refusal before allocation rather
 // than ENOSPC in the middle of a clone.
+// heldStorageNote points at the held-workspace count. Doctor deliberately does
+// not open the durable store, and only the journal knows which workspaces are
+// held (#203), so the count comes from gc, which does.
+const heldStorageNote = "Candidate workspaces holding budget-stranded material are never reclaimed by gc; " +
+	"`autonomy gc --dry-run` reports their count and size under \"held\""
+
 func doctorStateStorage(in DoctorInput) DoctorCheck {
 	const id = "state.storage"
 	if strings.TrimSpace(in.StateDir) == "" {
@@ -1282,12 +1605,12 @@ func doctorStateStorage(in DoctorInput) DoctorCheck {
 		// problem has nothing to repair.
 		return pass(doctorGroupState, id, fmt.Sprintf(
 			"the state directory holds %d bytes and no ceiling is configured. Each concurrent run adds a full candidate clone, "+
-				"so set storage.max_state_bytes to get a typed refusal before the disk fills rather than an error mid-clone", used))
+				"so set storage.max_state_bytes to get a typed refusal before the disk fills rather than an error mid-clone. "+heldStorageNote, used))
 	}
 	if err := storage.Admit(); err != nil {
 		return fail(doctorGroupState, id, err.Error())
 	}
 	return pass(doctorGroupState, id, fmt.Sprintf(
-		"the state directory holds %d bytes against an operator ceiling of %d, with room for another candidate workspace",
+		"the state directory holds %d bytes against an operator ceiling of %d, with room for another candidate workspace. "+heldStorageNote,
 		used, storage.CeilingBytes))
 }

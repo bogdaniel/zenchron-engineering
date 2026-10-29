@@ -42,22 +42,22 @@ func TestProviderExecutionResultCarriesNoAuthorityBearingField(t *testing.T) {
 		// no evidence class is satisfied by it, and a worker that reported a
 		// perfect posture still cannot authorize its own change.
 		"Invocation",
-		// Review is the structured verdict a reviewer stage emitted, and it is
-		// admitted here for a reason worth stating precisely: at THIS boundary
-		// it is a CLAIM, not authority.
-		//
-		// The adapter read a file and returned what it found. Nothing has yet
-		// established that the worker was the approved reviewer, that the stage
-		// produces verdicts at all, that the result is about the candidate the
-		// runtime materialized, or that it says one thing rather than two -
-		// AdmitReviewerResult does all of that in the runtime, against the
-		// frozen assignment, and a claim that fails any of it becomes a typed
-		// refusal instead of lifecycle state.
-		//
-		// So the invariant this test protects still holds: a provider cannot
-		// authorize its own work. It can now say "I accept", and that sentence
-		// is checked by machines before it means anything.
-		"Review",
+		// Executed is an observation ABOUT THE INVOCATION too: that it reached
+		// the model (#87). Its only effect is that the attempt's execution
+		// time stays charged; it can cost the run budget, never grant anything.
+		"Executed",
+		// No Review, ReviewRefusal or Resolution (#521): a verdict and a
+		// no-change resolution are typed result FILES the host reads from its
+		// own slots (readTypedResultSlots), so a provider has no field through
+		// which to state either one.
+		// Answer is the invocation's semantic final answer text, exposed only
+		// by an adapter that can state one directly (Claude's structured
+		// stream, on a successful non-error final result) and empty
+		// otherwise. It asserts nothing about acceptance and satisfies no
+		// authority condition: it is read by the planner as an alternative
+		// source for the SAME text a consumer could otherwise recover from
+		// the transcript, never as a claim that the work is approved.
+		"Answer",
 	}
 	typ := reflect.TypeOf(ExecutionResult{})
 	var got []string

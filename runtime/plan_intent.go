@@ -138,11 +138,15 @@ func planContractID(repository string, issue int) string {
 // touches the database, so "two plans for one source" is unrepresentable rather
 // than a race to lose.
 func (r *EngineeringRuntime) PlanID(issue int) (string, error) {
+	return derivePlanID(r.deps.Repository.Identity, issue, r.deps.ConfigDigest)
+}
+
+func derivePlanID(repository string, issue int, config ConfigDigest) (string, error) {
 	digest, err := Digest(struct {
 		Repository string       `json:"repository"`
 		Issue      int          `json:"issue"`
 		Config     ConfigDigest `json:"config"`
-	}{r.deps.Repository.Identity, issue, r.deps.ConfigDigest})
+	}{repository, issue, config})
 	if err != nil {
 		return "", err
 	}

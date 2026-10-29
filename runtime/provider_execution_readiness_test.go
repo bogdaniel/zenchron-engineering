@@ -106,6 +106,44 @@ func TestAnImplementerInvocationIsGrantedNoResultDirectory(t *testing.T) {
 	}
 }
 
+func TestCodexReadOnlyReviewerCapturesFinalMessageToItsTypedResultPath(t *testing.T) {
+	resultPath := "/state/artifacts/review/reviewer-result.json"
+	args := codexSpec.ReadOnly.Args(cliInvocation{
+		Agent:  ResolvedAgent{ID: "codex", Kind: AgentKindCodexCLI},
+		Prompt: "review", CandidateDir: "/candidate", ReviewerResultPath: resultPath,
+	})
+	if sandbox, ok := argValue(args, "--sandbox"); !ok || sandbox != "read-only" {
+		t.Fatalf("reviewer sandbox is %q, want read-only: %v", sandbox, args)
+	}
+	if path, ok := argValue(args, "--output-last-message"); !ok || path != resultPath {
+		t.Fatalf("last-message path is %q, want result slot %q: %v", path, resultPath, args)
+	}
+	if hasArg(args, "--add-dir") {
+		t.Fatalf("reviewer was granted a writable directory: %v", args)
+	}
+}
+
+func TestCodexMutatingReviewerCapturesFinalMessageToItsTypedResultPath(t *testing.T) {
+	resultPath := "/state/artifacts/review/reviewer-result.json"
+	args := codexSpec.Args(cliInvocation{
+		Prompt: "review", CandidateDir: "/candidate", ReviewerResultPath: resultPath,
+	})
+	if path, ok := argValue(args, "--output-last-message"); !ok || path != resultPath {
+		t.Fatalf("last-message path is %q, want result slot %q: %v", path, resultPath, args)
+	}
+	if sandbox, ok := argValue(args, "--sandbox"); !ok || sandbox != "workspace-write" {
+		t.Fatalf("mutating reviewer sandbox is %q, want workspace-write: %v", sandbox, args)
+	}
+}
+
+func TestCodexWithoutFinalMessageCaptureIsUnavailable(t *testing.T) {
+	provider, _, fake := agentFixture(t, AgentKindCodexCLI)
+	fake.help = strings.Replace(fake.help, "      --output-last-message <FILE>\n", "", 1)
+	if readiness := provider.Probe(context.Background()); readiness.Available {
+		t.Fatalf("Codex without typed reviewer-result capture was reported ready: %+v", readiness)
+	}
+}
+
 // D2: resolution is not permission. The invocation must grant exactly the
 // executables the contract obliges, per-executable rather than blanket Bash.
 //
@@ -410,5 +448,80 @@ func TestOnlyTheRuntimesOwnObligationContributesTools(t *testing.T) {
 	}
 	if tools := contractRequiredTools(runtimeAcceptanceIntent); len(tools) != 2 {
 		t.Fatalf("the runtime's own obligation contributed %v", tools)
+	}
+}
+
+// D4: the model must actually receive the prompt.
+//
+// Observed on a live isolated run of `autonomy run issue 77 --agent claude`,
+// two seconds in: "Error: Input must be provided either through stdin or as a
+// prompt argument when using --print", recorded as candidate.changed
+// outcome=failed and then run.failed reason=execution.invoke_failure_not_retryable.
+// Claude Code declares --add-dir and --allowedTools variadic, so the tool grant
+// that D1 and D2 added swallowed the trailing prompt and no positional survived.
+
+// claudeVariadicFlags are the options Claude Code's --help declares as
+// <directories...> and <tools...>, the ones whose parser keeps eating.
+var claudeVariadicFlags = map[string]bool{
+	"--add-dir": true, "--allowedTools": true, "--allowed-tools": true,
+}
+
+// positionalsAfterGreedyParse models that parser: a variadic option consumes
+// every following argument until one that begins with a dash, and `--` ends
+// option parsing outright so everything behind it is positional.
+func positionalsAfterGreedyParse(args []string) []string {
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--":
+			return append(positional, args[i+1:]...)
+		case claudeVariadicFlags[args[i]]:
+			for i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+			}
+		case strings.HasPrefix(args[i], "-"):
+			i++ // a scalar option and its one value
+		default:
+			positional = append(positional, args[i])
+		}
+	}
+	return positional
+}
+
+func TestThePromptSurvivesClaudeCodesVariadicGrants(t *testing.T) {
+	// EXACTLY the shape the shipped operator configuration produces: a model, a
+	// reviewer result slot, and a contract that obliges executables.
+	const prompt = "the objective a live run never delivered"
+	spec, err := specForKind(AgentKindClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invocation := cliInvocation{
+		Agent:  ResolvedAgent{ID: "claude", Kind: AgentKindClaudeCode, Model: "test-model"},
+		Prompt: prompt, ResultDir: "/state/artifacts/x", RequiredTools: []string{"go", "gofmt"},
+	}
+	for name, build := range map[string]func(cliInvocation) []string{
+		"ordinary":  spec.Args,
+		"read-only": spec.ReadOnly.Args,
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := build(invocation)
+			positionals := strings.Join(positionalsAfterGreedyParse(args), "\n")
+			if !strings.Contains(positionals, prompt) {
+				t.Fatalf("a variadic option consumed the prompt, so the CLI received none: %#v", args)
+			}
+			// The redaction offset counts from the END, so the repair is only
+			// safe while the prompt is still the last element.
+			if !strings.Contains(args[len(args)-1], prompt) {
+				t.Fatalf("the prompt is no longer the trailing argument the redaction offset points at: %#v", args)
+			}
+			recorded := redactedArgv(args, spec.PromptArgFromEnd)
+			if joined := strings.Join(recorded, " "); strings.Contains(joined, prompt) {
+				t.Fatalf("untrusted prompt text entered the durable argv: %s", joined)
+			}
+			if !hasArg(recorded, "[prompt]") || !hasArg(recorded, "--safe-mode") {
+				t.Fatalf("redaction lost either the placeholder or the security flags: %#v", recorded)
+			}
+		})
 	}
 }

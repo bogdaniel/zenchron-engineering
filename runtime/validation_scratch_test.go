@@ -1,0 +1,236 @@
+package runtime
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestValidationScratchGrants(t *testing.T) {
+	scratch := filepath.Join(t.TempDir(), "build space")
+	invocation := cliInvocation{CandidateDir: t.TempDir(), ScratchDir: scratch}
+	for name, spec := range map[string]cliAgentSpec{"codex": codexSpec, "claude": claudeSpec} {
+		t.Run(name, func(t *testing.T) {
+			args := strings.Join(spec.Args(invocation), " ")
+			if !strings.Contains(args, scratch) {
+				t.Fatalf("scratch is not granted: %s", args)
+			}
+			if strings.Contains(strings.Join(spec.ReadOnly.Args(invocation), " "), scratch) {
+				t.Fatal("planning received a write grant")
+			}
+		})
+	}
+	provider := CLIAgentProvider{Toolchain: ToolchainConfig{RequiredTools: []string{"go"}}, ExecScratchDir: scratch}
+	env := strings.Join(provider.env(claudeSpec, ""), "\n")
+	for _, entry := range []string{"TMPDIR=" + scratch, "GOTMPDIR=" + scratch, "GOCACHE=" + filepath.Join(scratch, "cache"), "GOPATH=" + filepath.Join(scratch, "gopath"), "GOENV=" + os.DevNull} {
+		if !strings.Contains(env, entry) {
+			t.Fatalf("missing %q in %s", entry, env)
+		}
+	}
+}
+
+// TestExecutionScratchDirIsShortAndUnescaped is #331. The scratch is the
+// worker's TMPDIR, so a '%' in it breaks every "file:" URI a test builds and
+// its length eats the Unix socket address budget. A real operation id encodes
+// to ~150 bytes of %XX; the leaf must stay escape-free, bounded, unique per
+// operation and attempt, and a pure function of identity.
+func TestExecutionScratchDirIsShortAndUnescaped(t *testing.T) {
+	t.Setenv("GOTMPDIR", "")
+	state := "/Users/operator/.zenchron/state"
+	run := "run-00a8aecb360c53896934e5b051b0ccc5"
+	operation := run + ":execution.invoke:execution.invoke#initial|1|b1202216a0cd9cc534ffcc17fe5dc4605f0bf352"
+	seen := map[string]bool{}
+	for _, attempt := range []ExecutionAttemptRef{
+		{RunID: run, OperationID: operation, Attempt: 1},
+		{RunID: run, OperationID: operation, Attempt: 2},
+		{RunID: run, OperationID: operation + "x", Attempt: 1},
+	} {
+		scratch, err := ExecutionScratchDir(state, attempt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if replay, _ := ExecutionScratchDir(state, attempt); replay != scratch {
+			t.Fatalf("scratch is not a function of identity: %q then %q", scratch, replay)
+		}
+		if strings.Contains(scratch, "%") {
+			t.Fatalf("scratch carries an escape: %s", scratch)
+		}
+		// runs/<run>/scratch/<16 hex>/attempt-N beneath the state dir.
+		if leaf, err := filepath.Rel(state, scratch); err != nil || len(leaf) > len("runs/")+len(run)+len("/scratch/")+16+len("/attempt-9") {
+			t.Fatalf("scratch leaf is unbounded: %q", leaf)
+		}
+		if filepath.Dir(filepath.Dir(scratch)) != filepath.Join(state, "runs", run, executionScratchDir) {
+			t.Fatalf("scratch left the run's scratch directory the collector reclaims: %s", scratch)
+		}
+		if seen[scratch] {
+			t.Fatalf("two attempts share scratch %s", scratch)
+		}
+		seen[scratch] = true
+	}
+}
+
+func TestValidationScratchAdmissionSubject(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	if err := os.Mkdir(candidate, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOTMPDIR", root)
+	attempt := ExecutionAttemptRef{RunID: "run-cache", OperationID: "run-cache:execution.invoke:x", Attempt: 1}
+	scratch, err := ExecutionScratchDir(root, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareValidationScratch(candidate, scratch); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := ExecutionScratchDir(root, attempt)
+	if err != nil || replay != scratch {
+		t.Fatalf("replay scratch: %q, %v", replay, err)
+	}
+	if err := os.WriteFile(filepath.Join(candidate, "source.go"), []byte("package source\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, shape := range []string{".test-cache/38/3836bcb5017074e3b9d9e26170671e008544641fe4552451a3736b807d22cf4b-d", ".work-cache/build/4d/4d6e240d199dcaafed1d7ddf853b224f41112a0efa40ade9ad60f83b72cfd0b6-d"} {
+		t.Run(shape, func(t *testing.T) {
+			cache := filepath.Join(scratch, shape)
+			if err := os.MkdirAll(filepath.Dir(cache), 0700); err != nil {
+				t.Fatal(err)
+			}
+			f, err := os.Create(cache)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Truncate(credentialScanFileLimit + 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := ScanCandidateForCredentialValues(candidate); err != nil {
+				t.Fatalf("runtime cache entered admission: %v", err)
+			}
+			source := filepath.Join(candidate, shape)
+			if err := os.MkdirAll(filepath.Dir(source), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(cache, source); err != nil {
+				t.Fatal(err)
+			}
+			assertCredentialKind(t, ScanCandidateForCredentialValues(candidate), CredentialMaterialInconclusive)
+			if err := os.WriteFile(source, []byte("ghp_"+strings.Repeat("a", 36)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			assertCredentialKind(t, ScanCandidateForCredentialValues(candidate), CredentialMaterialValue)
+			if err := os.Remove(source); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func assertCredentialKind(t *testing.T, err error, kind CredentialMaterialKind) {
+	t.Helper()
+	var refusal *CredentialMaterialError
+	if !errors.As(err, &refusal) || refusal.Kind != kind {
+		t.Fatalf("want %s refusal, got %v", kind, err)
+	}
+}
+
+func TestValidationScratchCannotOverlapCandidate(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	if err := os.Mkdir(candidate, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, scratch := range []string{root, candidate, filepath.Join(candidate, "cache")} {
+		if err := prepareValidationScratch(candidate, scratch); err == nil {
+			t.Fatalf("allowed overlap: %s", scratch)
+		}
+	}
+	link := filepath.Join(root, "alias")
+	if err := os.Symlink(candidate, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareValidationScratch(candidate, link); err == nil {
+		t.Fatal("allowed symlink into candidate")
+	}
+}
+
+// Exercise Go itself: its build cache and testing.T temporary directories must
+// leave the candidate source inventory unchanged.
+func TestGoValidationLeavesOnlySourceInCandidate(t *testing.T) {
+	workspace := commitGateWorkspace(t)
+	candidate := workspace.Dir
+	// The verifier's default temporary directory may be mounted noexec.
+	// Use the runtime's published executable scratch for Go's test binary,
+	// while retaining an isolated directory and test-owned cleanup.
+	scratch, err := os.MkdirTemp(ExecCapableScratchBase(t.TempDir()), "validation-scratch-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(scratch); err != nil {
+			t.Errorf("remove validation scratch: %v", err)
+		}
+	})
+	if err := prepareValidationScratch(candidate, scratch); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"go.mod":    "module validationfixture\n\ngo 1.25.0\n",
+		"source.go": "package validationfixture\nfunc Value() int { return 2 }\n",
+		"source_test.go": `package validationfixture
+import ("os"; "path/filepath"; "strings"; "testing")
+func TestValue(t *testing.T) {
+ if Value() != 2 { t.Fatal("wrong source") }
+ rel, err := filepath.Rel(os.Getenv("TMPDIR"), t.TempDir())
+ if err != nil || strings.HasPrefix(rel, "..") { t.Fatal("test scratch escaped") }
+}
+`,
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(candidate, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provider := CLIAgentProvider{Toolchain: ToolchainConfig{RequiredTools: []string{"go"}}, ExecScratchDir: scratch}
+	cmd := exec.Command("go", "test", "./...")
+	cmd.Dir = candidate
+	cmd.Env = append(os.Environ(), provider.toolchainEnv()...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go validation: %v\n%s", err, out)
+	}
+	entries, err := os.ReadDir(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != len(files)+2 {
+		t.Fatalf("validation added candidate material: %v", entries)
+	}
+	cache, err := os.ReadDir(filepath.Join(scratch, "cache"))
+	if err != nil || len(cache) == 0 {
+		t.Fatalf("Go did not populate runtime scratch: %v", err)
+	}
+	if err := ScanCandidateForCredentialValues(candidate); err != nil {
+		t.Fatal(err)
+	}
+	result, err := workspace.Commit("validated source", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(result.Paths, ",") != "go.mod,source.go,source_test.go" {
+		t.Fatalf("scratch entered changed-path evidence: %v", result.Paths)
+	}
+	observed, err := workspace.ObservedChange(result)
+	if err != nil || strings.Join(observed.Paths, ",") != "go.mod,source.go,source_test.go" {
+		t.Fatalf("reassessment subject: %v, %v", observed, err)
+	}
+	tree, err := gitOutput(candidate, "ls-tree", "-r", "--name-only", "HEAD")
+	if err != nil || strings.TrimSpace(tree) != "README.md\ngo.mod\nsource.go\nsource_test.go" {
+		t.Fatalf("commit subject: %q, %v", tree, err)
+	}
+}

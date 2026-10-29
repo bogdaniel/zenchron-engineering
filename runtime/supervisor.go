@@ -23,7 +23,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -31,16 +30,23 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
+	"github.com/bogdaniel/zenchron-engineering/planning"
 )
 
 // SupervisorDependencies is the complete input. Like the runtime's own
 // dependency set, every external system is a seam and nothing is discovered
 // from ambient state.
 type SupervisorDependencies struct {
-	Store    *SQLiteOperationStore
-	Clock    Clock
-	Owner    string
-	Liveness OwnerLiveness
+	// WorkAdmissionWithheld constructs the supervisor unable to take on work.
+	// It is how the successor half of a controller handoff holds the scheduler
+	// while it revalidates and proves itself: ownership is permission to
+	// perform the transition, and never permission to serve.
+	WorkAdmissionWithheld bool
+	Store                 *SQLiteOperationStore
+	Clock                 Clock
+	Owner                 string
+	Liveness              OwnerLiveness
 	// StateDir is the runtime state directory holding each run's workspace. The
 	// plan reconciler reads it ONLY to prove whether one upstream candidate
 	// contains another, in the producer's own clone. Absent, that relationship
@@ -63,10 +69,13 @@ type SupervisorDependencies struct {
 	// anything else is refused: enrolment is operator authority, and a local
 	// control request must not be able to introduce a repository.
 	Repositories []GitHubRepo
-	// MaxConcurrentRuns is the operator-authorized ceiling on runs driven at
-	// once. The scheduler enforces the same ceiling durably; this bounds the
-	// goroutines so the process does not start work it cannot lease.
-	MaxConcurrentRuns int
+	// MaxConcurrentRuns is the operator-authorized ceiling on runs doing WORK
+	// at once, and MaxConcurrentObservations the ceiling on runs observing at
+	// once (#85). The scheduler enforces both durably, per capacity class; the
+	// supervisor only bounds its goroutines by their sum, so it never has to
+	// predict which class a run's next operation is.
+	MaxConcurrentRuns         int
+	MaxConcurrentObservations int
 	// PollInterval is how often a quiet supervisor looks again.
 	PollInterval time.Duration
 	// Discovery is the OPTIONAL automatic issue-intake policy. Nil means
@@ -76,16 +85,60 @@ type SupervisorDependencies struct {
 	Discovery *WatchController
 	// Agents is the registry a control request resolves an agent id against.
 	Agents AgentRegistry
+	// AgentProber builds the readiness probe a Submit agent selection - default
+	// or explicit, Submit only ever creates work - is checked against, so a
+	// configured-but-uninvocable agent is refused with the same reason `doctor`
+	// already reports for it rather than accepted and left to fail deep inside
+	// the run it starts. Nil disables the check.
+	AgentProber func(ResolvedAgent) AgentProber
+	// WorkUnitHolds reports the readiness holds one WorkGraph's units are under
+	// from an owner OUTSIDE the graph: unresolved decisions the work needs
+	// before it may run (#472's seam for #508).
+	//
+	// It is the ONLY way a unit is held. #472 owns no decision record, no
+	// authority and no persistence for one, so nothing here supplies it yet and
+	// a nil source holds nothing. A held unit is simply not in the frontier, so
+	// the pass does not activate it; when the source stops reporting the hold,
+	// the ordinary frontier computation includes it again. There is no path by
+	// which a worker answers its own hold.
+	//
+	// A source that fails holds NOTHING ANSWERED: the graph is reported and
+	// left alone for that pass rather than activated past a hold that may
+	// exist.
+	//
+	// A #473 decision_request message is NOT a hold. That is a worker ASKING
+	// for a decision; a hold is the authority that owns the decision saying the
+	// work may not proceed. Wiring worker messages in here would let a worker
+	// hold its own graph, which is the self-answer path in reverse.
+	WorkUnitHolds func(graphID string) (map[string]orchestration.DecisionWait, error)
 	// Plans is the plan lifecycle service, or the zero value when no plan has
 	// ever been proposed. It is what the plan reconciler resolves assignments
-	// through, and it contacts nothing.
+	// through, and it contacts nothing. Plans.Registry is a startup snapshot.
 	Plans PlanService
+	// PlanRegistry resolves the current registry per call (ADR-0008 reload); nil keeps Plans.Registry's snapshot.
+	PlanRegistry func() planning.Registry
+	// ReviewTrigger is the OPTIONAL automatic #474 progression policy: nil
+	// disables it (Discovery/AgentProber's convention). Set, driveOne calls
+	// it once per run per pass, same cadence as ObserveFeedback, composing
+	// #233's ReviewPort with AdmitReviewRemediation.
+	ReviewTrigger func(ctx context.Context, engine *EngineeringRuntime, run EngineeringRun) error
 }
 
 // SupervisorReport is one tick's account of what the supervisor did.
 type SupervisorReport struct {
-	At time.Time `json:"at"`
-	// Driven is the runs reconciled in this tick.
+	// Reconciliation is what this pass did about the controller's own state,
+	// or why it did nothing. It rides the existing report rather than a new
+	// channel: an operator reading a tick should see the whole tick.
+	Reconciliation *ReconciliationAttempt `json:"reconciliation,omitempty"`
+	// Upgrade is what this pass did about replacing this controller with the
+	// successor trusted main names. Its Superseded() is how serve learns that
+	// this process has given up the role and must stop.
+	Upgrade *ControllerUpgradeAttempt `json:"upgrade,omitempty"`
+	At      time.Time                 `json:"at"`
+	// Driven is the runs whose driving FINISHED and was noticed by this pass.
+	// A run started here and finished here appears here, as it always did; a
+	// run whose provider spans several passes appears in the pass it finished
+	// in, because a pass starts work rather than containing it.
 	Driven []RunOutcome `json:"driven,omitempty"`
 	// Observed is the feedback polls performed, one per active published run.
 	Observed []FeedbackObservation `json:"observed,omitempty"`
@@ -100,15 +153,24 @@ type SupervisorReport struct {
 	// Draining reports that the supervisor is finishing started work and
 	// accepting none.
 	Draining bool `json:"draining"`
-	// Capacity is the operator ceiling and how much of it this tick used.
-	Capacity int `json:"capacity"`
-	Active   int `json:"active"`
+	// Capacity is the WORK ceiling (max_concurrent_runs) and ObservationCapacity
+	// the observation ceiling (#85). A tick may drive up to their sum, because
+	// the supervisor bounds turns by both; the store bounds each class.
+	Capacity            int `json:"capacity"`
+	ObservationCapacity int `json:"observation_capacity"`
+	Active              int `json:"active"`
 	// NextEligibleAt is when the supervisor intends to look again.
 	NextEligibleAt time.Time `json:"next_eligible_at"`
 	// Plans is what the plan reconciler did this tick, one entry per plan it
 	// looked at. A plan awaiting approval appears here saying so, which is how
 	// an operator sees that the runtime is waiting on THEM rather than on work.
 	Plans []PlanTickReport `json:"plans,omitempty"`
+	// Orchestration names, bounded, each batch child this pass could not
+	// create or each handoff it could not admit (#470). Empty is healthy.
+	Orchestration []string `json:"orchestration,omitempty"`
+	// WorkGraphs names, bounded, each runnable work unit this pass could not
+	// activate (#472). Empty is healthy.
+	WorkGraphs []string `json:"work_graphs,omitempty"`
 	// Error is a tick that could not enumerate work. It is REPORTED rather
 	// than returned, because a supervisor that exited on one unreadable read
 	// would take every healthy run down with it - the same isolation rule that
@@ -137,20 +199,78 @@ type RunOutcome struct {
 	// same output, so an operator waiting for their review to reach a worker
 	// had no way to tell "nothing was said" from "nothing could be heard".
 	FeedbackError string `json:"feedback_error,omitempty"`
+	// ReviewTriggerError is FeedbackError's sibling for #474's automatic
+	// progression: driving continues regardless, and what is lost is only
+	// this pass's chance to notice or act on a review.
+	ReviewTriggerError string `json:"review_trigger_error,omitempty"`
 }
 
 // Supervisor owns the persistent runtime for one state directory.
 type Supervisor struct {
 	deps SupervisorDependencies
 
-	// mu guards the mutable lifecycle flags only. Run driving happens outside
-	// it, so a slow run never blocks an operator command.
-	mu       sync.Mutex
-	draining bool
-	// cursor is the rotation offset into the active-run list. It exists so a
+	// mu guards the lifecycle flags and the scheduling bookkeeping: what is
+	// draining, where the rotation is, which runs are in flight and which
+	// outcomes have not been reported yet. Driving a run happens entirely
+	// outside it, so a slow run never blocks an operator command.
+	mu sync.Mutex
+	// admission is the work-admission gate. It replaced a draining flag that
+	// was read under mu and released before the run was created, which made
+	// "after the drain returns nothing new is admitted" false by construction.
+	// See work_admission.go.
+	admission *workAdmissionGate
+	// reconciler maintains this controller's own generation state, one attempt
+	// per pass. It is bound AFTER construction because the cycle is real: the
+	// supervisor owns the admission gate, the controller service needs that
+	// gate, and the reconciler needs the service. Binding once at startup
+	// resolves it without a second gate, a second lease or a factory callback.
+	reconciler *ControllerReconciler
+	// upgrade replaces this controller with the successor trusted main names.
+	// It is bound after construction for the same cycle as the reconciler: it
+	// reaches the controller service, which needs this supervisor's gate.
+	upgrade *ControllerUpgrade
+	// cursor is the rotation offset into the ACTIVE-run ring. It exists so a
 	// ceiling smaller than the active set is a rate limit rather than a fixed
-	// prefix; see rotate.
+	// prefix; see admit.
 	cursor int
+	// inflight is the runs being driven right now, by run id. A pass does not
+	// start a run that is already in one - driving a run twice would be two
+	// workers on one journal - and it does not treat its slot as free either.
+	//
+	// It is what makes the ceiling hold across passes now that driving outlives
+	// the pass that started it. The durable count in AcquireOperation remains
+	// the authority on concurrency; this bounds the goroutines, which is the
+	// same thing MaxConcurrentRuns always bounded, counted over the right
+	// interval. Its bound is turns(): a turn whose next operation's class is
+	// full is refused by the store and returns.
+	inflight map[string]struct{}
+	// lastTurn is when this process last started each run. It spaces turns -
+	// at most one per poll interval, and one per quietSpacing intervals for a
+	// quiet run - and nothing else. It is in memory: forgetting it on restart
+	// costs one extra turn per run, never a lost or widened one.
+	lastTurn map[string]time.Time
+	// since is when this process first admitted anything. A quiet run it has
+	// not driven yet counts its wait from here, so after a restart it is not
+	// overdue at once - progressing runs go first - and is overdue, and so
+	// guaranteed a turn, one quietSpacing later.
+	since time.Time
+	// quietCursor rotates the quiet tier exactly as cursor rotates the
+	// moving one, so quiet runs are served fairly among themselves.
+	quietCursor int
+	// freed is signalled whenever a driven run releases its slot, so Run can
+	// hand the slot on at once instead of a whole poll interval later (#401).
+	freed chan struct{}
+	// landed is the outcomes of runs that finished driving and have not been
+	// reported yet, with the feedback observations that came with them. A run
+	// whose provider spans several passes is reported by the pass it finished
+	// in rather than the pass that started it, because those are no longer the
+	// same pass.
+	landed         []RunOutcome
+	landedFeedback []FeedbackObservation
+	// driving counts the run goroutines in flight. Nothing waits on it per
+	// pass; shutdown waits on it once, which is what keeps dispatching without
+	// waiting from leaking a goroutine past the process that owns it.
+	driving sync.WaitGroup
 	// plansMu serializes everything that WRITES plan state: the reconciler's
 	// own pass and an operator decision arriving over the control endpoint.
 	// They read a snapshot and then append against it, so running them side by
@@ -158,6 +278,8 @@ type Supervisor struct {
 	// started inside the window survives a supersession that changed it, and
 	// the invalidations are computed against a plan that has already moved.
 	plansMu sync.Mutex
+	// orchestrationMu serializes deciding a new batch's child run identities.
+	orchestrationMu sync.Mutex
 	// enginesMu guards the engine cache, which several run goroutines reach
 	// concurrently inside one tick. It is separate from mu on purpose: the
 	// lifecycle flags are read by operator commands, and a slow engine
@@ -200,7 +322,15 @@ func NewSupervisor(d SupervisorDependencies) (*Supervisor, error) {
 	// supervisor can never drive more runs at once than the operator
 	// authorized - and a request can only lower it.
 	d.MaxConcurrentRuns = resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.MaxConcurrentRuns)
-	return &Supervisor{deps: d, engines: map[string]*engineSlot{}}, nil
+	d.MaxConcurrentObservations = resolveMaxConcurrentObservations(d.MaxConcurrentObservations)
+	return &Supervisor{
+		deps: d, engines: map[string]*engineSlot{}, inflight: map[string]struct{}{}, lastTurn: map[string]time.Time{}, freed: make(chan struct{}, 1),
+		// A supervisor admits work from the start unless it is the successor
+		// half of a handoff, which holds the scheduler while it proves itself
+		// and is opened by EnableWorkAdmission once the durable record says it
+		// is the active generation.
+		admission: newWorkAdmissionGate(!d.WorkAdmissionWithheld),
+	}, nil
 }
 
 // engine returns the engine for one repository worked by one agent, refusing a
@@ -283,12 +413,6 @@ func (s *Supervisor) governedRepository(identity string) (GitHubRepo, bool) {
 // durable run. It creates the run and returns immediately; the tick loop drives
 // it, which is what removes the driving terminal from the operator's workflow.
 func (s *Supervisor) Submit(ctx context.Context, request ControlRequest) (StartOutcome, error) {
-	s.mu.Lock()
-	draining := s.draining
-	s.mu.Unlock()
-	if draining {
-		return StartOutcome{}, errors.New("the supervisor is draining and is not accepting new work")
-	}
 	if request.Issue <= 0 {
 		return StartOutcome{}, fmt.Errorf("issue number must be positive, got %d", request.Issue)
 	}
@@ -296,7 +420,22 @@ func (s *Supervisor) Submit(ctx context.Context, request ControlRequest) (StartO
 	// created through an engine bound to THAT agent. A control request selects
 	// among agents the operator configured; it can never introduce an
 	// executable, a trust mode or a credential.
-	engine, err := s.engine(request.Repository, request.Agent)
+	agent, err := s.deps.Agents.Agent(request.Agent)
+	if err != nil {
+		return StartOutcome{}, err
+	}
+	// Submit ONLY creates work, unlike the shared composition an operator's
+	// read-only commands (status, watch, resume) are also built through. There
+	// is no "leave the default alone" case here: whether the id came from
+	// --agent or from the operator's configured default, it is a configured
+	// selection this call is about to act on, and it is checked the same way
+	// either time.
+	if s.deps.AgentProber != nil {
+		if err := RefuseUnlessInvocable(ctx, agent, s.deps.AgentProber(agent)); err != nil {
+			return StartOutcome{}, err
+		}
+	}
+	engine, err := s.engine(request.Repository, agent.ID)
 	if err != nil {
 		return StartOutcome{}, err
 	}
@@ -304,7 +443,112 @@ func (s *Supervisor) Submit(ctx context.Context, request ControlRequest) (StartO
 	if request.NewGeneration {
 		mode = NewGeneration
 	}
-	return engine.StartIssueRun(ctx, request.Issue, mode)
+	// THE DECISION AND THE COMMIT UNDER ONE LOCK. Creating the run inside the
+	// gate is what makes a drain that has returned mean something: an
+	// admission either committed before the close or never happens.
+	var outcome StartOutcome
+	err = s.admission.admit(func() error {
+		created, startErr := engine.StartIssueRun(ctx, request.Issue, mode)
+		outcome = created
+		return startErr
+	})
+	return outcome, err
+}
+
+// BindControllerReconciler installs the controller-maintenance loop. It is
+// STARTUP-ONLY and refuses replacement.
+//
+// The refusal is the point. A supervisor whose reconciler could be swapped
+// while running would be a mechanism for changing controller semantics at
+// runtime, which is a governance surface nobody asked for and nothing
+// authorizes. Binding once is composition; rebinding would be policy.
+func (s *Supervisor) BindControllerReconciler(reconciler *ControllerReconciler) error {
+	if reconciler == nil {
+		return fmt.Errorf("a controller reconciler is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reconciler != nil {
+		return fmt.Errorf("a controller reconciler is already bound to this supervisor")
+	}
+	s.reconciler = reconciler
+	return nil
+}
+
+// QuiesceWorkForTransition suspends intake and waits until no work this
+// controller started can still append to a journal.
+//
+// IT IS THE PRECONDITION FOR GIVING UP THE ROLE, and it is two facts rather
+// than one. Closing intake stops runs being CREATED; it says nothing about the
+// goroutines already inside driveOne, which are in a provider, a workspace or a
+// journal write and will finish whatever the gate says. A predecessor that
+// released the role with those still running would have a successor activate
+// and serve while the previous controller was still writing durable state -
+// which is not a stale pointer or a lost update, it is two controllers
+// appending to one store.
+//
+// THE HOLD IS REVERSIBLE BECAUSE THIS HAPPENS BEFORE COMMITMENT. The successor
+// evaluates the quiescent head next and may refuse it; that must cost the
+// update rather than this controller's ability to serve. The returned release
+// puts intake back, and does nothing once the transition has closed the gate on
+// its way past the point of no return.
+//
+// It is bounded. A provider invocation of tens of minutes is ordinary, and an
+// unbounded wait would hold intake for as long as the slowest run in the
+// fleet - so a wait that does not settle gives intake back and lets the next
+// attempt try again, which converges: nothing new is admitted while a hold is
+// in place, so the in-flight set only shrinks.
+func (s *Supervisor) QuiesceWorkForTransition(ctx context.Context, within time.Duration) (func(), error) {
+	release, held := s.admission.hold("a controller transition is evaluating the state its successor would inherit")
+	if !held {
+		return nil, &WorkAdmissionRefusedError{Reason: "this controller is not admitting work, so it has no intake to suspend for a transition"}
+	}
+	quiet := make(chan struct{})
+	go func() {
+		s.driving.Wait()
+		close(quiet)
+	}()
+	timer := time.NewTimer(within)
+	defer timer.Stop()
+	select {
+	case <-quiet:
+		return release, nil
+	case <-ctx.Done():
+		release()
+		return nil, ctx.Err()
+	case <-timer.C:
+		release()
+		return nil, fmt.Errorf("work this controller started was still running after %s, so the role was not given up", within)
+	}
+}
+
+// BindControllerUpgrade installs the trusted-main upgrade. Like the
+// reconciler it is STARTUP-ONLY and refuses replacement: a supervisor whose
+// upgrade path could be swapped while running would be a way to change which
+// controller replaces this one, at runtime, with nothing authorizing it.
+func (s *Supervisor) BindControllerUpgrade(upgrade *ControllerUpgrade) error {
+	if upgrade == nil {
+		return fmt.Errorf("a controller upgrade is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.upgrade != nil {
+		return fmt.Errorf("a controller upgrade is already bound to this supervisor")
+	}
+	s.upgrade = upgrade
+	return nil
+}
+
+func (s *Supervisor) controllerUpgrade() *ControllerUpgrade {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.upgrade
+}
+
+func (s *Supervisor) controllerReconciler() *ControllerReconciler {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reconciler
 }
 
 // Drain stops accepting and starting work while letting started work finish.
@@ -312,17 +556,14 @@ func (s *Supervisor) Submit(ctx context.Context, request ControlRequest) (StartO
 // drain is an operator saying "wind this down", and un-draining silently would
 // make that instruction meaningless.
 func (s *Supervisor) Drain() {
-	s.mu.Lock()
-	s.draining = true
-	s.mu.Unlock()
+	// Closing waits for admissions already in progress, which is the point: a
+	// drain that returned while a run was being written down would be a drain
+	// that did not drain.
+	s.admission.close("the supervisor is draining and is not accepting new work")
 }
 
 // Draining reports the current lifecycle state.
-func (s *Supervisor) Draining() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.draining
-}
+func (s *Supervisor) Draining() bool { return s.admission.closed() }
 
 // StopAll is the one lifecycle action that actually CANCELS runs. It is
 // journalled per run through the same single cancellation path `stop RUN` uses,
@@ -342,17 +583,20 @@ func (s *Supervisor) StopAll(reason string) ([]Outcome, error) {
 	if strings.TrimSpace(reason) == "" {
 		reason = "operator_stop_all"
 	}
-	runs, err := s.deps.Store.Runs()
+	runs, err := s.deps.Store.ActiveRuns()
 	if err != nil {
 		return nil, err
 	}
-	scheduler := Scheduler{Store: s.deps.Store, Clock: s.deps.Clock, Owner: s.deps.Owner}
+	scheduler := Scheduler{Store: s.deps.Store, Clock: s.deps.Clock, Owner: s.deps.Owner, Liveness: s.deps.Liveness}
 	var outcomes []Outcome
 	for _, run := range runs {
 		if terminalDisposition(run.Disposition) {
 			continue
 		}
 		outcome, err := CancelRun(s.deps.Store, scheduler, s.deps.Clock.Now(), run.ID, reason)
+		if IsRunTerminal(err) {
+			continue // finished after the listing; its outcome stands (#439)
+		}
 		if err != nil {
 			return outcomes, err
 		}
@@ -361,18 +605,83 @@ func (s *Supervisor) StopAll(reason string) ([]Outcome, error) {
 	return outcomes, nil
 }
 
-// Tick drives one pass: optional discovery, then feedback observation and
-// reconciliation for every active run, bounded by the operator ceiling.
+// Tick is one scheduling pass followed by a wait for everything still being
+// driven, which is what a single-shot caller means by "tick": start the work
+// and tell me how it went.
+//
+// The LOOP deliberately does not use it - see Run - because a tick is a
+// scheduling PASS and not a unit of work. Nothing about admission, fairness or
+// the ceiling lives in the waiting; the wait exists only so that a caller with
+// no loop to come back on still gets an account of what it started.
+func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
+	report, err := s.pass(ctx)
+	s.driving.Wait()
+	s.collect(&report)
+	return report, err
+}
+
+// pass is one scheduling pass: optional discovery, plan reconciliation, and the
+// admission of as many active runs as the operator ceiling still has room for.
+// It DISPATCHES and returns.
+//
+// It does not wait, and that is the whole point. A run's driving is as long as
+// its provider - tens of minutes is ordinary - and a pass that waited for the
+// slowest one could not make the next pass either, so a run submitted while a
+// provider was executing sat at run.created with a free slot beside it until
+// that provider returned. Admission was tick-granular while a tick was as long
+// as its slowest run.
 //
 // A per-run failure is REPORTED, never returned. One run whose forge call
 // failed, whose provider is unavailable or whose workspace is broken must not
 // stop the supervisor or affect a sibling; that isolation is the whole reason
 // several tasks can share one process.
-func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
+func (s *Supervisor) pass(ctx context.Context) (SupervisorReport, error) {
 	now := s.deps.Clock.Now()
 	report := SupervisorReport{
-		At: now, Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns,
+		At: now, Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns, ObservationCapacity: s.deps.MaxConcurrentObservations,
 		NextEligibleAt: now.Add(s.deps.PollInterval),
+	}
+	// THIS CONTROLLER'S OWN STATE COMES FIRST, AND OUTSIDE THE INTAKE SECTION.
+	//
+	// Both of these run even while draining - draining stops taking on WORK,
+	// not repairing a stale pointer or resuming an activation this process
+	// already holds - and neither may run underneath the admission section
+	// below. A transition SUSPENDS and then CLOSES intake, which takes the
+	// gate's lock exclusively; doing that from inside a section holding it for
+	// reading is a self-deadlock, and it is the kind that appears on the first
+	// real upgrade rather than in a test.
+	//
+	// Reconciliation before upgrade: a controller that is not in the state its
+	// own records describe repairs that first, because handing the role to a
+	// successor is not a way to resolve a transition this process has not
+	// finished.
+	if reconciler := s.controllerReconciler(); reconciler != nil {
+		attempt := reconciler.Attempt(now)
+		report.Reconciliation = &attempt
+	}
+	if upgrade := s.controllerUpgrade(); upgrade != nil {
+		attempt := upgrade.Attempt(ctx, now)
+		report.Upgrade = &attempt
+		if attempt.Superseded() {
+			// THE PASS ENDS HERE. This process has given up the role, so every
+			// remaining step - discovery, plans, enumerating runs, dispatching
+			// them - would be a controller scheduling work it no longer has
+			// the authority to schedule. Stopping structurally is worth more
+			// than stopping because a caller read the report and reacted.
+			report.Draining = true
+			s.collect(&report)
+			return report, nil
+		}
+	}
+	// INTAKE IS HELD OPEN ACROSS THE WHOLE SECTION. Discovery and plan
+	// reconciliation both CREATE runs, so checking the gate once and then
+	// creating work afterwards would be the defect this gate exists to close,
+	// one layer up from Submit.
+	release, admissionErr := s.admission.section()
+	if admissionErr == nil {
+		defer release()
+	} else {
+		report.Draining = true
 	}
 	if s.deps.Discovery != nil && !report.Draining {
 		discovery, err := s.deps.Discovery.Tick(ctx)
@@ -400,10 +709,20 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 	// decides when a run executes.
 	if !report.Draining {
 		report.Plans = s.reconcilePlans(ctx)
+		// WORK GRAPHS are activated BEFORE batches are reconciled, so a unit
+		// whose dependency became satisfied since the last tick gets its
+		// one-issue batch written, its child run created and then driven in
+		// the SAME pass. Like the plan reconciler above, this is dependency
+		// gating and nothing else: everything below - the ceiling, the
+		// rotation, the leases - remains the only thing that decides when a
+		// run executes.
+		report.WorkGraphs = s.reconcileWorkGraphs()
+		report.Orchestration = s.reconcileOrchestration(ctx)
 	}
-	runs, err := s.deps.Store.Runs()
+	runs, err := s.deps.Store.ActiveRuns()
 	if err != nil {
 		report.Error = boundedDetail(err.Error())
+		s.collect(&report)
 		return report, nil
 	}
 	active := make([]EngineeringRun, 0, len(runs))
@@ -415,11 +734,12 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 	report.Active = len(active)
 	if report.Draining {
 		// A draining supervisor starts nothing. Work already inside a Reconcile
-		// call finishes because this function waits for it below; work that has
-		// not started does not begin.
+		// call finishes in the goroutine that owns it and is reported by the
+		// pass it lands in; work that has not started does not begin.
+		s.collect(&report)
 		return report, nil
 	}
-	// Oldest first, then ROTATED between ticks.
+	// Oldest first, then ROTATED between passes.
 	//
 	// A run is non-terminal for its whole lifetime, not only while it is inside
 	// Reconcile, so age order alone is not a queue - it is a fixed prefix. With
@@ -428,52 +748,209 @@ func (s *Supervisor) Tick(ctx context.Context) (SupervisorReport, error) {
 	// finish. The multi-task workflow this supervisor exists for would have
 	// been one task at a time wearing a fleet view.
 	//
-	// Rotating the starting offset each tick gives every active run a turn
+	// Rotating the starting offset each pass gives every active run a turn
 	// while still bounding how many are driven at once. Ordering stays
-	// deterministic within a tick; only the entry point moves.
+	// deterministic within a pass; only the entry point moves.
 	sort.SliceStable(active, func(i, j int) bool { return active[i].CreatedAt.Before(active[j].CreatedAt) })
-	active = s.rotate(active)
 
-	var mu sync.Mutex
-	var wait sync.WaitGroup
-	for _, run := range active {
-		wait.Add(1)
-		go func(run EngineeringRun) {
-			defer wait.Done()
-			outcome, observation := s.driveOne(ctx, run)
-			mu.Lock()
-			defer mu.Unlock()
-			report.Driven = append(report.Driven, outcome)
-			if observation != nil {
-				report.Observed = append(report.Observed, *observation)
-			}
-		}(run)
-	}
-	wait.Wait()
-	sort.SliceStable(report.Driven, func(i, j int) bool { return report.Driven[i].RunID < report.Driven[j].RunID })
-	sort.SliceStable(report.Observed, func(i, j int) bool { return report.Observed[i].RunID < report.Observed[j].RunID })
+	s.start(ctx, s.admit(active, s.journalActivity(), now))
+	s.collect(&report)
 	return report, nil
 }
 
-// rotate selects at most MaxConcurrentRuns runs, starting from a cursor that
-// advances every tick. It is the whole fairness mechanism: no priority, no
-// weighting, no starvation.
-func (s *Supervisor) rotate(active []EngineeringRun) []EngineeringRun {
-	if len(active) <= s.deps.MaxConcurrentRuns {
-		return active
-	}
-	s.mu.Lock()
-	start := s.cursor % len(active)
-	// The cursor advances by the number actually driven, so the next tick
-	// begins where this one stopped rather than overlapping it.
-	s.cursor = (start + s.deps.MaxConcurrentRuns) % len(active)
-	s.mu.Unlock()
+// movingWindow and quietSpacing are in poll intervals. A run whose journal
+// moved within movingWindow is MOVING; any other run is QUIET and gets a turn
+// at most every quietSpacing intervals, so a parked pull request is still
+// re-observed - a review left on it is noticed - within quietSpacing polls.
+const (
+	movingWindow = 2
+	quietSpacing = 4
+)
 
-	selected := make([]EngineeringRun, 0, s.deps.MaxConcurrentRuns)
-	for i := 0; i < s.deps.MaxConcurrentRuns; i++ {
-		selected = append(selected, active[(start+i)%len(active)])
+// journalActivity reads when each run's journal last moved. A failed read
+// returns nil, which makes every run moving: scheduling falls back to the
+// plain rotation rather than throttling runs it cannot see.
+func (s *Supervisor) journalActivity() map[string]time.Time {
+	activity, err := s.deps.Store.RunJournalActivity()
+	if err != nil {
+		return nil
+	}
+	return activity
+}
+
+// start drives each admitted run in its own goroutine. Finishing releases
+// the slot, parks the outcome and signals freed, so Run can refill the slot
+// without waiting for the next poll.
+func (s *Supervisor) start(ctx context.Context, runs []EngineeringRun) {
+	for _, run := range runs {
+		s.driving.Add(1)
+		go func(run EngineeringRun) {
+			defer s.driving.Done()
+			outcome, observation := s.driveOne(ctx, run)
+			s.mu.Lock()
+			// The slot is released and the outcome parked in the same step, so
+			// there is no instant in which a finished run is neither occupying
+			// capacity nor accounted for.
+			delete(s.inflight, run.ID)
+			s.landed = append(s.landed, outcome)
+			if observation != nil {
+				s.landedFeedback = append(s.landedFeedback, *observation)
+			}
+			s.mu.Unlock()
+			select {
+			case s.freed <- struct{}{}:
+			default:
+			}
+		}(run)
+	}
+}
+
+// refill hands freed slots on between passes. It is admission only - no
+// discovery, no plan reconciliation, no controller work - under the same
+// intake section a pass holds, so a draining or superseded controller starts
+// nothing here either. Each run still gets at most one turn per poll
+// interval, so refilling never becomes busy polling.
+func (s *Supervisor) refill(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	release, err := s.admission.section()
+	if err != nil {
+		return
+	}
+	defer release()
+	runs, err := s.deps.Store.ActiveRuns()
+	if err != nil {
+		return
+	}
+	active := make([]EngineeringRun, 0, len(runs))
+	for _, run := range runs {
+		if !terminalDisposition(run.Disposition) {
+			active = append(active, run)
+		}
+	}
+	sort.SliceStable(active, func(i, j int) bool { return active[i].CreatedAt.Before(active[j].CreatedAt) })
+	s.start(ctx, s.admit(active, s.journalActivity(), s.deps.Clock.Now()))
+}
+
+// admit decides which runs this pass starts, and reserves their slots. It is
+// the whole fairness mechanism: no priority, no weighting, no starvation.
+//
+// A run already being driven is neither a candidate nor free capacity: driving
+// it again would put two workers on one journal, and counting its slot as free
+// would admit past the ceiling now that driving outlives a pass. What is left
+// is the room the ceiling still has, and this sweep fills it.
+//
+// Room goes first to MOVING runs - whose journal moved within movingWindow
+// poll intervals, or that have no journal yet - and only then to QUIET ones.
+// Both are read from the durable journal, so the order is the same on a cold
+// start or after a restart as in steady state: ten long-parked runs never
+// make a run that is progressing wait behind them (#401). Every run gets at
+// most one turn per poll interval, and a quiet run one per quietSpacing
+// intervals; Run refills a freed slot at once, so a quiet run's turn - which
+// is short - delays nobody by a whole interval. A quiet run that has waited
+// quietSpacing intervals is overdue and competes with the moving tier, so no
+// run - however busy its siblings - goes unobserved for longer than that.
+//
+// Each tier's cursor indexes the ACTIVE ring - every non-terminal run - and the
+// sweep STEPS OVER the runs that are in flight, not due, or in the other tier.
+// It is deliberately not an index into the dispatchable subset, which is the
+// same mistake as walking a list while deleting from it: that subset shrinks
+// and grows by the in-flight set every pass, so the same integer names a
+// different run each time and (cursor, size) can settle into a cycle that
+// never lands on one of them. Four runs at a ceiling of two, with stable
+// per-run durations - three polling, two executing, the ordinary mixed fleet -
+// starved one poller forever while every pass had room and handed it to
+// somebody else. The active ring changes only when a run is created or
+// settles, so the windows tile it and every run is reached within one sweep.
+//
+// Selecting and reserving happen under one lock because they are one decision.
+func (s *Supervisor) admit(active []EngineeringRun, activity map[string]time.Time, now time.Time) []EngineeringRun {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastTurn == nil {
+		s.lastTurn = map[string]time.Time{}
+	}
+	if s.since.IsZero() {
+		s.since = now
+	}
+	live := make(map[string]bool, len(active))
+	for _, run := range active {
+		live[run.ID] = true
+	}
+	for id := range s.lastTurn {
+		if !live[id] {
+			delete(s.lastTurn, id)
+		}
+	}
+	room := s.deps.MaxConcurrentRuns + s.deps.MaxConcurrentObservations - len(s.inflight)
+	if room <= 0 || len(active) == 0 {
+		// The cursor does NOT advance on a pass that started nothing. Advancing
+		// past runs it never considered is how a sweep skips one.
+		return nil
+	}
+	quiet := func(run EngineeringRun) bool {
+		at, ok := activity[run.ID]
+		return ok && now.Sub(at) >= movingWindow*s.deps.PollInterval
+	}
+	due := func(run EngineeringRun, spacing time.Duration) bool {
+		last, ok := s.lastTurn[run.ID]
+		return !ok || now.Sub(last) >= spacing
+	}
+	// overdue is a quiet run that has waited a whole quietSpacing for a turn.
+	// It competes with the moving runs, so a run that progresses on every turn
+	// can never keep a parked one from being observed.
+	overdue := func(run EngineeringRun) bool {
+		last, ok := s.lastTurn[run.ID]
+		if !ok {
+			last = s.since
+		}
+		return now.Sub(last) >= quietSpacing*s.deps.PollInterval
+	}
+	selected := make([]EngineeringRun, 0, room)
+	sweep := func(cursor *int, want func(EngineeringRun) bool) {
+		start := *cursor % len(active)
+		considered := 0
+		for i := 0; i < len(active) && len(selected) < room; i++ {
+			considered = i + 1
+			run := active[(start+i)%len(active)]
+			if _, busy := s.inflight[run.ID]; busy || !want(run) {
+				continue
+			}
+			selected = append(selected, run)
+			s.inflight[run.ID] = struct{}{}
+			s.lastTurn[run.ID] = now
+		}
+		// The next pass resumes after the last run this one LOOKED AT, whether
+		// it started that run or stepped over it, so the sweep keeps moving.
+		*cursor = (start + considered) % len(active)
+	}
+	sweep(&s.cursor, func(run EngineeringRun) bool {
+		if quiet(run) {
+			return overdue(run)
+		}
+		return due(run, s.deps.PollInterval)
+	})
+	if len(selected) < room {
+		sweep(&s.quietCursor, func(run EngineeringRun) bool {
+			return quiet(run) && due(run, quietSpacing*s.deps.PollInterval)
+		})
 	}
 	return selected
+}
+
+// collect moves the outcomes of finished runs into the report of the pass that
+// noticed them, which is how an operator still sees every run's result in the
+// stream now that a result does not necessarily belong to the pass that started
+// the run.
+func (s *Supervisor) collect(report *SupervisorReport) {
+	s.mu.Lock()
+	report.Driven = append(report.Driven, s.landed...)
+	report.Observed = append(report.Observed, s.landedFeedback...)
+	s.landed, s.landedFeedback = nil, nil
+	s.mu.Unlock()
+	sort.SliceStable(report.Driven, func(i, j int) bool { return report.Driven[i].RunID < report.Driven[j].RunID })
+	sort.SliceStable(report.Observed, func(i, j int) bool { return report.Observed[i].RunID < report.Observed[j].RunID })
 }
 
 // driveOne observes feedback for one run and then reconciles it. The order
@@ -497,6 +974,19 @@ func (s *Supervisor) driveOne(ctx context.Context, run EngineeringRun) (RunOutco
 	} else {
 		observed = &observation
 	}
+	// #474 B3: before Reconcile, so an admission this pass is visible to the
+	// SAME pass's dispatch rather than a full poll interval later.
+	// Verification capacity (#474 R5) is bounded by ReviewTrigger's own
+	// durable claim against the scheduler's authoritative
+	// MaxConcurrentVerifications ceiling - never a Supervisor-local
+	// semaphore, so an ordinary assurance/verification operation and a
+	// reviewer invocation can never together exceed it, and the bound
+	// holds across restart and between controllers.
+	if s.deps.ReviewTrigger != nil {
+		if triggerErr := s.deps.ReviewTrigger(ctx, engine, run); triggerErr != nil {
+			result.ReviewTriggerError = boundedDetail(triggerErr.Error())
+		}
+	}
 	outcome, err := engine.Reconcile(ctx, run.ID)
 	if err != nil {
 		result.Error = boundedDetail(err.Error())
@@ -506,16 +996,39 @@ func (s *Supervisor) driveOne(ctx context.Context, run EngineeringRun) (RunOutco
 	return result, observed
 }
 
-// Run is the supervisor loop: tick, wait, repeat, until the context is
-// cancelled.
+// Run is the supervisor loop: pass, wait out the poll interval, repeat, until
+// the context is cancelled.
+//
+// It waits out the POLL INTERVAL rather than the work, which is the difference
+// between a fleet that admits a submission as soon as it has a slot and one
+// that admits it when the slowest provider happens to return. A pass that
+// starts a twenty-minute run is followed by the next pass one poll interval
+// later, with the ceiling counted across both.
 //
 // Cancelling the context is a SHUTDOWN, not a fleet cancellation. It stops
 // scheduling and propagates through the same bounded cancellation providers and
 // the Docker sandbox already honour; no run.cancelled is journalled, and every
 // run stays exactly as resumable as its own journal says it is.
 func (s *Supervisor) Run(ctx context.Context, report func(SupervisorReport)) error {
+	// Shutdown drains. Work that outlived its pass is unwound by the same
+	// context cancellation it always was, and this loop does not return until
+	// that unwinding is finished - returning earlier would let `serve` exit
+	// while runs were still mid-flight, which is the one thing shutdown is
+	// defined not to do. The last outcomes are reported rather than dropped,
+	// because an operator watching the stream should see how the work they
+	// were told would be let finish actually finished.
+	defer func() {
+		s.driving.Wait()
+		final := SupervisorReport{
+			At: s.deps.Clock.Now(), Draining: s.Draining(), Capacity: s.deps.MaxConcurrentRuns, ObservationCapacity: s.deps.MaxConcurrentObservations,
+		}
+		s.collect(&final)
+		if report != nil && (len(final.Driven) > 0 || len(final.Observed) > 0) {
+			report(final)
+		}
+	}()
 	for ctx.Err() == nil {
-		tick, err := s.Tick(ctx)
+		tick, err := s.pass(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -533,11 +1046,19 @@ func (s *Supervisor) Run(ctx context.Context, report func(SupervisorReport)) err
 			delay = time.Second
 		}
 		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil
-		case <-timer.C:
+	wait:
+		for {
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-s.freed:
+				// A slot came free between passes: hand it on now rather than
+				// a whole poll interval later.
+				s.refill(ctx)
+			case <-timer.C:
+				break wait
+			}
 		}
 	}
 	return nil
@@ -597,7 +1118,16 @@ func (s *Supervisor) decomposeWithAgent(ctx context.Context, repository string, 
 	// every producer invocation is bounded by. Zero here meant NO deadline at
 	// all, so the one stage type that runs unattended against a provider was
 	// the only one that could run forever.
-	budgets := ProviderBudget{WallLimit: engine.planningWallLimit(request.WallSeconds)}
+	// The no-progress window applies to the PLANNER too, and it is the stage
+	// that needs it most: a planning invocation runs unattended in a read-only
+	// mode against the same CLIs, so a host that loses its network stalls it
+	// exactly as it stalled the producer in #238. Leaving it out would have
+	// bounded the path that is watched and not the one that is not.
+	//
+	// Both bounds are the controller's own configuration, not a frozen
+	// RunPolicy: a planning invocation has no run (see planningWallLimit),
+	// and both values are controller-effective until B3 (ADR-0003).
+	budgets := engine.PlanningBudget(request.WallSeconds)
 	return InvokePlanner(ctx, PlannerInput{
 		PlanID: request.Plan.ID, Revision: request.Plan.Revision, Budgets: budgets,
 		Agent: engine.PlanningAgent(), Provider: engine.PlanningProvider(),
@@ -648,7 +1178,7 @@ func (s *Supervisor) reconcilePlans(ctx context.Context) []PlanTickReport {
 			continue
 		}
 		reconciler := PlanReconciler{
-			Store: s.deps.Store, Clock: s.deps.Clock, Service: s.deps.Plans,
+			Store: s.deps.Store, Clock: s.deps.Clock, Service: s.planServiceForReconcile(),
 			Repository: repository, Issue: issue, StateDir: s.deps.StateDir,
 			Engine: func(repository, agentID string) (*EngineeringRuntime, error) {
 				return s.engine(repository, agentID)

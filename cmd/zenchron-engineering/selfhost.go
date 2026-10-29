@@ -300,7 +300,9 @@ func selfhostIssueWithModels(rawNumber string, configuredModels []string, comman
 		execution = codexExecution{Provider: "Codex CLI", Model: model, AuthMode: authMode, Attempt: index + 1, MaxAttempts: len(models)}
 		fmt.Fprintf(stdout, "Codex attempt %d/%d: model %s, auth mode %s\n", execution.Attempt, execution.MaxAttempts, model, authMode)
 		args := []string{"--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "--ignore-user-config", "--model", model, "--cd", root, "--add-dir", contextDir, "--output-schema", schemaFile, "--output-last-message", reportFile, prompt}
-		_, runErr := commands.Output(root, "codex", args...)
+		// The worker inherits this shell's environment; a later GOENV wins in
+		// exec, so its plain `go env -w` cannot reach the operator's Go env (#430).
+		_, runErr := commands.OutputEnv(root, []string{"GOENV=" + os.DevNull}, "codex", args...)
 		if runErr == nil {
 			executionStatePath, err = persistInterruptedExecution(root, number, issueBranch, base, execution, commands)
 			if err != nil {
@@ -791,20 +793,15 @@ func temporaryReportFiles() (string, string, func(), error) {
 	return report.Name(), schema.Name(), cleanup, nil
 }
 
-func writeComment(target issue, branch string, pr pullRequest, head string, runtime goRuntime, report *executorReport, execution *codexExecution, checks []harnessCheck) (path string, err error) {
-	file, err := os.CreateTemp("", "zenchron-handoff-*.md")
+func writeComment(target issue, branch string, pr pullRequest, head string, runtime goRuntime, report *executorReport, execution *codexExecution, checks []harnessCheck) (string, error) {
+	body, err := renderComment(target, branch, pr, head, runtime, report, execution, checks)
 	if err != nil {
-		return "", fmt.Errorf("create handoff comment: %w", err)
+		return "", err
 	}
-	defer func() {
-		if closeErr := file.Close(); err == nil && closeErr != nil {
-			path = ""
-			err = fmt.Errorf("close temporary body: %w", closeErr)
-		}
-		if err != nil {
-			os.Remove(file.Name())
-		}
-	}()
+	return writeTemporaryBody("zenchron-handoff-*.md", "handoff comment", body)
+}
+
+func renderComment(target issue, branch string, pr pullRequest, head string, runtime goRuntime, report *executorReport, execution *codexExecution, checks []harnessCheck) (string, error) {
 	var body strings.Builder
 	fmt.Fprintf(&body, "## Zenchron self-host bootstrap handoff\n\n- Target issue: #%d — %s\n- Branch: `%s`\n- PR: #%d — %s\n- Exact head: `%s`\n- Harness Go runtime: `%s`\n- Stopped before merge: yes\n- Authority: external review required; execution and validation do not authorize merge\n\n### Executor-reported observations\n\n", target.Number, target.Title, branch, pr.Number, pr.URL, head, runtime)
 	if execution == nil {
@@ -825,30 +822,38 @@ func writeComment(target issue, branch string, pr pullRequest, head string, runt
 	for _, check := range checks {
 		fmt.Fprintf(&body, "- `%s` — pass (`%s`)\n", check.ID, check.Command)
 	}
-	if _, err := file.WriteString(body.String()); err != nil {
-		return "", fmt.Errorf("write temporary body: %w", err)
-	}
-	return file.Name(), nil
+	return body.String(), nil
 }
 
-func writePRBody(target issue) (path string, err error) {
-	file, err := os.CreateTemp("", "zenchron-pr-*.md")
+func writePRBody(target issue) (string, error) {
+	return writeTemporaryBody("zenchron-pr-*.md", "pull request body", renderPRBody(target))
+}
+
+func renderPRBody(target issue) string {
+	return fmt.Sprintf("Closes #%d\n\nCreated by `zenchron-engineering selfhost issue %d`.\n\nThis is an untrusted candidate change requiring external review. Codex completion, validation, and PR creation do not authorize merge. Automatic merge was not performed.\n", target.Number, target.Number)
+}
+
+// writeTemporaryBody writes a fully rendered body to a new temporary file and
+// returns its path. A failed write or close removes the file and returns no
+// path, so a partial body is never handed to gh.
+func writeTemporaryBody(pattern, what, body string) (path string, err error) {
+	file, err := os.CreateTemp("", pattern)
 	if err != nil {
-		return "", fmt.Errorf("create pull request body: %w", err)
+		return "", fmt.Errorf("create %s: %w", what, err)
 	}
 	defer func() {
 		if closeErr := file.Close(); err == nil && closeErr != nil {
-			path = ""
-			err = fmt.Errorf("close temporary body: %w", closeErr)
+			err = fmt.Errorf("close %s: %w", what, closeErr)
 		}
 		if err != nil {
-			os.Remove(file.Name())
+			path = ""
+			if removeErr := os.Remove(file.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				err = fmt.Errorf("%w (and the temporary file %s could not be removed: %v)", err, file.Name(), removeErr)
+			}
 		}
 	}()
-	var body strings.Builder
-	fmt.Fprintf(&body, "Closes #%d\n\nCreated by `zenchron-engineering selfhost issue %d`.\n\nThis is an untrusted candidate change requiring external review. Codex completion, validation, and PR creation do not authorize merge. Automatic merge was not performed.\n", target.Number, target.Number)
-	if _, err := file.WriteString(body.String()); err != nil {
-		return "", fmt.Errorf("write temporary body: %w", err)
+	if _, err := file.WriteString(body); err != nil {
+		return "", fmt.Errorf("write %s: %w", what, err)
 	}
 	return file.Name(), nil
 }

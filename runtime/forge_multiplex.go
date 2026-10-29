@@ -380,6 +380,11 @@ func (m *MultiplexedForge) CommentOnPullRequest(ctx context.Context, repo GitHub
 	return m.Inner.CommentOnPullRequest(ctx, repo, number, body)
 }
 
+func (m *MultiplexedForge) SubmitReview(ctx context.Context, repo GitHubRepo, number int, submission GitHubReviewSubmission) (GitHubReview, error) {
+	defer m.invalidate()
+	return m.Inner.SubmitReview(ctx, repo, number, submission)
+}
+
 // ---------------------------------------------------------------------------
 // Optional capabilities
 // ---------------------------------------------------------------------------

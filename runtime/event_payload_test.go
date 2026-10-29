@@ -264,6 +264,80 @@ func TestPhase8PayloadSchemas(t *testing.T) {
 	}
 }
 
+// TestFeedbackObservedPayloadValidatesReviewState closes the durable half of
+// the review-disposition fix: AdmitFeedback already normalizes an item's
+// ReviewState into the closed vocabulary before a decision is built, but nothing
+// stopped the event schema itself from accepting a durable review_state outside
+// that vocabulary, or one attached to a class that carries no disposition at
+// all. A legacy event, and every non-review class, must still canonicalize
+// with no review_state at all.
+func TestFeedbackObservedPayloadValidatesReviewState(t *testing.T) {
+	base := map[string]any{
+		"key": "pull_request_review:1", "class": string(FeedbackReview),
+		"actor": "reviewer", "admitted": false, "reason": feedbackRefusedNonBlockingReview,
+		"applicable": true, "text_digest": "d1",
+	}
+	withState := func(state string) map[string]any {
+		payload := map[string]any{}
+		for k, v := range base {
+			payload[k] = v
+		}
+		if state != "" {
+			payload["review_state"] = state
+		}
+		return payload
+	}
+
+	accepted := []struct {
+		name    string
+		payload map[string]any
+	}{
+		{"no review_state at all", withState("")},
+		{"approved", withState(string(GitHubReviewApproved))},
+		{"changes_requested", withState(string(GitHubReviewChangesRequested))},
+		{"commented", withState(string(GitHubReviewCommented))},
+		{"dismissed", withState(string(GitHubReviewDismissed))},
+	}
+	for _, c := range accepted {
+		t.Run("accepts "+c.name, func(t *testing.T) {
+			_, store := openJournal(t)
+			if _, err := store.AppendEvent(EngineeringEvent{SchemaVersion: SchemaVersion, ID: "e-ok", RunID: "r",
+				Type: EventFeedbackObserved, OccurredAt: time.Unix(105, 0).UTC(), Payload: marshalPayload(t, c.payload)}); err != nil {
+				t.Fatalf("a valid review_state was refused: %v", err)
+			}
+		})
+	}
+
+	nonReviewWithState := map[string]any{
+		"key": "issue_comment:1", "class": string(FeedbackIssueComment),
+		"actor": "reviewer", "admitted": false, "reason": feedbackRefusedStale,
+		"applicable": false, "text_digest": "d1", "review_state": string(GitHubReviewApproved),
+	}
+	refused := []struct {
+		name    string
+		payload map[string]any
+	}{
+		{"unrecognized review_state", withState("superseded")},
+		{"review_state on a non-review class", nonReviewWithState},
+	}
+	for _, c := range refused {
+		t.Run("refuses "+c.name, func(t *testing.T) {
+			_, store := openJournal(t)
+			if _, err := store.AppendEvent(EngineeringEvent{SchemaVersion: SchemaVersion, ID: "e-bad", RunID: "r",
+				Type: EventFeedbackObserved, OccurredAt: time.Unix(106, 0).UTC(), Payload: marshalPayload(t, c.payload)}); err == nil {
+				t.Fatalf("%s was accepted into a canonical event row", c.name)
+			}
+			events, err := store.Events("r")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 0 {
+				t.Fatalf("a refused append still wrote %d rows", len(events))
+			}
+		})
+	}
+}
+
 // TestReservedEventTypesStayReserved is the other half of every widening: the
 // registry was not loosened globally, so a catalogue type with no implemented
 // payload is still refused with or without one. The reserved set is derived

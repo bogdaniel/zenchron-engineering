@@ -1,12 +1,15 @@
 package runtime
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/analysis"
@@ -19,7 +22,7 @@ type RepositoryTarget struct{ Identity, Remote, DefaultBranch string }
 func ResolveRepository(cwd, explicit string) (RepositoryTarget, error) {
 	remote, err := gitOutput(cwd, "remote", "get-url", "origin")
 	if err != nil {
-		return RepositoryTarget{}, fmt.Errorf("repository target: %w", err)
+		return RepositoryTarget{}, repositoryTargetFailure(err)
 	}
 	identity, ok := githubIdentity(strings.TrimSpace(remote))
 	if explicit != "" {
@@ -124,8 +127,8 @@ func MaterializeCandidate(dir string, ref CandidateRef, sourceDir string) error 
 	if !ref.Materializable() {
 		return fmt.Errorf("upstream candidate reference is incomplete: run=%q revision=%q tree=%q", ref.RunID, ref.Revision, ref.Tree)
 	}
-	if _, err := os.Stat(filepath.Join(sourceDir, ".git")); err != nil {
-		return fmt.Errorf("upstream run %s has no workspace to take candidate %s from: %w", ref.RunID, short12(ref.Revision), err)
+	if !isDir(sourceDir) {
+		return fmt.Errorf("upstream run %s has no workspace to take candidate %s from", ref.RunID, short12(ref.Revision))
 	}
 	// --no-tags and an explicit revision: this takes exactly the object asked
 	// for and nothing else the producer's workspace happens to carry.
@@ -283,84 +286,785 @@ func (w *CandidateWorkspace) FetchBase(remote string) error {
 	return err
 }
 func gitMetadataDigest(dir string) (string, error) {
+	m, err := readGitMetadata(dir)
+	if err != nil {
+		return "", err
+	}
+	return m.digest(m.head), nil
+}
+
+// gitMetadata is what the integrity digest covers, kept in parts so a runtime
+// commit can derive its post-commit baseline from the state it checked rather
+// than re-reading a repository a provider process can still write (#437).
+type gitMetadata struct{ config, refs, head string }
+
+func readGitMetadata(dir string) (gitMetadata, error) {
 	// --local keeps the baseline on the runtime-owned repository file. System
 	// and global config are switched off for every runtime Git call, and the
 	// runtime's own -c overrides would otherwise appear as "command line:"
 	// entries and make the digest depend on per-call temporary paths.
 	config, err := gitOutput(dir, "config", "--list", "--show-origin", "--local")
 	if err != nil {
-		return "", err
+		return gitMetadata{}, err
 	}
 	refs, err := gitOutput(dir, "for-each-ref", "--format=%(refname):%(objectname)")
 	if err != nil {
-		return "", err
+		return gitMetadata{}, err
 	}
 	head, err := gitOutput(dir, "rev-parse", "HEAD")
 	if err != nil {
-		return "", err
+		return gitMetadata{}, err
 	}
-	h := sha256.Sum256([]byte(config + "\n" + refs + "\n" + head))
-	return hex.EncodeToString(h[:]), nil
+	return gitMetadata{config, refs, strings.TrimSpace(head)}, nil
+}
+
+// digest is the metadata digest with HEAD at head.
+func (m gitMetadata) digest(head string) string {
+	h := sha256.Sum256([]byte(m.config + "\n" + m.refs + "\n" + head + "\n"))
+	return hex.EncodeToString(h[:])
+}
+
+// subjectStoreDir is the runtime-owned, content-verified object store beside a
+// candidate workspace - never inside it, so nothing a provider can write is
+// part of it.
+func subjectStoreDir(candidateDir string) string {
+	return filepath.Join(filepath.Dir(candidateDir), "subject.git")
+}
+
+// subjectStore returns the subject store holding commit, taking the commit
+// from the candidate workspace first if the store does not hold it yet.
+//
+// AFTER A RUNTIME COMMIT THE CANDIDATE IS NOT A CONTENT AUTHORITY (#437). Git
+// does not re-hash a loose object it reads, so a process that outlived its
+// invocation can swap the bytes behind a recorded name, or answer a name from
+// an alternate. The store is filled only by a fetch, whose index-pack re-hashes
+// every object it receives: content that does not match its name is refused,
+// never stored. An object in the store is therefore the content its name
+// denotes, and every judgement and publication about a commit reads it here.
+// A commit that cannot be taken is an error; nothing falls back to the
+// candidate.
+func subjectStore(candidateDir, commit string) (string, error) {
+	if !isObjectName(commit) {
+		return "", fmt.Errorf("subject store: %q is not an object name", commit)
+	}
+	store := subjectStoreDir(candidateDir)
+	if !isDir(store) {
+		// Nothing to take a commit from: a reclaimed run is not given a store.
+		if !isDir(candidateDir) {
+			return "", fmt.Errorf("candidate commit %s has no workspace to be taken from", short12(commit))
+		}
+		if _, err := runGit("", "init", "-q", "--bare", store); err != nil {
+			return "", err
+		}
+	}
+	// A fetch checks connectivity, so a commit present here has its whole
+	// history and trees present, all of them re-hashed on the way in.
+	if _, err := runGit(store, "cat-file", "-e", commit+"^{commit}"); err == nil {
+		return store, nil
+	}
+	// The ref keeps the commit reachable for the store's own maintenance.
+	// git's stderr is not echoed: it carries candidate-controlled text.
+	if _, err := runGit(store, "fetch", "-q", "--no-tags", candidateDir, commit+":refs/subject/"+commit); err != nil {
+		return "", fmt.Errorf("candidate commit %s %s", short12(commit), errSubjectUnverified)
+	}
+	return store, nil
+}
+
+// errSubjectUnverified is the refusal of a commit the subject store could not
+// take: an object missing, unreadable, or not the content its name denotes.
+const errSubjectUnverified = "could not be taken into the verified subject store: an object is missing or does not match its name"
+
+// isObjectName reports a full, lowercase SHA-1 or SHA-256 object name.
+func isObjectName(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 type CommitResult struct {
 	Commit, Tree string
 	Paths        []string
+	// Excluded names the runtime-owned paths this commit deliberately did not
+	// carry, in full. It is never empty silently: a commit that left something
+	// in the workspace behind says which paths, so an operator reading the
+	// journal sees the same ownership decision the commit made.
+	Excluded []string
 }
 
+// afterCommitGates is a test seam: it runs after the gates have judged the
+// written tree and before HEAD names its commit (#437).
+var afterCommitGates func(dir string)
+
+// afterCommitUpdateRef is a test seam: it runs after HEAD names the runtime
+// commit and before the post-commit metadata is compared (#437).
+var afterCommitUpdateRef func(dir string)
+
 func (w *CandidateWorkspace) Commit(message string, maxBytes int64) (CommitResult, error) {
-	if err := w.AssertIntegrity(); err != nil {
+	// ONE READ is both the integrity check and the parent: the HEAD the check
+	// approved is the one the new commit names and update-ref expects, and the
+	// config and refs it approved are what the post-commit baseline is
+	// derived from (#437).
+	checked, err := readGitMetadata(w.Dir)
+	if err != nil {
 		return CommitResult{}, err
 	}
+	if checked.digest(checked.head) != w.TrustedMetadata {
+		return CommitResult{}, &WorkspaceIntegrityError{Detail: "Git metadata changed outside runtime"}
+	}
+	parent := checked.head
 	paths, err := changedPaths(w.Dir)
 	if err != nil {
 		return CommitResult{}, err
 	}
 	if len(paths) == 0 {
-		return CommitResult{}, fmt.Errorf("candidate has no changes")
+		return CommitResult{}, deterministicRefusal("candidate.empty", fmt.Errorf("candidate has no changes"))
 	}
-	if err := GuardCandidate(w.Dir, paths, maxBytes); err != nil {
+	// THE FILESYSTEM GATE COVERS EVERY OBSERVED PATH, because the runtime is
+	// about to join all of them onto the workspace root and stat them.
+	if err := GuardCandidatePathShape(w.Dir, paths); err != nil {
 		return CommitResult{}, err
 	}
-	// The OUTPUT half of the credential boundary. Admission proved the
-	// workspace was clean before the producer was shown it; this proves the
-	// producer did not introduce a credential value into what is about to
-	// become a runtime-owned commit. A value found here is REFUSED, not
-	// redacted and not ignored: redacting it would commit a rewritten version
-	// of the producer's work, and ignoring it would publish the secret.
-	if err := scanPathsForCredentialValues(w.Dir, paths); err != nil {
+	// After the path gate, so what is joined onto the workspace root here has
+	// already been proven to be a safe relative path.
+	debris, err := classifyRuntimeDebris(w.Dir, paths)
+	if err != nil {
 		return CommitResult{}, err
+	}
+	eligible := withoutPaths(paths, debris.Excluded)
+	// NOTHING BUT DEBRIS IS NOT A CANDIDATE. Committing here would mint an
+	// empty-tree commit in the name of work nobody did; the workspace is
+	// answered for exactly as an unchanged one is, and the paths that were
+	// left behind are named so the answer is not mistaken for "nothing
+	// happened".
+	if len(eligible) == 0 {
+		return CommitResult{}, deterministicRefusal("candidate.scratch_only", fmt.Errorf("candidate holds no change a runtime commit can carry, only runtime-owned scratch: %s", quotedPaths(debris.Excluded)))
+	}
+	// THE EXCLUSION HAS TO FIT IN THE RECORD OF IT. Every excluded path is
+	// journalled in full - not truncated, not digested - so a workspace whose
+	// debris exceeds what one payload may carry is refused HERE, before a
+	// commit is written, rather than after: minting a commit whose own event
+	// cannot be journalled is how #191's abandoned commit moved HEAD out from
+	// under the recorded-revision check.
+	//
+	// It is the SAME bound the event schema applies, called through the same
+	// function, so the gate and the schema cannot drift into disagreeing about
+	// what is recordable. It is a deliberate ceiling, and it names every path.
+	if err := boundedList("excluded_paths", debris.Excluded); err != nil {
+		return CommitResult{}, deterministicRefusal("candidate.exclusion_record_limit", fmt.Errorf("a runtime commit cannot record what it excluded: %w: %s", err, quotedPaths(debris.Excluded)))
+	}
+	// AN INDEX FLAG HIDES CONTENT FROM THE GATES BELOW (#435). The gates read
+	// worktree files; the commit carries index blobs. skip-worktree and
+	// assume-unchanged both make `add -A` leave an index entry alone, so its
+	// blob can differ from - or exist without - the file the gates inspect.
+	// The runtime does not unset them: it refuses, because a flag it did not
+	// set is a claim about the commit it has not checked.
+	if err := refuseIndexFlags(w.Dir); err != nil {
+		return CommitResult{}, err
+	}
+	// THE EXCLUSION IS AN INDEX WRITE, NEVER A WORKTREE WRITE.
+	//
+	// `git rm --cached` removes an entry and leaves the directory on disk
+	// exactly as the producer left it. Nothing here deletes, resets or cleans
+	// anything a candidate workspace holds, so the #241 guarantee that dirty
+	// candidate work is never discarded is untouched - the runtime declines to
+	// RECORD a path it cannot carry, which is a different act from destroying
+	// it. It is also why the excluded scratch is still on disk afterwards for
+	// an operator to look at.
+	//
+	// The order matters. Gitlinks already in the index are dropped FIRST, so a
+	// path that has stopped being a repository - a producer that staged a
+	// gitlink and then renamed the nested `.git` away - is staged as the
+	// ordinary content it now is by the `add` below, rather than being carried
+	// as an unresolvable gitlink. `-f` is index-only under `--cached`: it
+	// covers an entry an interrupted attempt left staged, and can no more
+	// touch the worktree than the plain form can.
+	//
+	// The pathspecs are exact paths. This runner sets GIT_LITERAL_PATHSPECS, so
+	// a directory a producer named with a bracket or an asterisk in it names
+	// itself and nothing else - which is also why the exclusion cannot be
+	// expressed as `add` pathspec magic and is done here instead.
+	for _, p := range debris.Unlink {
+		if _, err := runGit(w.Dir, "rm", "--cached", "-q", "-f", "--ignore-unmatch", "--", p); err != nil {
+			return CommitResult{}, err
+		}
 	}
 	if _, err := runGit(w.Dir, "add", "-A", "--"); err != nil {
 		return CommitResult{}, err
 	}
-	if _, err := runGit(w.Dir, "commit", "--no-gpg-sign", "-m", message); err != nil {
-		return CommitResult{}, err
+	// AFTER the add, because that is what creates the gitlink for a nested
+	// repository the producer left behind; removing it beforehand would remove
+	// an entry `add -A` immediately puts back.
+	for _, p := range debris.Excluded {
+		if _, err := runGit(w.Dir, "rm", "--cached", "-q", "-f", "--ignore-unmatch", "--", p); err != nil {
+			return CommitResult{}, err
+		}
 	}
-	commit, err := gitOutput(w.Dir, "rev-parse", "HEAD")
+	// THE COMMIT GATES JUDGE THE BYTES THE COMMIT WILL HOLD, and nothing else
+	// (#435). They run AFTER staging, over the staged blobs, because the index
+	// - not the status list and not the worktree - decides what is committed:
+	// a staged gitlink turned directory carries files status never named, an
+	// attribute conversion makes the blob differ from the worktree file, and a
+	// worktree file can change after it was hashed. An excluded path is not
+	// staged, so it cannot veto the commit. A refusal here commits nothing;
+	// the staged entries are the same leftover an interrupted attempt leaves,
+	// which the `rm --cached -f` above expects.
+	//
+	// THE GATED SET IS IMMUTABLE (#437). The index is written to a tree ONCE,
+	// the gates judge that tree's blobs, and exactly that tree is committed
+	// with commit-tree. `git commit` would read the index again, and a process
+	// that outlived its invocation could rewrite it in between.
+	treeOut, err := gitOutput(w.Dir, "write-tree")
 	if err != nil {
 		return CommitResult{}, err
 	}
-	tree, err := gitOutput(w.Dir, "rev-parse", "HEAD^{tree}")
+	tree := strings.TrimSpace(treeOut)
+	// The message gets the same whitespace cleanup `git commit -m` applies.
+	cleaned, err := runGitInput(w.Dir, []byte(message), "stripspace")
 	if err != nil {
 		return CommitResult{}, err
 	}
-	status, err := gitOutput(w.Dir, "status", "--porcelain=v1")
+	commitOut, err := runGitInput(w.Dir, cleaned, "commit-tree", "--no-gpg-sign", tree, "-p", parent)
 	if err != nil {
 		return CommitResult{}, err
 	}
-	if strings.TrimSpace(status) != "" {
-		return CommitResult{}, fmt.Errorf("candidate not clean after runtime commit")
-	}
-	metadata, err := gitMetadataDigest(w.Dir)
+	commit := strings.TrimSpace(string(commitOut))
+	// THE GATES READ THE VERIFIED SUBJECT STORE (#437). The commit object is
+	// written but named by nothing yet; it is taken into the subject store,
+	// whose fetch re-hashes every object, and the gates judge the tree diff
+	// and blobs from there. A stand-in planted behind a staged blob's name in
+	// the candidate's object directory is refused by that fetch instead of
+	// being what the gates read, and what the gates read is exactly what every
+	// later reader and the push read.
+	store, err := subjectStore(w.Dir, commit)
 	if err != nil {
 		return CommitResult{}, err
 	}
-	w.TrustedMetadata = metadata
-	return CommitResult{Commit: strings.TrimSpace(commit), Tree: strings.TrimSpace(tree), Paths: paths}, nil
+	staged, blobs, err := treeCommitPaths(store, parent, tree)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	if len(staged) == 0 {
+		return CommitResult{}, deterministicRefusal("candidate.empty_tree_diff", fmt.Errorf("candidate changes stage nothing a runtime commit can carry"))
+	}
+	if err := guardStagedContent(store, staged, blobs, maxBytes); err != nil {
+		return CommitResult{}, err
+	}
+	// The fail-closed backstop: the worktree must hold the committed bytes
+	// exactly, so the workspace the next producer invocation is handed is the
+	// commit. No runtime judgement after the commit reads the worktree, the
+	// index or the candidate's object directory: they read the subject store.
+	if err := refuseWorktreeDivergence(w.Dir, blobs); err != nil {
+		return CommitResult{}, err
+	}
+	if afterCommitGates != nil {
+		afterCommitGates(w.Dir)
+	}
+	// HEAD moves only from the parent the gates were run against. A HEAD moved
+	// concurrently is refused as the integrity violation a moved HEAD is
+	// everywhere else, and no commit is reported: HEAD never named this one.
+	if _, err := runGit(w.Dir, "update-ref", "--no-deref", "HEAD", commit, parent); err != nil {
+		return CommitResult{}, &WorkspaceIntegrityError{Detail: "HEAD moved during the runtime commit"}
+	}
+	// FROM HERE THE COMMIT EXISTS AND HEAD HAS MOVED (#402). Every return
+	// below carries the identity already known, so a failure after this point
+	// can never make the caller report the work as uncommitted.
+	// Paths is the committed tree diff (--no-renames), the same set #431
+	// recovery recomputes, not the status list.
+	result := CommitResult{Commit: commit, Tree: tree, Paths: staged, Excluded: debris.Excluded}
+	// THE BASELINE IS DERIVED, NEVER RE-READ (#437). Nothing the runtime ran
+	// since the check above writes config or refs, and HEAD is detached, so
+	// the trusted state is the checked config and refs with HEAD at the new
+	// commit. Re-reading the live repository here would adopt whatever a
+	// process changed in this window; instead such a change is the integrity
+	// violation it is, reported with the commit.
+	w.TrustedMetadata = checked.digest(commit)
+	if afterCommitUpdateRef != nil {
+		afterCommitUpdateRef(w.Dir)
+	}
+	live, err := gitMetadataDigest(w.Dir)
+	if err != nil {
+		return result, err
+	}
+	if live != w.TrustedMetadata {
+		return result, &WorkspaceIntegrityError{Detail: "Git metadata changed during the runtime commit"}
+	}
+	// THE CLEANLINESS PROBE ASKS ABOUT CANDIDATE STATE, NOT ABOUT DEBRIS.
+	//
+	// Reading the whole status is what refused commit f0f72ba: one excluded
+	// scratch repository kept mutating between the commit and the probe, so a
+	// commit that had captured every candidate path correctly was thrown away,
+	// and every remaining attempt met the same condition. The question the
+	// probe exists to ask is whether the runtime's own commit captured the
+	// candidate; a path the runtime already decided it does not carry cannot
+	// answer that question either way.
+	residue, err := dirtyPathsOutside(w.Dir, debris.Excluded)
+	if err != nil {
+		return result, err
+	}
+	if len(residue) > 0 {
+		return result, deterministicRefusal("candidate.residue", fmt.Errorf("candidate not clean after runtime commit: %s", quotedPaths(residue)))
+	}
+	return result, nil
 }
-func changedPaths(dir string) ([]string, error) {
-	out, err := gitOutput(dir, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "-z")
+
+// runtimeDebris is the runtime-owned split of a dirty candidate workspace into
+// what a governed commit may carry and what it provably cannot.
+//
+// Excluded are worktree paths that are THEMSELVES Git repositories. Unlink are
+// gitlinks already recorded in this workspace's index. The two overlap and are
+// not the same question, which is why they are two fields.
+type runtimeDebris struct{ Excluded, Unlink []string }
+
+// classifyRuntimeDebris decides, from the runtime's own reading of the
+// workspace, which changed paths a runtime-owned commit cannot carry content
+// for - BEFORE anything is staged.
+//
+// WHAT THE OWNERSHIP FACT IS. A commit cannot carry a nested Git repository.
+// `git add -A` does not record the directory's files; it records a 160000
+// gitlink naming a commit that exists only inside the nested repository, so the
+// content is in no tree this runtime owns. The determination is structural -
+// does this path hold its own `.git` - and it is made by the runtime from the
+// filesystem and the index. No repository file declares it, no `.gitignore`
+// widens or narrows it, and no provider output grants it: a tracked file can
+// never be named `.git` because Git refuses that path component in an index,
+// so candidate CONTENT cannot manufacture an exclusion.
+//
+// WHAT MADE IT VISIBLE was a killed attempt: run
+// run-5fa7aff09147d45bf7c3a05d504033f7 inherited its own `go test` temporary
+// tree on recovery, the runtime wrote commit f0f72ba, and the post-commit
+// cleanliness probe then refused it. The probe was catching a sixth of what
+// happened. f0f72ba carries SIX gitlinks across two in-tree scratch roots -
+// fixture origins, nested candidate workspaces and assurance checkouts - and
+// `git status` reported exactly one, because a parent reports a gitlink as
+// modified only while the nested worktree is dirty. The other five produced a
+// gitlink, a clean probe, and a publishable tree that does not hold the
+// content: `git show HEAD:<path>` answers "exists on disk, but not in HEAD".
+//
+// WHY EXCLUSION RATHER THAN REFUSAL, which is what this was. Refusing the whole
+// commit is correct about the gitlink and wrong about the run: the condition is
+// a property of the inherited workspace, so it is identical on every remaining
+// attempt, and a crashed run therefore lost every candidate edit it had
+// actually produced. Exclusion cannot hide a candidate mutation that refusal
+// would have preserved, because a commit containing the gitlink carries the
+// same zero bytes of that subtree. The only difference between the two is
+// whether the rest of the candidate reaches a tree at all.
+//
+// WHAT EXCLUSION IS NOT ALLOWED TO HIDE, and does not. Tracked candidate
+// content inside a directory a producer later ran `git init` on is reported by
+// Git under its own paths, never as one nested-repository path, so it never
+// arrives here and is committed normally. A NEW file a producer puts inside a
+// repository it created is excluded - and was never committable under any
+// behaviour this function could have. Every excluded path is carried out in
+// CommitResult.Excluded and journalled, so the decision is visible rather than
+// quiet.
+//
+// BOTH WAYS IN ARE STILL CLOSED. A nested repository a producer created is
+// untracked, so it appears as a changed path and the worktree answers for it. A
+// gitlink ALREADY recorded appears in no changed path at all once its nested
+// worktree is clean, so the index is asked too, and the entry is dropped from
+// the index before the commit is written. That covers the hostile shape which
+// overturned an earlier certification: staging a gitlink and then renaming the
+// nested `.git` away makes every worktree predicate answer wrongly, and the
+// answer here is to unlink the index entry and let the directory be committed
+// as the ordinary content it now is - the producer's files land in the tree
+// instead of a gitlink nobody can resolve.
+//
+// A repository that genuinely uses submodules cannot be a candidate here (it is
+// refused at workspace admission, see refuseSubmodules), and that is the honest answer rather than an omission: this runtime cannot show a
+// submodule's content to assurance either.
+func classifyRuntimeDebris(dir string, paths []string) (runtimeDebris, error) {
+	excluded, unlink := map[string]bool{}, map[string]bool{}
+	for _, p := range paths {
+		// Git reports an untracked nested repository as a directory, trailing
+		// separator and all, because it does not descend into one.
+		if p = strings.TrimSuffix(p, "/"); isNestedRepository(dir, p) {
+			excluded[p] = true
+		}
+	}
+	staged, err := gitOutput(dir, "ls-files", "--stage", "-z")
+	if err != nil {
+		return runtimeDebris{}, err
+	}
+	for _, record := range strings.Split(strings.TrimRight(staged, "\x00"), "\x00") {
+		if !strings.HasPrefix(record, "160000 ") {
+			continue
+		}
+		tab := strings.IndexByte(record, '\t')
+		if tab < 0 {
+			continue
+		}
+		p := record[tab+1:]
+		// A gitlink whose directory is GONE is being REMOVED, and `add -A`
+		// already stages exactly that. Unlinking it as well would be the same
+		// index write twice, and excluding it would block the one way out of
+		// this state.
+		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p))); os.IsNotExist(err) {
+			continue
+		}
+		unlink[p] = true
+		if isNestedRepository(dir, p) {
+			excluded[p] = true
+		}
+	}
+	return runtimeDebris{Excluded: sortedPathSet(excluded), Unlink: sortedPathSet(unlink)}, nil
+}
+
+// SubmoduleUnsupportedError is the admission refusal for a target repository
+// that records submodules. It names the capability limit rather than the Git
+// mechanism, so an operator reads "this runtime cannot carry submodules" and
+// not a gitlink diagnostic.
+type SubmoduleUnsupportedError struct{ Paths []string }
+
+func (e *SubmoduleUnsupportedError) Error() string {
+	return fmt.Sprintf("this runtime cannot carry submodules: the target repository records %d submodule path(s): %s. "+
+		"A submodule's content is not visible to assurance, so a candidate commit could not be verified against it; "+
+		"the run is refused at workspace admission, before any producer work. "+
+		"Remove the submodule from the target repository or point the runtime at a repository without submodules",
+		len(e.Paths), quotedPaths(e.Paths))
+}
+
+// refuseSubmodules refuses a workspace whose index records a submodule (a
+// 160000 gitlink). It runs at workspace admission, where the answer costs
+// nothing and precedes any provider invocation. Asking at commit time refused
+// every candidate commit for the repository, after the producer was paid for,
+// over a path the producer never touched.
+//
+// The question is asked of the index: `clone --no-checkout` followed by
+// `checkout --detach` leaves a submodule directory empty and `git status`
+// clean, so no worktree predicate can see it.
+func refuseSubmodules(dir string) error {
+	staged, err := gitOutput(dir, "ls-files", "--stage", "-z")
+	if err != nil {
+		return err
+	}
+	var paths []string
+	for _, record := range strings.Split(strings.TrimRight(staged, "\x00"), "\x00") {
+		if !strings.HasPrefix(record, "160000 ") {
+			continue
+		}
+		if tab := strings.IndexByte(record, '\t'); tab >= 0 {
+			paths = append(paths, record[tab+1:])
+		}
+	}
+	if len(paths) > 0 {
+		sort.Strings(paths)
+		return &SubmoduleUnsupportedError{Paths: paths}
+	}
+	return nil
+}
+
+// isNestedRepository is the whole of the structural test, in one place because
+// two callers must agree on it: a workspace path that holds its own `.git` is a
+// repository whose content no tree this runtime owns can carry. Nothing about
+// the path's SPELLING participates.
+func isNestedRepository(dir, p string) bool {
+	_, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p), ".git"))
+	return err == nil
+}
+
+func sortedPathSet(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func withinAny(p string, roots []string) bool {
+	for _, root := range roots {
+		if p == root || strings.HasPrefix(p, root+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func withoutPaths(paths, excluded []string) []string {
+	if len(excluded) == 0 {
+		return paths
+	}
+	kept := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if !withinAny(strings.TrimSuffix(p, "/"), excluded) {
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
+// dirtyPathsOutside is the post-commit question, asked of candidate state only.
+func dirtyPathsOutside(dir string, excluded []string) ([]string, error) {
+	paths, err := statusPaths(dir, false)
+	if err != nil {
+		return nil, err
+	}
+	return withoutPaths(paths, excluded), nil
+}
+
+// quotedPaths names paths in runtime evidence. Quoted, because neither
+// `status -z` nor `ls-files -z` quotes a path and these messages are
+// journalled: a producer that names a directory with a newline in it would
+// otherwise write its own line into runtime evidence. No privilege crosses,
+// but forgeable evidence is worth less than evidence that cannot be forged.
+//
+// Every offending path is named. Production had six, and an operator shown one
+// example of a workspace-wide condition will go looking for a one-off.
+func quotedPaths(paths []string) string {
+	named := make([]string, 0, len(paths))
+	for _, p := range paths {
+		named = append(named, fmt.Sprintf("%q", p))
+	}
+	sort.Strings(named)
+	return strings.Join(named, ", ")
+}
+
+// refuseIndexFlags refuses any index entry marked skip-worktree (tag S, or s
+// when also assume-unchanged) or assume-unchanged (any lowercase tag) in
+// `git ls-files -v`.
+func refuseIndexFlags(dir string) error {
+	flagged, err := flaggedIndexEntries(dir)
+	if err != nil {
+		return err
+	}
+	if len(flagged) == 0 {
+		return nil
+	}
+	return deterministicRefusal("candidate.index_flags", fmt.Errorf("index-flagged candidate path %q: skip-worktree or assume-unchanged hides it from the commit gates", flagged[0][2:]))
+}
+
+func flaggedIndexEntries(dir string) ([]string, error) {
+	out, err := gitOutput(dir, "ls-files", "-v", "-z")
+	if err != nil {
+		return nil, err
+	}
+	var flagged []string
+	for _, rec := range strings.Split(strings.TrimRight(out, "\x00"), "\x00") {
+		if len(rec) < 3 {
+			continue
+		}
+		if tag := rec[0]; tag == 'S' || (tag >= 'a' && tag <= 'z') {
+			flagged = append(flagged, rec)
+		}
+	}
+	return flagged, nil
+}
+
+// stagedBlob is one staged addition or modification: the blob the commit
+// would carry for path, and its size as the object store reports it.
+type stagedBlob struct {
+	path, id string
+	size     int64
+}
+
+// treeCommitPaths lists every path tree changes against parent (deletions
+// too, so the name gate still sees them) and the blob each addition or
+// modification carries. Only regular-file blobs are carried: a symlink or
+// gitlink entry is refused, because the gates judge bytes, not links.
+func treeCommitPaths(dir, parent, tree string) ([]string, []stagedBlob, error) {
+	out, err := gitOutput(dir, "diff-tree", "-r", "--raw", "-z", "--no-renames", "--no-abbrev", parent, tree)
+	if err != nil {
+		return nil, nil, err
+	}
+	// -z raw records are ":srcmode dstmode srcsha dstsha status\0path\0".
+	records := strings.Split(strings.TrimRight(out, "\x00"), "\x00")
+	var paths []string
+	var blobs []stagedBlob
+	for i := 0; i+1 < len(records); i += 2 {
+		fields, p := strings.Fields(records[i]), records[i+1]
+		if len(fields) != 5 {
+			return nil, nil, fmt.Errorf("unreadable staged candidate path %q", p)
+		}
+		paths = append(paths, p)
+		if fields[4] == "D" {
+			continue
+		}
+		if !strings.HasPrefix(fields[1], "100") {
+			return nil, nil, fmt.Errorf("staged candidate path %q is not a regular file the commit gates can read", p)
+		}
+		blobs = append(blobs, stagedBlob{path: p, id: fields[3]})
+	}
+	return paths, blobs, nil
+}
+
+// guardStagedContent runs the commit gates over the staged blobs: names from
+// the staged paths, sizes from the object store, credential values from the
+// blob bytes. Each rule is the shared one; only the byte source is the index.
+//
+// This is the OUTPUT half of the credential boundary. Admission proved the
+// workspace was clean before the producer was shown it; this proves the
+// producer did not introduce a credential value into what is about to become a
+// runtime-owned commit. A value found here is REFUSED, not redacted and not
+// ignored: redacting it would commit a rewritten version of the producer's
+// work, and ignoring it would publish the secret.
+func guardStagedContent(dir string, paths []string, blobs []stagedBlob, maxBytes int64) error {
+	sizes := make(map[string]int64, len(blobs))
+	if len(blobs) > 0 {
+		out, err := runGitInput(dir, blobIDs(blobs), "cat-file", "--batch-check")
+		if err != nil {
+			return err
+		}
+		lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+		if len(lines) != len(blobs) {
+			return fmt.Errorf("staged candidate blobs are unreadable")
+		}
+		for i, line := range lines {
+			fields := strings.Fields(line)
+			if len(fields) != 3 || fields[0] != blobs[i].id || fields[1] != "blob" {
+				return fmt.Errorf("staged candidate path %q has no readable blob", blobs[i].path)
+			}
+			if blobs[i].size, err = strconv.ParseInt(fields[2], 10, 64); err != nil {
+				return fmt.Errorf("staged candidate path %q has no readable blob", blobs[i].path)
+			}
+			if normalized, err := normalizedCandidatePath(blobs[i].path); err == nil {
+				sizes[normalized] = blobs[i].size
+			}
+		}
+	}
+	if err := guardCommitNamesAndSizes(paths, maxBytes, func(normalized string) (int64, bool) {
+		size, ok := sizes[normalized]
+		return size, ok
+	}); err != nil {
+		return err
+	}
+	// One --batch process reads every blob the scan will judge; a blob above the
+	// scan ceiling is not read, because the shared rule refuses it unread.
+	var scanned []stagedBlob
+	for _, b := range blobs {
+		if b.size <= credentialScanFileLimit {
+			scanned = append(scanned, b)
+		}
+	}
+	contents, err := readBlobs(dir, scanned)
+	if err != nil {
+		return err
+	}
+	for _, b := range blobs {
+		read := func() ([]byte, error) {
+			data, ok := contents[b.id]
+			if !ok {
+				return nil, fmt.Errorf("blob not read")
+			}
+			return data, nil
+		}
+		if err := credentialContentVerdict(b.path, b.size, read, "staged blob is unreadable"); err != nil {
+			var material *CredentialMaterialError
+			if errors.As(err, &material) && material.Kind == CredentialMaterialValue {
+				return deterministicRefusal("candidate.staged_credential_value", err)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func blobIDs(blobs []stagedBlob) []byte {
+	var in strings.Builder
+	for _, b := range blobs {
+		in.WriteString(b.id + "\n")
+	}
+	return []byte(in.String())
+}
+
+// readBlobs reads blobs through one `git cat-file --batch`, whose output is
+// "<id> blob <size>\n<bytes>\n" per requested object, in request order.
+func readBlobs(dir string, blobs []stagedBlob) (map[string][]byte, error) {
+	contents := make(map[string][]byte, len(blobs))
+	if len(blobs) == 0 {
+		return contents, nil
+	}
+	out, err := runGitInput(dir, blobIDs(blobs), "cat-file", "--batch")
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range blobs {
+		header, rest, ok := bytes.Cut(out, []byte("\n"))
+		fields := strings.Fields(string(header))
+		if !ok || len(fields) != 3 || fields[0] != b.id || fields[1] != "blob" || fields[2] != strconv.FormatInt(b.size, 10) || int64(len(rest)) < b.size+1 {
+			return nil, fmt.Errorf("staged candidate path %q could not be read from the object store", b.path)
+		}
+		contents[b.id] = rest[:b.size]
+		out = rest[b.size+1:]
+	}
+	return contents, nil
+}
+
+// refuseWorktreeDivergence is the fail-closed backstop: each staged blob must
+// equal its worktree file byte for byte. --no-filters hashes the raw file, so a
+// conversion attribute (working-tree-encoding, eol/CRLF) does not let converted
+// bytes stand in for raw ones - such a repository is refused, not trusted.
+func refuseWorktreeDivergence(dir string, blobs []stagedBlob) error {
+	if len(blobs) == 0 {
+		return nil
+	}
+	var in strings.Builder
+	for _, b := range blobs {
+		// --stdin-paths is line-delimited, so a newline in a path cannot be
+		// named to it. Refused, not worked around.
+		if strings.ContainsAny(b.path, "\n\r") {
+			return fmt.Errorf("staged candidate path %q cannot be compared with its worktree file", b.path)
+		}
+		in.WriteString(b.path + "\n")
+	}
+	out, err := runGitInput(dir, []byte(in.String()), "hash-object", "--no-filters", "--stdin-paths")
+	if err != nil {
+		// A missing or unreadable worktree file. git's stderr is not echoed:
+		// it can carry candidate-controlled text of any length.
+		return fmt.Errorf("staged candidate paths differ from the worktree: a staged path has no readable worktree file")
+	}
+	hashes := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(hashes) != len(blobs) {
+		return fmt.Errorf("staged candidate paths differ from the worktree")
+	}
+	for i, b := range blobs {
+		if hashes[i] != b.id {
+			return deterministicPathRefusal("candidate.worktree_divergence", b.path, fmt.Errorf("staged candidate path %q differs from its worktree file", b.path))
+		}
+	}
+	return nil
+}
+
+func changedPaths(dir string) ([]string, error) { return statusPaths(dir, true) }
+
+// candidateChangedPaths answers "what did the producer change" under the SAME
+// ownership rule the commit applies.
+//
+// Asking it any other way is how a recovered run reached candidate.commit with
+// nothing to commit: an inherited scratch repository is a changed path, so
+// "the candidate changed" was true, the commit was planned, and the commit then
+// had no candidate mutation to carry. Two answers to one question is the defect;
+// this is the one answer.
+func candidateChangedPaths(dir string) ([]string, error) {
+	paths, err := changedPaths(dir)
+	if err != nil {
+		return nil, err
+	}
+	debris, err := classifyRuntimeDebris(dir, paths)
+	if err != nil {
+		return nil, err
+	}
+	return withoutPaths(paths, debris.Excluded), nil
+}
+
+// statusPaths reads one workspace status. refuseIgnored is what tells the two
+// callers apart: the pre-commit read refuses an ignored candidate file, because
+// a candidate-controlled `.gitignore` must not decide what a runtime commit
+// leaves out, while the post-commit probe is only asking what is still dirty.
+func statusPaths(dir string, refuseIgnored bool) ([]string, error) {
+	args := []string{"status", "--porcelain=v1", "--untracked-files=all", "-z"}
+	if refuseIgnored {
+		args = append(args, "--ignored=matching")
+	}
+	out, err := gitOutput(dir, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -372,6 +1076,26 @@ func changedPaths(dir string) ([]string, error) {
 			continue
 		}
 		if strings.HasPrefix(rec, "!! ") {
+			// AN IGNORED PATH IS REFUSED, AND A NESTED REPOSITORY IS NOT AN
+			// IGNORED PATH - it is debris the runtime can classify.
+			//
+			// The refusal exists so a candidate-controlled `.gitignore` cannot
+			// decide what a runtime commit leaves out, and it stays exactly
+			// that strict for ordinary files. But a killed attempt's scratch is
+			// routinely BOTH ignored and a real Git repository, and erroring
+			// here meant it never reached classifyRuntimeDebris at all: the
+			// structural exclusion #189 exists for could not run, and recovery
+			// died on an ignore rule.
+			//
+			// The exception is structural and grants the ignore file nothing.
+			// A path that is its own Git repository is excluded whether it is
+			// ignored or not, so `.gitignore` cannot move anything from one
+			// side of the decision to the other; it can only decide whether the
+			// runtime is allowed to SEE a path it would have excluded anyway.
+			if p := strings.TrimSuffix(rec[3:], "/"); isNestedRepository(dir, p) {
+				paths = append(paths, rec[3:])
+				continue
+			}
 			return nil, fmt.Errorf("ignored candidate file %q", rec[3:])
 		}
 		if len(rec) < 4 {
@@ -462,5 +1186,8 @@ func remoteGit(dir string, identity RemoteIdentity, credentials CredentialProvid
 		Local:  controlPolicy(),
 		Remote: &RemotePolicy{Identity: identity, Credentials: credentials},
 	}
+}
+func runGitInput(dir string, input []byte, args ...string) ([]byte, error) {
+	return RepositoryGitRunner{Dir: dir, Local: controlPolicy(), Input: input}.run(args...)
 }
 func runGitIgnore(dir string, args ...string) error { _, err := runGit(dir, args...); return err }

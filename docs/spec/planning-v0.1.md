@@ -195,7 +195,9 @@ a real defect: `max_execution_attempts` bounds retries of ONE execution binding,
 while `max_provider_invocations` is the RUN TOTAL across every binding. A
 continuation is a new binding with its own attempt allowance, so a plan's
 remaining aggregate carried as an attempt ceiling can be spent more than once.
-The plan's remainder is carried as the total.
+The plan's remainder is carried as the total. The total refuses the next
+invocation the run would dispatch, never the one that spent its last unit: that
+invocation's output is still committed, assured and handed off (#514).
 
 `child_runs`, `provider_invocations` and `wall_seconds` are attributed by the
 reconciler and ENFORCED against the envelope before a stage starts. Wall time is
@@ -247,6 +249,37 @@ There is no plan nesting: a stage cannot contain stages, and a template cannot
 declare a `plan` stage kind. Both refusals are in the schemas.
 
 ## Approval
+
+### Objective-bound operational graphs
+
+`autonomy plan issue <existing-issue>` requires the owning supervisor when one
+is serving. It proposes through the existing planner and binds a durable WorkGraph to the
+exact stored plan revision and digest. Binding grants no execution authority:
+the normal approval of the exact revision, plan digest and assignment digest
+remains necessary. Candidate stages execute through graph-backed ordinary runs;
+review stages and typed gates retain plan-owned semantics. The command has no
+flat orchestration fallback. A started objective graph's immutable plan binding
+cannot be replaced by another proposal. This is the canonical issue-to-plan
+entry point; `autonomy orchestrate` remains the explicit flat batch command.
+
+`PlanStage` and `TemplateStage` optionally carry `execution_kind`, with values
+`provider` and `integration_compose`. Omission preserves ordinary provider
+execution. Explicit composition requires an `agent` stage with role `integrator`
+and at least two dependencies. Gates and planner-role stages cannot select an
+execution algorithm. Role never implies composition. The field is planning
+input until validated and approved; it grants no additional authority.
+
+`PlanStage` also optionally carries `acceptance_feature`: the operator's declared
+final-integration feature acceptance (`docs/feature-acceptance.md`). Only the
+planning request sets it, the compiler stamps it on the one final
+`integration_compose` stage, a planner proposal cannot carry it, and the stage's
+effective input set is at most 19 units. It is part of the plan digest and grants no
+authority: policy still decides what the declaration requires.
+
+These optional JSON fields preserve existing artifacts when absent. New
+objective graph bindings and explicit algorithms require a compatible build;
+older controllers must not adopt their persisted state. There is no new
+scheduler, policy system or dependency.
 
 A proposed plan never executes because it parsed. The lifecycle is:
 

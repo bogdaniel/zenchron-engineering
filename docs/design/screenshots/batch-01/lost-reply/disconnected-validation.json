@@ -1,0 +1,11 @@
+{
+  "source": "Isolated test data, actual controller/socket/role/journal; no production fleet measurements",
+  "phase": "disconnected",
+  "checks": [
+    "Reopened read store and controller socket/role; historical receipt recovered; independent identity/reachability; no mutation"
+  ],
+  "captures": [
+    "receipt-disconnected-390.png",
+    "controller-disconnected-390.png"
+  ]
+}

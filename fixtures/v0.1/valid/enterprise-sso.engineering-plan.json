@@ -131,7 +131,31 @@
       "provider_mode": "plan",
       "workspace_digest_before": "5a3f0f1f6b0e3a2d4c5b6a798899101112131415161718192021222324252627",
       "workspace_digest_after": "5a3f0f1f6b0e3a2d4c5b6a798899101112131415161718192021222324252627",
-      "workspace_unchanged": true
+      "workspace_unchanged": true,
+      "invocation": {
+        "executable": "claude",
+        "provider_version": "2.1.0 (Claude Code)",
+        "permission_mode": "plan",
+        "auth_mode": "local_cli_session",
+        "auth_mode_source": "provider_state",
+        "workspace_bound": false,
+        "workspace_instructions_suppressed": true,
+        "argv": ["--print", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "[prompt]"],
+        "prompt_sha256": "9f2c5a7e1b3d4c6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5a6",
+        "execution_deadline": "2026-09-26T18:20:08Z",
+        "execution_started_at": "2026-09-26T17:50:08Z",
+        "execution_completed_at": "2026-09-26T17:52:41Z",
+        "observed_wall_elapsed": 153000000000,
+        "termination_cause": "provider_returned",
+        "inactivity_limit": 600000000000,
+        "progress_mode": "structured_claude_events",
+        "structured_progress_events": 41,
+        "final_result_observed": true,
+        "permission_denials": 1,
+        "permission_denied_tools": ["WebFetch"],
+        "process_id": 48213,
+        "git_guarded": true
+      }
     },
     "previous_revision": 2,
     "proposal_id": "proposal-sso-002"

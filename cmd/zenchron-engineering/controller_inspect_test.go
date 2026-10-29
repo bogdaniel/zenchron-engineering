@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/runtime"
@@ -41,12 +42,19 @@ func TestInspectSelfReportsOnlyItsOwnProvenance(t *testing.T) {
 	// An attested build reports the injected identity together with a digest
 	// measured from the running executable - which is what the adopted builder
 	// compares against what it asked for.
-	attested, err := buildProvenance(runtime.ControllerAdopted, "main-abc12345",
-		"abc1234500000000000000000000000000000000", "def4567800000000000000000000000000000000",
-		func() (string, error) { return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", nil })
+	attestedSelf, err := runtime.ControllerIdentityFrom(runtime.ControllerDeclaration{
+		Kind: runtime.ControllerAdopted, Version: "main-abc12345",
+		SourceRevision: "abc1234500000000000000000000000000000000",
+		SourceTree:     "def4567800000000000000000000000000000000",
+	},
+		func() (string, error) { return "/controller/zenchron-engineering", nil },
+		func(string) (string, error) {
+			return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", nil
+		})
 	if err != nil {
 		t.Fatal(err)
 	}
+	attested := attestedSelf.Build
 	if attested.Kind != runtime.ControllerAdopted || attested.BinarySHA256 == "" {
 		t.Fatalf("an attested build did not report a measured identity: %+v", attested)
 	}
@@ -119,5 +127,46 @@ func TestUsageNamesTheControllerCommands(t *testing.T) {
 		if !bytes.Contains([]byte(err.Error()), []byte(want)) {
 			t.Fatalf("usage does not mention %q: %v", want, err)
 		}
+	}
+}
+
+// THE IDENTITY IS THE PROGRAM, NOT THE BUILD.
+//
+// A run's ControllerBinding carries the identity and the build as separate
+// members, and succession requires the identity to be unchanged while the
+// build advances. An identity computed from the build version satisfied that
+// condition only when nothing had changed, which is the one case succession is
+// not for: every automated upgrade would have been refused for having upgraded.
+func TestTheControllerIdentityDoesNotMoveWithTheBuild(t *testing.T) {
+	original := version
+	t.Cleanup(func() { version = original })
+
+	version = "main-aaaaaaa"
+	first := controllerIdentity()
+	version = "main-bbbbbbb"
+	second := controllerIdentity()
+
+	if first != second {
+		t.Fatalf("the controller identity moved from %q to %q for a new build of the same program", first, second)
+	}
+	if strings.Contains(first, version) || strings.Contains(first, "main-") {
+		t.Fatalf("the controller identity %q still carries a build version", first)
+	}
+}
+
+// A FACT THE PROVIDER DOES NOT EXPOSE IS UNKNOWN, NOT ABSENT.
+//
+// Codex CLI selects its own model and reports none; Claude Code reports
+// "sonnet". Both are truthful. Omitting the line for the first would let a
+// reader assume a default, which is a claim nobody made.
+func TestAnUnexposedModelRendersAsUnknown(t *testing.T) {
+	if got := orUnknown(""); got != "unknown" {
+		t.Fatalf("model = %q, want %q", got, "unknown")
+	}
+	if got := orUnknown("   "); got != "unknown" {
+		t.Fatalf("whitespace is not a model: %q", got)
+	}
+	if got := orUnknown("sonnet"); got != "sonnet" {
+		t.Fatalf("model = %q, want what the provider reported", got)
 	}
 }

@@ -56,6 +56,25 @@ type PlanService struct {
 	// Envelope is the OPERATOR's aggregate ceiling. A plan may be tighter and
 	// can never be wider, and only this path can raise it.
 	Envelope domain.PlanBudgetEnvelope
+	// Config is the controller-effective configuration this process runs
+	// under. A plan records it when first claimed, and a plan recorded under
+	// another one is held rather than revised, approved or dispatched (#307).
+	Config ConfigDigest
+}
+
+// RefuseConfigurationHold refuses work on a plan that belongs to another
+// controller-effective configuration. It is checked before anything is spent:
+// a revision would otherwise pay for a planning invocation on a plan that can
+// never dispatch.
+func (s PlanService) RefuseConfigurationHold(planID string) error {
+	held, err := planConfigurationHold(s.Store, planID, s.Config)
+	if err != nil {
+		return err
+	}
+	if held != "" {
+		return &PlanRefusedError{PlanID: planID, Detail: held}
+	}
+	return nil
 }
 
 func (s PlanService) now() time.Time {
@@ -91,6 +110,9 @@ type ProposeInput struct {
 	Issue int
 	// Template is the operator's chosen reusable process, or empty.
 	Template string
+	// Profile is the operator's default profile preference for agent stages.
+	// A template or reasoning proposal may state a more specific preference.
+	Profile string
 	// Reasoned is a reasoning agent's proposed stages, and Reasoning its
 	// provenance. Both are absent for a purely deterministic compilation, which
 	// is a first-class mode rather than a fallback: the deterministic skeleton
@@ -109,6 +131,10 @@ type ProposeInput struct {
 	References []PlanSourceReferencePayload
 	// Origin states where the proposal came from, for the durable record.
 	Origin string
+	// AcceptanceFeature is the operator's declared final-integration feature
+	// acceptance. A revision that states none inherits the previous revision's,
+	// so a re-proposal cannot drop what the operator declared.
+	AcceptanceFeature string
 }
 
 // PlanAttemptRefusedError is the typed refusal for a proposal that deterministic
@@ -186,6 +212,18 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	if s.Store == nil {
 		return domain.EngineeringPlan{}, &PlanRefusedError{Detail: "a durable store is required"}
 	}
+	if err := s.RefuseConfigurationHold(input.PlanID); err != nil {
+		return domain.EngineeringPlan{}, err
+	}
+	// A hard ceiling nothing reports against is refused rather than carried as
+	// one the plan appears to honor (the StopCostBudgetUnenforceable law).
+	if s.Envelope.MaxCostMicros != nil {
+		return domain.EngineeringPlan{}, &PlanRefusedError{PlanID: input.PlanID,
+			Detail: "the operator's plan ceiling names max_cost_micros, but no execution provider reports cost to a plan, so it would be silently unenforced; remove plan.max_cost_micros"}
+	}
+	if err := s.refuseStartedObjectiveRevision(input.PlanID); err != nil {
+		return domain.EngineeringPlan{}, err
+	}
 	existing, found, err := s.Store.Plan(input.PlanID)
 	if err != nil {
 		return domain.EngineeringPlan{}, err
@@ -204,6 +242,11 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 		}
 		template = &resolved
 	}
+	if input.Profile != "" {
+		if _, err := s.Registry.Profile(input.Profile); err != nil {
+			return domain.EngineeringPlan{}, err
+		}
+	}
 	origin := input.Origin
 	if origin == "" {
 		origin = domain.ProposalOriginInitial
@@ -216,12 +259,33 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	// below it is refused at compile time rather than approved and then blocked
 	// at the first stage that tries to run under it.
 	var consumed domain.PlanConsumption
+	// The privilege ratchet's floor: the latest revision an OPERATOR approved,
+	// never merely the latest stored one. `previous` above is the latest
+	// stored revision whatever its status, and a rejected or still-pending
+	// proposal grants no privilege floor - see planning.ValidationInput's
+	// RatchetBaseline. Nil here means nothing has ever been approved, which is
+	// itself the correct answer: there is no proposal-history floor to hold a
+	// first or still-unapproved proposal to.
+	var ratchetBaseline *domain.EngineeringPlan
 	if found {
 		snapshot, err := s.Store.ReplayPlan(input.PlanID)
 		if err != nil {
 			return domain.EngineeringPlan{}, err
 		}
 		consumed = snapshot.Consumed
+		if approvedRevision, ok := snapshot.ApprovedRevision(); ok {
+			baseline, baselineFound, err := s.Store.PlanRevision(input.PlanID, approvedRevision)
+			if err != nil {
+				return domain.EngineeringPlan{}, err
+			}
+			if !baselineFound {
+				return domain.EngineeringPlan{}, &PlanRefusedError{
+					PlanID: input.PlanID,
+					Detail: fmt.Sprintf("revision %d is approved and not stored, so a new proposal cannot be checked against it", approvedRevision),
+				}
+			}
+			ratchetBaseline = &baseline
+		}
 	}
 	// WHETHER A BASE REBINDING IS AUTHORIZED, before anything is compiled.
 	//
@@ -238,13 +302,23 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 	// evidence exactly like a refused decomposition.
 	var plan domain.EngineeringPlan
 	compileErr := unauthorizedRebind(input, previous)
+	if previous != nil && input.AcceptanceFeature == "" {
+		input.AcceptanceFeature = previous.DeclaredAcceptanceFeature()
+	}
 	if compileErr == nil {
 		plan, compileErr = planning.Compile(planning.CompileInput{
 			PlanID: input.PlanID, Revision: revision, Objective: input.Objective,
 			Subject: input.Subject, Contract: input.Contract, Model: input.Model, Facts: input.Facts,
-			Template: template, Envelope: s.Envelope, Proposed: input.Reasoned,
-			Reasoning: input.Reasoning, Previous: previous, Consumed: consumed,
+			Template: template, PreferredProfile: input.Profile, Envelope: s.Envelope, Proposed: input.Reasoned,
+			Reasoning: input.Reasoning, Previous: previous, RatchetBaseline: ratchetBaseline, Consumed: consumed,
+			AcceptanceFeature: input.AcceptanceFeature,
 		})
+	}
+	if compileErr == nil {
+		compileErr = validateAcceptanceFeaturePlan(plan)
+	}
+	if compileErr == nil && input.Issue > 0 && !hasObjectiveCandidate(plan) {
+		compileErr = errors.New("an issue objective plan requires at least one material-producing agent stage")
 	}
 	if compileErr != nil {
 		// The refusal is durable in BOTH shapes it can take.
@@ -293,6 +367,11 @@ func (s PlanService) Propose(ctx context.Context, input ProposeInput) (domain.En
 				Detail: "the plan was created concurrently by another proposal; read it and propose again from what is now stored",
 			}
 		}
+	}
+	// The configuration this plan belongs to. First binding wins, so this is
+	// idempotent on every revision and repairs a crash between claim and bind.
+	if err := s.Store.BindPlanConfig(plan.ID, s.Config); err != nil {
+		return domain.EngineeringPlan{}, err
 	}
 	// ClaimPlan writes the first revision with the plan row, in one
 	// transaction, so a first proposal's PutPlanRevision is a no-op by
@@ -381,6 +460,9 @@ func unstarted(assignments []domain.AgentAssignment, snapshot PlanSnapshot) []do
 // assignments the registry happened to resolve at decide time. Naming it is
 // what makes the approval a decision about work the operator actually read.
 func (s PlanService) Approve(planID string, revision int, digest, assignments, operator, note string) (PlanSnapshot, error) {
+	if err := s.RefuseConfigurationHold(planID); err != nil {
+		return PlanSnapshot{}, err
+	}
 	return s.decide(planID, revision, digest, assignments, operator, note, EventPlanApproved)
 }
 
@@ -388,6 +470,25 @@ func (s PlanService) Approve(planID string, revision int, digest, assignments, o
 // "we looked at this and said no" is a fact about the work.
 func (s PlanService) Reject(planID string, revision int, digest, assignments, operator, note string) (PlanSnapshot, error) {
 	return s.decide(planID, revision, digest, assignments, operator, note, EventPlanRejected)
+}
+
+// ErrPlanNotAwaitingDecision refuses a decision on a revision that is not the
+// one awaiting a decision.
+var ErrPlanNotAwaitingDecision = errors.New("the revision is not awaiting a decision")
+
+// RefuseUnlessAwaitingDecision is the GOVERNED decision's precondition (#398):
+// a second reject, or a reject after a concurrent approval, appends nothing.
+// The caller holds the plan lock across this check and the decision. The CLI
+// does not use it: an operator may still approve what they rejected.
+func (s PlanService) RefuseUnlessAwaitingDecision(planID string, revision int) error {
+	snapshot, err := s.Store.ReplayPlan(planID)
+	if err != nil {
+		return err
+	}
+	if !snapshot.AwaitingDecision(revision) {
+		return fmt.Errorf("%w: plan %s revision %d", ErrPlanNotAwaitingDecision, planID, revision)
+	}
+	return nil
 }
 
 func (s PlanService) decide(planID string, revision int, digest, assignments, operator, note, eventType string) (PlanSnapshot, error) {
@@ -645,44 +746,6 @@ func sameStageContent(left, right domain.PlanStage) bool {
 	return string(leftJSON) == string(rightJSON)
 }
 
-// PlanView is the operator's whole answer about one plan: the exact revision,
-// its replayed state, the assignments resolution would produce, and every stage
-// that cannot be assigned with the reason.
-type PlanView struct {
-	Plan     domain.EngineeringPlan   `json:"plan"`
-	Snapshot PlanSnapshot             `json:"state"`
-	Assigned []domain.AgentAssignment `json:"assignments,omitempty"`
-	Blocked  []planning.Blocked       `json:"blocked,omitempty"`
-	// Consumed and Envelope are shown together, and unknown cost stays unknown:
-	// an approval view that rendered "not reported" as zero would be telling an
-	// operator something nobody measured.
-	Envelope domain.PlanBudgetEnvelope `json:"budget_envelope"`
-	Consumed domain.PlanConsumption    `json:"consumed"`
-	// Preview is present when the revision shown is NOT the one governing the
-	// work. The state beside it is then prospective - what approving this
-	// revision would leave - rather than a report of what is happening.
-	Preview *PlanPreview `json:"preview,omitempty"`
-	// BaseChange is present when this revision binds a different exact base than
-	// the revision it replaces. Approving it authorizes work against a different
-	// tree, and everything performed against the old base is redone.
-	BaseChange *PlanBaseChange `json:"base_change,omitempty"`
-	// AssignmentsDigest is the digest of the assignments approving THIS view
-	// would bind: who performs each stage that has not started, under which
-	// profile, packs, context and worker.
-	//
-	// It exists so a decision can name it. The plan digest binds the document,
-	// and registry and workforce edits do not change that document - so an edit
-	// landing between reading a proposal and deciding on it would be bound as
-	// "what the operator saw". Naming this closes that the same way naming the
-	// revision digest closed deciding an unread document.
-	AssignmentsDigest string `json:"assignments_digest,omitempty"`
-	// Unbound is the stages this revision's approval bound NOTHING for, in
-	// stage order: they showed a blocker rather than an assignment, so there
-	// was no identity to hold execution to and they resolve live when they
-	// become performable.
-	Unbound []string `json:"unbound,omitempty"`
-}
-
 // PlanBaseChange states that this revision moved the plan onto a different
 // exact base of the SAME repository.
 //
@@ -749,24 +812,56 @@ func (s PlanService) View(planID string) (PlanView, error) { return s.ViewRevisi
 // an operator reads the proposal they are being asked about while a different
 // revision is executing.
 func (s PlanService) ViewRevision(planID string, revision int) (PlanView, error) {
-	plan, found, err := s.Store.Plan(planID)
+	plan, snapshot, preview, err := s.durable(planID, revision)
 	if err != nil {
 		return PlanView{}, err
 	}
+	view, err := s.viewOf(plan, snapshot)
+	if err != nil {
+		return PlanView{}, err
+	}
+	view.Preview = preview
+	return view, nil
+}
+
+// DurableView is ViewRevision without assignment resolution: only what the
+// store records - the revision, its replayed state, the preview against the
+// governing revision and the base change. Resolution needs the governing
+// controller's agents and profiles; a reader without that configuration
+// would invent Unbound and Blocked verdicts, so it does not resolve at all
+// (#425).
+func (s PlanService) DurableView(planID string, revision int) (PlanView, error) {
+	plan, snapshot, preview, err := s.durable(planID, revision)
+	if err != nil {
+		return PlanView{}, err
+	}
+	view, err := s.durableViewOf(plan, snapshot)
+	view.Preview = preview
+	return view, err
+}
+
+// durable selects the revision a view describes and the snapshot it is read
+// against: the governing revision by default, or one exact revision previewed
+// against the governing one.
+func (s PlanService) durable(planID string, revision int) (domain.EngineeringPlan, PlanSnapshot, *PlanPreview, error) {
+	plan, found, err := s.Store.Plan(planID)
+	if err != nil {
+		return domain.EngineeringPlan{}, PlanSnapshot{}, nil, err
+	}
 	if !found {
-		return PlanView{}, &PlanRefusedError{PlanID: planID, Detail: "no such plan"}
+		return domain.EngineeringPlan{}, PlanSnapshot{}, nil, &PlanRefusedError{PlanID: planID, Detail: "no such plan"}
 	}
 	snapshot, err := s.Store.ReplayPlan(planID)
 	if err != nil {
-		return PlanView{}, err
+		return domain.EngineeringPlan{}, PlanSnapshot{}, nil, err
 	}
 	if revision > 0 {
 		exact, exactFound, err := s.Store.PlanRevision(planID, revision)
 		if err != nil {
-			return PlanView{}, err
+			return domain.EngineeringPlan{}, PlanSnapshot{}, nil, err
 		}
 		if !exactFound {
-			return PlanView{}, &PlanRefusedError{
+			return domain.EngineeringPlan{}, PlanSnapshot{}, nil, &PlanRefusedError{
 				PlanID: planID, Detail: fmt.Sprintf("revision %d does not exist", revision),
 			}
 		}
@@ -778,14 +873,9 @@ func (s PlanService) ViewRevision(planID string, revision int) (PlanView, error)
 		// preview; it is one document decorated with another's execution.
 		preview, prospective, err := s.previewSnapshot(exact, snapshot)
 		if err != nil {
-			return PlanView{}, err
+			return domain.EngineeringPlan{}, PlanSnapshot{}, nil, err
 		}
-		view, err := s.viewOf(exact, prospective)
-		if err != nil {
-			return PlanView{}, err
-		}
-		view.Preview = preview
-		return view, nil
+		return exact, prospective, preview, nil
 	}
 	// The revision shown is the one that GOVERNS: the approved revision when
 	// there is one, and the latest proposal otherwise. Showing the newest
@@ -793,13 +883,13 @@ func (s PlanService) ViewRevision(planID string, revision int) (PlanView, error)
 	if approved, ok := snapshot.ApprovedRevision(); ok && approved != plan.Revision {
 		governing, governingFound, err := s.Store.PlanRevision(planID, approved)
 		if err != nil {
-			return PlanView{}, err
+			return domain.EngineeringPlan{}, PlanSnapshot{}, nil, err
 		}
 		if governingFound {
 			plan = governing
 		}
 	}
-	return s.viewOf(plan, snapshot)
+	return plan, snapshot, nil, nil
 }
 
 // viewOf renders one exact plan document beside the plan's replayed state.
@@ -854,13 +944,28 @@ func (s PlanService) previewSnapshot(plan domain.EngineeringPlan, snapshot PlanS
 	return preview, prospective, nil
 }
 
-func (s PlanService) viewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanView, error) {
+func (s PlanService) durableViewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanView, error) {
 	view := PlanView{Plan: plan, Snapshot: snapshot, Envelope: plan.BudgetEnvelope, Consumed: snapshot.Consumed}
+	graph, err := objectiveGraphFor(s.Store, plan.ID)
+	if err != nil {
+		return PlanView{}, err
+	}
+	if graph != nil {
+		view.WorkGraphID = graph.ID
+	}
 	baseChange, err := s.baseChange(plan)
 	if err != nil {
 		return PlanView{}, err
 	}
 	view.BaseChange = baseChange
+	return view, nil
+}
+
+func (s PlanService) viewOf(plan domain.EngineeringPlan, snapshot PlanSnapshot) (PlanView, error) {
+	view, err := s.durableViewOf(plan, snapshot)
+	if err != nil {
+		return PlanView{}, err
+	}
 	resolution, err := s.Resolve(plan, snapshot)
 	if err != nil {
 		return PlanView{}, err
@@ -1403,6 +1508,9 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, previous *domain.E
 	if _, err := s.Store.ClaimPlanAttempt(input.PlanID, repository, s.now()); err != nil {
 		return "", err
 	}
+	if err := s.Store.BindPlanConfig(input.PlanID, s.Config); err != nil {
+		return "", err
+	}
 	// The identity answers the SOURCE, whether or not it ever reached a plan.
 	// Binding it here is what lets `plan show` say which issue the operator was
 	// planning; without it the record described an attempt at nothing in
@@ -1467,6 +1575,14 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, previous *domain.E
 	}
 	if input.Reasoning != nil {
 		payload.Reasoning = reasoningPayload(*input.Reasoning)
+		// HOW THE REFUSED INVOCATION RAN AND ENDED (#327). A planner killed at
+		// its deadline produces no revision, so this attempt record is the only
+		// durable home its provenance has. It is fitted to the event beside
+		// everything else the attempt carries, never allowed to make the
+		// refusal itself unappendable.
+		if observed := input.Reasoning.Invocation; observed != nil {
+			fitRefusalInvocation(&payload, *observed)
+		}
 	}
 	// The transcripts are attached as event ARTIFACTS as well as referenced in
 	// the payload, so they pass the same ValidateArtifact discipline every other
@@ -1484,6 +1600,41 @@ func (s PlanService) recordRefusedAttempt(input ProposeInput, previous *domain.E
 		return "", err
 	}
 	return recorded.AttemptID, nil
+}
+
+// fitRefusalInvocation attaches a refused planning invocation's provenance to
+// its attempt record, fitted to the event beside everything else the attempt
+// carries. It is measured with the LONGEST attempt id the journal may allocate
+// in place of the pending one, so the allocation cannot push it over.
+//
+// It never makes the refusal itself unappendable. When even the fixed-size
+// core cannot fit - only a refusal already at the ceiling on its own - the
+// record says so with invocation_dropped_for_size, so "dropped" is never
+// confused with "the provider reported none".
+func fitRefusalInvocation(payload *PlanAttemptRefusedPayload, observed domain.InvocationObservation) {
+	fits := func(reasoning PlanReasoningPayload) bool {
+		candidate := *payload
+		candidate.Reasoning, candidate.AttemptID = &reasoning, strings.Repeat("a", maxPayloadFieldBytes)
+		return appendable(EventPlanAttemptRefused, candidate)
+	}
+	with := func(o *domain.InvocationObservation) PlanReasoningPayload {
+		reasoning := *payload.Reasoning
+		reasoning.Invocation = o
+		return reasoning
+	}
+	fitted := fitObservation(observed, func(o domain.InvocationObservation) bool { return fits(with(&o)) })
+	if fits(with(&fitted)) {
+		payload.Reasoning.Invocation = &fitted
+		return
+	}
+	dropped := with(nil)
+	dropped.InvocationDroppedForSize = true
+	// ponytail: a refusal within a few bytes of the ceiling cannot even take
+	// the flag, and records neither; that record was already at the limit
+	// before #327 and stays appendable.
+	if fits(dropped) {
+		*payload.Reasoning = dropped
+	}
 }
 
 // attemptStages reduces the proposal to the members that decide whether it is
@@ -1682,4 +1833,36 @@ func (s PlanService) AttemptsView(planID string) (PlanAttemptsView, error) {
 		}, nil
 	}
 	return PlanAttemptsView{}, &PlanRefusedError{PlanID: planID, Detail: "no such plan"}
+}
+
+// DecisionEventFor finds the durable decision this invocation asked for, by
+// revision, digest and verb. It reads the journal rather than a projection
+// because a projection answers about the present and this question is about the
+// past: a later proposal, a later decision, or a supersession all move the
+// present without unmaking what already happened.
+func DecisionEventFor(events []EngineeringEvent, verb string, revision int, digest string) (PlanApproval, bool) {
+	want := EventPlanApproved
+	status := domain.ApprovalApproved
+	if verb == "reject" {
+		want, status = EventPlanRejected, domain.ApprovalRejected
+	}
+	for _, event := range events {
+		if event.Type != want {
+			continue
+		}
+		var payload PlanDecisionPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			// An unreadable decision record is not this decision. It is also
+			// not a reason to claim one landed.
+			continue
+		}
+		if payload.Revision != revision || payload.Digest != digest {
+			continue
+		}
+		return PlanApproval{
+			Revision: payload.Revision, Digest: payload.Digest,
+			Status: status, Operator: payload.Operator, Note: payload.Note,
+		}, true
+	}
+	return PlanApproval{}, false
 }

@@ -1,0 +1,8 @@
+{
+  "name": "zenchron-browser-assurance",
+  "private": true,
+  "description": "Playwright driver for the pinned browser-capable assurance image. Installed with npm ci; the lockfile is the pin.",
+  "dependencies": {
+    "playwright-core": "1.49.1"
+  }
+}

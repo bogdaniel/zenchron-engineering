@@ -1,0 +1,38 @@
+{{define "title"}}runs{{end}}
+{{define "content"}}
+<section class="panel">
+  <h1>runs</h1>
+  <p class="meta" id="runs-meta" data-live>observed {{fmtTime .ObservedAt}} · {{.Fleet.Executing}}{{if .Fleet.Capacity}} / {{.Fleet.Capacity}}{{end}} executing · {{.Fleet.Active}} active</p>
+
+  <nav class="filters" aria-label="status filter">
+    <a href="{{runsLink "" .Filter.Source}}" {{if eq .Filter.Status ""}}class="active" aria-current="true"{{end}}>all</a>
+    <a href="{{runsLink "active" .Filter.Source}}" {{if eq .Filter.Status "active"}}class="active" aria-current="true"{{end}} data-state="active">active</a>
+    <a href="{{runsLink "waiting" .Filter.Source}}" {{if eq .Filter.Status "waiting"}}class="active" aria-current="true"{{end}} data-state="waiting">waiting</a>
+    <a href="{{runsLink "failed" .Filter.Source}}" {{if eq .Filter.Status "failed"}}class="active" aria-current="true"{{end}} data-state="failed">failed</a>
+    <a href="{{runsLink "completed" .Filter.Source}}" {{if eq .Filter.Status "completed"}}class="active" aria-current="true"{{end}} data-state="completed">completed</a>
+    <a href="{{runsLink "cancelled" .Filter.Source}}" {{if eq .Filter.Status "cancelled"}}class="active" aria-current="true"{{end}} data-state="cancelled">cancelled</a>
+    <a href="{{runsLink "held" .Filter.Source}}" {{if eq .Filter.Status "held"}}class="active" aria-current="true"{{end}} data-state="held_material">held material</a>
+  </nav>
+
+  <form class="source-filter" method="get" action="/runs">
+    <input type="hidden" name="status" value="{{.Filter.Status}}">
+    <label for="source">source issue</label>
+    <input id="source" name="source" type="text" placeholder="owner/repo#123 or 123" value="{{.Filter.Source}}">
+    <button type="submit">filter</button>
+    {{if .Filter.Source}}<a href="{{runsLink .Filter.Status ""}}">clear</a>{{end}}
+  </form>
+
+  <div class="graph-map" id="runs-table" data-live>
+    {{range .Runs}}<article class="stat" data-run-id="{{.ID}}">
+      <a href="/runs/{{.ID}}"><strong>{{.Repository}}{{if .Issue}} · Issue #{{.Issue}}{{else}} · Engineering run{{end}}</strong></a>
+      <span><span data-state="{{.Phase}}">{{.Phase}}</span> / <span data-state="{{.Disposition}}">{{.Disposition}}</span></span>
+      <span>{{if .Agent}}{{.Agent}}{{else}}Worker unknown{{end}}{{if .Operation}} · {{.Operation}} #{{.Attempt}}{{end}}</span>
+      <span class="muted">{{fmtDuration .Elapsed}} elapsed{{if .Executing}} · currently executing{{end}}</span>
+      {{if .Held}}<span class="badge held" data-state="held_material">held — operator attention required</span>{{end}}
+      {{if .PullRequest}}<span>PR #{{.PullRequest}} · {{.PRState}}{{if .CI}} · CI <span data-state="{{.CI}}">{{.CI}}</span>{{end}}{{if .Review}} · review <span data-state="{{.Review}}">{{.Review}}</span>{{end}}</span>{{end}}
+      <details><summary>Runtime details</summary><p class="mono">{{.ID}}</p><p>{{.ProviderKind}}{{if .Model}} · {{.Model}}{{end}}</p><p class="mono">{{.Branch}}<br>{{.CandidateRevision}}</p>{{range $kind, $n := .Attempts}}<div>{{$kind}}: {{$n}}</div>{{end}}</details>
+      {{if .Unavailable}}<p class="banner error">{{.ID}}: could not be replayed</p>{{end}}
+    </article>{{else}}<p class="empty">no runs match this filter</p>{{end}}
+  </div>
+</section>
+{{end}}
