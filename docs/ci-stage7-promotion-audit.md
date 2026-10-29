@@ -21,16 +21,14 @@ Observed 2026-10-28, `main` = `a1ea63ec5a31845735da09a953c48d9a82da45b2`
 | At least two weeks of T0/T1 shadow | **Met**: 21 days (#520 merged 2026-10-07T22:29:53Z; observed to 2026-10-28) |
 | At least 30 merged PRs | **Met**: 98 merged after #520 |
 | Representative high-risk and multi-domain changes | **Met**: see Coverage |
-| Every T1-PASS / `go`-not-PASS case explained (ADR-0007: a mapping fixed, or shown to be a flaky full-suite failure with re-run evidence) | **Met on the evidence below, with limits that need an owner decision**: 10 observations (9 `go` failures, 1 cancellation); none shows a selector miss in the current replay (which cannot rule one out under an older registry, Findings). Re-run evidence exists for 7 of the 9 failures: 3 passed in the T1 whole-`runtime` job on the same head, and 4 were rerun at the exact failing commit (10/10 idle on all four, 80/80 under 8-way load on two; **local runs, and the CI failure did not reproduce**). The other 2 failures are package-alarm timeouts, one of which also passed in the T1 whole-`runtime` job. No GitHub-hosted rerun of any `go` job was made |
+| Every T1-PASS / `go`-not-PASS case explained (ADR-0007: a mapping fixed, or shown to be a flaky full-suite failure with re-run evidence) | **Evidence recorded, verdict reserved for the owner**: 10 observations (9 `go` failures, 1 cancellation); none shows a selector miss in the current replay (which cannot rule one out under an older registry, Findings). Re-run evidence: the `go` job of all four narrow-selection failures was **rerun on GitHub (attempt 2, owner-authorized 2026-10-29) and passed the full suite**; 3 further failures passed in the T1 whole-`runtime` job on the same head; the remaining 2 are package-alarm timeouts, one of which also passed in the T1 whole-`runtime` job. Original failures are kept as attempt 1 |
 | Flaky failures separated from selector misses | **Done**: 2 of 98 merge commits had a red T2, both flaky/infra |
 | Controller runs the Stage 5 policy | **Met**: see Controller |
 
-Every gate is met on the evidence stated, with the limits above: the four
-rerun-evidenced failures were rerun locally, not on GitHub, and did not reproduce.
-Whether local same-revision reruns satisfy ADR-0007's re-run evidence is an owner
-decision, not something this audit decides; a GitHub-hosted rerun of those four
-`go` jobs would settle it. The residual risk is the flaky runtime
-tests themselves (Findings), which affect T2 whether or not Stage 7 is applied.
+The gates are met on the evidence stated, subject to the owner's evaluation of
+the re-run evidence against ADR-0007 (hosted reruns below). The residual risk is
+the flaky runtime tests
+themselves (Findings), which affect T2 whether or not Stage 7 is applied.
 
 ## Coverage
 
@@ -80,44 +78,54 @@ the same commit** (the T1 whole-`runtime` run), not that `go` was rerun.
 | Run | Head | `go` failure | T1 evidence on that head | Class | Explanation |
 |-----|------|--------------|-----------|-------|-------------|
 | [40668929651](https://github.com/bogdaniel/zenchron-engineering/actions/runs/40668929651) | `a5a609fe` | `TestSameGenerationWithoutTheLeaseHasNoAuthority` | whole `runtime` ran and passed (2208 tests under T1) | directly evidenced flaky | that test passed in the whole-`runtime` T1 run on the same commit |
-| [39981229955](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39981229955) | `dca145e9` | `TestALongToolIsSuspendedThroughoutAndClearsOnClose` | narrow: 350 tests | rerun-evidenced flaky (local) | the test passed 10/10 idle and 80/80 under load at this exact commit; the PR changed adopted-build/controller-status code, the test is provider suspension timing, and it fails on unrelated PRs below |
+| [39981229955](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39981229955) | `dca145e9` | `TestALongToolIsSuspendedThroughoutAndClearsOnClose` | narrow: 350 tests | hosted-rerun green (flaky) | attempt 2 of this run passed the full `go` job (locally the test also passed 10/10 idle and 80/80 under load); the PR changed adopted-build/controller-status code, the test is provider suspension timing, and it fails on unrelated PRs below |
 | [39760145989](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39760145989) | `ca2063c2` | `runtime` package alarm | narrow: 6 guard tests | timeout | 30-minute package alarm on a hosted runner (#656 raised it to 45m); a capacity failure, not a failing test, and no same-head full run exists |
-| [39157650978](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39157650978) | `4646e55c` | `TestNestedVerificationNativeShimAndCandidateRunShareCapacity` | 6 guard tests only | rerun-evidenced flaky (local) | the test passed 10/10 idle at this exact commit; the PR changed only PNG files under `docs/acceptance/`, so no code path can explain it |
-| [39075179632](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39075179632) | `ff48c009` | same nested-verification test | narrow: 353 tests (orchestration, workgraph, remediation, planning); the test belongs to `verification`, which the PR did not touch | rerun-evidenced flaky (local) | the test passed 10/10 idle and 80/80 under load at this exact commit; it belongs to `verification`, which the PR did not touch, and it failed on the docs-only PR above |
+| [39157650978](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39157650978) | `4646e55c` | `TestNestedVerificationNativeShimAndCandidateRunShareCapacity` | 6 guard tests only | hosted-rerun green (flaky) | attempt 2 of this run passed the full `go` job (locally the test also passed 10/10 idle); the PR changed only PNG files under `docs/acceptance/`, so no code path can explain it |
+| [39075179632](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39075179632) | `ff48c009` | same nested-verification test | narrow: 353 tests (orchestration, workgraph, remediation, planning); the test belongs to `verification`, which the PR did not touch | hosted-rerun green (flaky) | attempt 2 of this run passed the full `go` job (locally the test also passed 10/10 idle and 80/80 under load); it belongs to `verification`, which the PR did not touch, and it failed on the docs-only PR above |
 | [38593937196](https://github.com/bogdaniel/zenchron-engineering/actions/runs/38593937196) | `29c690ef` | `runtime` package alarm (30m) | whole `runtime` passed (1528 tests) | timeout | 30-minute package alarm; the whole `runtime` passed under T1 on the same commit |
 | [38309725113](https://github.com/bogdaniel/zenchron-engineering/actions/runs/38309725113) | `34251229` | `TestTheSilentProviderFixtureReallyHasALiveDescendant` (0.20 s) | whole `runtime` passed (1280 tests) | directly evidenced flaky | that test passed in the whole-`runtime` T1 run on the same commit |
 | [37848253929](https://github.com/bogdaniel/zenchron-engineering/actions/runs/37848253929) | `aaaaab6f` | `TestNestedVerificationKilledWrapperRetainsCapacityThroughGuardCleanup` | whole `runtime` passed (1452 tests) | directly evidenced flaky | that test passed in the whole-`runtime` T1 run on the same commit; the same test failed T2 on #686 |
-| [37748697530](https://github.com/bogdaniel/zenchron-engineering/actions/runs/37748697530) | `b3935128` | `TestALongToolIsSuspendedThroughoutAndClearsOnClose` | narrow: 89 tests | rerun-evidenced flaky (local) | the test passed 10/10 idle at this exact commit; the PR changed trust/adoption code and the test is unrelated provider timing |
+| [37748697530](https://github.com/bogdaniel/zenchron-engineering/actions/runs/37748697530) | `b3935128` | `TestALongToolIsSuspendedThroughoutAndClearsOnClose` | narrow: 89 tests | hosted-rerun green (flaky) | attempt 2 of this run passed the full `go` job (locally the test also passed 10/10 idle); the PR changed trust/adoption code and the test is unrelated provider timing |
 | [39157842462](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39157842462) | `57485949` | `go` **cancelled** | n/a | cancelled | superseded by a newer push; not a failure |
 
-Counts: 1 cancelled, 2 timeouts, 3 directly evidenced flaky, 4 rerun-evidenced
-flaky (local). In four rows the whole `runtime` package passed under T1 on the same
+Counts: 1 cancelled, 2 timeouts, 3 directly evidenced flaky, 4 hosted-rerun
+green (flaky). In four rows the whole `runtime` package passed under T1 on the same
 commit (three failing tests, one timeout), so a missing selection cannot explain
 them.
 
 #### Re-run evidence for the four narrow-selection failures
 
-For each head the failing test was run in a detached worktree at that exact commit
-(`go test ./runtime -run '^<Test>$' -count=10`, then eight concurrent processes of
-the compiled test binary, `-test.count=10` each):
+**GitHub-hosted reruns.** The owner authorized `gh run rerun RUN_ID --failed` for
+these four runs on 2026-10-29. Each rerun re-executed the whole `go` job (T0 and
+`go test -json -timeout 45m ./...`) as **attempt 2 of the same run**; attempt 1, the
+original failure, is unchanged. Attempt 2 checked out the pull-request merge
+commit the run was created for (`refs/remotes/pull/N/merge` at the SHA below; for
+run 39075179632 the logs of both attempts show the same SHA). Data:
+[`ci-stage7-audit/historical-reruns.csv`](ci-stage7-audit/historical-reruns.csv).
 
-| Head | Test | Idle (10 runs) | Under load (8 x 10 runs) |
-|------|------|----------------|---------------------------|
-| `b3935128` | `TestALongToolIsSuspendedThroughoutAndClearsOnClose` | pass | not run |
-| `dca145e9` | `TestALongToolIsSuspendedThroughoutAndClearsOnClose` | pass | pass, 8 of 8 processes exit 0 |
-| `ff48c009` | `TestNestedVerificationNativeShimAndCandidateRunShareCapacity` | pass | pass, 8 of 8 processes exit 0 |
-| `4646e55c` | `TestNestedVerificationNativeShimAndCandidateRunShareCapacity` | pass | not run |
+| Run | Head | Merge ref SHA tested | Test that failed in attempt 1 | Attempt 1 `go` | Attempt 2 `go` | Attempt 2 wall time |
+|-----|------|----------------------|-------------------------------|----------------|----------------|---------------------|
+| [37748697530](https://github.com/bogdaniel/zenchron-engineering/actions/runs/37748697530) | `b3935128` | `f2375330` | `TestALongToolIsSuspendedThroughoutAndClearsOnClose` | failure | **success** | 17 m 54 s |
+| [39981229955](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39981229955) | `dca145e9` | `8d98b325` | `TestALongToolIsSuspendedThroughoutAndClearsOnClose` | failure | **success** | 28 m 02 s |
+| [39075179632](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39075179632) | `ff48c009` | `03996664` | `TestNestedVerificationNativeShimAndCandidateRunShareCapacity` | failure | **success** | 25 m 28 s |
+| [39157650978](https://github.com/bogdaniel/zenchron-engineering/actions/runs/39157650978) | `4646e55c` | `22f6589e` | `TestNestedVerificationNativeShimAndCandidateRunShareCapacity` | failure | **success** | 25 m 34 s |
 
-The limits are real. These are local runs, not GitHub-hosted reruns of the `go`
-job, and **the CI failure did not reproduce**, so "runner load" remains an
-inference from the recurrence of these tests across unrelated PRs and both red T2
-runs. A reviewer who requires hosted evidence can have the four `go` jobs rerun
-with `gh run rerun RUN_ID --failed`; that adds an attempt to a historical run and
-was not done here. The recurring timing tests (`TestALongTool…`,
-`TestNestedVerification…`) are the common cause; #689 (`6556a03`, `2f87b41`)
-hardened two of those timing assumptions after the second red T2. The current
-replay shows no selector miss; it cannot show that none occurred under an older
-registry (Findings).
+All four full-suite reruns passed on the same revision that had failed. What this
+shows: none of the four failures is deterministic at its revision, so none can be
+attributed to a missing selection. What it does not show: *why* each failed the
+first time. The tests are timing tests that recur across unrelated PRs and both red
+T2 runs, so runner load is the likely cause, but a pass does not prove it.
+
+**Local reruns (supplementary).** Before the hosted reruns, each failing test was
+also run in a detached worktree at its exact head (`go test ./runtime -run
+'^<Test>$' -count=10`: pass on all four) and, for `dca145e9` and `ff48c009`, as eight
+concurrent processes of the compiled test binary, `-test.count=10` each (80 runs
+per head, all exit 0). The CI failures did not reproduce locally.
+
+The recurring timing tests (`TestALongTool…`, `TestNestedVerification…`) are the
+common cause; #689 (`6556a03`, `2f87b41`) hardened two of those timing assumptions
+after the second red T2. The current replay shows no selector miss; it cannot show
+that none occurred under an older registry (Findings).
 
 ### The two red post-merge T2 runs
 
