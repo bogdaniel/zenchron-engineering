@@ -395,3 +395,69 @@ func TestEvaluateNonMatchingEvidenceIsMissing(t *testing.T) {
 		}
 	}
 }
+
+// nonMatchingClone is a copy of bundle bound to another subject revision, so the
+// evaluator must treat every item in it as absent whatever the item says.
+func nonMatchingClone(bundle domain.EvidenceBundle, id string, edit func(domain.EvidenceItem) domain.EvidenceItem) domain.EvidenceBundle {
+	clone := bundle
+	clone.ID = id
+	clone.Subject.Revision = "other"
+	clone.Evidence = make(map[string]domain.EvidenceItem, len(bundle.Evidence))
+	for itemID, item := range bundle.Evidence {
+		clone.Evidence[itemID] = edit(item)
+	}
+	return clone
+}
+
+func mergeInput(t *testing.T, bundles ...domain.EvidenceBundle) authority.Input {
+	t.Helper()
+	input := inputFor(t, "security-sensitive.engineering-work-contract.json", domain.Action{Type: "git.merge", Target: "main"}, domain.CapabilityAvailable)
+	for _, bundle := range bundles {
+		input.EvidenceBundles[bundle.ID] = bundle
+	}
+	return input
+}
+
+func TestEvaluateNonMatchingFailureDoesNotBlockMatchingEvidence(t *testing.T) {
+	matching := evidenceFixture(t, "security-sensitive.evidence-bundle.json")
+	failing := nonMatchingClone(matching, "evidence-other-failing", func(item domain.EvidenceItem) domain.EvidenceItem {
+		item.Result.Status = domain.EvidenceFailed
+		return item
+	})
+	alone, together := evaluate(t, mergeInput(t, matching)), evaluate(t, mergeInput(t, matching, failing))
+	if together.Status != alone.Status || len(together.Blocking) != 0 || len(together.Stale) != 0 {
+		t.Fatalf("with a non-matching failing bundle: %#v; matching alone: %#v", together, alone)
+	}
+}
+
+func TestEvaluateNonMatchingPassCannotSatisfyOrUnblockAClaim(t *testing.T) {
+	passing := evidenceFixture(t, "security-sensitive.evidence-bundle.json")
+	other := nonMatchingClone(passing, "evidence-other-passing", func(item domain.EvidenceItem) domain.EvidenceItem { return item })
+
+	failedHere := passing
+	failedHere.Evidence = map[string]domain.EvidenceItem{}
+	for id, item := range passing.Evidence {
+		if item.ClaimID == "claim-auth-regression-tests" {
+			item.Result.Status = domain.EvidenceFailed
+		}
+		failedHere.Evidence[id] = item
+	}
+	blocked := evaluate(t, mergeInput(t, failedHere, other))
+	if blocked.Status != domain.AuthorityBlocked || !contains(blocked.Blocking, "claim-auth-regression-tests") {
+		t.Fatalf("a matching failure must still block despite a non-matching pass: %#v", blocked)
+	}
+
+	stale := evaluate(t, mergeInput(t, evidenceFixture(t, "matching-stale-evidence.evidence-bundle.json"), other))
+	if stale.Status != domain.AuthorityStale || !contains(stale.Stale, "claim-auth-regression-tests") {
+		t.Fatalf("matching stale evidence must stay stale and not be satisfied by a non-matching pass: %#v", stale)
+	}
+}
+
+func TestEvaluateNonMatchingHumanApprovalIsStillAwaitingAuthority(t *testing.T) {
+	matching := evidenceFixture(t, "security-sensitive.evidence-bundle.json")
+	approval := nonMatchingClone(matching, "evidence-other-approval", func(domain.EvidenceItem) domain.EvidenceItem { return humanApproval("approver") })
+	decision := evaluate(t, mergeInput(t, matching, approval))
+	if decision.Status != domain.AuthorityAwaitingAuthority || !contains(decision.Missing, "claim-security-owner-approval") {
+		t.Fatalf("an approval bound to another subject must not count: %#v", decision)
+	}
+}
