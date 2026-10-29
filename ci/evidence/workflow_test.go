@@ -85,6 +85,9 @@ func parseWorkflow(text string) (workflowFile, error) {
 			job.If = strings.TrimSpace(strings.TrimPrefix(trimmed, "if:"))
 		case section == "jobs" && job != nil && indent == 4 && strings.HasPrefix(trimmed, "needs:"):
 			job.Needs = strings.TrimSpace(strings.TrimPrefix(trimmed, "needs:"))
+			if job.Needs == "" {
+				return file, fmt.Errorf("a block-style needs list is not a shape this test reads: %q", trimmed)
+			}
 		case section == "jobs" && job != nil && strings.Contains(trimmed, "run:"):
 			command := strings.TrimSpace(trimmed[strings.Index(trimmed, "run:")+len("run:"):])
 			if command == "|" || command == ">" {
@@ -264,6 +267,7 @@ func TestTheWorkflowChecksRejectTheirNegativeMutations(t *testing.T) {
 		"no pull_request trigger":                             strings.Replace(text, "\n  pull_request:\n", "\n", 1),
 		"race aggregate ignores failure":                      strings.Replace(text, aggregateCommand, aggregateCommand+" || true", 1),
 		"race aggregate continues on error":                   strings.Replace(text, "\n  evidence-race:\n", "\n  evidence-race:\n    continue-on-error: true\n", 1),
+		"full suite waits on a block-style dependency":        strings.Replace(text, "\n  go:\n", "\n  go:\n    needs:\n      - evidence\n", 1),
 		"full suite step skipped":                             strings.Replace(text, "      - name: Test\n", "      - name: Test\n        if: false\n", 1),
 	}
 	for name, mutated := range mutations {
