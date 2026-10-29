@@ -72,3 +72,44 @@ func runtimeGovernance() (domain.ProjectModel, domain.EngineeringPolicy) {
 	claims["acceptance"] = domain.RequiredClaim{EvidenceClass: SemanticEvidenceClass, IndependentFromChangeProducer: true}
 	return model, domain.EngineeringPolicy{SchemaVersion: domain.SchemaVersion, ID: "policy", Revision: "1", Rules: map[string]domain.PolicyRule{"auth": {When: domain.PolicyCondition{Fact: "authentication.boundary_modified", Equals: domain.FactTrue}, Effect: domain.PolicyEffect{RequiredClaims: &claims, Obligations: &obligations, Permissions: &permissions, AuthorityConditions: &conditions, AcceptanceDischargeClaims: &acceptanceDischarge}}, "auth-observed": {When: domain.PolicyCondition{Fact: "authentication.boundary_modified", Equals: domain.FactTrue, Stage: &stage}, Effect: domain.PolicyEffect{RequiredClaims: &claims, Obligations: &obligations, Permissions: &permissions, AuthorityConditions: &conditions, AcceptanceDischargeClaims: &acceptanceDischarge}}}}
 }
+
+// After a material reassessment the old evidence keeps its original binding. It
+// can no longer authorize, and it is reported as missing rather than stale; fresh
+// evidence bound to the new contract is what converges the run.
+func TestKernelReassessmentConvergesOnFreshEvidenceNotRetainedBindings(t *testing.T) {
+	model, policy := runtimeGovernance()
+	flow := KernelFlow{}
+	state, err := flow.Compile(SourceSnapshot{ID: "issue-3", Objective: "change auth", AcceptanceIntent: []string{"works"}, PredictedPaths: []string{"internal/auth/session.go"}, PathsKnown: true}, model, policy, "contract-3", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Evidence["bundle"] = boundEvidence(state.Contract)
+	state, err = flow.ObserveCandidate(state, model, policy, domain.Subject{Repository: model.Subject.Repository, Revision: "candidate-3"}, []string{"internal/auth/session.go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	merge := domain.Action{Type: "git.merge", Target: "main"}
+	producer := domain.EvidenceProducer{ID: "producer", Type: domain.ProducerExecutionProvider}
+
+	retained, err := flow.Decide(state, merge, producer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained.Decision.Status == domain.AuthorityAuthorized || !containsString(retained.Decision.Missing, "approval") || containsString(retained.Decision.Stale, "approval") {
+		t.Fatalf("retained-binding evidence must be missing and must not authorize: %#v", retained.Decision)
+	}
+
+	fresh := boundEvidence(state.Contract)
+	fresh.ID = "fresh"
+	state.Evidence["fresh"] = fresh
+	converged, err := flow.Decide(state, merge, producer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsString(converged.Decision.Missing, "approval") || containsString(converged.Decision.Stale, "approval") {
+		t.Fatalf("fresh evidence bound to the new contract must satisfy the approval claim: %#v", converged.Decision)
+	}
+	if converged.Decision.Status == domain.AuthorityAuthorized {
+		t.Fatal("the acceptance claim is still undischarged, so nothing may be authorized")
+	}
+}
