@@ -19,6 +19,9 @@ the copy that needs updating.
                        #63  serve, named workers, concurrent runs,
                             control room, GitHub feedback loop
                        #66  rebase the benchmark on the actual product
+                       #392 local operational console: a read-mostly
+                            projection/control surface over this runtime
+                            (ADR-0004); not #72
                               |
         M2             Agentic Engineering System
                        #64  Engineering Planner, roles, capabilities,
@@ -163,6 +166,35 @@ provider kind and trust mode; capability and readiness metadata a planner can
 reason over; narrow optional interfaces rather than one universal agent
 interface; a supervisor that schedules durable runs rather than conversations;
 and a kernel that has never learned a provider's name.
+
+## The boundary between #392 and #72
+
+Both are called a "Control Plane" and that is the entire reason this boundary
+is stated here rather than left to be inferred from two issue numbers.
+
+```text
+#392  local operational console      #72  organization Control Plane
+(ADR-0004, M1/M2-adjacent)           (M6, this graph)
+
+one operator, one machine            an organization, several identities
+projects THIS serve's existing       spans repositories, shared policy,
+state; no new authority              budgets, identity, RBAC
+read-mostly, existing control        a product this repository has not
+socket for the mutations an          started: M6 is gated on evidence
+operator's CLI could already issue   from M2-M5 this repository does not
+                                      yet have
+```
+
+#392 exists because running several concurrent runs under #63 and diagnosing
+one now routinely costs several separate commands against several disjoint
+surfaces — CLI output, live SQLite-backed operation rows, the durable journal,
+and raw transcript artifacts; see `docs/troubleshooting.md` and ADR-0004 for
+the concrete evidence. That is a single-operator visibility gap over work this
+repository already runs, not an organization-scoped problem, and closing it
+does not require, and must not smuggle in, any of what makes #72 M6: no
+cross-repository scope, no shared policy, no identity federation, no RBAC.
+ADR-0004 is the architectural decision; #392's later slices implement the
+console within the bounds it states.
 
 ## What #64 implemented
 
@@ -347,9 +379,12 @@ things a reviewer or operator should know before relying on them.
   admitted by WHO wrote it, which is what makes admission robust against what it
   says. With `github.credential_mode: "github-cli"` the runtime publishes as the
   operator, so the guard that refuses runtime-authored feedback refuses the
-  operator's reviews too and the loop cannot run. `credential_mode: "token"`
-  gives the runtime its own identity - a GitHub App installation token or a
-  dedicated account - and `autonomy doctor` names the collision when it exists.
+  operator's reviews too and the loop cannot run. `credential_mode: "github-app"`
+  gives the runtime a MACHINE identity - the runtime mints the installation token
+  from the App key, re-mints it before it expires, and publishes as
+  `<slug>[bot]` - and `credential_mode: "token"` does the same with a dedicated
+  account's token. `autonomy doctor` resolves both the publication identity and
+  the operator's own login and names the collision when they are one account.
   The guard itself is unchanged: an operator's own login is never admitted as an
   exception.
 - **Gemini CLI and Qwen CLI are not live-qualified.** Neither is installed on

@@ -60,6 +60,7 @@ func resolveInput(t *testing.T, plan domain.EngineeringPlan, agents ...domain.Ex
 // classes that were compared.
 func TestIndependentReviewResolvesOntoADifferentVendorFamily(t *testing.T) {
 	plan := compilePlan(t, planInput(t, "security-sensitive.engineering-fact.json", nil))
+	plan.Objective = "The full approved objective, including exact acceptance requirements."
 	resolution, err := planning.Resolve(resolveInput(t, plan, claudeAgent(), codexAgent()))
 	if err != nil {
 		t.Fatal(err)
@@ -88,6 +89,33 @@ func TestIndependentReviewResolvesOntoADifferentVendorFamily(t *testing.T) {
 	if binding.SatisfiedBy != domain.IndependenceSatisfiedByWorker {
 		t.Fatalf("independence satisfied by %q", binding.SatisfiedBy)
 	}
+	if !strings.Contains(review.Context.Objective, plan.Objective) {
+		t.Fatalf("reviewer context omitted the full plan objective: %q", review.Context.Objective)
+	}
+}
+
+func TestSecurityReviewerRequiresStructuredVerdicts(t *testing.T) {
+	plan := compilePlan(t, planInput(t, "security-sensitive.engineering-fact.json", nil))
+	claude, codex := claudeAgent(), codexAgent()
+	claude.StructuredVerdicts = false
+	codex.StructuredVerdicts = false
+	resolution, err := planning.Resolve(resolveInput(t, plan, claude, codex))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, block := range resolution.Blocked {
+		if block.StageID != "security-reviewer" {
+			continue
+		}
+		for _, candidate := range block.Explain.Considered {
+			for _, reason := range candidate.Reasons {
+				if strings.Contains(reason, "structured reviewer verdict") {
+					return
+				}
+			}
+		}
+	}
+	t.Fatalf("security-reviewer was not blocked without structured verdict support: %#v", resolution)
 }
 
 // With ONE eligible vendor and a vendor-family obligation, the stage BLOCKS.
@@ -416,7 +444,7 @@ func TestARevisionCannotEscapeIndependenceByBecomingAGate(t *testing.T) {
 		next.Provenance.PreviousRevision = &revision
 		next.Stages = stages
 		return planning.Validate(next, planning.ValidationInput{
-			Contract: permitRequirement(permitted), Envelope: operatorEnvelope(), Previous: &source,
+			Contract: permitRequirement(permitted), Envelope: operatorEnvelope(), Previous: &source, RatchetBaseline: &source,
 		})
 	}
 
@@ -630,7 +658,7 @@ func TestAnObligationCannotBeDroppedByRenamingItsStage(t *testing.T) {
 
 	err := planning.Validate(renamed, planning.ValidationInput{
 		Contract: contractFor(t, "security-sensitive.engineering-fact.json"),
-		Previous: &previous,
+		Previous: &previous, RatchetBaseline: &previous,
 	})
 	if err == nil {
 		t.Fatal("a revision dropped an independence obligation by renaming the stage that held it")
@@ -677,14 +705,14 @@ func TestAnObligationCannotBeDroppedByRenamingItsStage(t *testing.T) {
 	})
 	if err := planning.Validate(repointed, planning.ValidationInput{
 		Contract: contractFor(t, "security-sensitive.engineering-fact.json"),
-		Previous: &previous,
+		Previous: &previous, RatchetBaseline: &previous,
 	}); err == nil {
 		t.Fatal("an obligation was dropped by renaming the reviewer and re-pointing it at another stage")
 	}
 
 	err = planning.Validate(gated, planning.ValidationInput{
 		Contract: contractFor(t, "security-sensitive.engineering-fact.json"),
-		Previous: &previous,
+		Previous: &previous, RatchetBaseline: &previous,
 	})
 	if err == nil {
 		t.Fatal("an obligation was answered by a human gate policy never permitted")
@@ -756,7 +784,7 @@ func TestARevisionCannotSwapTheRoleOrRepointTheObligation(t *testing.T) {
 			mutate(&stage)
 			next.Stages[i] = stage
 		}
-		return planning.Validate(next, planning.ValidationInput{Contract: contract, Previous: &previous})
+		return planning.Validate(next, planning.ValidationInput{Contract: contract, Previous: &previous, RatchetBaseline: &previous})
 	}
 	revise := func(mutate func(*domain.PlanStage)) error { return reviseWith(nil, mutate) }
 

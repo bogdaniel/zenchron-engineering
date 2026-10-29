@@ -3,6 +3,7 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -54,34 +55,43 @@ func NewProcessOwnerLiveness() ProcessOwnerLiveness {
 }
 
 // NewLockOwnerLiveness proves death from the OS ownership lock held by every
-// runtime instance that called AcquireOwnershipLock with the same state dir.
+// runtime instance that called AcquireControllerInstanceLock with the same state dir.
 func NewLockOwnerLiveness(stateDir string) ProcessOwnerLiveness {
 	return ProcessOwnerLiveness{Host: ownerHost(), StateDir: stateDir}
 }
 
 func (l ProcessOwnerLiveness) Alive(owner string) bool {
+	alive, decided := l.decide(owner, ownerLockHeld)
+	return alive || !decided
+}
+
+// observe is the READ-ONLY liveness question status asks (#352, #326): the
+// same evidence as Alive, with its uncertainty kept apart - decided is false
+// when the evidence cannot say either way, which status reports as
+// unverified - and a lock probe that never creates anything.
+func (l ProcessOwnerLiveness) observe(owner string) (alive, decided bool) {
+	return l.decide(owner, ownerLockHeldReadOnly)
+}
+
+func (l ProcessOwnerLiveness) decide(owner string, lockHeld func(stateDir, owner string) (bool, bool)) (alive, decided bool) {
 	host, pid, token, ok := parseOwner(owner)
 	if !ok {
-		return true
+		return false, false
 	}
 	if host != l.Host {
 		// Another host's process cannot be observed from here, and a lock file
 		// visible on a shared filesystem says nothing about that host either.
-		return true
+		return false, false
 	}
 	if l.StateDir != "" {
-		held, decided := ownerLockHeld(l.StateDir, owner)
-		if !decided {
-			return true
-		}
-		return held
+		return lockHeld(l.StateDir, owner)
 	}
 	if current, ok := processStartToken(pid); ok {
 		// A different start token means the PID was recycled: the recorded
 		// owner is provably gone.
-		return token == "" || current == token
+		return token == "" || current == token, true
 	}
-	return processExists(pid)
+	return processExists(pid), true
 }
 
 func parseOwner(owner string) (host string, pid int, token string, ok bool) {
@@ -107,20 +117,26 @@ func processExists(pid int) bool {
 	return !errors.Is(process.Signal(syscall.Signal(0)), syscall.ESRCH)
 }
 
-// OwnershipLock is the OS advisory lock a runtime instance holds for its whole
+// ControllerInstanceLock is the OS advisory lock a runtime instance holds for its whole
 // lifetime. Hold it before recording any lease and release it on shutdown; a
 // crash releases it automatically, which is what turns "the lock is acquirable"
 // into proof that the recorded owner is gone.
-type OwnershipLock struct {
+type ControllerInstanceLock struct {
 	path string
 	file *os.File
 }
 
-// AcquireOwnershipLock claims ownership for this instance and keeps the
+// AcquireControllerInstanceLock claims THIS INSTANCE's identity and keeps the
 // descriptor open until Release. It fails when another live process already
-// holds the same owner identity, so it is also the startup guard against two
+// holds the same owner identity, so it is the startup guard against two
 // runtimes sharing one identity.
-func AcquireOwnershipLock(stateDir, owner string) (*OwnershipLock, error) {
+//
+// IT IS NOT THE CONTROLLER ROLE, and its previous name - ownership - invited
+// exactly that reading. The path contains the owner identity (host, pid,
+// token), so two different controllers take two different locks and exclude
+// each other from nothing. What answers "do I own the controller role" is
+// ControllerRoleLock, at one well-known path; see controller_role.go.
+func AcquireControllerInstanceLock(stateDir, owner string) (*ControllerInstanceLock, error) {
 	file, err := openOwnerLockFile(stateDir, owner)
 	if err != nil {
 		return nil, fmt.Errorf("acquiring runtime ownership lock for %q: %w", owner, err)
@@ -133,12 +149,12 @@ func AcquireOwnershipLock(stateDir, owner string) (*OwnershipLock, error) {
 		_ = file.Close()
 		return nil, fmt.Errorf("acquiring runtime ownership lock for %q: %w", owner, err)
 	}
-	return &OwnershipLock{path: ownerLockPath(stateDir, owner), file: file}, nil
+	return &ControllerInstanceLock{path: ownerLockPath(stateDir, owner), file: file}, nil
 }
 
 // Path reports the lock file, for diagnosis only. Its existence is never
 // evidence of anything.
-func (l *OwnershipLock) Path() string {
+func (l *ControllerInstanceLock) Path() string {
 	if l == nil {
 		return ""
 	}
@@ -148,7 +164,7 @@ func (l *OwnershipLock) Path() string {
 // Release is idempotent and nil-safe so a shutdown path can defer it
 // unconditionally. Closing the descriptor is what drops the kernel lock;
 // removing the file afterwards is hygiene, not correctness.
-func (l *OwnershipLock) Release() error {
+func (l *ControllerInstanceLock) Release() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
@@ -169,6 +185,29 @@ func (l *OwnershipLock) Release() error {
 // absence can never influence the answer.
 func ownerLockHeld(stateDir, owner string) (held bool, decided bool) {
 	file, err := openOwnerLockFile(stateDir, owner)
+	if err != nil {
+		return false, false
+	}
+	defer func() { _ = file.Close() }()
+	locked, err := tryLockFile(file, false)
+	if err != nil {
+		return false, false
+	}
+	return !locked, true
+}
+
+// ownerLockHeldReadOnly is ownerLockHeld for a reader that must not write:
+// status. It opens the lock read-only and creates neither the file nor its
+// directory. A missing file is DECIDED not held, because a live owner holds
+// its file for its whole lifetime; any other failure is undecided.
+func ownerLockHeldReadOnly(stateDir, owner string) (held bool, decided bool) {
+	if strings.TrimSpace(stateDir) == "" {
+		return false, false
+	}
+	file, err := os.Open(ownerLockPath(stateDir, owner))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, true
+	}
 	if err != nil {
 		return false, false
 	}

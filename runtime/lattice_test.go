@@ -25,6 +25,7 @@ package runtime
 // silently - it has to fail this file first.
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -107,6 +108,21 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		// the in-repo layer names no credential member, so a repository cannot
 		// point the runtime at a different identity to publish as.
 		"github.token_path",
+		// The GitHub App publication identity. The App id and the installation
+		// id are public identifiers and the third member is a PATH; the key
+		// itself never appears in configuration. All three are operator
+		// authority for token_path's reason: a repository that could name them
+		// would be choosing the identity the runtime publishes as.
+		"github.app_id",
+		"github.installation_id",
+		"github.private_key_path",
+		// The identity that READS governance facts, which is deliberately not
+		// the one that publishes: GitHub does not disclose a ruleset's bypass
+		// actors to a GitHub App installation token. Operator authority for
+		// exactly the reason the publication members are - a repository that
+		// could name the governance identity would be choosing who is allowed
+		// to tell the runtime whether its own trust root has a bypass.
+		"github.governance_credential_mode",
 		"github.endpoint",
 		"budgets.wall_limit_seconds",
 		// A total-elapsed bound, separate from the execution budget. Operator
@@ -117,6 +133,15 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		"budgets.max_execution_continuations",
 		"budgets.max_remediation_attempts",
 		"budgets.max_assurance_attempts",
+		// The provider no-progress window: a THIRD budget dimension beside the
+		// active-work limit and the calendar deadline, and the one #238 was
+		// missing. It is a bound, not a capability, and it is tightenable -
+		// asking for a shorter window is a narrowing, so a repository may name
+		// it and appears below.
+		"budgets.provider_inactivity_seconds",
+		// The physical-attempt wall (#328): a bound on one attempt, distinct
+		// from the cumulative run budget. Tightenable, so it appears below.
+		"budgets.attempt_wall_limit_seconds",
 		"watch.repositories",
 		// The brokered worker execution environment. Both members are
 		// CAPABILITY statements and neither is an unsafe override: the path
@@ -130,6 +155,8 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		"watch.label",
 		"watch.poll_interval_seconds",
 		"watch.max_concurrent_runs",
+		"watch.max_concurrent_observations",
+		"watch.max_concurrent_verifications",
 		"gc.retention_hours",
 		"operator.id",
 		"operator.require_configured_id",
@@ -167,6 +194,8 @@ func TestOperatorLayerCarriesNoUnsafeOverrideMember(t *testing.T) {
 		// watch bounds by taking the stricter of the two, so stating one can
 		// never loosen the other.
 		"supervisor.max_concurrent_runs",
+		"supervisor.max_concurrent_observations",
+		"supervisor.max_concurrent_verifications",
 		"supervisor.poll_interval_seconds",
 	})
 }
@@ -190,6 +219,10 @@ func TestAgentLayerNamesItsOneUnsafeOverride(t *testing.T) {
 		"credential_path",
 		"endpoint",
 		"allow_permission_bypass",
+		// frontend_cache_dir grants nothing: it names an operator-owned,
+		// read-only source the runtime copies from, and is refused for
+		// brokered provider agents.
+		"frontend_cache_dir",
 		"unattended",
 	})
 	// Standing permission is not a grant. An agent an operator allowed the
@@ -217,16 +250,20 @@ func TestRepositoryLayerReachesOnlyTightenableBounds(t *testing.T) {
 		"budgets.max_execution_continuations",
 		"budgets.max_remediation_attempts",
 		"budgets.max_assurance_attempts",
+		"budgets.provider_inactivity_seconds",
+		"budgets.attempt_wall_limit_seconds",
 		"watch.poll_interval_seconds",
 		"watch.max_concurrent_runs",
+		"watch.max_concurrent_observations",
+		"watch.max_concurrent_verifications",
 	})
 	// The pre-decode allowlists must describe that same surface. They are the
 	// enforcement; the struct is only the shape.
 	if !reflect.DeepEqual(sortedKeys(repositoryScope), []string{"budgets", "watch"}) {
 		t.Fatalf("repositoryScope = %v, want exactly [budgets watch]", sortedKeys(repositoryScope))
 	}
-	if !reflect.DeepEqual(sortedKeys(repositoryWatchScope), []string{"max_concurrent_runs", "poll_interval_seconds"}) {
-		t.Fatalf("repositoryWatchScope = %v, want exactly [max_concurrent_runs poll_interval_seconds]", sortedKeys(repositoryWatchScope))
+	if !reflect.DeepEqual(sortedKeys(repositoryWatchScope), []string{"max_concurrent_observations", "max_concurrent_runs", "max_concurrent_verifications", "poll_interval_seconds"}) {
+		t.Fatalf("repositoryWatchScope = %v, want exactly [max_concurrent_observations max_concurrent_runs max_concurrent_verifications poll_interval_seconds]", sortedKeys(repositoryWatchScope))
 	}
 }
 
@@ -292,7 +329,7 @@ func TestRepositoryCannotNameAnOperatorDimension(t *testing.T) {
 // to an explicit value, so all six cases below meet the same ceiling.
 func latticeOperator(t *testing.T, dir string) string {
 	t.Helper()
-	return operatorConfigWithWatch(t, dir, `{"repositories": ["owner/name"], "poll_interval_seconds": 120, "max_concurrent_runs": 2}`)
+	return operatorConfigWithWatch(t, dir, `{"repositories": ["owner/name"], "poll_interval_seconds": 120, "max_concurrent_runs": 2, "max_concurrent_observations": 2, "max_concurrent_verifications": 2}`)
 }
 
 func latticeWatchSeconds(t *testing.T, config Config) int {
@@ -311,6 +348,24 @@ func latticeWatchRuns(t *testing.T, config Config) int {
 		t.Fatal(err)
 	}
 	return settings.MaxConcurrentRuns
+}
+
+func latticeWatchObservations(t *testing.T, config Config) int {
+	t.Helper()
+	settings, err := config.WatchSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return settings.MaxConcurrentObservations
+}
+
+func latticeWatchVerifications(t *testing.T, config Config) int {
+	t.Helper()
+	settings, err := config.WatchSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return settings.MaxConcurrentVerifications
 }
 
 // TestTightenLatticePerDimension is the §16 table. Every dimension a
@@ -354,6 +409,12 @@ func TestTightenLatticePerDimension(t *testing.T) {
 			func(_ *testing.T, c Config) int { return c.Budgets.MaxAssuranceAttempts },
 		},
 		{
+			"budgets.provider_inactivity_seconds", `{"budgets": {"provider_inactivity_seconds": 120}}`, 120,
+			`{"budgets": {"provider_inactivity_seconds": 601}}`,
+			`{"budgets": {"provider_inactivity_seconds": 0}}`,
+			func(_ *testing.T, c Config) int { return c.Budgets.ProviderInactivitySeconds },
+		},
+		{
 			// Inverted: tighter is a LONGER interval.
 			"watch.poll_interval_seconds", `{"watch": {"poll_interval_seconds": 900}}`, 900,
 			`{"watch": {"poll_interval_seconds": 119}}`,
@@ -365,6 +426,18 @@ func TestTightenLatticePerDimension(t *testing.T) {
 			`{"watch": {"max_concurrent_runs": 3}}`,
 			`{"watch": {"max_concurrent_runs": 0}}`,
 			latticeWatchRuns,
+		},
+		{
+			"watch.max_concurrent_observations", `{"watch": {"max_concurrent_observations": 1}}`, 1,
+			`{"watch": {"max_concurrent_observations": 3}}`,
+			`{"watch": {"max_concurrent_observations": 0}}`,
+			latticeWatchObservations,
+		},
+		{
+			"watch.max_concurrent_verifications", `{"watch": {"max_concurrent_verifications": 1}}`, 1,
+			`{"watch": {"max_concurrent_verifications": 3}}`,
+			`{"watch": {"max_concurrent_verifications": 0}}`,
+			latticeWatchVerifications,
 		},
 	} {
 		// Tighter wins, and is the value the effective configuration reports.
@@ -564,7 +637,12 @@ func TestNoConfigurationGrantsCandidateGitHubCredentials(t *testing.T) {
 		// USER is on the allowlist so a CLI whose credential lives in the OS
 		// keychain knows whose keychain to ask. It is an account name, not a
 		// secret, and the credential assertion below still holds.
-		if name != "PATH" && name != "HOME" && name != "USER" && name != "CODEX_HOME" {
+		// GOENV is on the allowlist only as the null device, so a worker's
+		// `go env -w` is discarded and never reaches the operator's file (#430).
+		if name == "GOENV" && value != os.DevNull {
+			t.Fatalf("provider GOENV = %q, want %q", value, os.DevNull)
+		}
+		if name != "PATH" && name != "HOME" && name != "USER" && name != "CODEX_HOME" && name != "GOENV" {
 			t.Fatalf("provider environment carries %q, which is not on the allowlist", name)
 		}
 		if strings.Contains(value, "leaked-secret-value") {

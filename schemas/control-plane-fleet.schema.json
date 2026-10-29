@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "capacity",
+    "executing",
+    "active",
+    "supervisor_running",
+    "counts",
+    "classes"
+  ],
+  "properties": {
+    "capacity": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "executing": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "active": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "supervisor_running": {
+      "type": "boolean"
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active",
+        "waiting",
+        "failed",
+        "completed",
+        "cancelled",
+        "held"
+      ],
+      "properties": {
+        "active": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "waiting": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cancelled": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "held": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "classes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "working",
+        "observing",
+        "runnable",
+        "waiting",
+        "paused",
+        "unavailable"
+      ],
+      "properties": {
+        "working": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observing": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "runnable": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "waiting": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "paused": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unavailable": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

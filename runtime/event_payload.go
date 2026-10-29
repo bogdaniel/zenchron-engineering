@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // maxCanonicalPayloadBytes is the M0 ceiling on one event payload after RFC 8785
@@ -39,15 +40,53 @@ const maxCanonicalPayloadBytes = 8 << 10
 type payloadValidator func(json.RawMessage) error
 
 var eventPayloads = map[string]payloadValidator{
+	EventVerificationPermitChanged: payloadSchema(func(p VerificationPermit) error { return p.validate() }),
+	EventReviewContinuationGranted: payloadSchema(func(p ReviewContinuationGrant) error {
+		if p.ActiveBaseline < 0 || p.Allowance <= 0 || p.Allowance > 30*time.Minute {
+			return errors.New("invalid review continuation envelope")
+		}
+		return required("feedback_digest", p.FeedbackDigest)
+	}),
+	// A succession admission is the only event that changes which controller
+	// may append the NEXT one, so its payload is validated rather than trusted:
+	// a decision that is not settled compatible, or that names neither party,
+	// admits nothing and must not reach the journal in a readable-looking form.
+	EventControllerSuccessionAdmitted: payloadSchema(func(p ControllerSuccessionDecision) error {
+		if p.Result != SuccessionCompatible {
+			return fmt.Errorf("a succession admission records a compatible decision, got %q", p.Result)
+		}
+		if _, err := p.Predecessor.Digest(); err != nil {
+			return fmt.Errorf("the admitted predecessor identity is not digestible: %w", err)
+		}
+		if _, err := p.Successor.Digest(); err != nil {
+			return fmt.Errorf("the admitted successor identity is not digestible: %w", err)
+		}
+		for _, refusal := range p.Refusals() {
+			return fmt.Errorf("a compatible decision carries no refusal, got %s", refusal)
+		}
+		return errors.Join(required("run_id", p.RunID), required("handoff_id", p.HandoffID))
+	}),
 	// run.created carries the creating controller's provenance (ControllerBuild)
-	// when the build is attested. It is optional because an unattested build
-	// records no claim, and strict because a recorded claim must be complete.
-	EventRunCreated: optionalPayload(payloadSchema(ControllerBuild.validateAttested)),
+	// when the build is attested, and the run's RunPolicyDigest (ADR-0003 B1).
+	// It is optional because a pre-B1 run from an unattested build recorded
+	// nothing, and strict because a recorded claim must be complete.
+	EventRunCreated: optionalPayload(payloadSchema(RunCreatedPayload.validate)),
 
-	EventRunWaiting:   dispositionPayload,
-	EventRunCompleted: dispositionPayload,
-	EventRunFailed:    dispositionPayload,
-	EventRunCancelled: dispositionPayload,
+	EventRunWaiting:   dispositionPayload(false, true),
+	EventRunCompleted: dispositionPayload(false, false),
+	EventRunFailed:    dispositionPayload(true, false),
+	EventRunCancelled: dispositionPayload(false, false),
+	// A pause records who asked and why; an unpause records who asked. Neither
+	// carries a disposition, a reason code or any authority (#86).
+	EventRunPaused: payloadSchema(func(p RunPausePayload) error {
+		return errors.Join(required("operator", p.Operator), bounded("reason", p.Reason))
+	}),
+	EventRunUnpaused: payloadSchema(func(p RunPausePayload) error {
+		if p.Reason != "" {
+			return errors.New("an unpause carries no reason")
+		}
+		return required("operator", p.Operator)
+	}),
 
 	EventFeedbackPublicationIdentity: payloadSchema(FeedbackPublicationIdentityPayload.validate),
 
@@ -82,7 +121,12 @@ var eventPayloads = map[string]payloadValidator{
 			required("commit", p.Commit),
 			required("tree", p.Tree),
 			nonNegative("path_count", p.PathCount),
-			required("paths_digest", p.PathsDigest))
+			required("paths_digest", p.PathsDigest),
+			// The excluded paths are carried WHOLE, so they are bounded like
+			// every other payload list rather than truncated or digested: a
+			// record of which paths a commit left behind is worth nothing if it
+			// is allowed to be a partial one.
+			boundedList("excluded_paths", p.ExcludedPaths))
 	}),
 	// A checkpoint carries the same identity a commit does: it IS a real
 	// runtime-owned commit, and the difference is what it means, not what it
@@ -92,8 +136,45 @@ var eventPayloads = map[string]payloadValidator{
 			required("commit", p.Commit),
 			required("tree", p.Tree),
 			nonNegative("path_count", p.PathCount),
-			required("paths_digest", p.PathsDigest))
+			required("paths_digest", p.PathsDigest),
+			boundedList("excluded_paths", p.ExcludedPaths))
 	}),
+	EventCandidateQuarantined: payloadSchema(func(p CandidateQuarantinedPayload) error {
+		return errors.Join(
+			required("operation_id", p.OperationID),
+			nonNegative("attempt", p.Attempt),
+			required("subject", p.Subject),
+			nonNegative("path_count", p.PathCount),
+			required("paths_digest", p.PathsDigest),
+			required("location", p.Location))
+	}),
+	EventHandoffReported: payloadSchema(func(p HandoffReportedPayload) error {
+		if p.Outcome != orchestration.OutcomeCompleted && p.Outcome != orchestration.OutcomePartial {
+			return fmt.Errorf("handoff outcome %q is not a recognized outcome", p.Outcome)
+		}
+		if (p.RepairOperationID == "") != (p.RepairAttempt == 0) {
+			return errors.New("a repaired handoff report names both its repair operation and attempt, or neither")
+		}
+		return errors.Join(
+			required("operation_id", p.OperationID),
+			positive("attempt", p.Attempt),
+			nonNegative("repair_attempt", p.RepairAttempt),
+			required("report_sha256", p.ReportSHA256))
+	}),
+	EventHandoffRefused: payloadSchema(func(p HandoffRefusedPayload) error {
+		if p.Kind != HandoffMissing && p.Kind != HandoffInvalid {
+			return fmt.Errorf("handoff refusal kind %q is not a recognized kind", p.Kind)
+		}
+		if p.Repairable && (p.Kind != HandoffInvalid || p.ReportSHA256 == "") {
+			return errors.New("only an invalid report with a digest of its refused bytes is repairable")
+		}
+		return errors.Join(
+			required("operation_id", p.OperationID),
+			positive("attempt", p.Attempt),
+			required("detail", p.Detail))
+	}),
+	EventMessagesObserved:   payloadSchema(validateMessagesObserved),
+	EventDecisionsDelivered: payloadSchema(validateDecisionsDelivered),
 	EventExecutionCompleted: payloadSchema(func(p ExecutionCompletedPayload) error {
 		return errors.Join(
 			required("producer_id", p.ProducerID),
@@ -137,6 +218,7 @@ var eventPayloads = map[string]payloadValidator{
 			required("tree", p.Tree),
 			bounded("artifact_ref", p.ArtifactRef),
 			bounded("failure_signature", p.FailureSignature),
+			validateVerificationChecks(p.Checks),
 			optionalRef("bundle", p.Bundle))
 	})),
 	EventAuthorityEvaluated: payloadSchema(func(p AuthorityEvaluatedPayload) error {
@@ -198,8 +280,10 @@ var eventPayloads = map[string]payloadValidator{
 			required("class", string(p.Class)),
 			required("reason", p.Reason),
 			required("text_digest", p.TextDigest),
-			bounded("actor", p.Actor))
+			bounded("actor", p.Actor),
+			validFeedbackReviewState(p.Class, p.ReviewState))
 	}),
+	EventExecutionAttemptProvenance: payloadSchema(ExecutionAttemptProvenance.validate),
 	EventFeedbackConsumed: payloadSchema(func(p FeedbackConsumedPayload) error {
 		// A record may carry ONLY unavailable keys: when every pending item's
 		// text artifact has been reclaimed, nothing was delivered and the
@@ -227,6 +311,25 @@ var eventPayloads = map[string]payloadValidator{
 // validateEventPayload enforces the byte ceiling and the per-type schema. It
 // runs before the append transaction, so a refused event writes no row.
 func validateEventPayload(e EngineeringEvent) error {
+	if e.Type == EventVerificationPermitChanged {
+		var p VerificationPermit
+		if err := strictJSON(e.Payload, &p); err != nil {
+			return err
+		}
+		if p.Parent.RunID != e.RunID || p.Parent.OperationID != e.OperationID {
+			return errors.New("verification observation does not match its parent")
+		}
+		at := p.RequestedAt
+		if p.GrantedAt != nil {
+			at = *p.GrantedAt
+		}
+		if p.ReleasedAt != nil {
+			at = *p.ReleasedAt
+		}
+		if !e.OccurredAt.Equal(at) {
+			return errors.New("verification observation does not match its transition time")
+		}
+	}
 	validate, implemented := eventPayloads[e.Type]
 	if !implemented {
 		if eventTypes[e.Type] {
@@ -250,17 +353,6 @@ func validateEventPayload(e EngineeringEvent) error {
 	return validate(e.Payload)
 }
 
-// dispositionPayload is what Reduce reads from the run disposition events.
-func dispositionPayload(raw json.RawMessage) error {
-	if len(raw) == 0 {
-		return nil
-	}
-	var payload struct {
-		Reason string `json:"reason"`
-	}
-	return strictJSON(raw, &payload)
-}
-
 // operationPayload is the RunOperation lifecycle payload Reduce folds into the
 // snapshot. Reduce separately checks that the operation's run id matches the run
 // and that the event's operation id agrees; this only checks the shape.
@@ -275,7 +367,7 @@ func operationPayload(raw json.RawMessage) error {
 	if operation.ID == "" || operation.RunID == "" {
 		return errors.New("operation lifecycle payload requires an operation id and run id")
 	}
-	return nil
+	return operation.Failure.validate()
 }
 
 // strictJSON decodes exactly one JSON value into target, rejecting unknown
@@ -355,11 +447,46 @@ type CandidateChangedPayload struct {
 // CandidateCommittedPayload records the commit/tree identity the runtime
 // created. The changed path set is a count plus a digest over it, so a wide
 // change cannot grow the payload.
+// CandidateQuarantinedPayload identifies the refused material one physical
+// attempt left behind (#390): which operation and attempt produced it, the
+// subject it was produced against, the refusal that settled it, and where the
+// bytes are kept. It carries identity only; the bytes stay on disk.
+type CandidateQuarantinedPayload struct {
+	OperationID   string       `json:"operation_id"`
+	Attempt       int          `json:"attempt"`
+	Subject       string       `json:"subject"`
+	FailureClass  FailureClass `json:"failure_class,omitempty"`
+	PathCount     int          `json:"path_count"`
+	PathsDigest   string       `json:"paths_digest"`
+	ContentDigest string       `json:"content_digest,omitempty"`
+	Location      string       `json:"location"`
+	// Restored says whether the refused paths were returned to Subject. A
+	// complete copy is journalled even when restoration failed, so the
+	// quarantine always has a durable identity; false means the attempt was
+	// stopped because the workspace may still hold part of the material.
+	Restored bool `json:"restored"`
+	// Adopted marks a record journalled by restart adoption: the copy was
+	// completed by an earlier attempt whose controller died before its own
+	// record became durable (#390).
+	Adopted bool `json:"adopted,omitempty"`
+}
+
 type CandidateCommittedPayload struct {
 	Commit      string `json:"commit"`
 	Tree        string `json:"tree"`
 	PathCount   int    `json:"path_count"`
 	PathsDigest string `json:"paths_digest"`
+	// ExcludedPaths names, in full, the runtime-owned paths this commit did
+	// not carry. It is the durable half of the #189 ownership decision: a
+	// crashed run's inherited scratch is left out of the tree deliberately,
+	// and an operator reading the journal has to be able to see WHICH paths
+	// rather than infer them from a path count that does not add up. It is
+	// bounded like every other payload list, and it is never truncated to
+	// fit: a workspace holding more debris than one payload may carry is
+	// refused at the commit gate, so this list is always the whole of the
+	// decision or there is no commit to describe.
+	ExcludedPaths []string `json:"excluded_paths,omitempty"`
+	Producing     string   `json:"producing_operation,omitempty"` // producing operation's ID (#508 P4a); optional, unchecked
 }
 
 // ExecutionCompletedPayload records that the producer finished its invocation
@@ -420,12 +547,24 @@ type AssuranceObservedPayload struct {
 	// than any text a candidate wrote.
 	ArtifactRef      string `json:"artifact_ref,omitempty"`
 	FailureSignature string `json:"failure_signature,omitempty"`
+	// Checks are the specialised, deterministic checks this observation
+	// COMPLETED on its exact commit and tree (see verification_check.go). Absent
+	// on every observation written before the member existed, and absence is
+	// never read as a check having run.
+	Checks []VerificationCheck `json:"checks,omitempty"`
 	// Semantic marks an observation produced by the independent semantic
 	// acceptance verifier rather than the automated one, and ClaimResults is its
 	// per-claim answer. A semantic verdict is claim-specific: one acceptance
 	// obligation may be discharged while another is not.
 	Semantic     bool              `json:"semantic,omitempty"`
 	ClaimResults map[string]string `json:"claim_results,omitempty"`
+	// IntegrationOriginalFailureClass is the fresh verifier's OWN class,
+	// preserved when a WorkGraph integration_compose unit's FailureClass
+	// above has been reclassified to FailureIntegrationConflict (#475 B5) so
+	// the actual verdict - FailureCompileTest, FailureVerification, whatever
+	// the verifier actually said - is never lost to the runtime's own
+	// retry-routing relabeling. Empty for every other observation.
+	IntegrationOriginalFailureClass FailureClass `json:"integration_original_failure_class,omitempty"`
 }
 
 // AuthorityEvaluatedPayload records a #7 decision reference for one action.
@@ -625,9 +764,34 @@ func boundedList(name string, values []string) error {
 	return nil
 }
 
+func positive(name string, n int) error {
+	if n <= 0 {
+		return fmt.Errorf("payload field %q must be positive", name)
+	}
+	return nil
+}
+
 func nonNegative(name string, n int) error {
 	if n < 0 {
 		return fmt.Errorf("payload field %q must not be negative", name)
+	}
+	return nil
+}
+
+// validFeedbackReviewState rejects a durable review_state that is neither
+// empty - the only value a non-review class or a legacy event may carry - nor
+// a member of the closed GitHub review-disposition vocabulary. Without this,
+// an adapter bug or a future review state could be written to the journal as
+// a value that looks recognized but was never validated as one.
+func validFeedbackReviewState(class FeedbackClass, state GitHubReviewState) error {
+	if state == "" {
+		return nil
+	}
+	if class != FeedbackReview {
+		return fmt.Errorf("payload field %q is set on a %q item, which carries no review disposition", "review_state", class)
+	}
+	if !validGitHubReviewStates[state] {
+		return fmt.Errorf("payload field %q is %q, outside the closed review-disposition vocabulary", "review_state", state)
 	}
 	return nil
 }
@@ -687,7 +851,6 @@ type PlanProposedPayload struct {
 	// References is what referenced-issue hydration produced for the invocation
 	// that proposed this revision: which same-repository issues the planner was
 	// given, pinned by digest, and which ones could not be read.
-	//
 	// It is recorded on a SUCCESSFUL proposal as well as a refused attempt,
 	// because "this plan was reasoned from four of the five referenced issues"
 	// is a fact about the plan an operator approves, not a detail of an
@@ -730,6 +893,16 @@ type PlanReasoningPayload struct {
 	WorkspaceDigestBefore string `json:"workspace_digest_before"`
 	WorkspaceDigestAfter  string `json:"workspace_digest_after"`
 	WorkspaceUnchanged    bool   `json:"workspace_unchanged"`
+	// Invocation is how the planning invocation ran and ended (#327). It is
+	// carried ONLY on a refused attempt, which has no plan revision to hold
+	// it; a proposed revision holds its own copy in the revision document, and
+	// the journal does not repeat it. Bounded to fit the event, and absent
+	// when the provider reported none.
+	Invocation *domain.InvocationObservation `json:"invocation,omitempty"`
+	// InvocationDroppedForSize marks a refused attempt whose invocation
+	// provenance existed but could not fit the event even in its fixed-size
+	// form. Absent Invocation without it means the provider reported none.
+	InvocationDroppedForSize bool `json:"invocation_dropped_for_size,omitempty"`
 }
 
 // PlanAttemptRefusedPayload records one reasoning proposal the deterministic
@@ -1367,35 +1540,6 @@ func validatePlanBudget(budget PlanBudgetPayload) error {
 		return fmt.Errorf("plan cost ceiling %d must not be negative", *budget.MaxCostMicros)
 	}
 	return nonNegative("max_wall_seconds", budget.MaxWallSeconds)
-}
-
-// validatePlanReasoning refuses a reasoning record that does not carry its own
-// proof. A planner invocation whose workspace was not verified afterwards, or
-// which ran in a mutating mode, is exactly what the non-mutating boundary
-// exists to prevent, so it cannot be recorded as if it had happened safely.
-func validatePlanReasoning(reasoning *PlanReasoningPayload) error {
-	if reasoning == nil {
-		return nil
-	}
-	if reasoning.InvocationMode != string(domain.InvocationModeNonMutatingPlanning) {
-		return fmt.Errorf("planner reasoning ran in mode %q: planning is %q", reasoning.InvocationMode, domain.InvocationModeNonMutatingPlanning)
-	}
-	if !reasoning.WorkspaceUnchanged {
-		return errors.New("planner reasoning recorded a changed planning workspace: a plan may not be built on an invocation that wrote")
-	}
-	if reasoning.WorkspaceDigestBefore != reasoning.WorkspaceDigestAfter {
-		return errors.New("planner reasoning claims an unchanged workspace while its own digests differ")
-	}
-	return errors.Join(
-		required("agent_id", reasoning.AgentID),
-		required("provider_kind", reasoning.ProviderKind),
-		required("trust_mode", reasoning.TrustMode),
-		required("workspace_digest_before", reasoning.WorkspaceDigestBefore),
-		required("workspace_digest_after", reasoning.WorkspaceDigestAfter),
-		bounded("vendor_family", reasoning.VendorFamily),
-		bounded("model", reasoning.Model),
-		bounded("profile_id", reasoning.ProfileID),
-		bounded("provider_mode", reasoning.ProviderMode))
 }
 
 func init() {

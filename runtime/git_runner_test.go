@@ -145,6 +145,8 @@ func TestTrustedGitEnvironmentIsBuiltFromScratch(t *testing.T) {
 		"GIT_LITERAL_PATHSPECS":   "1",
 		"GIT_CEILING_DIRECTORIES": "/runtime",
 		"GIT_OPTIONAL_LOCKS":      "0",
+		"GIT_NO_REPLACE_OBJECTS":  "1",
+		"GIT_GRAFT_FILE":          os.DevNull,
 	}
 	var got, expected []string
 	for k := range seen {

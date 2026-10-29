@@ -200,7 +200,7 @@ func watchDetail(detail string) string {
 // Tick performs one scheduling cycle:
 //
 //	registration -> per repository: not-before? -> discover -> claim
-//	  -> capacity -> Reconcile -> persist observation -> report
+//	  -> Reconcile -> persist observation -> report
 //
 // A failure against one repository is recorded in that repository's report and
 // the loop continues, so one broken forge, credential, or configuration cannot
@@ -212,20 +212,20 @@ func (w *WatchController) Tick(ctx context.Context) (TickReport, error) {
 	// One clock read per cycle. Every deadline this tick records derives from
 	// it, so a report is internally consistent and a test is deterministic.
 	now := w.deps.Clock.Now()
-	active, elsewhere, err := w.drivenRuns()
+	// Reported, never authorization (#85). Capacity is decided per class by
+	// the scheduler's transactional AcquireOperation: a class-blind gate here
+	// kept a waiting run from even observing while another run's work held
+	// the only work slot.
+	active, err := w.drivenRuns()
 	if err != nil {
 		return TickReport{}, err
 	}
-	// The global run-driving capacity. Runs a live OTHER owner is driving
-	// already occupy the ceiling; this is the cheap early exit, and the
-	// durable AcquireOperation inside the scheduler remains the authority.
-	capacity := elsewhere < w.deps.Settings.MaxConcurrentRuns
 	report := TickReport{ActiveRuns: active}
 	for _, repo := range w.deps.Settings.Repositories {
 		if err := ctx.Err(); err != nil {
 			return TickReport{}, err
 		}
-		observed := w.tickRepository(ctx, repo, now, capacity)
+		observed := w.tickRepository(ctx, repo, now)
 		report.Repositories = append(report.Repositories, observed)
 		if next := observed.NextEligibleAt; !next.IsZero() && (report.NextEligibleAt.IsZero() || next.Before(report.NextEligibleAt)) {
 			report.NextEligibleAt = next
@@ -234,15 +234,15 @@ func (w *WatchController) Tick(ctx context.Context) (TickReport, error) {
 	return report, nil
 }
 
-// drivenRuns counts the runs currently holding a run-driving slot, and how many
-// of those belong to another live owner. A lease whose owner cannot be proved
-// dead counts as alive, exactly as the scheduler treats it.
-func (w *WatchController) drivenRuns() (active int, elsewhere int, err error) {
-	operations, err := w.deps.Store.AllOperations()
+// drivenRuns counts the runs currently holding a lease, for the report. A lease
+// whose owner cannot be proved dead counts as alive, exactly as the scheduler
+// treats it.
+func (w *WatchController) drivenRuns() (int, error) {
+	operations, err := w.deps.Store.ActiveOperations("")
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
-	driving, foreign := map[string]bool{}, map[string]bool{}
+	driving := map[string]bool{}
 	for _, op := range operations {
 		if (op.State != Leased && op.State != Running) || op.Lease == nil {
 			continue
@@ -251,14 +251,11 @@ func (w *WatchController) drivenRuns() (active int, elsewhere int, err error) {
 			continue
 		}
 		driving[op.RunID] = true
-		if op.Lease.Owner != w.deps.Owner {
-			foreign[op.RunID] = true
-		}
 	}
-	return len(driving), len(foreign), nil
+	return len(driving), nil
 }
 
-func (w *WatchController) tickRepository(ctx context.Context, repo GitHubRepo, now time.Time, capacity bool) RepositoryWatchReport {
+func (w *WatchController) tickRepository(ctx context.Context, repo GitHubRepo, now time.Time) RepositoryWatchReport {
 	report := RepositoryWatchReport{Repository: repo}
 	state, revision, _, err := w.deps.Store.WatchStateFor(repo.String())
 	if err != nil {
@@ -290,7 +287,7 @@ func (w *WatchController) tickRepository(ctx context.Context, repo GitHubRepo, n
 		// asked for. Already-claimed runs are still driven: discovery cadence
 		// and run reconciliation are independent.
 		report.Discovered = len(watched)
-		w.drive(ctx, engine, &report, w.claim(ctx, engine, &report, watched), capacity && contactable(state.LastErrorClass))
+		w.drive(ctx, engine, &report, w.claim(ctx, engine, &report, watched), contactable(state.LastErrorClass))
 		return report
 	}
 
@@ -317,7 +314,7 @@ func (w *WatchController) tickRepository(ctx context.Context, repo GitHubRepo, n
 		// A transient discovery failure must not freeze runs that are already
 		// making progress, for the same reason a 304 must not.
 		report.Discovered = len(watched)
-		w.drive(ctx, engine, &report, w.claim(ctx, engine, &report, watched), capacity && contactable(class))
+		w.drive(ctx, engine, &report, w.claim(ctx, engine, &report, watched), contactable(class))
 		return report
 	}
 
@@ -348,7 +345,7 @@ func (w *WatchController) tickRepository(ctx context.Context, repo GitHubRepo, n
 	}
 	w.recordSuccess(&report, state, revision, now, result, observed)
 	report.Discovered = len(observed)
-	w.drive(ctx, engine, &report, w.claim(ctx, engine, &report, observed), capacity)
+	w.drive(ctx, engine, &report, w.claim(ctx, engine, &report, observed), true)
 	return report
 }
 
@@ -356,36 +353,56 @@ func (w *WatchController) tickRepository(ctx context.Context, repo GitHubRepo, n
 // Claiming and driving
 // ---------------------------------------------------------------------------
 
-// claim resolves the durable run for each consented issue, creating one where
-// none exists. Creation goes through StartOrResumeIssueRun, which derives the
-// identity from the repository, the issue and the configuration digest and
-// takes it with the atomic source claim - so two watchers that discover the
-// same issue converge on one run instead of racing to create two.
+// claim resolves the durable run for each consented issue from the SOURCE'S
+// whole history (#58), across every configuration identity space:
+//
+//   - a live run in this controller's space is resumed;
+//   - a live run anywhere else is reported as a boundary and never paralleled;
+//   - a source whose runs are all terminal is settled, and a standing label
+//     does not start it again - a new generation is an explicit operator act;
+//   - only a source with no history at all gets a run, through a claim that
+//     re-checks "no history" in the same statement, so two watchers - even
+//     under different configurations - cannot both create one.
 //
 // Claiming makes no forge call and holds no capacity: it is discovery, and it
 // happens whether or not there is a slot to drive anything in.
 func (w *WatchController) claim(ctx context.Context, engine *EngineeringRuntime, report *RepositoryWatchReport, issues []int) []string {
 	runIDs := make([]string, 0, len(issues))
 	for _, issue := range issues {
-		runID, live, exhausted, err := issueRun(engine, issue)
+		// This controller's own live run is resumed from its own identity
+		// space alone: driving work already admitted must not depend on
+		// unrelated history being readable. Only deciding to CREATE work
+		// reads the source's whole history.
+		own, live, err := engine.liveRunInThisSpace(issue)
 		if err != nil {
 			report.note(fmt.Sprintf("issue %d: %v", issue, err))
 			continue
 		}
-		switch {
-		case live:
-			runIDs = append(runIDs, runID)
-		case exhausted:
-			// Every generation of this issue has already terminated. Discovery
-			// does not re-run finished work: starting a new generation is an
-			// explicit operator action, not something a standing label repeats.
-		default:
-			created, err := engine.StartOrResumeIssueRun(ctx, issue)
+		if live {
+			runIDs = append(runIDs, own)
+			continue
+		}
+		decision, err := engine.sourceDecision(issue)
+		if err != nil {
+			report.note(fmt.Sprintf("issue %d: %v", issue, err))
+			continue
+		}
+		switch decision.State {
+		case SourceLive:
+			runIDs = append(runIDs, decision.RunID)
+		case SourceLiveElsewhere:
+			report.note((&SourceLiveElsewhereError{Issue: issue, RunID: decision.RunID}).Error())
+		case SourceSettled:
+			// Finished work stays finished, whatever configuration finished it.
+		case SourceUnseen:
+			created, claimed, err := engine.claimUnseenSource(ctx, issue)
 			if err != nil {
 				report.note(fmt.Sprintf("issue %d: %v", issue, err))
 				continue
 			}
-			runIDs = append(runIDs, created)
+			if claimed {
+				runIDs = append(runIDs, created)
+			}
 		}
 	}
 	return runIDs
@@ -401,11 +418,11 @@ func (w *WatchController) claim(ctx context.Context, engine *EngineeringRuntime,
 // holds no slot the moment it returns, and the NEXT run is driven inside the
 // same tick. Nothing here holds capacity merely because a durable run exists,
 // so with the M0 ceiling of one a later run is delayed, never starved.
-func (w *WatchController) drive(ctx context.Context, engine *EngineeringRuntime, report *RepositoryWatchReport, runIDs []string, capacity bool) {
+func (w *WatchController) drive(ctx context.Context, engine *EngineeringRuntime, report *RepositoryWatchReport, runIDs []string, reachable bool) {
 	// The single funnel every claimed run passes through on its way to the
 	// reconciler, which is why the intake-only decision is taken here rather
 	// than at each call site: one guard cannot be forgotten by a fourth one.
-	if w.deps.IntakeOnly || !capacity {
+	if w.deps.IntakeOnly || !reachable {
 		return
 	}
 	for _, runID := range runIDs {
@@ -466,7 +483,7 @@ func (w *WatchController) markOptInRestored(engine *EngineeringRuntime, report *
 // there is nothing to record on. An absent run is left absent and a terminal
 // run is left terminal: watch never fabricates or revives one.
 func (w *WatchController) liveRun(engine *EngineeringRuntime, report *RepositoryWatchReport, issue int) (*runState, bool) {
-	runID, live, _, err := issueRun(engine, issue)
+	runID, live, err := engine.liveRunInThisSpace(issue)
 	if err != nil {
 		report.note(fmt.Sprintf("issue %d: %v", issue, err))
 		return nil, false
@@ -494,38 +511,6 @@ func (w *WatchController) appendOptIn(engine *EngineeringRuntime, report *Reposi
 		return false
 	}
 	return true
-}
-
-// issueRun resolves the durable run for one issue WITHOUT creating anything. It
-// probes the same deterministic identity space StartOrResumeIssueRun does and
-// answers one of three things: a live run to resume, that every generation of
-// this issue has terminated, or that this issue has no run at all.
-func issueRun(engine *EngineeringRuntime, issue int) (runID string, live bool, exhausted bool, err error) {
-	goal := issueGoal(engine.deps.Repository.Identity, issue)
-	for generation := 0; generation < maxRunGenerations; generation++ {
-		id, err := issueRunID(engine.deps.Repository.Identity, issue, engine.deps.ConfigDigest, generation)
-		if err != nil {
-			return "", false, false, err
-		}
-		run, ok, err := engine.deps.Store.Run(id)
-		if err != nil {
-			return "", false, false, err
-		}
-		if !ok {
-			return "", false, generation > 0, nil
-		}
-		if run.Repository != engine.deps.Repository.Identity || run.Goal != goal {
-			return "", false, false, &RunConflictError{RunID: id, Detail: "durable run describes different work"}
-		}
-		snapshot, err := engine.deps.Store.Replay(id)
-		if err != nil {
-			return "", false, false, err
-		}
-		if !terminalDisposition(snapshot.Disposition) {
-			return id, true, false, nil
-		}
-	}
-	return "", false, true, nil
 }
 
 // ---------------------------------------------------------------------------

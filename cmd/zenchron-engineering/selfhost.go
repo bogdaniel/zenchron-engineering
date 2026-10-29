@@ -304,7 +304,9 @@ func selfhostIssueWithModels(rawNumber string, configuredModels []string, comman
 		execution = codexExecution{Provider: "Codex CLI", Model: model, AuthMode: authMode, Attempt: index + 1, MaxAttempts: len(models)}
 		fmt.Fprintf(stdout, "Codex attempt %d/%d: model %s, auth mode %s\n", execution.Attempt, execution.MaxAttempts, model, authMode)
 		args := []string{"--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "--ignore-user-config", "--model", model, "--cd", root, "--add-dir", contextDir, "--output-schema", schemaFile, "--output-last-message", reportFile, prompt}
-		_, runErr := commands.Output(root, "codex", args...)
+		// The worker inherits this shell's environment; a later GOENV wins in
+		// exec, so its plain `go env -w` cannot reach the operator's Go env (#430).
+		_, runErr := commands.OutputEnv(root, []string{"GOENV=" + os.DevNull}, "codex", args...)
 		if runErr == nil {
 			executionStatePath, err = persistInterruptedExecution(root, number, issueBranch, base, execution, commands)
 			if err != nil {

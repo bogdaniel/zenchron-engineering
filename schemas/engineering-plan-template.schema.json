@@ -187,6 +187,13 @@
         },
         "action": {
           "$ref": "#/$defs/action"
+        },
+        "execution_kind": {
+          "type": "string",
+          "enum": [
+            "provider",
+            "integration_compose"
+          ]
         }
       }
     },

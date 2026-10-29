@@ -1,0 +1,736 @@
+{
+  "source": "Chromium accessibility tree; manual screen-reader speech remains unqualified",
+  "nodes": [
+    {
+      "role": "RootWebArea",
+      "name": "Zenchron · Engineering OS",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "link",
+      "name": "Skip to main content",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "status",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Skip to main content",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "banner",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "RUNTIME",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Observed API data",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "Refresh",
+      "ignored": false
+    },
+    {
+      "role": "main",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "contentinfo",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "navigation",
+      "name": "Mobile navigation",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Skip to main content",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "button",
+      "name": "Open navigation",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Engineering OS · isolated controller test data",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "button",
+      "name": "Switch to light theme",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "RUNTIME",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Observed API data",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Refresh",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "button",
+      "name": "Runtime recovery ↘",
+      "ignored": false
+    },
+    {
+      "role": "LabelText",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "group",
+      "name": "Plan request pagination",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Browser received 2026-10-14T09:16:53.477Z",
+      "ignored": false
+    },
+    {
+      "role": "link",
+      "name": "Overview",
+      "ignored": false
+    },
+    {
+      "role": "link",
+      "name": "Objectives",
+      "ignored": false
+    },
+    {
+      "role": "link",
+      "name": "Decisions",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "More navigation",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "☰",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Engineering OS · isolated controller test ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "data",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "☀",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Refresh",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "Action required",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " pending · ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " actionable · plan decisions",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Runtime recovery ↘",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Choose a decision",
+      "ignored": false
+    },
+    {
+      "role": "combobox",
+      "name": "Choose a decision",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "heading",
+      "name": "Select an exact request",
+      "ignored": false
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "2",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": " loaded · offset ",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "Previous",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "Next",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Browser received 2026-10-14T09:16:53.477Z",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Overview",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Objectives",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "Decisions",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "StaticText",
+      "name": "More",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "☰",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "☀",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "OPERATIONS / HUMAN AUTHORITY",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Action required",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " pending · ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "1",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " actionable · plan decisions",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Runtime recovery ↘",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Choose a decision",
+      "ignored": false
+    },
+    {
+      "role": "MenuListPopup",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "Decision context",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Select an exact request",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Inspect its subject and consequence before deciding. No request is selected automatically after resolution.",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "2",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": " loaded · offset ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "0",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Previous",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Next",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "WorkGraph decisions & publication requests",
+      "ignored": false
+    },
+    {
+      "role": "button",
+      "name": "Refresh graph requests",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Graph-owned human requests, separately paged from plan approvals. Runtime recovery never enters this list.",
+      "ignored": false
+    },
+    {
+      "role": "sectionheader",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "heading",
+      "name": "Recovery aggregate unavailable",
+      "ignored": false
+    },
+    {
+      "role": "paragraph",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "generic",
+      "name": "",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Overview",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Objectives",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Decisions",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "More",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "OPERATIONS / HUMAN AUTHORITY",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Action required",
+      "ignored": false
+    },
+    {
+      "role": "none",
+      "ignored": true
+    },
+    {
+      "role": "option",
+      "name": "Select request",
+      "ignored": false
+    },
+    {
+      "role": "option",
+      "name": "plan-5eea25f673a44e1b1179681df255feb4 · r2",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Decision context",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Select an exact request",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Inspect its subject and consequence before deciding. ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "No request is selected automatically after resolution.",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Previous",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Next",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "WorkGraph decisions & publication requests",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Refresh graph requests",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Graph-owned human requests, separately paged from ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "plan approvals. Runtime recovery never enters this list.",
+      "ignored": false
+    },
+    {
+      "role": "heading",
+      "name": "Runtime-owned recovery",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Recovery aggregate unavailable",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "No automatic runtime failure is promoted into a human authority request. Inspect individual runs for failure classes, held material and successors; no aggregate count is inferred.",
+      "ignored": false
+    },
+    {
+      "role": "link",
+      "name": "Inspect run recovery",
+      "ignored": false
+    },
+    {
+      "role": "link",
+      "name": "Inspect WorkUnit human requests",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Decision context",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "WorkGraph decisions & ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "publication requests",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Refresh graph ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "requests",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Runtime-owned recovery",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Recovery aggregate unavailable",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "No automatic runtime failure is promoted into a human ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "authority request. Inspect individual runs for failure ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "classes, held material and successors; no aggregate ",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "count is inferred.",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Inspect run recovery",
+      "ignored": false
+    },
+    {
+      "role": "StaticText",
+      "name": "Inspect WorkUnit human requests",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Runtime-owned recovery",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Inspect run recovery",
+      "ignored": false
+    },
+    {
+      "role": "InlineTextBox",
+      "name": "Inspect WorkUnit human requests",
+      "ignored": false
+    }
+  ]
+}

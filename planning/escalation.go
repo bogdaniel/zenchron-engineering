@@ -39,23 +39,35 @@ func (e *EscalationError) Error() string {
 // resolver - rather than at load time, because a registry is valid on its own
 // and only its RELATIONSHIP to the configured agents can be escalating.
 func (r Registry) Bind(agents []domain.ExecutionAgentDescriptor) error {
-	byID := make(map[string]domain.ExecutionAgentDescriptor, len(agents))
-	for _, agent := range agents {
-		byID[agent.ID] = agent
-	}
+	byID := agentsByID(agents)
 	for _, profile := range r.Profiles() {
-		agent, ok := byID[profile.ExecutionAgent]
-		if !ok {
-			return &EscalationError{
-				Profile: profile.ID, Agent: profile.ExecutionAgent,
-				Detail: "no such agent is configured; a profile specializes a worker the operator already registered and can never introduce one",
-			}
-		}
-		if err := RefuseEscalation(profile, agent); err != nil {
+		if err := bindProfile(profile, byID); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func agentsByID(agents []domain.ExecutionAgentDescriptor) map[string]domain.ExecutionAgentDescriptor {
+	byID := make(map[string]domain.ExecutionAgentDescriptor, len(agents))
+	for _, agent := range agents {
+		byID[agent.ID] = agent
+	}
+	return byID
+}
+
+// bindProfile is Bind's check for ONE profile, shared with the write path
+// (ADR-0008) so a profile that would escalate its worker is refused at the
+// write that introduces it, not only here against the whole registry.
+func bindProfile(profile domain.AgentProfile, byID map[string]domain.ExecutionAgentDescriptor) error {
+	agent, ok := byID[profile.ExecutionAgent]
+	if !ok {
+		return &EscalationError{
+			Profile: profile.ID, Agent: profile.ExecutionAgent,
+			Detail: "no such agent is configured; a profile specializes a worker the operator already registered and can never introduce one",
+		}
+	}
+	return RefuseEscalation(profile, agent)
 }
 
 // RefuseEscalation is the check for one profile against one worker.

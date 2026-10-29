@@ -28,7 +28,7 @@ func TestSelfhostIssuePublishesVerifiedHandoff(t *testing.T) {
 		"Target issue: #4",
 		"Branch: `issue-4`",
 		"Exact head: `head456`",
-		"Harness Go runtime: `local Go 1.25.1 (host-go:1.25.1)`",
+		"Harness Go runtime: `docker Go 1.25 (sha256:test-image)`",
 		`"command": "go test ./..."`,
 		`"result": "pass"`,
 		"Executor-reported observations",
@@ -46,6 +46,9 @@ func TestSelfhostIssuePublishesVerifiedHandoff(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(commands.calls, "\n"), "--ask-for-approval never --sandbox workspace-write") {
 		t.Fatal("Codex was not run with the bounded non-interactive policy")
+	}
+	if !slices.Contains(commands.codexEnv, "GOENV="+os.DevNull) {
+		t.Fatalf("Codex worker env %q does not isolate GOENV (#430)", commands.codexEnv)
 	}
 	if !strings.Contains(commands.prBody, "Closes #4") || !strings.Contains(commands.prBody, "do not authorize merge") {
 		t.Fatalf("PR body did not preserve the trust boundary:\n%s", commands.prBody)
@@ -229,12 +232,12 @@ func TestSelfhostResumePublishesInterruptedCandidate(t *testing.T) {
 
 func TestWriteSelfhostPreflightReportsResolvedInputs(t *testing.T) {
 	var output bytes.Buffer
-	writeSelfhostPreflight(&output, "example/engineering", "abc123", goRuntime{kind: localGoRuntime, goVersion: "1.25.1", environmentIdentifier: "host-go:1.25.1"})
+	writeSelfhostPreflight(&output, "example/engineering", "abc123", goRuntime{kind: dockerGoRuntime, goVersion: "1.25", environmentIdentifier: "sha256:test-image"})
 
 	for _, want := range []string{
 		`repository "example/engineering"`,
 		`trusted origin/main base "abc123"`,
-		`Go runtime "local Go 1.25.1 (host-go:1.25.1)"`,
+		`Go runtime "docker Go 1.25 (sha256:test-image)"`,
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Errorf("preflight missing %q: %s", want, output.String())
@@ -247,7 +250,7 @@ func assertSelfhostPreflight(t *testing.T, output string) {
 	for _, want := range []string{
 		`Selfhost preflight: repository "bogdaniel/zenchron-engineering"`,
 		`trusted origin/main base "base123"`,
-		`Go runtime "local Go 1.25.1 (host-go:1.25.1)"`,
+		`Go runtime "docker Go 1.25 (sha256:test-image)"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("preflight missing %q: %s", want, output)
@@ -359,6 +362,7 @@ type fakeCommands struct {
 	codexErrors             []error
 	codexAttempts           int
 	lastCodexFailed         bool
+	codexEnv                []string
 	codexLoginStatus        string
 	statusAfterCodexFailure string
 	pr                      pullRequest
@@ -454,7 +458,14 @@ func (f *fakeCommands) Output(_ string, name string, args ...string) (string, er
 		path := argumentAfter(f.t, args, "--output-last-message")
 		return "", os.WriteFile(path, []byte(mustJSON(f.t, f.report)), 0o600)
 	}
+	if name == "docker" && strings.Contains(call, "sha256:test-image gofmt -l") {
+		return f.formatOutput, nil
+	}
 	switch call {
+	case "docker info --format {{.ServerVersion}}":
+		return "28.0.0", nil
+	case "docker image inspect --format {{.Id}} golang:1.25":
+		return "sha256:test-image", nil
 	case "go version":
 		return "go version go1.25.1 test/arch", nil
 	case "git ls-files -z --cached --others --exclude-standard -- *.go":
@@ -535,7 +546,10 @@ func countCodexExecutions(calls []string) int {
 	return count
 }
 
-func (f *fakeCommands) OutputEnv(dir string, _ []string, name string, args ...string) (string, error) {
+func (f *fakeCommands) OutputEnv(dir string, env []string, name string, args ...string) (string, error) {
+	if name == "codex" {
+		f.codexEnv = env
+	}
 	return f.Output(dir, name, args...)
 }
 
@@ -554,7 +568,7 @@ func (f *fakeCommands) Run(_ string, name string, args ...string) error {
 		return os.WriteFile(path, []byte(mustJSON(f.t, f.report)), 0o600)
 	case name == "git" && slices.Equal(args, []string{"add", "--all"}):
 		return nil
-	case name == "go" && (slices.Equal(args, []string{"vet", "./..."}) || slices.Equal(args, []string{"test", "./..."})):
+	case name == "docker" && (strings.HasSuffix(call, "sha256:test-image go vet ./...") || strings.HasSuffix(call, "sha256:test-image go test ./...")):
 		return nil
 	case name == "git" && len(args) == 3 && args[0] == "commit" && args[1] == "-m":
 		f.committed = true

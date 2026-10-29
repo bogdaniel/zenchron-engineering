@@ -314,14 +314,16 @@ func (input ResolveInput) resolveStage(stage domain.PlanStage, profiles []domain
 		return domain.AgentAssignment{}, nil, err
 	}
 	pack, err := CompileContext(ContextInput{
-		Stage:        stage,
-		Role:         stage.Role,
-		Contract:     input.Contract,
-		Model:        input.Model,
-		Facts:        input.Facts,
-		Policy:       contextPolicy,
-		Upstream:     input.Upstream[stage.ID],
-		Independence: independenceBindings(stage, assigned, selectedAgent, *selected),
+		Stage:         stage,
+		Role:          stage.Role,
+		PlanObjective: input.Plan.Objective,
+		PlanStages:    input.Plan.Stages,
+		Contract:      input.Contract,
+		Model:         input.Model,
+		Facts:         input.Facts,
+		Policy:        contextPolicy,
+		Upstream:      input.Upstream[stage.ID],
+		Independence:  independenceBindings(stage, assigned, selectedAgent, *selected),
 	})
 	if err != nil {
 		return domain.AgentAssignment{}, nil, err
@@ -411,7 +413,7 @@ func eligibility(stage domain.PlanStage, profile domain.AgentProfile, agent doma
 	// and the plan would stop without ever failing. It is refused at resolution
 	// for the same reason an absent invocation mode is - discovering it after
 	// the invocation has been spent is the expensive way to learn it.
-	if stage.Kind == domain.StageAgent && stage.Role == domain.RoleReviewer && !agent.ProducesStructuredVerdicts() {
+	if stage.Kind == domain.StageAgent && stage.Role.ProducesReviewVerdict() && !agent.ProducesStructuredVerdicts() {
 		reasons = append(reasons, "agent cannot return the structured reviewer verdict this role must produce")
 		kinds = append(kinds, BlockVerdictProtocol)
 	}

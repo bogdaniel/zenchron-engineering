@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "requests",
+    "offset",
+    "has_more",
+    "graphs_offset",
+    "graphs_has_more"
+  ],
+  "properties": {
+    "requests": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "id",
+          "graph_id",
+          "graph_name",
+          "graph_revision",
+          "repository"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "graph_id": {
+            "type": "string"
+          },
+          "graph_name": {
+            "type": "string"
+          },
+          "unit_id": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string"
+          },
+          "objective_plan_id": {
+            "type": "string"
+          },
+          "objective_plan_digest": {
+            "type": "string"
+          },
+          "unavailable": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "decision",
+              "publication"
+            ]
+          },
+          "graph_revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "objective_plan_revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "decision": {
+            "$ref": "control-plane-workgraph-detail.schema.json#/properties/units/items/properties/open_decisions/items"
+          },
+          "run": {
+            "$ref": "control-plane-run.schema.json"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "decision"
+              }
+            },
+            "required": [
+              "decision"
+            ],
+            "not": {
+              "required": [
+                "run"
+              ]
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "publication"
+              }
+            },
+            "required": [
+              "run"
+            ],
+            "not": {
+              "required": [
+                "decision"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "has_more": {
+      "type": "boolean"
+    },
+    "graphs_offset": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "graphs_has_more": {
+      "type": "boolean"
+    }
+  }
+}

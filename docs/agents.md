@@ -203,7 +203,7 @@ standing permission is itself a posture.
 
 ## Invocation provenance
 
-Every attempt records, without secrets:
+Every attempt that reaches a provider records, without secrets:
 
 ```text
 agent id, provider kind, trust mode, model
@@ -213,12 +213,170 @@ whether a bypass was authorized and requested
 observed auth mode and how it was observed
 whether the workspace was bound by flag or by working directory
 whether workspace instruction files were suppressed
-the security-relevant argv, with the prompt replaced by its digest
+the security-relevant argv, with the prompt element replaced by the literal
+  placeholder [prompt], and the prompt's digest as prompt_sha256
+the effective provider-control environment, as provider_environment (below)
+execution deadline, start, completion, elapsed, and whether it overran
+termination cause (provider_returned, deadline_reached,
+  provider_inactivity_limit_reached, run_stopped), process id, and whether it ran
+  under the brokered candidate Git guard
+the inactivity window and the progress mode that measured it
+  (byte_output; byte_output_excluding_transport_chatter for Codex, where a
+  line matching its known reconnect/transport chatter does not refresh the
+  window, never classifies a failure, and an inactivity kill is always
+  provider_no_progress; or structured_claude_events)
+for Claude Code: accepted structured progress events, main-thread tool calls
+  still open at exit, permission denials in the final result, and malformed
+  or oversized stream lines - counts only, never provider text - plus at
+  most 8 denied tool identifiers read from the typed
+  permission_denials[].tool_name (never a tool input or denial text).
+  final_result_observed says whether a final result was read at all: the
+  denial count and tool names come from it, so without one - an attempt
+  killed at its deadline, typically - they are UNKNOWN, recorded as absent
+  and shown as "unknown (no final result)", never as 0; for a provider
+  without the structured stream (a byte_output mode) it is shown as
+  "n/a (provider reports none)", decided from the recorded progress mode
 ```
 
-The prompt is excluded from the durable record and referenced by digest: it
+The prompt text is excluded from the durable record: its argv slot holds the
+placeholder `[prompt]` and its SHA-256 is recorded as `prompt_sha256`. It
 carries untrusted third-party text and is unbounded, while every
 security-relevant flag is short and is kept verbatim.
+
+**`provider_environment` (#391).** The environment the runtime actually passed
+to the provider process, read from the exact slice handed to it after every
+addition (the toolchain grant, the scratch, Claude's deadline-derived Bash
+timeouts), never from the supervisor's own environment. It is restricted to an
+explicit non-secret allowlist and is never the whole environment:
+
+```text
+every native CLI: PATH HOME GOENV GIT_DIR GOMODCACHE GOTOOLCHAIN GOPROXY
+                  GOSUMDB GOFLAGS TMPDIR GOTMPDIR GOCACHE GOPATH
+plus the provider's state variable: CODEX_HOME, CLAUDE_CONFIG_DIR, QWEN_HOME
+plus Claude Code's controls: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS
+                  BASH_DEFAULT_TIMEOUT_MS BASH_MAX_TIMEOUT_MS
+```
+
+That set is CLOSED: validation and the schema accept exactly these names, so a
+case variant (`home`) or an unlisted name (`XDG_CONFIG_HOME`) is refused.
+
+USER is passed to the provider (keychain lookup) but is deliberately NOT
+recorded: it is host/operator identity, not a governance input.
+
+It is an ordered list of `{name, value, sha256, value_bounded}`, one entry per
+allowlisted name. An entry with neither `value` nor `sha256` means the runtime
+did not pass the variable; otherwise exactly one is present, including for an
+empty value. Absent and empty are never collapsed, and `status` prints them as
+`NAME (absent)` and `NAME=""` (or `NAME=sha256:<12 hex>`).
+
+**Host paths are recorded by identity only.** Every variable whose value is a
+host path never appears literally: PATH, HOME, GIT_DIR (the Git guard
+sentinel), TMPDIR, GOTMPDIR, GOCACHE, GOPATH, GOMODCACHE and the provider's
+state variable. Each records `sha256`, the lowercase hex SHA-256 of
+`"zenchron/provider-env/<NAME>/v1" + NUL + value` over the exact, untruncated
+passed value; an empty value records the identity of `""`, an absent one
+records nothing. Every other name records only `value`. Validation and the
+schema refuse a literal value on a hash-only name and a `sha256` on a literal
+one. The recorded environment therefore holds no host path except the null
+device GOENV names. It answers "was this the same PATH/HOME/cache as before"
+without copying host-account or scratch paths into the permanent journal. The
+raw PATH is not kept even truncated: a 200-byte prefix is no reproducibility
+evidence and the full value stays in the operator's own shell. (The argv is a
+separate #327 member; it names runtime-owned paths by role, see below, #464.)
+
+The construction is the one #84 specifies for `home_identity` (a tag, NUL, the
+value), but the TAGS ARE SEPARATE AND STAY SEPARATE: `zenchron/provider-env/...`
+here, #84's own tag for agent posture. Environment provenance (what one attempt
+was given) and posture binding (what an agent is bound to) are different facts,
+so the same HOME is deliberately a different identity in each.
+
+A name shaped like a
+credential (containing KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or AUTH) is
+never recorded, URL userinfo in a value (`scheme://user:token@host`) is
+redacted, values pass through the same token redaction and 200-byte field
+bound as every other detail, and `value_bounded` marks a value that was redacted
+or cut. The record stays inside the journal and
+`autonomy status`/`events`; the control-plane HTTP API projects no invocation
+provenance, so these local paths do not cross it.
+
+**Paths in recorded argv are logical references (#464).** The provider runs
+with the real host paths; the durable argv names each runtime-owned directory
+by the role the runtime gave it, never by its host spelling:
+
+```text
+invocation scratch root          $SCRATCH
+typed-result directory           $RESULT
+candidate workspace              $CANDIDATE/<relative>
+anything else under StateDir     $STATE/<relative>
+any other absolute path          <host-path>
+```
+
+So Codex records `-c sandbox_workspace_write.writable_roots=["$SCRATCH"]` and
+`--cd $CANDIDATE`, and Claude Code records `--add-dir $SCRATCH --add-dir
+$RESULT`. The record is built from the invocation's structured path roles - the
+provider spec's own argument builder applied to the invocation with each
+path-bearing field replaced by its reference - not by scrubbing strings, so the
+spec that knows a value is the scratch directory is the only thing that decides
+where `$SCRATCH` appears. Roots match on whole path components (`/tmp/ab` is not
+under `/tmp/a`), under both the given and the symlink-resolved spelling (macOS
+`/tmp` is `/private/tmp`), with Windows drive roots and separators normalized;
+the most specific role wins. A recorded argv is therefore the same when the
+state directory moves to another machine or home.
+
+An absolute path under no runtime-owned root - an operator-configured model
+path or tool path, say - is recorded as `<host-path>`. The loss is explicit
+rather than silent, and the invocation is never refused for it: a diagnostic
+projection does not get to block real work. The journal refuses, at append, an
+argv element that is itself a raw POSIX, drive-rooted or UNC path, as a
+backstop for a projection defect. Artifact references are unaffected; they are
+already runtime-relative identities.
+
+**Where it is recorded.** For a run attempt - initial execution, remediation or
+continuation, whether it succeeded, failed, hit its deadline, was ended for
+inactivity or was cancelled - the record is one immutable
+`execution.attempt_provenance` journal event, bound to the operation id and the
+physical `attempt_identity`, appended before that operation's
+`operation.after`. Two attempts of one operation are two events. Refused
+destructive candidate Git operations are not repeated there: they stay counted,
+with the latest one shaped, on the operation result. `autonomy events RUN`
+shows the event, and `autonomy status RUN` (text, and `--json` field
+`execution_attempt_provenance`) shows the latest execution attempt's record from
+the journal alone, after any restart and without reading a transcript. An
+attempt that never reached a provider records none, and status says so rather
+than showing zeros.
+
+The event is bounded by the 8 KiB canonical payload ceiling. Every field is
+bounded where it is produced; argv, the one member long enough to reach the
+ceiling in aggregate, has its tail trimmed in that case and then ends in
+`[argv truncated]` - never silently, and never for an ordinary invocation. If
+even that cannot fit (for example configuration strings full of control
+characters, which canonical JSON escapes six-fold), the record falls back to a
+fixed-size core - bounds, times, counters, termination cause and progress mode -
+marked `provenance_truncated`. The record is never dropped, and never made
+unappendable.
+
+For a planning invocation the same explanatory core is persisted with the plan
+revision, as `provenance.reasoning.invocation` (the `invocation_observation`
+definition in `schemas/planning-vocabulary.schema.json`). Planning has no run
+operation or physical attempt, so it records no `operation_id`,
+`attempt_identity` or refused-operation list; a revision whose provider
+reported no provenance, or that predates it, has no `invocation` member. A
+planning attempt that is REFUSED - including one killed at its deadline - has no
+revision, so its `plan.attempt_refused` journal event carries the same record in
+`reasoning.invocation`, fitted to that event's ceiling alongside everything else
+the attempt records; a refusal already at the ceiling that cannot take even the
+fixed-size core says `invocation_dropped_for_size` instead, so a dropped record
+is never mistaken for one the provider never reported. A proposed revision's
+journal event does not repeat it: the
+revision document is its one home.
+
+Planning provenance carries host-local and time-bound facts (paths, a process
+id, timestamps). It enters only the plan revision's own content digest - which
+an approval pins, so the operator approves what was recorded - and no plan id,
+attempt id, proposal id, idempotency key or run identity is derived from it.
+
+This record is observation. Nothing routes, classifies, authorizes or budgets
+from it.
 
 `workspace_instructions_suppressed` is a real difference between providers.
 Codex, Claude Code and Qwen expose a flag that keeps a candidate repository's own
@@ -226,6 +384,26 @@ Codex, Claude Code and Qwen expose a flag that keeps a candidate repository's ow
 not. Where it is false the runtime-owned trusted instruction text still frames
 everything in the workspace as data, but the adapter cannot prove the file was
 never read, so it does not claim to.
+
+### Claude Code runs the structured protocol
+
+Claude Code is invoked with `--print --output-format stream-json --verbose`, in
+both its editing and its `plan` mode, and without `--include-partial-messages`
+or `--bare`. Every one of those flags is probed against the installed binary
+first - `stream-json` must be a choice of `--output-format` itself, not a word
+in another option's description - and a CLI that does not advertise them is
+unavailable rather than run in text mode. `--safe-mode` is probed the same way:
+it is a capability of the installed CLI even where the public CLI reference
+does not list it. The structured events are what supervise the inactivity bound
+(see [configuration.md](configuration.md)), so an executor that cannot tee
+stdout to the parser is refused before Claude runs. A run that exits 0 without
+a final `result`, or with `is_error`, fails closed.
+
+The invocation also receives `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`, three
+quarters of the configured inactivity window, so Claude's own background wait
+gives up first. It is the one non-secret variable a spec adds to the
+allowlisted environment; it is not help-probeable, so whether the installed CLI
+honours it is live-acceptance evidence rather than a proven capability.
 
 ## Choosing an agent for a run
 
@@ -294,3 +472,182 @@ provider's name.
 - [`supervisor.md`](supervisor.md) — what drives them
 - [`configuration.md`](configuration.md) — the full configuration surface
 - [`../ROADMAP.md`](../ROADMAP.md) — agents versus future engineering roles
+
+## Candidate Git is brokered
+
+A provider may create and modify candidate work. It has **no authority to
+destructively discard it**.
+
+That law exists because of a measured cost. During live dogfood a coding CLI
+twice reached for habitual recovery — `git checkout -- <path>` against a dirty
+runtime-owned candidate workspace — and erased its own uncommitted
+implementation edits. No governed candidate commit was lost, because the runtime
+owns those; what was lost was the expensive part, the reasoning already
+performed, and the worker then spent more subscription capacity reconstructing
+it.
+
+Every native CLI invocation therefore runs under a brokered Git boundary:
+
+```text
+provider runs git
+      ↓
+runtime-owned shim, first on the worker search path
+      ↓
+classify the argv
+      ↓
+discard family  → refused, recorded, diagnostic to the provider
+everything else → executed as the real git
+```
+
+The refused family is the operations whose purpose or effect is to throw
+uncommitted work away: `checkout`, `switch`, `restore`, `clean`,
+`reset --hard`/`--merge`, `stash` (push/save/clear/drop), forced `git rm`,
+`checkout-index`, `sparse-checkout`, `worktree`, `read-tree -u`, and
+`submodule deinit`. Read-only and ordinary engineering Git — `status`, `diff`,
+`log`, `show`, `add`, `apply`, `commit` — is passed through untouched. This is a
+destruction guard, not a Git allowlist.
+
+**Aliases are resolved before classification.** A worker could otherwise author
+its own bypass out of two permitted commands — `git config alias.co checkout`,
+then `git co -- file` — because real Git expands aliases *after* the broker has
+authorized the verb it was spelled with, and a checked-out `.git/config` can
+carry one too. The lookup runs under the same configuration the execution will
+use, including leading `-c`/`-C` options, so `git -c alias.x=reset\ --hard x` is
+resolved too. Chains are followed, cycles, shell aliases (`!…`), malformed
+values and expansions that will not terminate all **fail closed** — "I could not
+tell what this would do" is not "this is safe", and nothing executes alias
+content to find out what it means. An alias whose name collides with a real Git
+command is ignored, exactly as Git ignores it, so `git status` is never refused
+because a config file once mentioned it. A resolved command is executed in its
+resolved form, so the lookup and the execution cannot disagree.
+
+**A destructive command is refused whether or not the workspace is dirty.** That
+is the smaller law and the stronger one: permitting it on an observably clean
+tree would require checking dirtiness and then executing, which is a race the
+provider's own process can win by writing a file in between. The decision is
+made from the argv, which cannot change. Dirtiness is still *observed*, so the
+diagnostic and the durable record can say what was at stake, but it cannot
+change the answer.
+
+### Who asked
+
+A refusal names the operation, the resource and, since #259, the actor that
+directly originated it:
+
+```text
+model_tool           the model's own tool call
+provider_runtime     the provider's machinery — repository probing, checkpointing, restore
+zenchron_runtime     this controller
+workload_subprocess  a program running inside the workload — a test binary, a build system
+unknown              the runtime could not establish it
+```
+
+The origin is derived from execution topology — the distance between the broker
+and the controller process that prepared the guard — and never from the shape of
+the command. Reading intent out of argv is how a run's 63 refusals were first
+reported as model stubbornness when the model had issued none of them: 51 came
+from the candidate's own test binaries and the rest from the provider probing
+its repository.
+
+Two properties make the answer usable. **Causation is not provenance**: a model
+that runs `go test ./...` causes the test binaries that follow, and the commits
+those binaries attempt are recorded as `workload_subprocess`, never promoted to
+`model_tool` because a model-originated process is somewhere in their ancestry.
+And **the origin changes no decision** — it is recorded beside an answer that was
+already given, an `unknown` origin is never more permissive than a known one, and
+a provider kind whose topology has not been measured yields `workload_subprocess`
+or `unknown` rather than a guess at the model.
+
+### Why an absolute path does not get around it
+
+Two mechanisms, and the second is the one that matters. The guard directory is
+first on the worker's search path, so a bare `git` — what a model types —
+resolves to the broker. And the worker's environment carries a brokered
+`GIT_DIR` naming a path that is not a repository, so Git performs no discovery
+at all: `/usr/bin/git reset --hard`, `sh -c '/usr/bin/git clean -fd'` and
+`command /usr/bin/git restore .` fail, naming the brokered path in Git's own
+error. The shim is the one caller that clears the sentinel.
+
+**What is not claimed.** These workers are `operator_trusted`: they run under
+the operator's own account. A worker that deliberately sets out to defeat the
+runtime can both go around the name *and* clear the variable — `unset GIT_DIR;
+/usr/bin/git reset --hard` reaches the repository. No in-process mechanism
+closes that while one account owns both sides; it is the same residual this
+trust mode already names, and it is why `RequireProtectedIsolation` refuses
+these adapters for protected work. What is closed is the whole of the observed
+failure: habitual destructive recovery, in every spelling that does not
+dismantle the runtime's own environment.
+
+**A controller that cannot install the boundary dispatches nothing.** The
+production composition always intends the guard, so a broker executable it
+cannot resolve is a controller unable to enforce its own law rather than a
+composition that chose not to. That is refused before the capability probe and
+before any process, as `candidate_guard_unavailable` — a typed wait an operator
+clears by repairing the installation, never a provider fault, because nothing
+about the worker, the work, the account or the network is wrong. A deliberately
+unguarded composition — a unit test, a probe, an embedder driving one
+invocation — remains possible and is recorded truthfully as `GitGuarded=false`.
+
+An execution attempt claims the candidate's writer lock
+(`<candidate>.writer.lock`, beside the candidate, never in it) before it reads,
+restores or scans the candidate, and holds it through dispatch. The provider
+inherits the lock's descriptor, so every descendant that keeps it keeps the
+candidate locked — including a tool command that left the provider's process
+group and survived a supervisor killed with SIGKILL, which the owner-death
+guard cannot reach (#168).
+
+- A claim that finds the lock held waits a bounded settle period (three times
+  the default guard grace) and is then refused before anything touches the
+  candidate as `candidate_writer_alive`: a typed, non-spending wait an
+  operator clears by stopping the stale writer (`lsof <candidate>.writer.lock`
+  names it). The settle is paid once: a run already waiting on
+  `candidate_writer_alive` re-probes once per pass without sleeping. A
+  controller shutdown (the attempt's parent context ending) interrupts the
+  settle and is recorded as `controller_shutdown`, never as a live writer. A
+  durable `stop RUN` is not observed during the settle; it is observed just
+  before the provider would start, as for any attempt. A lock that cannot be
+  checked at all is `candidate_guard_unavailable`.
+- When a provider returns normally, a lock still held by its own process
+  group (a backgrounded command) is stopped with the usual TERM-then-KILL, so
+  an attempt's own leftovers never refuse the next attempt. A holder that
+  survives that left the group, and is attributed to that attempt as
+  `provider_background_work_unresolved`.
+- Garbage collection does not delete a candidate whose lock is held, and
+  removes the lock file with the candidate.
+
+**It is cooperative, not a security boundary.** It sees only processes that
+kept the inherited descriptor; a provider can release it (`flock -u 3`), close
+it, or, unsandboxed, unlink the lock file. Whether tool commands inherit it is
+a property of each provider:
+
+| Provider kind | Tool commands inherit the lock descriptor |
+|---|---|
+| `codex_cli` | verified in review against codex 0.157.0, including a backgrounded `nohup` command |
+| node-based CLIs | no: node does not pass inherited descriptors to its children |
+| `claude_code` | unverified (a Bun-compiled binary) |
+| others | unverified |
+
+The boundary grants the worker no new command surface. It adds no tool to any
+provider's allowlist, so a stage that was obliged nothing is still obliged
+nothing.
+
+### What an operator sees
+
+A refusal is an **observation, not a failure** — the invocation that carried it
+may well have succeeded, which is the case worth reporting, because it is where
+expensive reasoning was nearly lost and was not. `autonomy status` prints it
+separately from any execution diagnostic:
+
+```text
+candidate discard refused   1 destructive Git operation(s) refused; dirty candidate work preserved: git checkout -- <1 operand(s)> (2 dirty candidate path(s) preserved)
+```
+
+It is never reported as provider quota, unavailability, a stall, an assurance
+failure or an unknown: the runtime knew exactly what it refused.
+
+The runtime's own candidate Git is unaffected. `RepositoryGitRunner` and
+`GitRunner` build their environment from scratch and resolve Git from their own
+trusted search path, so they never see the guard's path or its sentinel —
+candidate creation, inspection, staging, runtime-owned commits, branches and
+authorized pushes all behave exactly as before. The restriction is on the
+execution provider's authority, not on Zenchron's candidate machinery.

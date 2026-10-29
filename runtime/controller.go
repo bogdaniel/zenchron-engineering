@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -87,6 +88,20 @@ type ControllerBuild struct {
 func (b ControllerBuild) Attested() bool {
 	return (b.Kind != "" && b.Kind != ControllerUnattested) ||
 		b.Version != "" || b.SourceRevision != "" || b.SourceTree != "" || b.BinarySHA256 != ""
+}
+
+// ControllerBuildBinding is the one comparable identity of a build: the digest
+// of every provenance field, the measured binary included. An unattested build
+// has none, because it claims nothing that could be bound to (#398).
+func ControllerBuildBinding(b ControllerBuild) string {
+	if !b.Attested() {
+		return ""
+	}
+	digest, err := Digest(b)
+	if err != nil {
+		return ""
+	}
+	return digest
 }
 
 // validate is the construction-time check: nothing injected is legal, but a
@@ -168,6 +183,53 @@ type RunBudgets struct {
 	MaxProviderInvocations int `json:"max_provider_invocations,omitempty"`
 	MaxRemediationAttempts int `json:"max_remediation_attempts"`
 	MaxAssuranceAttempts   int `json:"max_assurance_attempts"`
+	// ProviderInactivityLimit bounds how long ONE provider invocation may go
+	// without producing observable output. It is a THIRD dimension beside
+	// WallLimit, which bounds active work, and LifecycleDeadline, which bounds
+	// calendar time - and it exists because neither of those can tell a
+	// provider that is reasoning from one whose host lost its network an hour
+	// ago. A live subprocess is not evidence of progress.
+	//
+	// It is frozen with the run and read back exactly, like every member
+	// (runState.budgets): a later configuration neither widens nor narrows
+	// it, and a restart reconstructs the same bound rather than minting a
+	// fresh default.
+	//
+	// omitempty, because a run persisted before this budget existed has none
+	// and its identity is derived from its canonical document, so an added
+	// zero would re-identify every historical run. That absence is NOT "no
+	// bound": such a run takes the window its controller binding identifies
+	// (the ADR-0003 §5 legacy rule, see runState.budgets). New runs always
+	// carry one - see RunBudgets.defaults.
+	ProviderInactivityLimit time.Duration `json:"provider_inactivity_limit,omitempty"`
+	// AttemptWallLimit bounds ONE physical provider attempt (#328), and it is a
+	// different resource from WallLimit, the run's CUMULATIVE active-work
+	// budget. Each attempt's durable deadline is start + min(this, remaining
+	// run active work), so a stop at this bound leaves the run able to admit a
+	// successor, while a stop at the run's remaining work exhausts the run.
+	//
+	// It is FROZEN at run creation (absent in configuration derives to
+	// min(DefaultAttemptWallLimit, WallLimit)) and read back EXACTLY - never
+	// from live configuration, never as min(live, persisted). omitempty, and
+	// absent means the run predates
+	// #328 and keeps the legacy rule: the attempt is bounded by its
+	// operation's own remaining WallBudget, nothing else. Nothing is
+	// backfilled.
+	AttemptWallLimit time.Duration `json:"attempt_wall_limit,omitempty"`
+	// AssuranceWallLimit bounds the run's CUMULATIVE assurance work (#640): the
+	// time spent inside assurance.go / assurance.semantic. It is a different
+	// resource from WallLimit, which bounds execution and remediation. A
+	// repository's full-suite verification is real work that must not spend the
+	// execution allowance, and it is not unlimited either: this is its own
+	// finite ceiling, consumed across retries, restarts and AssuranceRerun and
+	// never reset by them.
+	//
+	// Frozen at run creation (absent in configuration resolves to
+	// DefaultAssuranceWallLimit) and read back EXACTLY. omitempty, and absent
+	// means the run predates #640 and keeps the legacy rule: assurance time is
+	// charged to WallLimit as it always was. Nothing is backfilled, and a
+	// negative value is refused as corrupt state (runState.invariants).
+	AssuranceWallLimit time.Duration `json:"assurance_wall_limit,omitempty"`
 }
 
 // Dependencies is the complete, explicit input to a runtime instance. Every
@@ -249,6 +311,16 @@ type Dependencies struct {
 	// "raise the ceiling" is structurally unreachable from anything a
 	// repository can influence.
 	OperatorMaxConcurrentRuns int
+	// MaxConcurrentObservations is the operator's observation-class ceiling
+	// (#85). Zero means the default.
+	MaxConcurrentObservations int
+	// MaxConcurrentVerifications is the operator's verification ceiling
+	// (#490). Zero means the default.
+	MaxConcurrentVerifications int
+	// DriverLeases is the process's record of which leases its drivers hold
+	// (#485). Every engine of one process receives the SAME instance; nil
+	// leaves a lease this process stranded to the dead-owner rule alone.
+	DriverLeases *DriverLeases
 }
 
 // Outcome is what one Reconcile settled on. It is the CLI's whole answer.
@@ -399,11 +471,7 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 	if d.ControllerBuild.Attested() {
 		build = &d.ControllerBuild
 	}
-	controller, err := Digest(struct {
-		Controller string           `json:"controller"`
-		Build      *ControllerBuild `json:"build,omitempty"`
-		Config     ConfigDigest     `json:"config"`
-	}{d.ControllerID, build, d.ConfigDigest})
+	controller, err := ControllerBinding{Controller: d.ControllerID, Build: build, Config: d.ConfigDigest}.Digest()
 	if err != nil {
 		return nil, err
 	}
@@ -412,14 +480,25 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 		agents: d.Agents,
 		scheduler: Scheduler{
 			Store: d.Store, Clock: d.Clock, Owner: d.Owner, Liveness: d.Liveness,
-			LeaseDuration:     time.Minute,
-			MaxConcurrentRuns: resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.OperatorMaxConcurrentRuns),
+			LeaseDuration:              time.Minute,
+			MaxConcurrentRuns:          resolveMaxConcurrentRuns(d.MaxConcurrentRuns, d.OperatorMaxConcurrentRuns),
+			MaxConcurrentObservations:  d.MaxConcurrentObservations,
+			MaxConcurrentVerifications: d.MaxConcurrentVerifications,
+			Drivers:                    d.DriverLeases,
 		},
 		flow:       KernelFlow{},
 		repo:       repo,
 		controller: controller,
 	}, nil
 }
+
+// DefaultAttemptWallLimit is a last-resort physical fuse, separate from the
+// provider inactivity window and cumulative run active-work budget (#497).
+const DefaultAttemptWallLimit = 3 * time.Hour
+
+// DefaultAssuranceWallLimit is the total assurance allowance of one new run
+// (#640), sized for a normal full-suite verification with room for one rerun.
+const DefaultAssuranceWallLimit = time.Hour
 
 func (b RunBudgets) defaults() RunBudgets {
 	if b.WallLimit <= 0 {
@@ -437,6 +516,25 @@ func (b RunBudgets) defaults() RunBudgets {
 	if b.MaxAssuranceAttempts <= 0 {
 		b.MaxAssuranceAttempts = 2
 	}
+	// FINITE, ALWAYS, for a new run. The configuration layer already resolves
+	// an absent member, so this only catches a runtime constructed without
+	// going through it - a test, an embedder - and it is defaulted rather than
+	// left at zero because zero means "this provider may stall forever", which
+	// is the condition #238 exists to remove.
+	if b.ProviderInactivityLimit <= 0 {
+		b.ProviderInactivityLimit = DefaultProviderInactivitySeconds * time.Second
+	}
+	// Resolve the shipped hard fuse only at new-run creation, so an absent
+	// configuration member stays out of the controller-effective digest.
+	if b.AttemptWallLimit <= 0 {
+		b.AttemptWallLimit = DefaultAttemptWallLimit
+	}
+	if b.AttemptWallLimit > b.WallLimit {
+		b.AttemptWallLimit = b.WallLimit
+	}
+	if b.AssuranceWallLimit <= 0 {
+		b.AssuranceWallLimit = DefaultAssuranceWallLimit
+	}
 	return b
 }
 
@@ -449,6 +547,16 @@ func (b RunBudgets) defaults() RunBudgets {
 // unattended against a provider the only one that could run forever. Every
 // producer invocation is bounded by the configured limit; a planner is not
 // special enough to be exempt from it.
+//
+// WHAT GOVERNS IT (ADR-0003 B1). A planning invocation is not an
+// EngineeringRun: no run exists, so there is no RunPolicy to freeze into and
+// none is invented. The stated bound comes from the approved plan revision
+// (category P, frozen and digested there). The fallback is this controller's
+// configured run wall limit, which is controller-effective until B3 and so
+// identified by the controller binding: a changed value is a changed
+// controller, and a changed controller forks the PlanID (#131). B3 must move
+// that fallback into the plan revision before wall_limit_seconds leaves the
+// controller-effective digest.
 func (r *EngineeringRuntime) planningWallLimit(stageSeconds int) time.Duration {
 	configured := r.deps.Budgets.WallLimit
 	stated := time.Duration(stageSeconds) * time.Second
@@ -473,6 +581,11 @@ func (r *EngineeringRuntime) planningWallLimit(stageSeconds int) time.Duration {
 func (b RunBudgets) tightenedBy(stage domain.StageBudget) RunBudgets {
 	if wall := time.Duration(stage.MaxWallSeconds) * time.Second; wall > 0 && (b.WallLimit <= 0 || wall < b.WallLimit) {
 		b.WallLimit = wall
+	}
+	// A narrowed run budget narrows the attempt bound with it: one attempt can
+	// never hold more authority than the run it belongs to.
+	if b.AttemptWallLimit > b.WallLimit {
+		b.AttemptWallLimit = b.WallLimit
 	}
 	if attempts := stage.MaxExecutionAttempts; attempts > 0 && (b.MaxExecutionAttempts <= 0 || attempts < b.MaxExecutionAttempts) {
 		b.MaxExecutionAttempts = attempts
@@ -627,8 +740,34 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 		if !ok {
 			// A free slot. Under either mode this is a NEW run, and the source
 			// claim below is what keeps two writers from taking the same one.
-			created, err := r.createRun(ctx, runID, goal, nil, domain.StageBudget{})
-			return StartOutcome{RunID: created}, err
+			//
+			// Continuing (not an explicit new generation) never starts a run
+			// beside live work the source already has in ANOTHER identity
+			// space (#58): a configuration change is not authority to run the
+			// same issue twice.
+			if mode == NewGeneration {
+				created, err := r.createRun(ctx, runID, goal, nil, nil, domain.StageBudget{}, r.deps.Store.ClaimRun)
+				return StartOutcome{RunID: created}, err
+			}
+			decision, err := r.sourceDecision(issue)
+			if err != nil {
+				return StartOutcome{}, err
+			}
+			if decision.State == SourceLiveElsewhere {
+				return StartOutcome{}, &SourceLiveElsewhereError{Issue: issue, RunID: decision.RunID}
+			}
+			// The decision above is a read; the claim re-decides "no live run
+			// of this source" in the same statement as the insert, so a start
+			// under another configuration racing this one cannot also win.
+			created, err := r.createRun(ctx, runID, goal, nil, nil, domain.StageBudget{}, r.deps.Store.ClaimRunUnlessSourceLive)
+			if err != nil {
+				return StartOutcome{}, err
+			}
+			if _, found, err := r.deps.Store.Run(created); err != nil || found {
+				return StartOutcome{RunID: created}, err
+			}
+			// The claim lost to a live run the read did not see; name it.
+			return StartOutcome{}, r.liveSourceRunError(issue, goal)
 		}
 		if existing.Repository != r.deps.Repository.Identity || existing.Goal != goal {
 			return StartOutcome{}, &RunConflictError{RunID: runID, Detail: "durable run describes different work"}
@@ -648,11 +787,8 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 			// the next slot, leaving this run exactly as it is.
 			continue
 		}
-		if existing.ControllerSHA256 != r.controller {
-			return StartOutcome{}, &RunAdoptionRefusedError{
-				RunID: runID, Owner: existing.ControllerSHA256,
-				Detail: "adopting it would reconcile another controller's work under this one",
-			}
+		if err := r.refuseUnlessSucceeded(runID, existing); err != nil {
+			return StartOutcome{}, err
 		}
 		// A live generation keeps the agent it was created with. Adopting it
 		// under a different worker would be a silent provider handoff, which
@@ -681,6 +817,30 @@ func (r *EngineeringRuntime) StartIssueRun(ctx context.Context, issue int, mode 
 		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
 	}
 	return StartOutcome{}, fmt.Errorf("issue %d has exhausted %d run generations", issue, maxRunGenerations)
+}
+
+// refuseUnlessSucceeded is the adoption half of the controller-change rule.
+//
+// Reconciling another controller's live work under this one is refused, and an
+// ADMITTED SUCCESSION is the one thing that makes this controller not another
+// one for this run: the journal already carries the proof, so adoption reads it
+// rather than repeating the evaluation. A run whose journal holds no such
+// admission is refused exactly as it was before #234.
+func (r *EngineeringRuntime) refuseUnlessSucceeded(runID string, existing EngineeringRun) error {
+	if existing.ControllerSHA256 == r.controller {
+		return nil
+	}
+	events, err := r.deps.Store.Events(runID)
+	// An unreadable journal admits nothing. The refusal below is the same one
+	// the caller would have received before, which is the safe answer for a
+	// state this process could not read.
+	if err == nil && ControllerSuccessionContinues(existing, events, r.controller, r.wasTransitionActivated()) {
+		return nil
+	}
+	return &RunAdoptionRefusedError{
+		RunID: runID, Owner: existing.ControllerSHA256,
+		Detail: "adopting it would reconcile another controller's work under this one",
+	}
 }
 
 // repairAgentBinding restores a journalled agent assignment for a run whose row
@@ -732,7 +892,10 @@ func (r *EngineeringRuntime) repairAgentBinding(runID string, run EngineeringRun
 	return err
 }
 
-func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, plan *RunPlanBinding, stageBudget domain.StageBudget) (string, error) {
+// claim is the conditional insert that decides which process creates the run:
+// ClaimRun for an identity, ClaimUnseenSourceRun when the source must also have
+// no history at all (#58).
+func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, plan *RunPlanBinding, orchestration *RunOrchestrationBinding, stageBudget domain.StageBudget, claim func(EngineeringRun) (bool, error)) (string, error) {
 	now := r.deps.Clock.Now()
 	budgets := r.deps.Budgets.defaults().tightenedBy(stageBudget)
 	run := EngineeringRun{
@@ -745,28 +908,27 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, pl
 		Base:             Ref{ID: r.deps.Repository.DefaultBranch},
 		Candidate:        Candidate{Branch: candidateBranch(runID)},
 		ControllerSHA256: r.controller,
-		// A new run persists the bounds it was created under. Today the
-		// continuation bound is the one runState reads back from here, so it
-		// is the one whose terminal decision replays from durable state rather
-		// than from whatever is configured afterwards; the wall limit and the
-		// attempt ceilings are still read live. Persisting the whole record
-		// now is what lets the rest follow without another schema change.
+		// A new run persists the bounds it was created under, and this record
+		// IS the budget half of its frozen RunPolicy (ADR-0003 B1):
+		// runState.budgets reads every member back exactly - never live, never
+		// min(live, frozen).
 		Budgets: &budgets,
 		AgentID: r.deps.Agent.ID,
 		// The plan binding is part of the run AS CREATED, never attached
 		// afterwards: the genesis event is hashed against this row, and a row
 		// that gained its binding later would leave the two disagreeing about
 		// what the run is.
-		Plan:      plan,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Plan:          plan,
+		Orchestration: orchestration,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	// ClaimRun is the cross-process source claim: one conditional INSERT on the
 	// derived identity, so the database decides which process created this run.
 	// A caller that loses adopts the winner's run - it must not fall through to
 	// PutRun, whose upsert would overwrite the row the winner already hashed
 	// its genesis event against. See source_claim.go.
-	claimed, err := r.deps.Store.ClaimRun(run)
+	claimed, err := claim(run)
 	if err != nil {
 		return "", err
 	}
@@ -779,12 +941,22 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, pl
 	// journal - not in an adjacent metadata file that could be edited or lost.
 	// An unattested controller records nothing, which is exactly the claim it is
 	// entitled to make.
-	var provenance json.RawMessage
+	//
+	// The RunPolicyDigest is recorded here too (ADR-0003 B1), so status and
+	// provenance name the policy this run was frozen under without
+	// reconstructing it from today's configuration file.
+	policy := RunPolicyRecord{RepositoryConfig: r.deps.ConfigDigest.Repository}
+	if policy.SHA256, err = run.policy(policy.RepositoryConfig).Digest(); err != nil {
+		return "", err
+	}
+	genesis := RunCreatedPayload{RunPolicy: &policy}
 	if r.deps.ControllerBuild.Attested() {
-		provenance, err = marshalPayloadJSON(r.deps.ControllerBuild)
-		if err != nil {
-			return "", err
-		}
+		build := r.deps.ControllerBuild
+		genesis.ControllerBuild = &build
+	}
+	provenance, err := marshalPayloadJSON(genesis)
+	if err != nil {
+		return "", err
 	}
 	if _, err := r.deps.Store.AppendEvent(EngineeringEvent{
 		SchemaVersion: SchemaVersion,
@@ -832,8 +1004,16 @@ func (r *EngineeringRuntime) createRun(_ context.Context, runID, goal string, pl
 // generations of the same issue never share a branch.
 func candidateBranch(runID string) string { return "zenchron/" + runID }
 
+// terminalDispositions is shared with the durable acquisition guard.
+var terminalDispositions = [...]Disposition{Completed, Failed, Cancelled}
+
 func terminalDisposition(d Disposition) bool {
-	return d == Completed || d == Failed || d == Cancelled
+	for _, terminal := range terminalDispositions {
+		if d == terminal {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -861,17 +1041,26 @@ type ControllerIdentity struct {
 // into the genesis event. A run created before provenance existed, or by an
 // unattested build, reads back as unattested - never as adopted.
 func (s *runState) recordedControllerBuild() ControllerBuild {
+	if build := s.genesis().ControllerBuild; build != nil && build.Attested() {
+		return *build
+	}
+	return ControllerBuild{Kind: ControllerUnattested}
+}
+
+// genesis replays the run.created payload. A genesis that recorded nothing,
+// or nothing readable, reads back as the empty payload.
+func (s *runState) genesis() RunCreatedPayload {
 	for _, event := range s.events {
 		if event.Type != EventRunCreated {
 			continue
 		}
-		var build ControllerBuild
-		if len(event.Payload) > 0 && json.Unmarshal(event.Payload, &build) == nil {
-			return build
+		var payload RunCreatedPayload
+		if len(event.Payload) > 0 && json.Unmarshal(event.Payload, &payload) == nil {
+			return payload
 		}
 		break
 	}
-	return ControllerBuild{Kind: ControllerUnattested}
+	return RunCreatedPayload{}
 }
 
 // OperationStatus is the operator's view of the current bounded operation.
@@ -881,9 +1070,58 @@ type OperationStatus struct {
 	State       OperationState `json:"state"`
 	Attempt     int            `json:"attempt"`
 	MaxAttempts int            `json:"max_attempts"`
-	StartedAt   *time.Time     `json:"started_at,omitempty"`
-	HeartbeatAt *time.Time     `json:"heartbeat_at,omitempty"`
-	Elapsed     time.Duration  `json:"elapsed"`
+	// AttemptIdentity is the physical attempt identity this operation has
+	// allocated. It is reported alongside Attempt because the two legitimately
+	// disagree: a provider condition that routes to an external wait refunds the
+	// attempt and does not unhappen the try. Without it, an operator reading
+	// "attempt 1/2" after two provider calls has no way to tell a refunded wait
+	// from a stuck scheduler.
+	AttemptIdentity int           `json:"attempt_identity,omitempty"`
+	StartedAt       *time.Time    `json:"started_at,omitempty"`
+	HeartbeatAt     *time.Time    `json:"heartbeat_at,omitempty"`
+	Elapsed         time.Duration `json:"elapsed"`
+	// LastProgressAt is when this operation last produced RECOGNIZED progress -
+	// for a provider invocation, when output last arrived. It is reported
+	// beside HeartbeatAt because the two are different claims and #238 was
+	// exactly the cost of confusing them: a heartbeat says a controller is
+	// alive, this says the work moved.
+	LastProgressAt *time.Time `json:"last_progress_at,omitempty"`
+	// SilentFor is how long it has been since that progress, and
+	// InactivityLimit is the window it is measured against. Together they are
+	// the answer to "is this provider thinking or is it dead", which an
+	// operator previously could not get from status at all.
+	SilentFor       time.Duration `json:"silent_for,omitempty"`
+	InactivityLimit time.Duration `json:"inactivity_limit,omitempty"`
+	// InactivityLimitUnknown says the window cannot be reported, because it is
+	// a legacy run's unrecorded member read under a changed controller. An
+	// absent inactivity_limit would otherwise read as "no limit".
+	InactivityLimitUnknown bool `json:"inactivity_limit_unknown,omitempty"`
+	// ProgressSource says where LastProgressAt, SilentFor, HeartbeatAt and
+	// Lease were read for an operation that is still running or leased: "row"
+	// is the durable operation row of this exact attempt, "journal" is the
+	// fallback when that row could not be read or no longer matches (#326).
+	// It is empty once the operation has settled, when the journal is the
+	// only source. The heartbeat is only as fresh as its producer keeps the
+	// row; renewing it is #180, so an unchanged heartbeat here is not by
+	// itself evidence the attempt is dead.
+	ProgressSource string `json:"progress_source,omitempty"`
+	// Lease is the live row's lease, set only when ProgressSource is "row".
+	Lease *Lease `json:"lease,omitempty"`
+	// InactivitySuspension is "active" while a structured main-thread tool of
+	// THIS attempt holds the inactivity kill suspended (#322, #352), and
+	// InactivitySuspendedSince when it opened. It is "unverified" when the row
+	// records one but the owning process's liveness cannot be established, so
+	// it may belong to a controller that died: SilentFor then stands. Neither is
+	// set when ProgressSource is not "row". While it is active, SilentFor is
+	// not approaching a kill: the window resumes when the tool closes. It is up
+	// to one record interval behind the process, like the progress beside it.
+	InactivitySuspension     string     `json:"inactivity_suspension,omitempty"`
+	InactivitySuspendedSince *time.Time `json:"inactivity_suspended_since,omitempty"`
+	// Deadline is the absolute instant this attempt's authority ends, and
+	// DeadlineBound which bound set it (#328). A suspension never moves it.
+	// Both are reported only while the operation is leased or running.
+	Deadline      *time.Time   `json:"deadline,omitempty"`
+	DeadlineBound AttemptBound `json:"deadline_bound,omitempty"`
 }
 
 // SourceIdentity is the pinned, untrusted source the run answers. The title
@@ -918,17 +1156,35 @@ type StatusReport struct {
 	Goal          string             `json:"goal"`
 	Source        SourceIdentity     `json:"source"`
 	Controller    ControllerIdentity `json:"controller"`
-	Phase         Phase              `json:"phase"`
-	Disposition   Disposition        `json:"disposition"`
-	Reason        string             `json:"reason,omitempty"`
-	Base          Ref                `json:"base"`
-	Candidate     Candidate          `json:"candidate"`
-	Contract      Ref                `json:"contract"`
-	Operation     *OperationStatus   `json:"operation,omitempty"`
+	// Worker is which execution agent owns this run, from the journalled
+	// binding rather than from today's configuration. It is here because an
+	// operator reading one run should not have to switch to the fleet view to
+	// learn who is doing the work.
+	Worker      WorkerIdentity   `json:"worker"`
+	Phase       Phase            `json:"phase"`
+	Disposition Disposition      `json:"disposition"`
+	Reason      string           `json:"reason,omitempty"`
+	Base        Ref              `json:"base"`
+	Candidate   Candidate        `json:"candidate"`
+	Contract    Ref              `json:"contract"`
+	Operation   *OperationStatus `json:"operation,omitempty"`
+	// Retry is the durable retry a waiting run is held by (#87), read from
+	// the journalled operation; nil when none.
+	Retry *RetryStatus `json:"retry,omitempty"`
 
-	CreatedAt time.Time     `json:"created_at"`
-	Now       time.Time     `json:"now"`
-	Elapsed   time.Duration `json:"elapsed"`
+	CreatedAt time.Time `json:"created_at"`
+	Now       time.Time `json:"now"`
+	// Elapsed is lifecycle age, retained for JSON compatibility.
+	Elapsed             time.Duration `json:"elapsed"`
+	ActiveElapsed       time.Duration `json:"active_elapsed"`
+	ExternalWaitElapsed time.Duration `json:"external_wait_elapsed"`
+	// ActiveElapsed always reports total active work, including assurance.
+	// In split mode ExecutionElapsed + AssuranceElapsed == ActiveElapsed.
+	// In legacy mode ExecutionElapsed is the authoritative wall-budget charge;
+	// AssuranceElapsed is observed work overlapping that charge.
+	AccountingMode   string        `json:"accounting_mode"`
+	AssuranceElapsed time.Duration `json:"assurance_elapsed,omitempty"`
+	ExecutionElapsed time.Duration `json:"execution_elapsed,omitempty"`
 
 	Evidence             []Ref                   `json:"evidence,omitempty"`
 	Assurance            *AssuranceObservation   `json:"assurance,omitempty"`
@@ -950,8 +1206,52 @@ type StatusReport struct {
 	// runtime bound dropped. It names attempt numbers and byte counts only;
 	// the observations themselves stay in the local-only attempt artifacts.
 	ExecutionPriorContext *PriorAttemptObservations `json:"execution_prior_attempt_context,omitempty"`
-	Budgets               RunBudgets                `json:"budgets"`
-	StateSHA256           string                    `json:"state_sha256"`
+	// CandidateDiscardRefusals is how many destructive Git operations the
+	// runtime refused for this run's latest execution attempt, and
+	// CandidateDiscardRefused is the bounded shape of the most recent one.
+	//
+	// It is projected because an operator reading a run that took two provider
+	// attempts deserves to know that one of them tried to erase the other's
+	// work. It is not a failure and it is deliberately not rendered as one.
+	CandidateDiscardRefusals int    `json:"candidate_discard_refusals,omitempty"`
+	CandidateDiscardRefused  string `json:"candidate_discard_refused,omitempty"`
+	// ExecutionAttemptProvenance is how the latest execution attempt ran and
+	// ended, replayed from its journalled attempt-provenance event (#327) and
+	// never from the live operation row. Absent means that attempt recorded
+	// none: it never reached a provider, or it has not ended yet.
+	ExecutionAttemptProvenance *ExecutionAttemptProvenance `json:"execution_attempt_provenance,omitempty"`
+	// HeldMaterial is the valuable material a budget-ended run is holding and
+	// its disposition (#203), exactly as the terminal event recorded it.
+	// Absent on a budget failure means the run held no material result.
+	HeldMaterial *HeldMaterial `json:"held_material,omitempty"`
+	// Budgets are the budgets THIS RUN is judged by - its frozen RunPolicy,
+	// or the ADR-0003 §5 legacy derivation - never the current process's
+	// configuration (§6.2). RunPolicy names that policy and its source.
+	//
+	// Nil (JSON null) means UNKNOWN: a legacy run read by a controller that is
+	// not its binding, whose unrecorded members RunPolicy.Unverifiable names.
+	// It is never reported as zeroes, which would read as real bounds.
+	Budgets     *RunBudgets     `json:"budgets"`
+	RunPolicy   RunPolicyStatus `json:"run_policy"`
+	StateSHA256 string          `json:"state_sha256"`
+}
+
+// WorkerIdentity is the execution agent a run is bound to.
+//
+// MODEL IS WHAT THE PROVIDER EXPOSES, and empty is a truthful answer rather
+// than a gap to fill in. An agent whose CLI selects its own model does not
+// report one, and inventing a plausible name - or quietly omitting the field
+// so a reader assumes the default - would claim knowledge nobody has. The
+// renderer prints "unknown" for it, which is the same discipline `autonomy
+// agents` already applies to an unobservable authentication mode.
+type WorkerIdentity struct {
+	Agent        string    `json:"agent,omitempty"`
+	ProviderKind string    `json:"provider_kind,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	TrustMode    TrustMode `json:"trust_mode,omitempty"`
+	// Workspace is the runtime-owned candidate clone, so an operator can open
+	// what the worker is editing without going through the database.
+	Workspace string `json:"workspace,omitempty"`
 }
 
 // Status replays the run and reports it. It performs no network call and no
@@ -962,6 +1262,13 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		return StatusReport{}, err
 	}
 	now := r.deps.Clock.Now()
+	budgets, unverifiable := state.reportedBudgets()
+	policy := state.runPolicy()
+	policy.Unverifiable = unverifiable
+	accountingMode := "split"
+	if state.budgets().AssuranceWallLimit <= 0 {
+		accountingMode = "legacy"
+	}
 	report := StatusReport{
 		SchemaVersion: SchemaVersion,
 		RunID:         state.run.ID,
@@ -974,6 +1281,7 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 			ConfigDigest: r.deps.ConfigDigest,
 			Changed:      state.controllerChanged,
 		},
+		Worker:                state.workerIdentity(r.deps.StateDir),
 		Phase:                 state.phase(),
 		Disposition:           state.snapshot.Disposition,
 		Reason:                state.snapshot.Reason,
@@ -983,15 +1291,27 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		CreatedAt:             state.run.CreatedAt,
 		Now:                   now,
 		Elapsed:               now.Sub(state.run.CreatedAt),
+		ActiveElapsed:         state.activeElapsed(now),
+		ExternalWaitElapsed:   now.Sub(state.run.CreatedAt) - state.activeElapsed(now),
+		AccountingMode:        accountingMode,
+		AssuranceElapsed:      state.assuranceElapsed(now),
+		ExecutionElapsed:      state.executionElapsed(now),
 		Evidence:              state.projection.EvidenceBundles,
 		Assurance:             state.projection.Assurance,
 		PullRequest:           state.projection.PullRequest,
 		Attempts:              state.projection.Attempts,
-		Budgets:               r.deps.Budgets,
+		Budgets:               budgets,
+		RunPolicy:             policy,
 		StateSHA256:           state.snapshot.StateSHA256,
 		PublicationAuthority:  publicationAuthorityOf(state),
 		ExecutionDiagnostic:   state.projection.ExecutionDiagnostic,
 		ExecutionPriorContext: state.projection.ExecutionPriorContext,
+
+		CandidateDiscardRefusals: state.projection.CandidateDiscardRefusals,
+		CandidateDiscardRefused:  state.projection.CandidateDiscardRefused,
+
+		ExecutionAttemptProvenance: state.projection.ExecutionAttemptProvenance,
+		HeldMaterial:               state.snapshot.HeldMaterial,
 	}
 	if state.source != nil {
 		report.Source = SourceIdentity{
@@ -1018,11 +1338,36 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 		request = nil
 	}
 	report.AuthorityRequest = request
+	report.Retry = retryStatus(state)
 	if op, ok := state.currentOperation(); ok {
 		status := OperationStatus{
 			ID: op.ID, Kind: op.Kind, State: op.State,
-			Attempt: op.Attempt, MaxAttempts: op.MaxAttempts,
-			StartedAt: op.StartedAt, Elapsed: OperationElapsed(op, now),
+			Attempt: op.Attempt, MaxAttempts: op.MaxAttempts, AttemptIdentity: op.AttemptIdentity,
+			StartedAt: op.StartedAt, Elapsed: statusOperationElapsed(op, state.events, now),
+			LastProgressAt: op.LastProgressAt,
+			SilentFor:      ProviderSilence(op, now),
+		}
+		// Budgets is nil exactly when a member is unverifiable. The window is
+		// then reported unknown rather than absent, which would mean "no limit".
+		if budgets != nil {
+			status.InactivityLimit = budgets.ProviderInactivityLimit
+		} else {
+			status.InactivityLimitUnknown = slices.Contains(unverifiable, "provider_inactivity_limit")
+		}
+		if op.State == Leased || op.State == Running {
+			status.ProgressSource = "journal"
+			status.Deadline, status.DeadlineBound = op.Deadline, op.DeadlineBound
+			if row, ok := r.liveOperationRow(op); ok {
+				status.ProgressSource = "row"
+				status.LastProgressAt = row.LastProgressAt
+				status.SilentFor = ProviderSilence(row, now)
+				status.Lease = row.Lease
+				op.Lease = row.Lease
+				if state := r.inactivitySuspension(row); state != "" {
+					since := row.InactivitySuspension.Since
+					status.InactivitySuspension, status.InactivitySuspendedSince = state, &since
+				}
+			}
 		}
 		if op.Lease != nil {
 			heartbeat := op.Lease.HeartbeatAt
@@ -1033,8 +1378,122 @@ func (r *EngineeringRuntime) Status(runID string) (StatusReport, error) {
 	return report, nil
 }
 
+// RetryStatus is a waiting run's next probe: RetryNotBefore, with the
+// disposition that accounts for it and what makes it eligible again.
+type RetryStatus struct {
+	Operation       string           `json:"operation"`
+	NotBefore       time.Time        `json:"not_before"`
+	Disposition     RetryDisposition `json:"disposition"`
+	ResumeCondition string           `json:"resume_condition"`
+}
+
+// retryStatus is the retry the run is actually waiting on: the latest
+// operation that awaits its disposition's retry, is still the latest of its
+// kind (a superseded binding's failure is history), and whose wait reason is
+// the run's. Anything else - authority, integrity - is not masked by it.
+func retryStatus(s *runState) *RetryStatus {
+	if s.snapshot.Disposition != Waiting {
+		return nil
+	}
+	ops := sortOperations(mapValues(s.snapshot.Operations))
+	latest := map[string]string{}
+	for _, op := range ops {
+		latest[op.Kind] = op.ID
+	}
+	var out *RetryStatus
+	for _, op := range ops {
+		if latest[op.Kind] != op.ID || waitReasonOf(op) != s.snapshot.Reason {
+			continue
+		}
+		if d, ok := awaitsRetry(op); ok && !op.RetryNotBefore.IsZero() {
+			out = &RetryStatus{Operation: op.ID, NotBefore: op.RetryNotBefore, Disposition: op.RetryDisposition, ResumeCondition: d.ResumeCondition}
+		}
+	}
+	return out
+}
+
+// liveOperationRow is the durable row of op's CURRENT attempt, read by status
+// for its progress, open-tool suspension and lease observations only (#326,
+// #352): those are row-only writes, so the journal cannot hold them for a
+// running operation. Like
+// currentOperation it is never consulted to decide what to do next, and
+// nothing else in the report is taken from it. A row that cannot be read, is
+// missing, is on a different attempt, or is no longer active is not this
+// attempt's live state, so the caller keeps the journal's values rather than
+// mixing two attempts in one report.
+func (r *EngineeringRuntime) liveOperationRow(op RunOperation) (RunOperation, bool) {
+	row, _, found, err := r.deps.Store.Operation(op.ID)
+	if err != nil || !found || row.AttemptIdentity != op.AttemptIdentity || (row.State != Leased && row.State != Running) {
+		return RunOperation{}, false
+	}
+	return row, true
+}
+
+// inactivitySuspension is whether the live row's recorded open-tool suspension
+// is ACTIVE (#352): "active", "unverified", or "" for none.
+//
+// A suspension is a claim about one process, so it is active only while that
+// process still owns the attempt: the row is on the suspension's attempt, the
+// lease is still held by the owner that recorded it, and that owner is not
+// provably dead. The lease heartbeat cannot say so (#180: nothing renews it),
+// so the owner's liveness is read from the same lock evidence a takeover uses,
+// through a probe that only reads: status creates no lock file (#326).
+// Provably dead - a crashed controller whose row nothing has reclaimed yet -
+// is no suspension at all: nothing is supervising that attempt, and its
+// silence is reported as silence. Evidence that cannot decide is "unverified",
+// never "active". A takeover, a reclaim, a new attempt or a settlement each
+// break one of the conditions, so no later attempt can inherit it.
+func (r *EngineeringRuntime) inactivitySuspension(row RunOperation) string {
+	s := row.InactivitySuspension
+	if s == nil || s.AttemptIdentity != row.AttemptIdentity || row.Lease == nil || row.Lease.Owner != s.Owner {
+		return ""
+	}
+	liveness := r.scheduler.defaults().Liveness
+	if observer, ok := liveness.(interface {
+		observe(string) (bool, bool)
+	}); ok {
+		switch alive, decided := observer.observe(s.Owner); {
+		case !decided:
+			return "unverified"
+		case !alive:
+			return ""
+		}
+	} else if !liveness.Alive(s.Owner) {
+		return ""
+	}
+	return "active"
+}
+
+// The journal's after payload is written before Scheduler.Finish and older
+// payloads still carry ActiveSince. Bound that projection by the durable after
+// timestamp, without changing the scheduler's budget counter or journal bytes.
+func statusOperationElapsed(op RunOperation, events []EngineeringEvent, now time.Time) time.Duration {
+	end := now
+	var before time.Time
+	for _, event := range events {
+		if event.OperationID != op.ID {
+			continue
+		}
+		switch event.Type {
+		case EventOperationBefore:
+			before = event.OccurredAt
+			end = now
+		case EventOperationAfter:
+			end = event.OccurredAt
+		}
+	}
+	// Journals predating the active counter still have before/after boundaries.
+	if op.ActiveSince == nil && op.ConsumedExecution == 0 && !before.IsZero() {
+		op.ActiveSince = &before
+	}
+	return OperationElapsed(op, end)
+}
+
 func publicationAuthorityOf(state *runState) *PublicationAuthority {
 	decision, ok := state.publicationDecision()
+	if !ok {
+		decision, ok = state.recordedPublicationDecision()
+	}
 	if !ok {
 		return nil
 	}
@@ -1058,81 +1517,4 @@ func marshalPayloadJSON(payload any) (json.RawMessage, error) {
 		return nil, err
 	}
 	return json.RawMessage(raw), nil
-}
-
-// ---------------------------------------------------------------------------
-// Plan stage runs
-// ---------------------------------------------------------------------------
-
-// StartPlanStageRun creates the ordinary EngineeringRun for one dependency-ready
-// agent stage.
-//
-// It is deliberately the same run every other path creates: same identity
-// derivation, same claim, same genesis and agent-binding events, same
-// scheduler, same leases, same candidate lifecycle. What a plan adds is the
-// BINDING - which plan revision, which stage, which assignment - and nothing
-// else. A second kind of run would be a second runtime.
-//
-// The identity includes the plan revision and the stage, so two stages of one
-// plan are two runs and a new revision's stage is a new run rather than a
-// silent continuation of work approved under different terms.
-func (r *EngineeringRuntime) StartPlanStageRun(ctx context.Context, issue int, binding RunPlanBinding) (StartOutcome, error) {
-	if issue <= 0 {
-		return StartOutcome{}, fmt.Errorf("a plan stage run answers a source issue, and none was given")
-	}
-	if binding.PlanID == "" || binding.StageID == "" || binding.AssignmentID == "" || binding.Revision < 1 {
-		return StartOutcome{}, fmt.Errorf("a plan stage run needs the plan, revision, stage and assignment it was created for")
-	}
-	goal := issueGoal(r.deps.Repository.Identity, issue)
-	runID, err := derivedRunID(r.deps.Repository.Identity, issue, r.deps.ConfigDigest, 0, &planStageIdentity{
-		Plan: binding.PlanID, Revision: binding.Revision, Stage: binding.StageID,
-		Generation: binding.Generation,
-	})
-	if err != nil {
-		return StartOutcome{}, err
-	}
-	existing, found, err := r.deps.Store.Run(runID)
-	if err != nil {
-		return StartOutcome{}, err
-	}
-	if found {
-		// The reconciler is idempotent: it re-derives the same identity every
-		// tick, so finding the run it created before is the ordinary case, not
-		// a conflict. A row describing different work IS a conflict.
-		if existing.Repository != r.deps.Repository.Identity || existing.Goal != goal {
-			return StartOutcome{}, &RunConflictError{RunID: runID, Detail: "durable run describes different work"}
-		}
-		if existing.Plan == nil || existing.Plan.PlanID != binding.PlanID || existing.Plan.StageID != binding.StageID {
-			return StartOutcome{}, &RunConflictError{RunID: runID, Detail: "durable run belongs to a different plan stage"}
-		}
-		// The ASSIGNMENT is part of what the run is. Adopting a run created
-		// under a different assignment would silently hand this stage's work to
-		// a run bound to another worker, another profile and another frozen
-		// instruction set.
-		if existing.Plan.AssignmentID != binding.AssignmentID {
-			return StartOutcome{}, &RunConflictError{
-				RunID: runID,
-				Detail: fmt.Sprintf("durable run was created under assignment %s and this start names %s",
-					existing.Plan.AssignmentID, binding.AssignmentID),
-			}
-		}
-		// The run identity carries the repository, the issue, the configuration
-		// and the plan stage - but NOT the controller. Two controllers that
-		// share a configuration digest and differ in build or identity derive
-		// the same id, so without this check the second one would adopt the
-		// first one's live work. StartIssueRun refuses exactly this, and a plan
-		// stage run is an ordinary run: it is refused here on the same terms.
-		if existing.ControllerSHA256 != r.controller {
-			return StartOutcome{}, &RunAdoptionRefusedError{
-				RunID: runID, Owner: existing.ControllerSHA256,
-				Detail: "adopting it would reconcile another controller's work under this one",
-			}
-		}
-		if err := r.repairAgentBinding(runID, existing); err != nil {
-			return StartOutcome{}, err
-		}
-		return StartOutcome{RunID: runID, Adopted: true, AdoptedFrom: existing.ControllerSHA256}, nil
-	}
-	created, err := r.createRun(ctx, runID, goal, &binding, binding.StageBudget)
-	return StartOutcome{RunID: created}, err
 }

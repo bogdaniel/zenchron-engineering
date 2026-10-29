@@ -31,6 +31,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,7 +62,13 @@ const (
 	// file, which is how the runtime is given a publication identity of its own
 	// rather than borrowing the operator's.
 	GitHubCredentialToken = "token"
-	GitHubCredentialNone  = "none"
+	// GitHubCredentialApp mints the publication credential from a GitHub App
+	// installation, which is the only way to get a publication identity that is
+	// a machine rather than a second human account. The token it mints expires
+	// hourly and is re-minted from the App private key, so nothing long-lived
+	// sits on disk except a key the operator can revoke in one click.
+	GitHubCredentialApp  = "github-app"
+	GitHubCredentialNone = "none"
 )
 
 // Watch enrolment. Watch observes ONLY repositories an operator listed in the
@@ -170,15 +177,71 @@ type GitHubConfig struct {
 	// #63 review loop cannot run on a single-account installation: the operator
 	// reviews the pull request and the worker never hears it.
 	//
-	// The answer is a separate identity, not a weaker guard. A GitHub App
-	// installation token or a dedicated runtime account keeps admission decided
-	// by identity - which is what makes it robust against text - while leaving
-	// the human a distinct actor whose feedback is admissible.
+	// The answer is a separate identity, not a weaker guard: a dedicated
+	// runtime account's token keeps admission decided by identity - which is
+	// what makes it robust against text - while leaving the human a distinct
+	// actor whose feedback is admissible.
+	//
+	// It is NOT where a GitHub App goes. An App issues no token that can sit in
+	// a file: its installation token is minted from the App's private key and
+	// expires in an hour. That path is credential_mode "github-app".
 	//
 	// omitempty, so a configuration that does not use it canonicalizes exactly
 	// as it did before this member existed.
 	TokenPath string `json:"token_path,omitempty"`
-	Endpoint  string `json:"endpoint,omitempty"`
+	// AppID, InstallationID and PrivateKeyPath configure credential_mode
+	// "github-app". None of the three is a secret: the App id is on the App's
+	// public page, the installation id is in the installation URL, and the
+	// third is a PATH exactly as token_path and provider.credential_path are.
+	// The KEY is the secret, it stays on disk, and the file must be owner-only.
+	//
+	// The App path exists because "token_path holds a GitHub App installation
+	// token" was never true: an App does not issue a token an operator can put
+	// in a file. It issues one that is minted from the private key, expires in
+	// an hour, and cannot call GET /user - so the runtime has to mint it, and
+	// has to resolve its own identity from the App rather than from the user.
+	//
+	// All three are omitempty, so a configuration that does not use them
+	// canonicalizes exactly as it did before they existed.
+	AppID          int64  `json:"app_id,omitempty"`
+	InstallationID int64  `json:"installation_id,omitempty"`
+	PrivateKeyPath string `json:"private_key_path,omitempty"`
+	Endpoint       string `json:"endpoint,omitempty"`
+	// GovernanceCredentialMode selects the identity that READS governance
+	// facts - today, the adoption trust root's disclosed bypass actors. It is
+	// a second member rather than a second meaning for credential_mode because
+	// the two roles are genuinely different authorities and are meant to be
+	// held by different identities: the publication credential publishes and
+	// cannot observe the trust root, and the governance credential observes
+	// and cannot publish.
+	//
+	// The reason it exists is measured, not theoretical. GitHub does not
+	// disclose a ruleset's bypass_actors to a GitHub App installation token
+	// even when the token carries administration:read; it substitutes
+	// current_user_can_bypass, which answers a different question. So the
+	// publication identity #82 requires is precisely the identity that cannot
+	// verify the trust root, and an adopted build needs a second one.
+	//
+	// The only mode is "github-cli", the operator's own already-
+	// authenticated local session, borrowed read-only. Empty is the
+	// fail-closed default: no
+	// governance credential is authorized, and an adopted build refuses rather
+	// than falling back to the publication credential, whose silence about
+	// bypass actors is not evidence that there are none. A non-interactive
+	// governance identity will want a mode of its own; it can have one when an
+	// operator needs it, and inventing it now would be inventing a second
+	// unproven path.
+	//
+	// omitempty, so a configuration that does not use it canonicalizes exactly
+	// as it did before this member existed.
+	GovernanceCredentialMode string `json:"governance_credential_mode,omitempty"`
+}
+
+// appMembersStated reports whether any github-app member was named. They are
+// refused as a group under the other modes, for token_path's reason: a member
+// that is silently ignored reads as a configuration that is in effect.
+func (c GitHubConfig) appMembersStated() bool {
+	return c.AppID != 0 || c.InstallationID != 0 || strings.TrimSpace(c.PrivateKeyPath) != ""
 }
 
 // SupervisorConfig is the persistent supervisor's own bounds.
@@ -195,6 +258,17 @@ type SupervisorConfig struct {
 	// once. Zero means "not stated here", which falls back to the watch bound
 	// and then to the M0 default of one.
 	MaxConcurrentRuns int `json:"max_concurrent_runs,omitempty"`
+	// MaxConcurrentObservations is the operator-authorized ceiling on runs
+	// OBSERVING at once (#85). Observation does not consume a run slot, so it
+	// has its own bound. Zero means "not stated here", which falls back to the
+	// watch bound and then to DefaultMaxConcurrentObservations.
+	MaxConcurrentObservations int `json:"max_concurrent_observations,omitempty"`
+	// MaxConcurrentVerifications is the operator-authorized ceiling on runs
+	// running an expensive host verifier at once (#490). A verification is
+	// work, so it narrows max_concurrent_runs and never adds to it. Zero means
+	// "not stated here", which falls back to the watch bound and then to
+	// DefaultMaxConcurrentVerifications.
+	MaxConcurrentVerifications int `json:"max_concurrent_verifications,omitempty"`
 	// PollIntervalSeconds is how often a quiet supervisor looks again. Zero
 	// means "not stated here".
 	PollIntervalSeconds int `json:"poll_interval_seconds,omitempty"`
@@ -355,6 +429,48 @@ type BudgetConfig struct {
 	MaxExecutionContinuations *int `json:"max_execution_continuations,omitempty"`
 	MaxRemediationAttempts    int  `json:"max_remediation_attempts"`
 	MaxAssuranceAttempts      int  `json:"max_assurance_attempts"`
+	// ProviderInactivitySeconds bounds how long ONE provider invocation may go
+	// without recognized provider progress (output bytes, or Claude's
+	// structured events; see claude_stream.go). A stated value must be at least
+	// MinProviderInactivitySeconds. It is a third bound beside wall_limit_seconds,
+	// which bounds the work, and lifecycle_deadline_seconds, which bounds the
+	// calendar: a provider subprocess being alive is not evidence that the
+	// invocation is moving, and without this the run wall budget was the thing
+	// that eventually discovered a dead provider - eight hours and fifty-five
+	// minutes later, in the run that produced #238.
+	//
+	// It is optional so that configurations written before it existed stay
+	// loadable, and absent resolves to DefaultProviderInactivitySeconds rather
+	// than to no bound at all. There is deliberately no spelling that disables
+	// it: an unattended CLI worker with no inactivity bound is the exact
+	// configuration this budget exists to prevent. An explicit 0 is therefore
+	// read as absent, like lifecycle_deadline_seconds, and a negative value is
+	// refused.
+	ProviderInactivitySeconds int `json:"provider_inactivity_seconds,omitempty"`
+	// AttemptWallLimitSeconds bounds ONE physical provider attempt (#328). It
+	// is a different resource from WallLimitSeconds, which is the CUMULATIVE
+	// active-work budget of the whole run: an attempt that ends at this bound
+	// charges the run only what it actually spent, and its successor (a retry
+	// or a continuation) is bounded again by min(this, remaining run work).
+	//
+	// ABSENT STAYS ABSENT in the digested form - omitempty, never resolved in
+	// resolved() - so upgrading the binary does not move the Global digest of
+	// any existing configuration (ADR-0003 §4). An absent value is derived at
+	// run creation, as min(DefaultAttemptWallLimit, run wall), and frozen into
+	// run.Budgets. A stated value may not exceed wall_limit_seconds, and 0 means
+	// absent.
+	AttemptWallLimitSeconds int `json:"attempt_wall_limit_seconds,omitempty"`
+}
+
+// checkProviderInactivityMinimum refuses a stated window below
+// MinProviderInactivitySeconds, naming the value and the minimum, so the
+// operator hears it from config loading and doctor rather than from a refused
+// dispatch. Zero stays "absent".
+func checkProviderInactivityMinimum(seconds int) string {
+	if seconds > 0 && seconds < MinProviderInactivitySeconds {
+		return fmt.Sprintf("budgets.provider_inactivity_seconds is %d, below the minimum %d: a provider's own background-wait ceiling must fit strictly inside the window", seconds, MinProviderInactivitySeconds)
+	}
+	return ""
 }
 
 // DefaultMaxExecutionContinuations is the M1 continuation depth for a new run.
@@ -373,6 +489,13 @@ func (b BudgetConfig) resolved() BudgetConfig {
 	if b.MaxExecutionContinuations == nil {
 		fallback := DefaultMaxExecutionContinuations
 		b.MaxExecutionContinuations = &fallback
+	}
+	// Resolved here rather than at the point of use, so the effective bound is
+	// the one the digest covers and the one `doctor` prints: an inactivity
+	// window invented where the process starts would be a bound nothing in the
+	// configuration lattice had ever agreed to.
+	if b.ProviderInactivitySeconds <= 0 {
+		b.ProviderInactivitySeconds = DefaultProviderInactivitySeconds
 	}
 	return b
 }
@@ -397,6 +520,12 @@ type WatchConfig struct {
 	// feeds resolveMaxConcurrentRuns as the AUTHORIZED value; the ceiling rule
 	// itself lives there and is not restated here.
 	MaxConcurrentRuns int `json:"max_concurrent_runs,omitempty"`
+	// MaxConcurrentObservations is the watch-scope observation ceiling, combined
+	// with the supervisor's exactly as MaxConcurrentRuns is.
+	MaxConcurrentObservations int `json:"max_concurrent_observations,omitempty"`
+	// MaxConcurrentVerifications is the watch-scope verification ceiling,
+	// combined with the supervisor's in the same way.
+	MaxConcurrentVerifications int `json:"max_concurrent_verifications,omitempty"`
 }
 
 // GCConfig is the operator's retention window for `autonomy gc`. It is
@@ -510,6 +639,15 @@ type RepositoryBudgets struct {
 	MaxExecutionContinuations *int `json:"max_execution_continuations,omitempty"`
 	MaxRemediationAttempts    *int `json:"max_remediation_attempts,omitempty"`
 	MaxAssuranceAttempts      *int `json:"max_assurance_attempts,omitempty"`
+	// ProviderInactivitySeconds is TIGHTEN-ONLY like every other bound here: a
+	// repository may ask for a shorter no-progress window for its own work and
+	// can never ask for a longer one. A repository that could widen it would be
+	// choosing how long its own provider may stall.
+	ProviderInactivitySeconds *int `json:"provider_inactivity_seconds,omitempty"`
+	// AttemptWallLimitSeconds is tighten-only too. Its ceiling is the
+	// operator's stated attempt limit, or min(DefaultAttemptWallLimit, run wall)
+	// when absent - the same rule used at new-run creation.
+	AttemptWallLimitSeconds *int `json:"attempt_wall_limit_seconds,omitempty"`
 }
 
 // RepositoryWatch is the only part of watch a repository may address, and both
@@ -518,8 +656,10 @@ type RepositoryBudgets struct {
 // and no Label member - enrolment and the opt-in label are operator authority,
 // and repositoryWatchScope refuses either name before decoding.
 type RepositoryWatch struct {
-	PollIntervalSeconds *int `json:"poll_interval_seconds,omitempty"`
-	MaxConcurrentRuns   *int `json:"max_concurrent_runs,omitempty"`
+	PollIntervalSeconds        *int `json:"poll_interval_seconds,omitempty"`
+	MaxConcurrentRuns          *int `json:"max_concurrent_runs,omitempty"`
+	MaxConcurrentObservations  *int `json:"max_concurrent_observations,omitempty"`
+	MaxConcurrentVerifications *int `json:"max_concurrent_verifications,omitempty"`
 }
 
 // RepositoryConfig is the tighten-only layer.
@@ -540,13 +680,21 @@ var repositoryScope = map[string]bool{"budgets": true, "watch": true}
 // and "label" are absent on purpose: a repository that could name either would
 // be enrolling itself into watch, which is exactly the authority this layer
 // does not have.
-var repositoryWatchScope = map[string]bool{"poll_interval_seconds": true, "max_concurrent_runs": true}
+var repositoryWatchScope = map[string]bool{
+	"poll_interval_seconds": true, "max_concurrent_runs": true, "max_concurrent_observations": true, "max_concurrent_verifications": true,
+}
 
 // Config is the governing configuration for one process invocation, together
 // with the digest of exactly the two layers that produced it.
 type Config struct {
 	OperatorConfig
-	Digest         ConfigDigest
+	// Digest is the configuration identity this process binds as. LoadConfig
+	// sets the legacy whole-file digest; ResolveConfigIdentity may keep the
+	// governing authority's token instead (ADR-0003 B4).
+	Digest ConfigDigest
+	// Effective is the digest of the controller-effective (category C)
+	// content alone: the configuration with its S members cleared.
+	Effective      ConfigDigest
 	OperatorPath   string
 	RepositoryPath string
 }
@@ -560,6 +708,8 @@ func (c Config) RunBudgets() RunBudgets {
 		MaxExecutionContinuations: c.Budgets.continuations(),
 		MaxRemediationAttempts:    c.Budgets.MaxRemediationAttempts,
 		MaxAssuranceAttempts:      c.Budgets.MaxAssuranceAttempts,
+		ProviderInactivityLimit:   time.Duration(c.Budgets.ProviderInactivitySeconds) * time.Second,
+		AttemptWallLimit:          time.Duration(c.Budgets.AttemptWallLimitSeconds) * time.Second,
 	}
 }
 
@@ -594,6 +744,9 @@ func LoadConfig(explicitPath, repositoryRoot string) (Config, error) {
 	}
 	config := Config{OperatorConfig: operator, OperatorPath: operatorPath}
 	config.Digest = ConfigDigest{Global: operatorDigest}
+	if config.Effective.Global, err = Digest(controllerEffectiveOperator(operator)); err != nil {
+		return Config{}, &ConfigError{Path: operatorPath, Detail: err.Error()}
+	}
 	if repositoryRoot == "" {
 		return config, nil
 	}
@@ -615,6 +768,9 @@ func LoadConfig(explicitPath, repositoryRoot string) (Config, error) {
 	config.OperatorConfig = tightened
 	config.RepositoryPath = repositoryPath
 	config.Digest.Repository = repositoryDigest
+	if config.Effective.Repository, err = Digest(controllerEffectiveRepository(repository)); err != nil {
+		return Config{}, &ConfigError{Path: repositoryPath, Detail: err.Error()}
+	}
 	return config, nil
 }
 
@@ -713,6 +869,12 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 	// value is behind a pointer that `tightened := c` shares with c, so writing
 	// through it would silently retighten the configuration it came from.
 	continuations := tightened.Budgets.continuations()
+	attemptWall := tightened.Budgets.AttemptWallLimitSeconds
+	if attemptWall <= 0 {
+		attemptWall = int((RunBudgets{
+			WallLimit: time.Duration(tightened.Budgets.WallLimitSeconds) * time.Second,
+		}).defaults().AttemptWallLimit / time.Second)
+	}
 	proposals := []struct {
 		name     string
 		proposed *int
@@ -723,6 +885,8 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 		{"budgets.max_execution_continuations", budgets.MaxExecutionContinuations, &continuations},
 		{"budgets.max_remediation_attempts", budgets.MaxRemediationAttempts, &tightened.Budgets.MaxRemediationAttempts},
 		{"budgets.max_assurance_attempts", budgets.MaxAssuranceAttempts, &tightened.Budgets.MaxAssuranceAttempts},
+		{"budgets.provider_inactivity_seconds", budgets.ProviderInactivitySeconds, &tightened.Budgets.ProviderInactivitySeconds},
+		{"budgets.attempt_wall_limit_seconds", budgets.AttemptWallLimitSeconds, &attemptWall},
 	}
 	for _, proposal := range proposals {
 		if proposal.proposed == nil {
@@ -731,12 +895,22 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 		if *proposal.proposed < 1 {
 			return OperatorConfig{}, &ConfigError{Detail: fmt.Sprintf("%s must be at least 1", proposal.name)}
 		}
+		if proposal.name == "budgets.provider_inactivity_seconds" {
+			if err := checkProviderInactivityMinimum(*proposal.proposed); err != "" {
+				return OperatorConfig{}, &ConfigError{Detail: err}
+			}
+		}
 		if *proposal.proposed > *proposal.ceiling {
 			return OperatorConfig{}, &ConfigError{Detail: fmt.Sprintf("repository configuration may only tighten %s: %d exceeds the operator bound %d", proposal.name, *proposal.proposed, *proposal.ceiling)}
 		}
 		*proposal.ceiling = *proposal.proposed
 	}
 	tightened.Budgets.MaxExecutionContinuations = &continuations
+	// Written back only when the repository stated one, so an absent limit
+	// stays absent and is derived at run creation like the operator's.
+	if budgets.AttemptWallLimitSeconds != nil {
+		tightened.Budgets.AttemptWallLimitSeconds = attemptWall
+	}
 	if err := tightened.tightenWatch(repository.Watch); err != nil {
 		return OperatorConfig{}, err
 	}
@@ -756,14 +930,26 @@ func (c *OperatorConfig) tightenWatch(watch *RepositoryWatch) error {
 	if err != nil {
 		return &ConfigError{Detail: err.Error()}
 	}
-	if proposed := watch.MaxConcurrentRuns; proposed != nil {
-		if *proposed < 1 {
-			return &ConfigError{Detail: "watch.max_concurrent_runs must be at least 1"}
+	for _, ceiling := range []struct {
+		name     string
+		proposed *int
+		bound    int
+		into     *int
+	}{
+		{"max_concurrent_runs", watch.MaxConcurrentRuns, settings.MaxConcurrentRuns, &c.Watch.MaxConcurrentRuns},
+		{"max_concurrent_observations", watch.MaxConcurrentObservations, settings.MaxConcurrentObservations, &c.Watch.MaxConcurrentObservations},
+		{"max_concurrent_verifications", watch.MaxConcurrentVerifications, settings.MaxConcurrentVerifications, &c.Watch.MaxConcurrentVerifications},
+	} {
+		if ceiling.proposed == nil {
+			continue
 		}
-		if *proposed > settings.MaxConcurrentRuns {
-			return &ConfigError{Detail: fmt.Sprintf("repository configuration may only tighten watch.max_concurrent_runs: %d exceeds the operator bound %d", *proposed, settings.MaxConcurrentRuns)}
+		if *ceiling.proposed < 1 {
+			return &ConfigError{Detail: "watch." + ceiling.name + " must be at least 1"}
 		}
-		c.Watch.MaxConcurrentRuns = *proposed
+		if *ceiling.proposed > ceiling.bound {
+			return &ConfigError{Detail: fmt.Sprintf("repository configuration may only tighten watch.%s: %d exceeds the operator bound %d", ceiling.name, *ceiling.proposed, ceiling.bound)}
+		}
+		*ceiling.into = *ceiling.proposed
 	}
 	if proposed := watch.PollIntervalSeconds; proposed != nil {
 		operatorSeconds := int(settings.PollInterval / time.Second)
@@ -791,6 +977,10 @@ type WatchSettings struct {
 	PollInterval time.Duration
 	// MaxConcurrentRuns is the resolved ceiling; see resolveMaxConcurrentRuns.
 	MaxConcurrentRuns int
+	// MaxConcurrentObservations is the resolved observation ceiling (#85).
+	MaxConcurrentObservations int
+	// MaxConcurrentVerifications is the resolved verification ceiling (#490).
+	MaxConcurrentVerifications int
 }
 
 // validRepositoryPart bounds one side of owner/name to the characters GitHub
@@ -812,15 +1002,23 @@ func validRepositoryPart(part string) bool {
 	return true
 }
 
+// stricterCeiling combines a watch and a supervisor concurrency ceiling: the
+// smaller STATED value wins, and zero or less means unstated.
+func stricterCeiling(watch, supervisor int) int {
+	if supervisor > 0 && (watch <= 0 || supervisor < watch) {
+		return supervisor
+	}
+	return watch
+}
+
 func (c OperatorConfig) WatchSettings() (WatchSettings, error) {
 	// The supervisor bounds and the watch bounds are combined by taking the
 	// STRICTER of the two, so stating one can never loosen the other and a
 	// repository that tightens the watch bound still tightens the effective
 	// one.
-	ceiling := c.Watch.MaxConcurrentRuns
-	if stated := c.Supervisor.MaxConcurrentRuns; stated > 0 && (ceiling <= 0 || stated < ceiling) {
-		ceiling = stated
-	}
+	ceiling := stricterCeiling(c.Watch.MaxConcurrentRuns, c.Supervisor.MaxConcurrentRuns)
+	observations := stricterCeiling(c.Watch.MaxConcurrentObservations, c.Supervisor.MaxConcurrentObservations)
+	verifications := stricterCeiling(c.Watch.MaxConcurrentVerifications, c.Supervisor.MaxConcurrentVerifications)
 	interval := time.Duration(c.Watch.PollIntervalSeconds) * time.Second
 	// Only a STATED supervisor interval participates. Treating an unset zero
 	// as a candidate would let the absence of one member erase a malformed
@@ -830,9 +1028,11 @@ func (c OperatorConfig) WatchSettings() (WatchSettings, error) {
 		interval = stated
 	}
 	settings := WatchSettings{
-		Label:             strings.TrimSpace(c.Watch.Label),
-		PollInterval:      interval,
-		MaxConcurrentRuns: resolveMaxConcurrentRuns(0, ceiling),
+		Label:                      strings.TrimSpace(c.Watch.Label),
+		PollInterval:               interval,
+		MaxConcurrentRuns:          resolveMaxConcurrentRuns(0, ceiling),
+		MaxConcurrentObservations:  resolveMaxConcurrentObservations(observations),
+		MaxConcurrentVerifications: resolveMaxConcurrentVerifications(verifications),
 	}
 	if settings.Label == "" {
 		settings.Label = DefaultWatchLabel
@@ -873,6 +1073,11 @@ func (c OperatorConfig) WatchSettings() (WatchSettings, error) {
 
 func (c OperatorConfig) validate(path string) error {
 	refuse := func(detail string) error { return &ConfigError{Path: path, Detail: detail} }
+	for i, dir := range c.Toolchain.Path {
+		if strings.TrimSpace(dir) == "" {
+			return refuse(fmt.Sprintf("toolchain.path[%d] must not be empty or whitespace-only", i))
+		}
+	}
 	for _, required := range []struct{ name, value string }{
 		{"state_dir", c.StateDir},
 		{"project_model_path", c.ProjectModelPath},
@@ -926,6 +1131,9 @@ func (c OperatorConfig) validate(path string) error {
 		if strings.TrimSpace(c.GitHub.TokenPath) != "" {
 			return refuse(fmt.Sprintf("github.token_path is only used with credential_mode %q", GitHubCredentialToken))
 		}
+		if c.GitHub.appMembersStated() {
+			return refuse(fmt.Sprintf("github.app_id, github.installation_id and github.private_key_path are only used with credential_mode %q", GitHubCredentialApp))
+		}
 	case GitHubCredentialToken:
 		if strings.TrimSpace(c.GitHub.TokenPath) == "" {
 			return refuse(fmt.Sprintf("github.credential_mode %q requires github.token_path", GitHubCredentialToken))
@@ -933,8 +1141,67 @@ func (c OperatorConfig) validate(path string) error {
 		if !filepath.IsAbs(c.GitHub.TokenPath) {
 			return refuse("github.token_path must be an absolute path")
 		}
+		if c.GitHub.appMembersStated() {
+			return refuse(fmt.Sprintf("github.app_id, github.installation_id and github.private_key_path are only used with credential_mode %q", GitHubCredentialApp))
+		}
+	case GitHubCredentialApp:
+		if strings.TrimSpace(c.GitHub.TokenPath) != "" {
+			return refuse(fmt.Sprintf("github.token_path is only used with credential_mode %q", GitHubCredentialToken))
+		}
+		if c.GitHub.AppID <= 0 {
+			return refuse(fmt.Sprintf("github.credential_mode %q requires github.app_id, the App's numeric id", GitHubCredentialApp))
+		}
+		if c.GitHub.InstallationID <= 0 {
+			return refuse(fmt.Sprintf("github.credential_mode %q requires github.installation_id, the numeric id of the App's installation on this repository", GitHubCredentialApp))
+		}
+		if strings.TrimSpace(c.GitHub.PrivateKeyPath) == "" {
+			return refuse(fmt.Sprintf("github.credential_mode %q requires github.private_key_path", GitHubCredentialApp))
+		}
+		if !filepath.IsAbs(c.GitHub.PrivateKeyPath) {
+			return refuse("github.private_key_path must be an absolute path")
+		}
 	default:
-		return refuse(fmt.Sprintf("github.credential_mode must be %q, %q or %q", GitHubCredentialCLI, GitHubCredentialToken, GitHubCredentialNone))
+		return refuse(fmt.Sprintf("github.credential_mode must be %q, %q, %q or %q", GitHubCredentialCLI, GitHubCredentialToken, GitHubCredentialApp, GitHubCredentialNone))
+	}
+	switch strings.TrimSpace(c.GitHub.GovernanceCredentialMode) {
+	case "", GitHubCredentialCLI:
+	default:
+		return refuse(fmt.Sprintf("github.governance_credential_mode must be %q, or absent to authorize no governance observation at all", GitHubCredentialCLI))
+	}
+	// github.endpoint feeds every GitHub consumer this configuration can
+	// authorize - the publication adapter, the App credential and the
+	// governance observer - and whichever credential the operator has
+	// configured is what will be sent to it. Checked here, once, so a
+	// malformed or non-https endpoint is refused at load time rather than only
+	// when whichever adapter happens to run first resolves its own credential
+	// and discovers it the hard way (#223).
+	if _, err := githubAPIRoot(c.GitHub.Endpoint); err != nil {
+		var authErr *GitHubAuthError
+		if errors.As(err, &authErr) {
+			return refuse(authErr.Detail)
+		}
+		return refuse(err.Error())
+	}
+	// AND https IS NOT ENOUGH. TLS protects the transport; it does not bind the
+	// credential to the forge it was issued for.
+	//
+	// The CLI credential is resolved from the governed repository identity,
+	// which is github.com throughout - GitHubRepo.CloneURL() says so, and
+	// `gh auth token` is asked without a hostname. A configuration naming
+	// https://attacker.example would pass every check above and then be handed
+	// the operator's token, because nothing downstream compares the host the
+	// credential belongs to against the host it is sent to.
+	//
+	// So the authority boundary refuses what the model cannot honour. This is
+	// deliberately NOT partial GitHub Enterprise support: real support means a
+	// repository host, an API endpoint host, `gh auth token --hostname`, and
+	// credential provenance that agree end to end. Until they do, an endpoint
+	// this product cannot bind a credential to is a configuration it will not
+	// accept.
+	if endpoint := strings.TrimSuffix(strings.TrimSpace(c.GitHub.Endpoint), "/"); endpoint != "" && endpoint != DefaultGitHubAPIEndpoint {
+		return refuse("github.endpoint is " + strconv.Quote(endpoint) +
+			"; custom GitHub API endpoints are not supported by the current github.com-bound repository and credential model, so this configuration may name " +
+			strconv.Quote(DefaultGitHubAPIEndpoint) + " or nothing at all")
 	}
 	for _, bound := range []struct {
 		name  string
@@ -969,6 +1236,25 @@ func (c OperatorConfig) validate(path string) error {
 	if c.Budgets.LifecycleDeadlineSeconds < 0 {
 		return refuse("budgets.lifecycle_deadline_seconds must not be negative")
 	}
+	// provider_inactivity_seconds is optional in the same shape: 0 means absent
+	// and resolves to the default, because there must be no way to spell "no
+	// inactivity bound". A negative value is still a mistake.
+	if c.Budgets.ProviderInactivitySeconds < 0 {
+		return refuse("budgets.provider_inactivity_seconds must not be negative")
+	}
+	if err := checkProviderInactivityMinimum(c.Budgets.ProviderInactivitySeconds); err != "" {
+		return refuse(err)
+	}
+	// attempt_wall_limit_seconds is optional (0 means absent). A stated value
+	// above the run budget is refused rather than clamped: one physical attempt
+	// can never hold more authority than the whole run it belongs to.
+	if a := c.Budgets.AttemptWallLimitSeconds; a < 0 {
+		return refuse("budgets.attempt_wall_limit_seconds must not be negative")
+	} else if a > c.Budgets.WallLimitSeconds {
+		return refuse(fmt.Sprintf(
+			"budgets.attempt_wall_limit_seconds (%d) exceeds budgets.wall_limit_seconds (%d): one provider attempt cannot hold more active-work authority than its whole run",
+			a, c.Budgets.WallLimitSeconds))
+	}
 	if d := c.Budgets.LifecycleDeadlineSeconds; d > 0 && d < c.Budgets.WallLimitSeconds {
 		return refuse(fmt.Sprintf(
 			"budgets.lifecycle_deadline_seconds (%d) is below budgets.wall_limit_seconds (%d): the total deadline would end every run before its execution budget could be spent",
@@ -988,6 +1274,12 @@ func (c OperatorConfig) validate(path string) error {
 	}
 	if c.Supervisor.MaxConcurrentRuns < 0 {
 		return refuse("supervisor.max_concurrent_runs must not be negative")
+	}
+	if c.Supervisor.MaxConcurrentObservations < 0 {
+		return refuse("supervisor.max_concurrent_observations must not be negative")
+	}
+	if c.Supervisor.MaxConcurrentVerifications < 0 {
+		return refuse("supervisor.max_concurrent_verifications must not be negative")
 	}
 	if seconds := c.Supervisor.PollIntervalSeconds; seconds != 0 && seconds < MinWatchPollSeconds {
 		return refuse(fmt.Sprintf("supervisor.poll_interval_seconds must be at least %d", MinWatchPollSeconds))

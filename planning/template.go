@@ -28,7 +28,7 @@ func validateTemplateGraph(template domain.EngineeringPlanTemplate) error {
 	stages := make([]stageView, 0, len(template.Stages))
 	for _, stage := range template.Stages {
 		stages = append(stages, stageView{
-			ID: stage.ID, Kind: stage.Kind, Role: stage.Role, DependsOn: stage.DependsOn,
+			ID: stage.ID, Kind: stage.Kind, Role: stage.Role, DependsOn: stage.DependsOn, ExecutionKind: stage.ExecutionKind,
 			RequiredClaims: stage.RequiredClaims, Action: stage.Action,
 			Independence: stage.Independence, RequiresCapabilities: stage.RequiresCapabilities,
 			Profile: stage.Profile,

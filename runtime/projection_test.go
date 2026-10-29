@@ -33,7 +33,7 @@ func projectionRun(t *testing.T) []EngineeringEvent {
 	return []EngineeringEvent{
 		projectionEvent(t, 1, EventRunCreated, nil),
 		projectionEvent(t, 2, EventContractCompiled, ContractCompiledPayload{
-			Contract: Ref{"contract-1", "rev-1"},
+			Contract: Ref{ID: "contract-1", Revision: "rev-1"},
 			Subject:  domain.Subject{Repository: "o/r", Revision: "base-1"}}),
 		projectionEvent(t, 3, EventCandidateChanged, CandidateChangedPayload{
 			ProducerID: "codex", Purpose: InvocationInitial, Outcome: Succeeded}),
@@ -42,11 +42,11 @@ func projectionRun(t *testing.T) []EngineeringEvent {
 		projectionEvent(t, 5, EventCandidateBaseIntegrated, CandidateBaseIntegratedPayload{
 			Strategy: "rebase", BaseRevision: "base-2", Commit: "commit-2", Tree: "tree-2"}),
 		projectionEvent(t, 6, EventReassessmentCompleted, ReassessmentCompletedPayload{
-			Material: true, Contract: Ref{"contract-1", "rev-2"},
+			Material: true, Contract: Ref{ID: "contract-1", Revision: "rev-2"},
 			DeviationKinds: []string{"scope_expansion"}, RequestedPrivilegeCount: 1}),
 		projectionEvent(t, 7, EventAssuranceObserved, AssuranceObservedPayload{
 			ProviderID: "go", VerifierDefinition: "verifier-1", Passed: true,
-			Commit: "commit-2", Tree: "tree-2", Bundle: Ref{"bundle-1", "rev-1"}}),
+			Commit: "commit-2", Tree: "tree-2", Bundle: Ref{ID: "bundle-1", Revision: "rev-1"}}),
 		projectionEvent(t, 8, EventGitHubPRObserved, GitHubPRObservedPayload{
 			Number: 7, HeadRevision: "commit-2", BaseRevision: "base-2", State: "open"}),
 		projectionEvent(t, 9, EventGitHubCIObserved, GitHubCIObservedPayload{
@@ -54,7 +54,7 @@ func projectionRun(t *testing.T) []EngineeringEvent {
 		projectionEvent(t, 10, EventGitHubReviewObserved, GitHubReviewObservedPayload{
 			HeadRevision: "commit-2", State: "changes_requested", FindingCount: 2}),
 		projectionEvent(t, 11, EventAuthorityEvaluated, AuthorityEvaluatedPayload{
-			Decision: Ref{"decision-1", "rev-1"},
+			Decision: Ref{ID: "decision-1", Revision: "rev-1"},
 			Action:   domain.Action{Type: "publish_pull_request", Target: "o/r"},
 			Status:   domain.AuthorityAwaitingAuthority}),
 		projectionEvent(t, 12, EventOperationBefore, RunOperation{SchemaVersion: SchemaVersion,
@@ -72,7 +72,7 @@ func TestProjectFoldsARunToItsDomainView(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The reassessment's resulting contract revision supersedes the compiled one.
-	if projection.Contract != (Ref{"contract-1", "rev-2"}) {
+	if projection.Contract != (Ref{ID: "contract-1", Revision: "rev-2"}) {
 		t.Fatalf("contract is %+v", projection.Contract)
 	}
 	if projection.Subject != (domain.Subject{Repository: "o/r", Revision: "base-1"}) {
@@ -91,11 +91,11 @@ func TestProjectFoldsARunToItsDomainView(t *testing.T) {
 	if projection.Reassessment == nil || !projection.Reassessment.Material || projection.Reassessment.RequestedPrivilegeCount != 1 {
 		t.Fatalf("reassessment is %+v", projection.Reassessment)
 	}
-	if len(projection.EvidenceBundles) != 1 || projection.EvidenceBundles[0] != (Ref{"bundle-1", "rev-1"}) {
+	if len(projection.EvidenceBundles) != 1 || projection.EvidenceBundles[0] != (Ref{ID: "bundle-1", Revision: "rev-1"}) {
 		t.Fatalf("evidence bundles are %+v", projection.EvidenceBundles)
 	}
 	decision, ok := projection.AuthorityDecisions["publish_pull_request\x00o/r"]
-	if !ok || decision.Status != domain.AuthorityAwaitingAuthority || decision.Decision != (Ref{"decision-1", "rev-1"}) {
+	if !ok || decision.Status != domain.AuthorityAwaitingAuthority || decision.Decision != (Ref{ID: "decision-1", Revision: "rev-1"}) {
 		t.Fatalf("authority decisions are %+v", projection.AuthorityDecisions)
 	}
 	if projection.PullRequest == nil || projection.PullRequest.Number != 7 || projection.PullRequest.Merged {

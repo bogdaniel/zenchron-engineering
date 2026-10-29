@@ -50,6 +50,18 @@ func brokeredMounts(args []string) []string {
 	return mounts
 }
 
+// mountSource returns the host path a mount specification binds, so an
+// assertion can compare the whole path rather than search the specification for
+// a substring of one.
+func mountSource(mount string) string {
+	for _, field := range strings.Split(mount, ",") {
+		if source, ok := strings.CutPrefix(field, "src="); ok {
+			return source
+		}
+	}
+	return ""
+}
+
 // goWritableLocations are every variable that decides where the Go toolchain
 // puts something. The list is the test's own statement of completeness: if the
 // runtime stops naming one, Go starts choosing for it.
@@ -232,20 +244,30 @@ func TestBrokeredSandboxBoundaryIsUnchanged(t *testing.T) {
 		}
 	}
 	// The candidate is the only host path attached, and nothing else from the
-	// host reaches the container.
+	// host reaches the container. The bound source is compared as a whole path,
+	// canonical on both sides, so the assertion names one directory instead of
+	// one spelling of it - and still refuses any other directory.
+	candidate := resolvedPath(t, broker.CandidateDir)
 	for _, mount := range brokeredMounts(args) {
 		if !strings.HasPrefix(mount, "type=bind") {
 			continue
 		}
-		if !strings.Contains(mount, "src="+broker.CandidateDir+",") {
+		source := mountSource(mount)
+		if source == "" || resolvedPath(t, source) != candidate {
 			t.Fatalf("a host path other than the candidate is mounted: %s", mount)
 		}
+	}
+	// The sibling the fixture keeps outside the workspace stays a different
+	// directory after canonicalization, so the comparison above is still capable
+	// of failing: resolving does not collapse neighbours under one temp root.
+	if outside := filepath.Join(filepath.Dir(broker.CandidateDir), "outside"); resolvedPath(t, outside) == candidate {
+		t.Fatalf("canonicalization equated the candidate with %s", outside)
 	}
 	for _, forbidden := range []string{
 		"docker.sock", "/var/run", ".zenchron-dogfood", "runtime.db",
 		"/Users/", "/root", ".ssh", ".netrc", ".config/gh",
 	} {
-		if strings.Contains(joined, forbidden) && !strings.Contains(broker.CandidateDir, forbidden) {
+		if strings.Contains(joined, forbidden) && !strings.Contains(candidate, forbidden) {
 			t.Fatalf("the brokered boundary exposes %q", forbidden)
 		}
 	}

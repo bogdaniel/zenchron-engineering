@@ -148,6 +148,31 @@ const (
 	GitHubReviewDismissed        GitHubReviewState = "dismissed"
 )
 
+// validGitHubReviewStates is the closed vocabulary a review disposition must
+// belong to before it is written to a durable record. An unrecognized value -
+// a forge adapter bug, or a future GitHub state this runtime does not yet
+// know - is never treated as any of them, least of all
+// GitHubReviewChangesRequested: admission already fails closed on anything
+// that is not an exact match to that one state, and this closes the same
+// door for what the audit trail records.
+var validGitHubReviewStates = map[GitHubReviewState]bool{
+	GitHubReviewApproved:         true,
+	GitHubReviewChangesRequested: true,
+	GitHubReviewCommented:        true,
+	GitHubReviewDismissed:        true,
+}
+
+// normalized reports s unchanged when it belongs to the closed vocabulary,
+// and the zero value otherwise - fail-closed, so a disposition this runtime
+// does not recognize is persisted as "unknown" rather than silently adopting
+// the spelling of a state it was never confirmed to be.
+func (s GitHubReviewState) normalized() GitHubReviewState {
+	if validGitHubReviewStates[s] {
+		return s
+	}
+	return ""
+}
+
 // GitHubReview is one submitted review of one exact commit.
 type GitHubReview struct {
 	ID          int64
@@ -174,6 +199,28 @@ type GitHubReviewObservation struct {
 	HeadSHA  string
 	Reviews  []GitHubReview
 	Comments []GitHubReviewComment
+}
+
+// GitHubReviewSubmission is one review to publish against an EXACT commit.
+// GitHub itself binds the review to CommitSHA (the wire "commit_id" member),
+// so a head that has moved by the time this reaches the forge is refused by
+// GitHub rather than silently attached to whatever is current - the same
+// exact-subject guarantee every other head-bound call in this file keeps.
+type GitHubReviewSubmission struct {
+	CommitSHA string
+	// Event is the disposition to submit. Only GitHubReviewApproved,
+	// GitHubReviewChangesRequested and GitHubReviewCommented are submittable;
+	// GitHubReviewDismissed is an observed state only and is refused here.
+	Event    GitHubReviewState
+	Body     Publication
+	Comments []GitHubInlineComment
+}
+
+// GitHubInlineComment is one line-bound comment attached to a review.
+type GitHubInlineComment struct {
+	Path string
+	Line int
+	Body Publication
 }
 
 // GitHubComment is one conversation comment on a pull request or an issue.
@@ -211,6 +258,21 @@ type ForgeViewer interface {
 	// acts as. The repository is a parameter because the credential is
 	// repository-scoped: there is no ambient forge session here.
 	Viewer(ctx context.Context, repo GitHubRepo) (GitHubActor, error)
+}
+
+// ForgeAppIdentity is the OPTIONAL capability of a CREDENTIAL that knows the
+// identity it publishes under without being asked.
+//
+// It exists because GET /user - the ordinary answer to "who am I" - is refused
+// to a GitHub App installation token, so the adapter cannot resolve the
+// publication identity the way it resolves a user's. The App can: it holds the
+// private key that authenticates as the App itself, and the App's own comments
+// are authored by its slug with GitHub's "[bot]" suffix.
+type ForgeAppIdentity interface {
+	// AppIdentity names the actor the forge stamps on this credential's own
+	// comments. It is not repository-scoped: an App is the same actor on every
+	// repository it is installed on.
+	AppIdentity(ctx context.Context) (GitHubActor, error)
 }
 
 // ForgeConversation is the OPTIONAL capability of reading conversation
@@ -379,6 +441,12 @@ type GitHubAdapter interface {
 	// Reviews reads reviews and review comments for exactly headSHA.
 	Reviews(ctx context.Context, repo GitHubRepo, number int, headSHA string) (GitHubReviewObservation, error)
 	CommentOnPullRequest(ctx context.Context, repo GitHubRepo, number int, body Publication) error
+	// SubmitReview publishes one review of exactly submission.CommitSHA. It is
+	// the one write call in this interface that may carry an approval or a
+	// change request rather than an ordinary comment, so it is kept separate
+	// from CommentOnPullRequest: a caller that only has publication authority
+	// for comments can never reach this method by accident.
+	SubmitReview(ctx context.Context, repo GitHubRepo, number int, submission GitHubReviewSubmission) (GitHubReview, error)
 	// RefSHA resolves a remote ref. This is the push crash-reconciliation
 	// question: did the push that was interrupted land? A genuinely absent ref
 	// is reported as RefObservation{Exists: false} with a nil error; an error
@@ -511,8 +579,11 @@ func (GitHubCLICredential) Credential(identity RemoteIdentity) (string, string, 
 }
 
 // GitHubTokenFileCredential resolves the PUBLICATION credential from a file the
-// operator provisioned - a GitHub App installation token or a dedicated runtime
-// account's token.
+// operator provisioned - a dedicated runtime account's token.
+//
+// Not a GitHub App's: an App issues no token that can live in a file, and
+// GitHubAppCredential is that path. This one is for a token whose value the
+// operator already holds.
 //
 // It exists so the runtime can act as SOMEBODY ELSE. With the `gh` credential
 // the runtime authenticates as the operator, so a comment it publishes and a

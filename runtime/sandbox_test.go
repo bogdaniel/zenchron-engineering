@@ -152,7 +152,7 @@ func TestDockerSandboxBindsTrustedEndpointToEveryControlPlaneCall(t *testing.T) 
 
 func TestDockerSandboxRejectsAmbiguousTrustedEndpoint(t *testing.T) {
 	s := DockerSandbox{Image: "sha256:image", Endpoint: DockerEndpoint{Host: "tcp://user:secret@dind:2375"}, Executor: &fakeCommandExecutor{found: true}}
-	if !errors.Is(s.ready(), ErrSandboxUnavailable) {
+	if !errors.Is(s.ready(context.Background()), ErrSandboxUnavailable) {
 		t.Fatal("credential-bearing endpoint was accepted")
 	}
 }
@@ -237,14 +237,14 @@ func TestDockerReconciliationTargetsOnlyRecordedExactContainer(t *testing.T) {
 	root := t.TempDir()
 	fake := &fakeCommandExecutor{found: true}
 	s := DockerSandbox{Image: "sha256:image", Executor: fake, OperationID: "operation", StateDir: root}
-	state, err := s.ReconcileDockerOperation()
+	state, err := s.ReconcileDockerOperation(context.Background())
 	if err != nil || state != DockerNoContainer {
 		t.Fatalf("unrecorded reconciliation = %q, %v", state, err)
 	}
 	if len(fake.calls) != 0 {
 		t.Fatal("unrecorded reconciliation must not enumerate or target containers")
 	}
-	record, path, err := s.operationRecord()
+	record, path, err := s.operationRecord(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestDockerReconciliationTargetsOnlyRecordedExactContainer(t *testing.T) {
 	if err := writeDockerOperation(path, record); err != nil {
 		t.Fatal(err)
 	}
-	state, err = s.ReconcileDockerOperation()
+	state, err = s.ReconcileDockerOperation(context.Background())
 	if err != nil || state != DockerRemoved {
 		t.Fatalf("recorded exited reconciliation = %q, %v", state, err)
 	}
@@ -274,7 +274,7 @@ func TestReconciliationDefaultsGraceAndTriesGracefulStopBeforeForceKill(t *testi
 	// terminateExact's first loop pass, so the deadline/poll race is real.
 	fake := &fakeCommandExecutor{found: true, runningInspects: 2}
 	s := DockerSandbox{Image: "sha256:image", Executor: fake, OperationID: "operation", StateDir: root}
-	record, path, err := s.operationRecord()
+	record, path, err := s.operationRecord(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestReconciliationDefaultsGraceAndTriesGracefulStopBeforeForceKill(t *testi
 	if err := writeDockerOperation(path, record); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReconcileDockerOperation(); err != nil {
+	if _, err := s.ReconcileDockerOperation(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !hasDockerInvocation(fake.calls, "kill", "--signal", "TERM", record.ContainerName) {
@@ -455,8 +455,33 @@ func processFromFileAlive(path string) bool {
 	return processAlive(strings.TrimSpace(string(data)))
 }
 
+// processAlive reports whether a pid names a process that is still RUNNING.
+//
+// A ZOMBIE IS NOT RUNNING. It has been killed and nobody has collected its
+// exit status yet, which is the normal state of an orphan wherever its new
+// parent does not reap - a container whose PID 1 is the test binary rather
+// than an init, for instance. `kill -0` succeeds on a zombie, so a probe built
+// on that alone reports a process that is dead, holds no memory and cannot
+// write as though containment had failed.
+//
+// That is not hypothetical. The harness verifies candidates in exactly such a
+// container, and TestOwnerDeathStopsTheProviderWritingIntoTheCandidate failed
+// there - state Z, workspace already inert - while the owner-death guard had
+// in fact stopped the provider. Every selfhost publication on this machine was
+// refused by that one false reading.
+//
+// A pid `ps` cannot describe is reported as alive: the signal probe already
+// said it exists, and for a test asserting containment, believing the stricter
+// of two answers is the fail-closed direction.
 func processAlive(pid string) bool {
-	return exec.Command("sh", "-c", "kill -0 "+pid).Run() == nil
+	if exec.Command("sh", "-c", "kill -0 "+pid).Run() != nil {
+		return false
+	}
+	state, err := exec.Command("sh", "-c", "ps -o state= -p "+pid).Output()
+	if err != nil {
+		return true
+	}
+	return !strings.HasPrefix(strings.TrimSpace(string(state)), "Z")
 }
 
 // This is deliberately an execution proof rather than a flag-string test. A
@@ -518,7 +543,7 @@ func TestDockerSandboxOwnsExactContainerLifecycleWhenConfigured(t *testing.T) {
 	}
 	op := "lifecycle-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	s := DockerSandbox{Image: image, Endpoint: endpoint, Grace: 250 * time.Millisecond, OperationID: op, StateDir: filepath.Join(root, "runtime")}
-	record, _, err := s.operationRecord()
+	record, _, err := s.operationRecord(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -581,4 +606,38 @@ func dockerContainerRunning(endpoint DockerEndpoint, name string) bool {
 }
 func dockerContainerExists(endpoint DockerEndpoint, name string) bool {
 	return dockerTestCommand(endpoint, "inspect", name).Run() == nil
+}
+
+// A ZOMBIE IS REPORTED DEAD AND A RUNNING PROCESS IS NOT.
+//
+// This pins the distinction the containment tests depend on, because the cost
+// of getting it wrong is not a wrong answer in one test: it is every candidate
+// verification failing on a host whose orphans are not reaped.
+func TestALivenessProbeTellsAZombieFromARunningProcess(t *testing.T) {
+	requireBoundedProcess(t)
+
+	running := exec.Command("sh", "-c", "sleep 30")
+	if err := running.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = running.Process.Kill(); _, _ = running.Process.Wait() })
+	if !processAlive(strconv.Itoa(running.Process.Pid)) {
+		t.Fatal("a running process was reported dead")
+	}
+
+	// A zombie: exited, and deliberately not waited for.
+	zombie := exec.Command("sh", "-c", "exit 0")
+	if err := zombie.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := strconv.Itoa(zombie.Process.Pid)
+	defer func() { _, _ = zombie.Process.Wait() }()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("a process that had exited and not been reaped was reported as still running")
 }

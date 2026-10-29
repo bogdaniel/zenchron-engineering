@@ -51,6 +51,11 @@ controller created it)`, then drives the run until it settles.
 - adoption is refused when a DIFFERENT controller build or configuration created
   the live generation: reconciling it here would drive another controller's work
   under this one.
+- an ordinary start is also refused when the issue's live run lives in another
+  identity space - created under a previous configuration, or by a plan stage or
+  an orchestration batch - because a configuration change is not authority to
+  run the same issue twice. The refusal names that run. `--new-generation` is
+  the deliberate way to start fresh work beside it.
 - `--dangerous-permission-bypass` requests the provider's unsafe permission
   mode for this invocation. It is refused before any process starts unless that
   agent's configuration also sets `allow_permission_bypass`. Two independent
@@ -130,6 +135,16 @@ so it is safe to tail a run a supervisor is driving. A payload above 1 KiB is
 replaced by its size and digest rather than truncated into JSON that no longer
 parses.
 
+Timing in status separates `active consumed` (`active_elapsed` in JSON),
+`external wait` (`external_wait_elapsed`), and `lifecycle age` (`elapsed`).
+For split accounting, execution elapsed spends the run wall budget and
+assurance has its own allowance. Legacy accounting charges all active consumed
+time to the run wall budget; observed assurance overlaps the execution charge. An optional lifecycle
+deadline bounds calendar age independently. A completed operation's active
+consumption is fixed at its journalled completion; it does not grow while the
+run waits for review. Polling during an external wait adds only the observation
+work, and replay preserves the recorded consumption across restart.
+
 Both reads exit with the run's own disposition mapping, so `status` and `run`
 can never disagree about what a disposition means.
 
@@ -206,6 +221,10 @@ the successor generation in the same command.
 
 `stop` is the only thing that cancels a run WITHOUT replacing it. It is durable, idempotent, and
 journalled with the reason `operator_stop`; a second stop appends nothing.
+`stop` on a run that already `completed` or `failed` is refused with exit
+status 64 and never rewrites that outcome: nothing is journalled and the run
+keeps its disposition and reason. It only releases a lease whose owner is
+provably dead.
 Killing the process, closing the terminal, or shutting down a supervisor cancels
 nothing.
 
@@ -233,6 +252,33 @@ zenchron-engineering autonomy run issue 42 --agent claude --new-generation
 
 ## What a stop means
 
+`autonomy stop RUN` (and `stop-all`) cancels a run durably: it journals
+`run.cancelled`, and no operation of that run is leased afterwards. If the run
+is inside an `execution.invoke` when the stop lands, the controller notices
+the durable stop while the provider process runs (#213) and terminates it;
+when the stop is what ended it, the attempt is journalled `cancelled` with
+failure class
+`run_cancelled` (and, for CLI agents, termination cause `run_stopped`).
+`status` shows that diagnostic. A stop already durable just before the
+provider would start means it never starts.
+
+Only the provider is watched. A completed provider execution retains the
+termination owner established by the event that actually ended or initiated
+termination of that physical execution. Later run-level cancellation or
+authority revocation does not rewrite it. The stop is acted on only after the
+run is actually read as cancelled; a state database the watcher cannot read
+never kills a provider, and the failed reads are noted in the attempt's
+diagnostic when it has one. A provider that ignores cancellation and returns anyway still
+has its result refused.
+
+That is the whole of what a stop interrupts. `candidate.commit`,
+`candidate.push`, `pull_request.create` and publication already under way
+when a stop lands are not interrupted or skipped by it; whether a stop should
+gate those runtime effects is a separate question (#215) that this does not
+define. A stop is also neither a `drain` (which lets started work finish) nor a
+`shutdown` (which interrupts the invocation as `controller_shutdown` and leaves
+the run resumable); see [supervisor.md](supervisor.md).
+
 Waiting reasons, in the vocabulary `status` prints:
 
 | Reason | Meaning | What clears it |
@@ -244,6 +290,7 @@ Waiting reasons, in the vocabulary `status` prints:
 | `execution_provider_rate_limited` | the provider asked to be called less often | wait; repeated rate limiting means the configured concurrency is above what that account tolerates |
 | `execution_provider_account_unavailable` | the provider refused at its own account boundary before any reasoning happened | repair the account, then `resume` |
 | `assurance_dependency_unavailable` | the verifier's environment is not there: no toolchain in the image, a missing or empty module cache, or a module the offline cache does not hold | provision it, then `resume`; the same run re-derives assurance against the same commit and tree |
+| `verification_capacity_unavailable` | the next operation is a host verification and every `max_concurrent_verifications` slot is held by another run; nothing was started and no attempt was spent | nothing: it runs when a slot frees. Not a verification failure; raise the ceiling only if the host can carry more |
 | `state_storage_exhausted` | the local state ceiling was reached before a candidate clone was allocated | free space or raise `storage.max_state_bytes`; nothing is ever reclaimed automatically to make room |
 | `github_auth_required` | the forge credential is gone | `gh auth login`, then `resume` |
 | `opt_in_removed` | the opt-in label was removed, withdrawing consent | restore the label; resuming does not restore consent |
@@ -278,3 +325,55 @@ Terminal failure reasons carry the operation that exhausted: for example
 - [troubleshooting.md](troubleshooting.md) — symptom to cause to fix
 - [agents.md](agents.md), [supervisor.md](supervisor.md), [product-architecture.md](product-architecture.md)
 - [architecture.md](architecture.md), [spec/runtime-v0.1.md](spec/runtime-v0.1.md), [../README.md](../README.md), [../ROADMAP.md](../ROADMAP.md)
+
+Worker validation scratch is runtime-owned and separate from candidate source.
+For native Go workers, the per-attempt scratch path is supplied as `GOCACHE`,
+`GOTMPDIR`, `TMPDIR`, and `GOPATH`; `GOENV=off` prevents ambient Go configuration
+from redirecting these locations. Codex and Claude receive an explicit write
+grant for that directory. Scratch identity is reconstructed from the run,
+operation, and attempt on replay, and scratch is retired with the run.
+
+Credential admission conservatively scans the entire candidate working tree,
+including ignored and untracked source. Scratch is outside that subject and
+outside the Git worktree used for commits, changed-path evidence, and
+reassessment. There are no cache-name or Git-ignore exemptions: source under
+`.test-cache` or `.work-cache` receives the same fail-closed checks as any other
+source. Oversized candidate files remain inconclusive and refused.
+
+A runtime commit carries engineering work, never a path Git cannot hold content
+for. A nested Git repository under the candidate workspace — the kind a killed
+attempt's own `go test` run leaves behind when recovery reuses the workspace —
+is recorded by `git add -A` as a gitlink naming a commit that exists only inside
+that nested repository, so no tree the runtime owns holds its files. Such a path
+is excluded from the commit and named in full in the `candidate.committed`
+journal entry (`excluded_paths`) and in the operation record. The determination
+is structural and runtime-owned: it comes from the workspace and the index, not
+from a `.gitignore`, a scratch-looking name, or anything a provider reports. The
+same rule decides whether the candidate changed at all, so scratch alone is not
+a change.
+
+An ignored candidate file is still refused outright — a candidate-controlled
+`.gitignore` does not decide what a runtime commit leaves out. The one exception
+is structural and grants the ignore file nothing: an ignored path that is itself
+a nested Git repository is classified as debris and excluded, exactly as the
+same path would be if nothing ignored it. Without that, a killed attempt's
+scratch — routinely both ignored and a real repository — blocked recovery on an
+ignore rule.
+
+The commit gates follow the same ownership split. Path normalization, traversal
+refusal and symlink safety apply to every path the workspace reported, because
+the runtime stats all of them. The credential-shaped-name refusal, the candidate
+size ceiling and the credential-value scan apply to the paths the commit will
+carry, because they are statements about the object being published; an excluded
+scratch repository therefore cannot veto a valid candidate commit, and nothing
+about those gates changes for candidate work. Excluded paths are recorded whole
+and bounded by the ordinary payload list contract — never truncated, never
+replaced by a digest — so a workspace holding more debris than one payload can
+carry is refused before a commit is written rather than after.
+
+Exclusion is an index write and never a worktree write. The directory stays on
+disk exactly as the producer left it — nothing is reset, cleaned, or deleted —
+so it is still dirty after a successful commit, and that residue is expected.
+Because the runtime knows which paths it excluded, that residue cannot fail the
+post-commit cleanliness check; anything else still dirty does, and the message
+names the paths.

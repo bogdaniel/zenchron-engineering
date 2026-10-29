@@ -53,8 +53,28 @@ type ValidationInput struct {
 	Contract domain.EngineeringWorkContract
 	// Envelope is the OPERATOR ceiling. A plan may be tighter and never wider.
 	Envelope domain.PlanBudgetEnvelope
-	// Previous is the revision being replaced, when there is one.
+	// Previous is the revision being replaced, when there is one. It is
+	// checked for document continuity: identity, revision ordering, the
+	// PreviousRevision pointer, and the governed repository. It is NOT the
+	// privilege ratchet's floor - see RatchetBaseline.
 	Previous *domain.EngineeringPlan
+	// RatchetBaseline is the latest operator-APPROVED revision, when one
+	// exists. Trust, independence and peer-set obligations may only
+	// strengthen relative to it.
+	//
+	// It is deliberately a different revision from Previous. A proposal the
+	// operator rejected remains immutable history, but it grants no
+	// authority: a privilege it carried - even one an LLM proposed and an
+	// operator never approved - must not become the floor the next proposal
+	// is measured against. Rejecting a proposal must never be how an
+	// obligation quietly disappears. When no revision has ever been
+	// approved, this is nil and the ratchet does not apply - there is no
+	// proposal-history floor to hold a first or still-unapproved proposal to.
+	//
+	// Obligations that originate from policy or the contract are unaffected
+	// by this: they are enforced by unmetObligations against the CURRENT
+	// contract, independently of any revision history.
+	RatchetBaseline *domain.EngineeringPlan
 	// Consumed is what the plan has already spent. A revision may tighten the
 	// remaining envelope and may never claim back consumption.
 	Consumed domain.PlanConsumption
@@ -114,11 +134,46 @@ func Validate(plan domain.EngineeringPlan, input ValidationInput) error {
 			continue
 		}
 		for _, claim := range stage.RequiredClaims {
-			if _, ok := input.Contract.RequiredClaims[claim]; !ok {
+			definition, ok := input.Contract.RequiredClaims[claim]
+			if !ok {
 				// A CLAIMLESS contract used to skip this check entirely, so a
 				// gate could reference claims nothing defines - valid at
 				// approval, and unsatisfiable forever at runtime.
 				add("stage %q is a %s referencing claim %q, which the work contract does not define", stage.ID, stage.Kind, claim)
+				continue
+			}
+			if stage.Kind == domain.StageAssuranceGate && definition.EvidenceClass == "human_approval" {
+				add("assurance stage %q cannot claim human_approval evidence for %q", stage.ID, claim)
+			}
+		}
+		if stage.Kind == domain.StageHumanDecisionGate {
+			for _, claimID := range stage.RequiredClaims {
+				action, required := publicationConditionForClaim(input.Contract, claimID)
+				if !required {
+					continue
+				}
+				if input.Contract.RequiredClaims[claimID].EvidenceClass != "human_approval" {
+					add("publication decision stage %q requires claim %q with evidence class human_approval", stage.ID, claimID)
+					continue
+				}
+				if stage.Action == nil || *stage.Action != action {
+					add("publication decision stage %q must name its contract-authorized action %s:%s", stage.ID, action.Type, action.Target)
+				}
+			}
+		}
+		if stage.Kind == domain.StageHumanDecisionGate && stage.Action != nil && publicationAction(*stage.Action) {
+			for _, claimID := range stage.RequiredClaims {
+				claim := input.Contract.RequiredClaims[claimID]
+				if claim.EvidenceClass != "human_approval" {
+					add("publication decision stage %q requires claim %q with evidence class human_approval", stage.ID, claimID)
+					continue
+				}
+				if !authorityConditionRequires(input.Contract, *stage.Action, claimID) {
+					add("publication decision stage %q claim %q is not required by the work contract for %s:%s", stage.ID, claimID, stage.Action.Type, stage.Action.Target)
+				}
+			}
+			if len(stage.RequiredClaims) == 0 {
+				add("publication decision stage %q must reference a contract human_approval claim", stage.ID)
 			}
 		}
 	}
@@ -127,7 +182,10 @@ func Validate(plan domain.EngineeringPlan, input ValidationInput) error {
 	}
 	reasons = append(reasons, envelopeViolations(plan, input)...)
 	if input.Previous != nil {
-		reasons = append(reasons, revisionViolations(plan, *input.Previous)...)
+		reasons = append(reasons, revisionIdentityViolations(plan, *input.Previous)...)
+	}
+	if input.RatchetBaseline != nil {
+		reasons = append(reasons, revisionPrivilegeViolations(plan, *input.RatchetBaseline)...)
 	}
 	if len(reasons) > 0 {
 		return &ValidationError{PlanID: plan.ID, Reasons: reasons}
@@ -135,12 +193,45 @@ func Validate(plan domain.EngineeringPlan, input ValidationInput) error {
 	return nil
 }
 
+func publicationConditionForClaim(contract domain.EngineeringWorkContract, claimID string) (domain.Action, bool) {
+	for _, condition := range contract.AuthorityConditions {
+		if !publicationAction(condition.Action) {
+			continue
+		}
+		for _, required := range condition.RequiredClaims {
+			if required == claimID {
+				return condition.Action, true
+			}
+		}
+	}
+	return domain.Action{}, false
+}
+
+func publicationAction(action domain.Action) bool {
+	return action.Type == "git.pull_request.create" || action.Type == "git.pull_request.update" || action.Type == "git.push"
+}
+
+func authorityConditionRequires(contract domain.EngineeringWorkContract, action domain.Action, claimID string) bool {
+	for _, condition := range contract.AuthorityConditions {
+		if condition.Action != action {
+			continue
+		}
+		for _, required := range condition.RequiredClaims {
+			if required == claimID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func planStageViews(plan domain.EngineeringPlan) []stageView {
 	views := make([]stageView, 0, len(plan.Stages))
 	for _, stage := range plan.Stages {
 		views = append(views, stageView{
-			ID: stage.ID, Kind: stage.Kind, Role: stage.Role, DependsOn: stage.DependsOn,
-			RequiredClaims: stage.RequiredClaims, Action: stage.Action, Independence: stage.Independence,
+			ID: stage.ID, Kind: stage.Kind, Role: stage.Role, DependsOn: stage.DependsOn, ExecutionKind: stage.ExecutionKind,
+			AcceptanceFeature: stage.AcceptanceFeature,
+			RequiredClaims:    stage.RequiredClaims, Action: stage.Action, Independence: stage.Independence,
 			SubstitutesRole:      stage.SubstitutesRole,
 			RequiresCapabilities: stage.RequiresCapabilities, Profile: stage.Profile,
 			TrustRequirement: stage.TrustRequirement,
@@ -319,11 +410,13 @@ func envelopeViolations(plan domain.EngineeringPlan, input ValidationInput) []st
 	return reasons
 }
 
-// revisionViolations enforces the revision laws that are checkable from the two
-// documents alone. Everything else about a revision - which stages are
-// invalidated, what is already consumed - belongs to the reconciler, which can
-// see durable state.
-func revisionViolations(plan, previous domain.EngineeringPlan) []string {
+// revisionIdentityViolations enforces the document-continuity laws that are
+// checkable from the two documents alone: a revision keeps its plan's
+// identity, moves forward, records the exact revision it replaces, and stays
+// bound to the same governed repository. It says nothing about privilege -
+// see revisionPrivilegeViolations for that ratchet, which is judged against a
+// different baseline.
+func revisionIdentityViolations(plan, previous domain.EngineeringPlan) []string {
 	var reasons []string
 	if plan.ID != previous.ID {
 		reasons = append(reasons, fmt.Sprintf("revision replaces plan %q with plan %q", previous.ID, plan.ID))
@@ -359,10 +452,20 @@ func revisionViolations(plan, previous domain.EngineeringPlan) []string {
 		reasons = append(reasons, fmt.Sprintf("a revision cannot move the plan from repository %q to repository %q",
 			previous.Subject.Repository, plan.Subject.Repository))
 	}
-	// PRIVILEGE. A revision may tighten trust and independence; widening either
-	// is new privilege and goes through policy, not through a plan edit.
+	return reasons
+}
+
+// revisionPrivilegeViolations is the privilege ratchet: a revision may
+// tighten trust and independence relative to BASELINE; widening either is new
+// privilege and goes through policy, not through a plan edit.
+//
+// BASELINE is the latest operator-approved revision, never merely the latest
+// proposed one - see ValidationInput.RatchetBaseline. A rejected proposal is
+// not compared here at all: it is immutable history, not an authority floor.
+func revisionPrivilegeViolations(plan, baseline domain.EngineeringPlan) []string {
+	var reasons []string
 	for _, stage := range plan.Stages {
-		before, found := previousStage(previous, stage.ID)
+		before, found := previousStage(baseline, stage.ID)
 		if !found {
 			continue
 		}
@@ -430,7 +533,7 @@ func revisionViolations(plan, previous domain.EngineeringPlan) []string {
 	// `security-review-2` without the obligation weakened the plan without
 	// tripping a single rule. An obligation a revision drops has to still be
 	// carried by some stage in the same role.
-	for _, before := range previous.Stages {
+	for _, before := range baseline.Stages {
 		if _, still := previousStage(plan, before.ID); still {
 			continue
 		}

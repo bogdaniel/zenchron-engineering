@@ -1,0 +1,60 @@
+{
+  "version": "agentkernel.execution/v0.1",
+  "execution_id": "exec-minimal-1",
+  "attempt_id": "attempt-1",
+  "objective": "Summarize the repository layout.",
+  "objective": "Delete everything.",
+  "mode": "read_only",
+  "workspace": {
+    "id": "ws-1",
+    "manifest_digest": "sha256:21a3230e03772a58aff1b3709a9e232850916337e1fba95c434076b6668c6e08",
+    "dirty": false
+  },
+  "constraints": {
+    "require_host_proven_isolation": false,
+    "instruction_digest": "sha256:238fa28a94976c7da14563bc873c2729bd5cd325389085bb4c6dd0de28923590"
+  },
+  "context": [
+    {
+      "id": "task-1",
+      "kind": "task",
+      "trust": "host",
+      "required": true,
+      "content": "Summarize the repository layout.",
+      "content_digest": "sha256:282092f4720d08473bf4505cbce40e6830cf4bbf083673ceaf003414905844ff"
+    }
+  ],
+  "grants": [
+    {
+      "handle": "read-all",
+      "kind": "file.read",
+      "roots": [
+        "."
+      ]
+    }
+  ],
+  "budget": {
+    "deadline": "2099-01-01T00:00:00Z",
+    "max_iterations": 4,
+    "max_tool_calls": 8,
+    "max_input_tokens": 20000,
+    "max_output_tokens": 2000,
+    "max_artifact_bytes": 1048576,
+    "max_provider_retries": 0
+  },
+  "providers": [
+    {
+      "id": "scripted",
+      "kind": "scripted",
+      "model": "scripted-model",
+      "model_version": "unknown",
+      "config_fingerprint": "fp-scripted",
+      "eligible": true,
+      "pinned": false,
+      "preference": 0,
+      "isolation": "unproven",
+      "context_window": 32000,
+      "max_output_tokens": 4000
+    }
+  ]
+}

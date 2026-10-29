@@ -33,9 +33,11 @@ import (
 // compiler cannot go and look something up" is a property of the signature
 // rather than a rule somebody has to remember.
 type ContextInput struct {
-	Stage    domain.PlanStage
-	Role     domain.EngineeringRole
-	Contract domain.EngineeringWorkContract
+	Stage         domain.PlanStage
+	Role          domain.EngineeringRole
+	PlanObjective string
+	PlanStages    []domain.PlanStage
+	Contract      domain.EngineeringWorkContract
 	// Model is ProjectModel v1, consumed exactly as it is.
 	Model domain.ProjectModel
 	Facts []domain.EngineeringFact
@@ -122,6 +124,19 @@ var roleContextClasses = map[domain.EngineeringRole][]domain.ContextClass{
 	},
 }
 
+// RoleContextClasses is the ONE answer to "which context classes does this role
+// receive through this policy": the role's stated row plus the required
+// classes, narrowed by the operator's ContextPolicy. A caller that delivers
+// context outside a ContextPack - a WorkGraph unit with no assignment - asks
+// here rather than restating the table.
+func RoleContextClasses(role domain.EngineeringRole, policy *domain.ContextPolicy) (map[domain.ContextClass]bool, error) {
+	optional, known := roleContextClasses[role]
+	if !known {
+		return nil, fmt.Errorf("role %q has no stated context selection; a role nothing states context for would receive whatever happened to be in scope", role)
+	}
+	return selectClasses(optional, policy)
+}
+
 // CompileContext builds one assignment's ContextPack.
 //
 // It is deterministic: every collection is emitted in a stated canonical order,
@@ -131,12 +146,7 @@ func CompileContext(input ContextInput) (domain.ContextPack, error) {
 	refuse := func(detail string) (domain.ContextPack, error) {
 		return domain.ContextPack{}, &ContextError{Stage: input.Stage.ID, Detail: detail}
 	}
-	optional, known := roleContextClasses[input.Role]
-	if !known {
-		return refuse(fmt.Sprintf("role %q has no stated context selection; a role nothing states context for would receive whatever happened to be in scope", input.Role))
-	}
-
-	selected, err := selectClasses(optional, input.Policy)
+	selected, err := RoleContextClasses(input.Role, input.Policy)
 	if err != nil {
 		return refuse(err.Error())
 	}
@@ -144,6 +154,19 @@ func CompileContext(input ContextInput) (domain.ContextPack, error) {
 	objective := strings.TrimSpace(input.Stage.Objective)
 	if objective == "" {
 		objective = strings.TrimSpace(input.Contract.Objective)
+	}
+	isReviewer := input.Role == domain.RoleReviewer || input.Role == domain.RoleSecurityReviewer ||
+		input.Role == domain.RoleReleaseReviewer
+	if isReviewer && strings.TrimSpace(input.PlanObjective) != "" {
+		objective = "Plan objective:\n" + strings.TrimSpace(input.PlanObjective) + "\n\nReview objective:\n" + objective
+	}
+	if isReviewer && len(input.PlanStages) > 0 {
+		var stages []string
+		for _, stage := range input.PlanStages {
+			stages = append(stages, fmt.Sprintf("%s (%s, role=%s, execution=%s, depends_on=%s): %s",
+				stage.ID, stage.Kind, stage.Role, stage.ExecutionKind, strings.Join(stage.DependsOn, ","), stage.Objective))
+		}
+		objective += "\n\nApproved plan stages:\n" + strings.Join(stages, "\n")
 	}
 	if objective == "" {
 		return refuse("neither the stage nor the contract states an objective, so the worker would be asked for nothing in particular")

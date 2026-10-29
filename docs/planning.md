@@ -24,7 +24,9 @@ an issue, or a stated objective
    plan show PLAN           read it
         |
         v
-   plan approve PLAN --revision N --digest SHA   the boundary: nothing ran before this
+   approve in the Product Workspace   the boundary: nothing ran before this
+        |                   (Action required -> Review & approve; `plan approve`
+        |                   with its digests is the scriptable equivalent)
         |
         v
    serve executes           ordinary EngineeringRuns, one per agent stage
@@ -164,6 +166,10 @@ objective  acceptance_criteria  obligations  permissions  prohibitions
 They carry the governance envelope, and a worker that cannot see its obligations
 is a worker nothing can hold to them. A policy that excludes one is refused when
 it is loaded, not quietly ignored when work starts.
+
+Reviewer assignments receive the full plan objective alongside their
+stage-specific review objective, so they can check the candidate against the
+operator's exact request without inheriting producer reasoning.
 
 `producer_reasoning` — the implementation worker's own reasoning transcript — is
 a named class precisely so it can be refused. A policy that asks for it is
@@ -402,7 +408,9 @@ max_wall_seconds           total ACTIVE execution wall time across the plan:
 max_cost_micros            optional, and usually absent
 ```
 
-Cost is reported only where the provider or runtime actually reports it. A
+Proposing a plan under a configured `plan.max_cost_micros` is refused: no execution provider
+reports cost to a plan and no stage budget carries a cost bound, so a stated
+ceiling would be silently unenforced. Cost is reported only where the provider or runtime actually reports it. A
 subscription CLI reports none, and unknown stays **unknown** in the approval view
 and everywhere else. It is never rendered as zero, and no currency figure is
 invented.
@@ -456,7 +464,23 @@ zenchron-engineering autonomy plan status PLAN [--text]
 zenchron-engineering autonomy plan list [--text]
 ```
 
-`plan issue` compiles a proposal and stores it. It does not execute it.
+**Approving without copying digests.** A plan proposed by `plan issue` is an
+ordinary objective plan; the Control Plane lists it under Objectives and in
+Action required, whether or not it belongs to a product. Open
+`http://127.0.0.1:8787/app` (the address `control-plane` prints), sign in with
+the token file it names, open the plan from Action required, read the stages,
+assignments and budget, then choose Review & approve. The dialog binds the exact
+revision, plan digest and live assignment digest for you; the controller still
+refuses a stale revision, a changed worker binding or a changed controller
+configuration. A plan proposed from the browser's "Create objective" form with a
+product chosen is additionally associated with that product, so its WorkGraph
+appears under the Product Workspace; a CLI-proposed plan is not, and the Products
+page says where to find it. Templates such as `zenchron-feature` are operator
+files in the planning directory, not shipped; `plan issue` without `--template`
+uses the default, and `GET /v1/workspace/options` lists the installed ones.
+
+`plan issue` compiles a proposal, binds its objective WorkGraph, and stores it.
+It does not execute work before the exact plan and assignment digests are approved.
 
 By default the decomposition is REASONED by a registered execution agent in its
 own non-mutating mode: `--agent` selects which one, and an agent whose adapter
@@ -482,7 +506,7 @@ These commands work while `serve` is running, which is when they matter most:
   this terminal is the owner and decides directly; the output is identical
   either way, so an operator cannot tell which process applied their decision.
 - **Proposals** - `plan issue N` and `plan revise` - go to the supervisor too,
-  first one included. The local path would take the exclusive ownership lock
+  first one included. The local path would take the exclusive controller-instance lock
   `serve` already holds, so an operator could once decide plans while `serve`
   ran but not start one.
 - `plan show --revision N` renders one exact revision. The default is the
@@ -634,6 +658,17 @@ does not bind itself to an upstream head - while the run that produced that head
 is back at work. That covers a first performance too, because a plan stage stays
 completed while its run is re-activated.
 
+**A run that owes a human decision has not settled.** A worker can commit a
+candidate and ask a governed `decision_request` in the same invocation; the run
+reads as having reached its goal until the next orchestration pass admits the
+question. A stage whose run is in that state is not accepted and is not a head
+dependent work may start against, for as long as any of these holds: the run's
+question is open, its resolution has not been delivered to it, or its last
+invocation wrote a `decision_request` the runtime has not yet admitted or
+refused. The run keeps its own authority and assignment; the existing #508
+protocol resumes it, and only its final accepted output releases downstream work
+(`awaitsHumanDecision`, `runtime/plan_decision_hold.go`).
+
 The stage is then performed AGAIN under the same approved plan, as a new
 EXECUTION GENERATION. A producer moving from candidate A to candidate B is an
 execution fact, not a change to the plan: the role, profile, worker, trust
@@ -727,6 +762,56 @@ both, as `2<3`: revision 2 governs, revision 3 is waiting for you.
 
 The shared flags are the ones every `autonomy` command takes: `--repo`,
 `--config`, `--text`, and `--agent` where an agent is being selected.
+
+### A reviewer whose invocation failed
+
+A reviewer whose invocation FAILS has not reviewed anything: it answered in a
+shape the verdict protocol refuses, ran out of provider time, or hit a
+transient provider fault. That is a fact about the invocation, not a verdict
+about the candidate, and it is not remediation - nothing is sent back to the
+producer. The run's own bounded protocol correction (one corrective attempt,
+ending in `execution.invoke_reviewer_protocol_correction_exhausted`) has already
+been spent by the time the run fails.
+
+The stage is then performed ONE more time, automatically, through the same
+execution-generation machinery described above (`runtime/plan_reviewer_recovery.go`).
+The failed run is retired, the generation advances, and the next pass freezes
+the assignment for the new generation and starts a new run.
+
+What is preserved: the retry is frozen from the assignment the failed
+performance already held, so it is the same reviewer, profile, worker,
+independence requirement and obligations reviewing the same exact upstream
+candidate and tree; the structural privilege comparison above still proves that
+before the run exists. The implementer is not rerun and no candidate changes. No
+verdict is invented: the retried reviewer decides, or fails, like any other, and
+nothing lets a person's approval stand in for an independent review.
+
+What bounds it:
+
+- **Which failures qualify** is decided from the failed run's typed failure
+  class, in one place (`reviewerFailureRecoverable`): the classes the runtime
+  already routes to a retry - a protocol failure, a transient provider or
+  infrastructure fault, a provider that made no progress, connectivity. A
+  cancelled run, a passed deadline, a quota or a missing credential, and any
+  verdict about the candidate (a blocking review, an authority refusal) do not
+  qualify. A run that ended on a run-level budget - wall time, lifecycle,
+  continuations, provider invocations, assurance - never qualifies whatever its
+  last class was.
+- **How many:** at most two performances of one reviewer stage against one exact
+  candidate and tree - the original and one retry - counted from the durable
+  assignments and runs, so replay and restart read the same answer and cannot
+  start a second one.
+- **Budget:** the retry is a child run charged to the plan's aggregate envelope
+  and its invocations count against it like any run's. A plan that has spent its
+  child-run or invocation ceiling settles the stage FAILED instead; nothing
+  renews a spent budget. The stage's own per-performance assignment budget
+  applies to the new performance, as it does to any re-performance.
+
+If the retry is exhausted, ineligible, or unaffordable, the stage settles
+`failed` with the failure it actually had, the plan reads `blocked`, and the
+objective page shows the failed stage and the held candidate. There is no manual
+override for it: a manual recovery action, if one is ever added, has to be typed,
+bounded and governed on its own terms.
 
 ## Revision and decomposition
 
@@ -895,6 +980,72 @@ An attempt grants nothing. It is not approvable, because approval names a
 revision and there is no revision; it is not executable, because execution reads
 the approved revision and there is none. Proposing again is the ordinary next
 step, and it promotes the same plan identity rather than colliding with it.
+
+## A dynamic team, end to end
+
+The team an objective gets is whatever its planner proposes, bounded by what
+deterministic code admits. Nothing the model writes spawns a worker.
+
+```text
+registered planner agent  ->  InvokePlanner         non-mutating, workspace verified unchanged
+                          ->  PlanService.Propose   planning.Compile: vocabulary, budget envelope,
+                                                    dependencies, policy, independence, ratchet
+                          ->  BindObjectivePlan     the approved plan's WorkGraph projection
+                          ->  operator approval     names the plan digest and the assignments
+                          ->  plan reconciler       stages become ordinary EngineeringRuns
+                          ->  supervisor            the one scheduler
+```
+
+The smallest sufficient team is the planner's job and the compiler's check: a
+one-producer proposal compiles to a one-unit graph and one worker run, and the
+contract's required assurance gate is added by policy (a gate creates no run).
+A broad proposal - parallel producers, an `integration_compose` integrator -
+compiles to the units and edges it named; independent producers start together,
+the integrator waits for every upstream admitted handoff, and its composed
+candidate is what reaches the PR. A proposal outside the bounds (more producers
+than the plan's child-run envelope, a dependency on a stage that does not exist,
+a cycle, no material producer) is refused as a durable attempt: no plan
+revision, graph, batch or run exists afterwards.
+
+Composition happens before approval. Once any unit has started, the graph's
+plan binding is immutable (`BindObjectivePlan` refuses a started graph); a
+revision after discoveries needs the governed revision above, which preserves
+activated work and its frozen bindings. The proof is
+`runtime/dynamic_team_acceptance_test.go`.
+
+A plan stage on an objective graph follows its unit's CURRENT run. When a unit
+is remediated through a #581 epoch the work continues in the epoch's run, so
+`ReplayPlan` reads each remediated unit's stage against its latest epoch run
+(`runtime/plan_epoch_run.go`; the epoch table is the authority, the plan journal
+is not rewritten and still records the original run). The reconciler, `plan
+show` and the fleet summary therefore agree on one current run. Without that,
+the stage would stay parked on the first run, a downstream gate would be judged
+on superseded evidence, and the final candidate's publication would stay
+deferred behind a gate that cannot open.
+
+An epoch is also a child run of the plan, so it runs under what the plan
+approved (`runtime/remediation_plan_admission.go`), not as a generic WorkGraph
+unit. Before its batch is written it is admitted against the plan: refused, with
+no run created, when the plan's child-run or provider-invocation ceiling is
+spent, when the stage has spent its own allowance, when its frozen assignment
+cannot be read back, or when the worker has drifted - judged by the reconciler's
+own `refuseWorkerDrift` (provider kind, vendor family, trust mode, model). The
+run it becomes carries the stage's plan binding and frozen assignment, so it
+executes the stage's objective, instruction packs, context and model preference,
+and its budget is the stage's allowance less what every run of the stage has
+spent, narrowed by what the plan has left: an epoch never resets consumed
+allowance. The epoch's child-run charge and the epoch itself (its batch and epoch row) are
+committed in ONE transaction (`runtime/remediation_epoch_charge_store.go`), under
+the plan lock, with the ceiling re-checked against the plan journal inside that
+transaction. So a failed admission consumes no budget, two admissions cannot both
+take the last slot, and the charge is keyed by run and recorded once. An epoch
+stored by code before this rule, with no charge, is charged and materialized under
+the stage's binding before it can run; one whose run already exists is charged as
+the fact it is and never rebound. Lock order is `orchestrationMu`, then `plansMu`.
+A graph with no objective plan is unchanged.
+
+`ReplayPlan` accepts an epoch as a stage's current run only when it belongs to
+the plan's graph and unit and its run is bound to that plan and stage.
 
 ## Related documents
 

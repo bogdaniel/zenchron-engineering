@@ -279,3 +279,165 @@ func TestEveryWaitRoutedFailureIsClassified(t *testing.T) {
 		}
 	}
 }
+
+// Exercise the historical operation payload, not just the scheduler row: the
+// journal is written before Finish clears ActiveSince in the operation store.
+func TestParkedObservationStatusSurvivesRestart(t *testing.T) {
+	f := newPhase8Fixture(t)
+	id := f.start()
+	for i := 0; i < 12; i++ {
+		out := f.reconcile(id)
+		if out.Disposition == Waiting && out.Reason == ReasonGoalStateReached {
+			break
+		}
+	}
+	read := func() StatusReport {
+		t.Helper()
+		s, err := f.runtime.Status(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	before := read()
+	observations := func() map[string]time.Duration {
+		t.Helper()
+		state, err := f.runtime.load(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]time.Duration{}
+		for id, op := range state.snapshot.Operations {
+			if op.Kind == OpGitHubObserve && op.State == Succeeded {
+				out[id] = statusOperationElapsed(op, state.events, f.clock.Now())
+			}
+		}
+		return out
+	}
+	observedBefore := observations()
+	if len(observedBefore) == 0 {
+		t.Fatal("no succeeded GitHub observation")
+	}
+	if before.Reason != ReasonGoalStateReached || before.PullRequest == nil || before.Operation == nil || before.Operation.State != Succeeded {
+		t.Fatalf("fixture did not park after observing its PR: %+v operation=%+v", before, before.Operation)
+	}
+	if before.ActiveElapsed <= 0 || before.Operation.Elapsed <= 0 {
+		t.Fatal("fixture must perform measurable work")
+	}
+	f.clock.advance(8 * time.Hour)
+	after := read()
+	if after.ActiveElapsed != before.ActiveElapsed || after.Operation.Elapsed != before.Operation.Elapsed {
+		t.Fatalf("parked wait changed active consumption: before=%+v/%+v after=%+v/%+v", before.ActiveElapsed, before.Operation, after.ActiveElapsed, after.Operation)
+	}
+	if after.ExternalWaitElapsed <= before.ExternalWaitElapsed || after.Elapsed <= before.Elapsed {
+		t.Fatal("wait and lifecycle age did not advance")
+	}
+	reopen(t, f)
+	replayed := read()
+	observedAfter := observations()
+	for id, elapsed := range observedBefore {
+		if observedAfter[id] != elapsed {
+			t.Fatalf("replayed observation changed duration: %s", id)
+		}
+	}
+	if replayed.ActiveElapsed != before.ActiveElapsed || replayed.Operation.Elapsed != before.Operation.Elapsed {
+		t.Fatal("restart changed consumed time")
+	}
+	f.reconcile(id)
+	polled := read()
+	state, err := f.runtime.load(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if polled.ActiveElapsed != state.activeElapsed(polled.Now) {
+		t.Fatal("status differs from budget truth")
+	}
+	if polled.ActiveElapsed-before.ActiveElapsed > time.Minute {
+		t.Fatal("poll charged idle wait")
+	}
+}
+
+func TestObservationStatusCountsOnlyBoundedWork(t *testing.T) {
+	start := time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC)
+	events := []EngineeringEvent{waitEvent(start.Add(time.Minute), ReasonGoalStateReached)}
+	for i := 1; i <= 2; i++ {
+		at := start.Add(time.Duration(i) * 4 * time.Hour)
+		events = append(events, operationPair("observe", at, 3*time.Second)...)
+		op := RunOperation{ID: "observe", Kind: OpGitHubObserve, State: Succeeded, StartedAt: &at, ActiveSince: &at, ConsumedExecution: time.Duration(i-1) * 3 * time.Second}
+		now := at.Add(2 * time.Hour)
+		if got := statusOperationElapsed(op, events, now); got != time.Duration(i)*3*time.Second {
+			t.Fatalf("observation duration=%s", got)
+		}
+		run := EngineeringRun{CreatedAt: start}
+		want := time.Minute + time.Duration(i)*3*time.Second
+		if got := ActiveElapsed(run, events, now); got != want {
+			t.Fatalf("active=%s want=%s", got, want)
+		}
+		data, err := json.Marshal(events)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var replay []EngineeringEvent
+		if err := json.Unmarshal(data, &replay); err != nil {
+			t.Fatal(err)
+		}
+		if got := ActiveElapsed(run, replay, now.Add(8*time.Hour)); got != want {
+			t.Fatalf("replayed active=%s want=%s", got, want)
+		}
+	}
+}
+
+func TestOperationElapsedRetainsFinishedConsumption(t *testing.T) {
+	scheduler, clock := deadlineScheduler(t)
+	op := plannedExecution(t, scheduler, time.Minute)
+	clock.advance(3 * time.Second)
+	if got := OperationElapsed(op, clock.Now()); got != 3*time.Second {
+		t.Fatalf("running elapsed=%s", got)
+	}
+	finished, err := scheduler.Finish(op.ID, Succeeded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(8 * time.Hour)
+	if got := OperationElapsed(finished, clock.Now()); got != 3*time.Second {
+		t.Fatalf("finished elapsed=%s", got)
+	}
+}
+
+func TestAcceptedReviewBudgetExhaustionUsesPersistedContinuation(t *testing.T) {
+	start := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	for _, consumed := range []bool{false, true} {
+		t.Run(fmt.Sprint("consumed=", consumed), func(t *testing.T) {
+			observed, _ := json.Marshal(FeedbackObservedPayload{FeedbackDecision: FeedbackDecision{Key: "review:123", Admitted: true}})
+			events := []EngineeringEvent{{Type: EventFeedbackObserved, OccurredAt: start.Add(time.Minute), Payload: observed}}
+			if consumed {
+				payload, _ := json.Marshal(FeedbackConsumedPayload{Keys: []string{"review:123"}})
+				events = append(events, EngineeringEvent{Type: EventFeedbackConsumed, OccurredAt: start.Add(2 * time.Minute), Payload: payload})
+			}
+			clock := &steppingClock{at: start.Add(35 * time.Minute)}
+			state := conditionsFixture(start, clock, RunBudgets{WallLimit: 30 * time.Minute}, events)
+			if disposition, reason := state.conditions(); disposition != Waiting || reason != ReasonReviewBudgetExhausted {
+				t.Fatalf("accepted review abandoned: %s/%s", disposition, reason)
+			}
+			state.events = append(state.events, waitEvent(clock.at, ReasonReviewBudgetExhausted))
+			clock.at = start.Add(24 * time.Hour)
+			state = conditionsFixture(start, clock, RunBudgets{WallLimit: 30 * time.Minute}, state.events)
+			if state.activeElapsed(clock.at) != 35*time.Minute {
+				t.Fatal("budget wait spent idle time")
+			}
+			if state.feedbackState().Consumed["review:123"] != consumed {
+				t.Fatal("budget wait changed delivery identity")
+			}
+			state.run.Budgets = &RunBudgets{WallLimit: 30 * time.Minute}
+			state.rt.deps.Budgets.WallLimit = time.Hour
+			if _, reason := state.conditions(); reason != ReasonReviewBudgetExhausted {
+				t.Fatal("live configuration widened the persisted budget")
+			}
+			grant, _ := json.Marshal(ReviewContinuationGrant{ActiveBaseline: 35 * time.Minute, Allowance: 30 * time.Minute, FeedbackDigest: "digest"})
+			state.events = append(state.events, EngineeringEvent{Type: EventReviewContinuationGranted, OccurredAt: clock.at, Payload: grant})
+			if _, reason := state.conditions(); reason == ReasonReviewBudgetExhausted {
+				t.Fatal("durable continuation did not release the wait")
+			}
+		})
+	}
+}

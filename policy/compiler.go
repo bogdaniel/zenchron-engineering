@@ -32,7 +32,12 @@ type CompileInput struct {
 // Compile resolves all matching policy rules without relying on map or input
 // ordering. Conflicting policy outcomes are rejected rather than selected by
 // an implicit precedence rule.
-func Compile(input CompileInput) (domain.EngineeringWorkContract, error) {
+func Compile(input CompileInput) (result domain.EngineeringWorkContract, err error) {
+	defer func() {
+		if err != nil {
+			err = &CompilationError{Err: err}
+		}
+	}()
 	if err := validateInput(input); err != nil {
 		return domain.EngineeringWorkContract{}, err
 	}

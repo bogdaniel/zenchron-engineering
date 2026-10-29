@@ -28,8 +28,6 @@ package runtime
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -38,6 +36,7 @@ import (
 	"time"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
 
 // ---------------------------------------------------------------------------
@@ -55,17 +54,23 @@ const (
 	OpAssuranceSemantic = "assurance.semantic"
 	OpAuthorityEvaluate = "authority.evaluate"
 	OpBaseIntegrate     = "base.integrate"
-	OpCandidatePush     = "candidate.push"
-	OpPullRequestCreate = "pull_request.create"
-	OpPullRequestUpdate = "pull_request.update"
-	OpGitHubObserve     = "github.observe"
+	// OpIntegrationCompose is the deterministic Git composition for a
+	// WorkGraph unit explicitly marked orchestration.ExecutionKindIntegrationCompose
+	// (#475): composing its exact consumed admitted inputs instead of an
+	// ordinary execution invocation. See bindIntegrationCompose.
+	OpIntegrationCompose = "integration.compose"
+	// OpIntegrationHandoffAdmit defers an integration_compose unit's handoff
+	// report until its own fresh assurance has passed (#475 review B2). See
+	// bindIntegrationHandoffAdmit.
+	OpIntegrationHandoffAdmit = "integration.handoff_admit"
+	OpCandidatePush           = "candidate.push"
+	OpPullRequestCreate       = "pull_request.create"
+	OpPullRequestUpdate       = "pull_request.update"
+	OpGitHubObserve           = "github.observe"
+	// OpHandoffRepair is the one result-only correction of a refused
+	// orchestration handoff (#492, handoff_repair.go).
+	OpHandoffRepair = "handoff.repair"
 )
-
-// observationKinds are the operations that only READ external state. They are
-// the only operations a waiting run may perform: a waiting run must still be
-// able to notice that its pull request was merged, but it must not execute,
-// mutate, verify, authorize, or publish anything while it waits.
-var observationKinds = map[string]bool{OpSourceObserve: true, OpGitHubObserve: true}
 
 // publicationKinds are the operations that change protected remote state.
 // Every one of them is gated on a current, authorized #7 decision.
@@ -136,6 +141,54 @@ type mutationResult struct {
 	PathCount    int          `json:"path_count"`
 	FailureClass FailureClass `json:"failure_class,omitempty"`
 	ProviderID   string       `json:"provider_id,omitempty"`
+	// ProviderExecuted records that this attempt actually reached a worker, as
+	// opposed to being refused before any execution began. It is the difference
+	// between an external condition that cost nothing and one that cost twenty
+	// minutes of provider work before it appeared, and only the first may be
+	// refunded to the run's execution budget.
+	ProviderExecuted bool `json:"provider_executed,omitempty"`
+	// DiscardRefusals is how many destructive Git operations the runtime
+	// refused during this invocation, and DiscardRefused is the bounded shape
+	// of the most recent one.
+	//
+	// They are OBSERVATION and not failure: a provider that reached for a
+	// destructive recovery, was refused, and then did the work properly
+	// succeeded - and the refusal is still the most interesting thing that
+	// happened, because it is where expensive reasoning was nearly lost. That
+	// is why it is recorded here rather than becoming a FailureClass: the
+	// runtime knows exactly what it refused, so #241's rule against reporting
+	// it as quota, unavailability, a stall or an unknown is satisfied by it
+	// not being a failure at all.
+	DiscardRefusals int    `json:"discard_refusals,omitempty"`
+	DiscardRefused  string `json:"discard_refused,omitempty"`
+	// ContentDigest identifies the uncommitted change this operation left in
+	// the workspace (workspaceContentDigest), taken when it returned. It is
+	// what binds held material to exact content when a budget ends the run
+	// before the change is committed (#203). Empty means unknown.
+	ContentDigest string `json:"content_digest,omitempty"`
+	// ResolvedFeedback is the set of admitted feedback keys this attempt
+	// explicitly and typedly resolved as requiring no change, admitted by
+	// AdmitFeedbackResolution against exactly what this attempt was
+	// delivered and exactly the subject it was invoked against (#376).
+	//
+	// It is populated ONLY through that admission. It is never set from
+	// "the provider returned success and the workspace is unchanged" alone -
+	// that observation is indistinguishable from a provider that deferred
+	// unfinished work and simply exited, which is the exact defect #376
+	// exists to close. Discharge reads this field and nothing else.
+	ResolvedFeedback []string `json:"resolved_feedback,omitempty"`
+	// CheckpointResolved records that AdmitCheckpointCompletion admitted a
+	// FeedbackResolutionCheckpointComplete claim for this attempt, independent
+	// of how many feedback keys (if any) it named and independent of Mutated.
+	// ResolvedFeedback alone cannot say this: an admitted resolution naming
+	// zero keys - the shape a continuation that inherits a checkpoint with no
+	// feedback obligation writes to state "this checkpoint is complete" -
+	// leaves ResolvedFeedback empty exactly like no resolution was ever
+	// admitted at all. This is #379's generalization of #376 from feedback
+	// discharge to checkpoint continuation: a continuation that returns
+	// without setting this is not evidence the checkpoint it inherited is
+	// complete, whether or not it mutated the candidate further.
+	CheckpointResolved bool `json:"checkpoint_resolved,omitempty"`
 }
 
 // pushResult records how a push settled: landed by this attempt, or already
@@ -149,19 +202,38 @@ type pushResult struct {
 // runState is one replayed view of one run. Everything a planner may read is
 // here, and nothing here comes from wall time, the filesystem, or the network.
 type runState struct {
-	rt                *EngineeringRuntime
-	run               EngineeringRun
-	snapshot          RunSnapshot
-	events            []EngineeringEvent
-	projection        RunProjection
-	sources           []sourceRecord
-	source            *sourceRecord
-	controllerChanged bool
+	capacityWait       *CapacityWait
+	feedbackCached     *FeedbackState
+	feedbackEventCount int
+	rt                 *EngineeringRuntime
+	run                EngineeringRun
+	snapshot           RunSnapshot
+	events             []EngineeringEvent
+	projection         RunProjection
+	sources            []sourceRecord
+	source             *sourceRecord
+	controllerChanged  bool
 	// External-wait accounting, folded from the journal once; see externalWait.
 	waitExcluded  time.Duration
 	waitOpenSince time.Time
 	waitOpenWork  time.Duration
 	waitComputed  bool
+	// resolvedOwnDecisions is this run's own live, resolved #473
+	// decision_request messages, read once per load() (#508 P4b); see
+	// decision_resumption.go.
+	resolvedOwnDecisions []orchestration.DecisionResolution
+	// deliveredOwnDecisionIDs: load() fails closed on a corrupt decision-
+	// delivery event rather than forgetting it; see deliveredDecisionIDsFromEvents.
+	deliveredOwnDecisionIDs map[string]bool
+	// origin is the WorkGraph unit execution (#472) this run's batch exists to
+	// perform, when it exists - read once per load so every pure bind function
+	// can read it without a store call of its own. nil for an ordinary batch
+	// or plan-stage run, exactly as Orchestration itself is.
+	origin *orchestration.BatchOrigin
+	// publicationDeferred is true for an objective producer whose output is
+	// consumed by a later integration_compose unit. Its admitted handoff, not a
+	// producer PR, is the integration input.
+	publicationDeferred bool
 }
 
 func (r *EngineeringRuntime) load(runID string) (*runState, error) {
@@ -184,21 +256,72 @@ func (r *EngineeringRuntime) load(runID string) (*runState, error) {
 	if err != nil {
 		return nil, err
 	}
+	resolvedOwnDecisions, err := r.deps.Store.ResolvedOwnDecisionRequests(runID)
+	if err != nil {
+		return nil, err
+	}
+	deliveredOwnDecisionIDs, err := deliveredDecisionIDsFromEvents(events)
+	if err != nil {
+		return nil, err
+	}
+	origin, err := r.workUnitOrigin(run)
+	if err != nil {
+		return nil, err
+	}
+	publicationDeferred, err := r.objectivePublicationDeferred(origin)
+	if err != nil {
+		return nil, err
+	}
 	state := &runState{
 		rt: r, run: run, snapshot: snapshot, events: events, projection: projection,
-		controllerChanged: run.ControllerSHA256 != r.controller,
+		resolvedOwnDecisions: resolvedOwnDecisions, deliveredOwnDecisionIDs: deliveredOwnDecisionIDs, origin: origin,
+		publicationDeferred: publicationDeferred,
+		// A DIFFERENT CONTROLLER IS STILL THE DEFAULT REFUSAL. What changed
+		// with #234 is that one specific transition can be converted from
+		// drift into an admitted succession by evidence in this run's own
+		// journal; everything without that evidence parks exactly as before.
+		controllerChanged: !ControllerSuccessionContinues(run, events, r.controller, r.wasTransitionActivated()),
 	}
-	for _, op := range state.succeeded(OpSourceObserve) {
+	state.collectSources()
+	return state, nil
+}
+
+// workUnitOrigin reads the WorkGraph unit, if any, this run's batch exists to
+// perform (#472) - the same batch.Origin workUnit() reads for the invocation's
+// upstream context, read once here so every pure bind function can consult
+// it (bindIntegrationCompose, the bindExecutionInvoke integrator guard)
+// without a store call of its own.
+//
+// ponytail: one extra read per orchestrated run per reconcile pass; fine at
+// current scale, fold into load()'s existing Run/Events reads if this ever
+// shows up in a profile.
+func (r *EngineeringRuntime) workUnitOrigin(run EngineeringRun) (*orchestration.BatchOrigin, error) {
+	if run.Orchestration == nil || run.Orchestration.BatchID == "" {
+		return nil, nil
+	}
+	batch, found, err := r.deps.Store.OrchestrationBatch(run.Orchestration.BatchID)
+	if err != nil || !found {
+		return nil, err
+	}
+	if err := verifyAcceptanceFeatureOrigin(r.deps.Store, batch.Origin); err != nil {
+		return nil, deterministicRefusal("origin.acceptance_feature", err)
+	}
+	return batch.Origin, nil
+}
+
+// collectSources folds the run's succeeded source observations into the state,
+// which is where its pinned base comes from.
+func (s *runState) collectSources() {
+	for _, op := range s.succeeded(OpSourceObserve) {
 		var record sourceRecord
 		if len(op.Result) == 0 || json.Unmarshal(op.Result, &record) != nil {
 			continue
 		}
-		state.sources = append(state.sources, record)
+		s.sources = append(s.sources, record)
 	}
-	if n := len(state.sources); n > 0 {
-		state.source = &state.sources[n-1]
+	if n := len(s.sources); n > 0 {
+		s.source = &s.sources[n-1]
 	}
-	return state, nil
 }
 
 // succeeded returns the run's succeeded operations of one kind in durable
@@ -278,6 +401,63 @@ func (s *runState) lastFailure(id string) (FailureClass, bool) {
 	return result.FailureClass, true
 }
 
+// lastReviewRefusal reads the exact reviewer-protocol refusal THIS operation's
+// most recent failed attempt recorded, so a bounded retry of the same
+// reviewer invocation (#374) can be told why rather than being re-dispatched
+// blind. It is scoped to FailureReviewerProtocolIncomplete deliberately: that
+// is the one class a retry of this exact operation, not a different one,
+// answers - unlike FailureVerification's admission refusals, which only ever
+// surface once a candidate exists for the run to remediate (see findings()).
+func (s *runState) lastReviewRefusal(id string) (*ReviewerResultRefusedError, bool) {
+	op, ok := s.snapshot.Operations[id]
+	if !ok || op.State != OperationFailed {
+		return nil, false
+	}
+	var record executionRecord
+	if decodeJSON(op.Result, &record) != nil ||
+		record.FailureClass != FailureReviewerProtocolIncomplete || record.ReviewRefusal == nil {
+		return nil, false
+	}
+	return record.ReviewRefusal, true
+}
+
+// reviewerProtocolCorrectionExhausted reports whether this operation's two
+// most recent CONSECUTIVE attempts both failed to cross the reviewer-result
+// protocol (#374). The runtime grants exactly one corrective reviewer
+// invocation after a malformed or missing result; it is independent of
+// max_execution_attempts, which bounds a different question (how many tries
+// this operation gets, for any reason) and must not be read as also answering
+// this one. A second FailureReviewerProtocolIncomplete in a row means the
+// correction offered through lastReviewRefusal was not taken up.
+//
+// It reads the full event history, not the folded operation, because the
+// folded operation (lastFailure, lastReviewRefusal) only ever holds the most
+// recent attempt - exactly one attempt short of what "two in a row" needs. A
+// non-reviewer-protocol attempt anywhere in the streak - success, a different
+// failure class, an external wait - resets the count: only a run of
+// uninterrupted protocol failures, starting from the most recent attempt,
+// counts against the one-correction grant.
+func (s *runState) reviewerProtocolCorrectionExhausted(id string) bool {
+	streak := 0
+	for _, e := range s.events {
+		if e.Type != EventOperationAfter || e.OperationID != id {
+			continue
+		}
+		var op RunOperation
+		if decodeJSON(e.Payload, &op) != nil || op.State != OperationFailed {
+			streak = 0
+			continue
+		}
+		var record executionRecord
+		if decodeJSON(op.Result, &record) == nil && record.FailureClass == FailureReviewerProtocolIncomplete {
+			streak++
+		} else {
+			streak = 0
+		}
+	}
+	return streak >= 2
+}
+
 // currentOperation is the most recently started operation, for the status
 // report only. It is never consulted to decide what to do next.
 func (s *runState) currentOperation() (RunOperation, bool) {
@@ -318,57 +498,9 @@ func (s *runState) epoch() int64 {
 
 func (s *runState) epochKey() string { return "epoch-" + strconv.FormatInt(s.epoch(), 10) }
 
-// externalWaitReasons is the CLOSED set of waits that are somebody else's turn.
-//
-// An execution wall budget bounds the work this system does. It must not be
-// spent waiting for a human to read a pull request, for an operator to sign a
-// provider back in, or for a rate limit to lift: none of that is the runtime
-// working, and a budget that burns through it forces an operator to size their
-// engineering budget around how fast people answer email. A run that reached
-// its goal and sat overnight awaiting review used to die of
-// run_wall_budget_exhausted, which made the #63 review loop unusable at any
-// budget that still bounded runaway work.
-//
-// The set is closed and fail-closed: a reason that is not listed here SPENDS
-// the budget. A new wait pauses the clock only when somebody decides it should,
-// which is the safe direction for a bound whose whole job is to end things.
-// ReasonGoalStateReached is the wait a run settles into when it has done
-// everything it can: the candidate is produced, assurance has judged it, and
-// what remains is a person in the forge. It is named because a PLAN reads it -
-// a stage whose run reached its goal state has produced its output, and the
-// stages that depend on it can proceed while the run itself waits for review.
-const ReasonGoalStateReached = "goal_state_reached"
-
-var externalWaitReasons = map[string]bool{
-	// Waiting for a person: review, merge authority, a policy decision only an
-	// operator can make.
-	ReasonGoalStateReached:          true,
-	"awaiting_authority":            true,
-	"authority_blocked":             true,
-	"authority_unknown":             true,
-	"requested_privilege_expansion": true,
-	// Waiting for the operator's own accounts and tools.
-	"execution_provider_account_unavailable": true,
-	"execution_provider_quota":               true,
-	// Rate limiting is the other capacity wait. It is the provider declining to
-	// be asked yet, not the runtime working, and leaving it out charged an
-	// operator for their provider's backoff.
-	"execution_provider_rate_limited":  true,
-	"assurance_dependency_unavailable": true,
-	// The operator has to free disk before anything can proceed; the run is not
-	// working while it waits for them.
-	"state_storage_exhausted": true,
-	// The controller stopped. The run is not working, and it is waiting for a
-	// supervisor to exist again rather than for anything it can do itself.
-	"controller_shutdown":  true,
-	WatchWaitingGitHubAuth: true,
-	// Waiting for a human decision about the source or the pull request.
-	WatchWaitingOptInRemoved:       true,
-	"source_intent_changed":        true,
-	"source_closed":                true,
-	"pull_request_closed_unmerged": true,
-	"candidate_external_changed":   true,
-}
+// ReasonGoalStateReached, ReasonReviewBudgetExhausted, ReasonDecisionPending
+// and the externalWaitReasons closed set they belong to live in
+// external_wait_reasons.go.
 
 // activeElapsed is the time this run has been the SYSTEM'S turn, derived from
 // the durable journal rather than from a stopwatch: every interval it excludes
@@ -385,15 +517,18 @@ func (s *runState) activeElapsed(now time.Time) time.Duration {
 	// conditions() asks several times per pass - through the same arithmetic
 	// the plan's ceiling uses.
 	excluded, openSince, openWork := s.externalWait()
-	return activeFrom(s.run.CreatedAt, excluded, openSince, openWork, now)
+	openWork += liveExternalWork(s.events, openSince, now)
+	return max(0, activeFrom(s.run.CreatedAt, excluded, openSince, openWork, now)-verificationWait(s.events, "", s.run.CreatedAt, now))
 }
 
 // externalWait folds the journal once: the total of the CLOSED external-wait
 // intervals, the start of an open one, and the work performed inside it.
 //
 // An external wait is a STATE, not the gap between two adjacent events. It opens
-// at the run.waiting that declared an external reason and closes only at the
-// next DISPOSITION event - a wait for a different reason, or a terminal event.
+// at the run.waiting that declared an external reason and normally closes at
+// the next DISPOSITION event - a different reason, or a terminal event.
+// A deterministic retry closes its own wait when it actually resumes. Held
+// nested tools suspend idle exclusion until their timestamped release.
 // It deliberately does not close on operation events, because recordDisposition
 // appends run.waiting only when the disposition or reason CHANGES:
 //
@@ -432,42 +567,107 @@ func (s *runState) externalWait() (excluded time.Duration, openSince time.Time, 
 func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSince time.Time, openWork time.Duration) {
 	var waitingSince time.Time
 	var work time.Duration
+	var deterministicOperation string
+	declaredWait := false
+	tools := map[string]bool{}
 	started := map[string]time.Time{}
 	closeWait := func(at time.Time) {
 		if waitingSince.IsZero() {
 			return
 		}
-		if idle := at.Sub(waitingSince) - work; idle > 0 {
+		pendingWork := work
+		for _, began := range started {
+			if began.Before(waitingSince) {
+				began = waitingSince
+			}
+			pendingWork += max(0, at.Sub(began))
+		}
+		if idle := at.Sub(waitingSince) - pendingWork; idle > 0 {
 			excluded += idle
 		}
-		waitingSince, work = time.Time{}, 0
-		started = map[string]time.Time{}
+		waitingSince, work, deterministicOperation = time.Time{}, 0, ""
 	}
 	for _, event := range events {
 		switch event.Type {
 		case EventRunWaiting:
 			if externalWaitReasons[payloadReason(event.Payload)] {
-				if waitingSince.IsZero() {
+				declaredWait = true
+				if payloadReason(event.Payload) != ReasonDeterministicFailureUnchanged {
+					deterministicOperation = ""
+				}
+				if waitingSince.IsZero() && len(tools) == 0 {
 					waitingSince = event.OccurredAt
 				}
 				continue
 			}
+			declaredWait = false
 			closeWait(event.OccurredAt)
 		case EventRunCompleted, EventRunFailed, EventRunCancelled:
+			declaredWait = false
 			closeWait(event.OccurredAt)
 		case EventOperationBefore:
-			if !waitingSince.IsZero() && event.OperationID != "" {
+			// This exact operation passed the retry gate and really resumed.
+			// Probes for other operations cannot resolve its contradiction.
+			if event.OperationID != "" && event.OperationID == deterministicOperation {
+				declaredWait = false
+				closeWait(event.OccurredAt)
+			}
+			if event.OperationID != "" {
+				if old, ok := started[event.OperationID]; ok && !waitingSince.IsZero() {
+					if old.Before(waitingSince) {
+						old = waitingSince
+					}
+					work += max(0, event.OccurredAt.Sub(old))
+				}
 				started[event.OperationID] = event.OccurredAt
 			}
 		case EventOperationAfter:
+			// The after record is durable before run.waiting. A crash in that
+			// gap must preserve external-wait accounting as well as the deadline.
+			var op RunOperation
+			if decodeJSON(event.Payload, &op) == nil {
+				if op.State == OperationFailed && op.Failure != nil {
+					declaredWait = true
+					if waitingSince.IsZero() && len(tools) == 0 {
+						waitingSince = event.OccurredAt
+					}
+					deterministicOperation = event.OperationID
+				} else if waitingSince.IsZero() {
+					if s, ok := awaitsRetry(op); ok && !s.SpendsActiveWork {
+						declaredWait = true
+						if len(tools) == 0 {
+							waitingSince = event.OccurredAt
+						}
+					}
+				}
+			}
 			if waitingSince.IsZero() || event.OperationID == "" {
+				delete(started, event.OperationID)
 				continue
 			}
 			if at, ok := started[event.OperationID]; ok {
+				if at.Before(waitingSince) {
+					at = waitingSince
+				}
 				if spent := event.OccurredAt.Sub(at); spent > 0 {
 					work += spent
 				}
 				delete(started, event.OperationID)
+			}
+		case EventVerificationPermitChanged:
+			var permit VerificationPermit
+			if decodeJSON(event.Payload, &permit) != nil {
+				continue
+			} // validated at append
+			if permit.State == VerificationGranted {
+				tools[permit.ID] = true
+				closeWait(event.OccurredAt)
+			}
+			if permit.State == VerificationReleased {
+				delete(tools, permit.ID)
+				if declaredWait && len(tools) == 0 && waitingSince.IsZero() {
+					waitingSince = event.OccurredAt
+				}
 			}
 		}
 	}
@@ -482,7 +682,8 @@ func foldExternalWait(events []EngineeringEvent) (excluded time.Duration, openSi
 // means exactly what it means for a run's own wall budget.
 func ActiveElapsed(run EngineeringRun, events []EngineeringEvent, now time.Time) time.Duration {
 	excluded, openSince, openWork := foldExternalWait(events)
-	return activeFrom(run.CreatedAt, excluded, openSince, openWork, now)
+	openWork += liveExternalWork(events, openSince, now)
+	return max(0, activeFrom(run.CreatedAt, excluded, openSince, openWork, now)-verificationWait(events, "", run.CreatedAt, now))
 }
 
 // activeFrom is the arithmetic itself, over a fold either caller supplies. It
@@ -547,12 +748,29 @@ func (s *runState) upstreamCandidate() *CandidateRef {
 	return s.run.Plan.UpstreamCandidate
 }
 
-// baseRevision is the base the candidate currently sits on.
+// pristineCandidateHead is the commit a freshly cloned workspace must be at
+// before this run has made any commit of its own: ordinarily the trusted
+// base it was cloned at, but the exact upstream candidate when this stage
+// consumes one that was never published and had to be transferred into the
+// workspace after the clone - see createCandidate.
+func (s *runState) pristineCandidateHead() string {
+	if ref := s.upstreamCandidate(); ref != nil {
+		return ref.Revision
+	}
+	return s.pinnedBase()
+}
+
+// baseRevision is the base the candidate currently sits on: the recorded base
+// once a base.integrate has moved it, otherwise the pristine head the
+// workspace started from - which, for a stage consuming an unpublished
+// upstream candidate, is the transferred candidate rather than the trusted
+// base the clone itself resolved. Falling back to pinnedBase here would claim
+// the workspace sits on a commit createCandidate never checked it out to.
 func (s *runState) baseRevision() string {
 	if s.projection.BaseRevision != "" {
 		return s.projection.BaseRevision
 	}
-	return s.pinnedBase()
+	return s.pristineCandidateHead()
 }
 
 func (s *runState) contractRevision() string { return s.projection.Contract.Revision }
@@ -594,6 +812,9 @@ func (s *runState) publicationDecision() (AuthorityEvaluatedPayload, bool) {
 // still settles the run as waiting, and a rejection still settles it as
 // blocked. Both terminate.
 func (s *runState) unansweredPublicationDecision() (AuthorityEvaluatedPayload, bool) {
+	if s.publicationDeferred {
+		return AuthorityEvaluatedPayload{}, false
+	}
 	decision, ok := s.decidedPublication()
 	if !ok {
 		return AuthorityEvaluatedPayload{}, false
@@ -688,6 +909,9 @@ func (s *runState) invariants() error {
 	if s.snapshot.ID != s.run.ID {
 		return fmt.Errorf("replayed snapshot identity does not match the run")
 	}
+	if s.run.Budgets != nil && s.run.Budgets.AssuranceWallLimit < 0 {
+		return fmt.Errorf("run froze a negative assurance wall limit")
+	}
 	if s.projection.CandidateRevision != "" && s.projection.Contract == (Ref{}) {
 		return fmt.Errorf("a candidate commit exists with no governing contract")
 	}
@@ -741,11 +965,20 @@ func (s *runState) conditions() (Disposition, string) {
 	// operator who genuinely wants a run to stop existing after a while. They
 	// are different questions and overloading one to answer both is what made a
 	// pull request awaiting review look like a runaway run.
-	if limit := s.budgets().WallLimit; limit > 0 && s.activeElapsed(now) > limit {
-		return Failed, "run_wall_budget_exhausted"
+	reviewDelivered := false
+	if runBudgetSpent(s.budgets().WallLimit, s.executionElapsed(now)) {
+		if len(s.outstandingReviewKeys()) > 0 {
+			if s.reviewContinuationRemaining(now) <= 0 {
+				return Waiting, ReasonReviewBudgetExhausted
+			}
+		} else if s.reviewContinuationDelivered() {
+			reviewDelivered = true
+		} else {
+			return Failed, ReasonRunWallBudgetExhausted
+		}
 	}
-	if deadline := s.rt.deps.Budgets.LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
-		return Failed, "run_lifecycle_deadline_exhausted"
+	if deadline := s.budgets().LifecycleDeadline; deadline > 0 && now.Sub(s.run.CreatedAt) > deadline {
+		return Failed, ReasonLifecycleDeadlineExhausted
 	}
 	if s.controllerChanged {
 		return Waiting, "controller_changed"
@@ -755,6 +988,13 @@ func (s *runState) conditions() (Disposition, string) {
 	}
 	if s.projection.SourceIntentChanged {
 		return Waiting, "source_intent_changed"
+	}
+	// #474: an unreadable admission table must never read as nothing pending.
+	// A transient failure here waits visibly under its own reason instead of
+	// settling goal_state_reached over work this pass could not prove was
+	// absent.
+	if _, err := s.pendingReviewRemediationKeys(); err != nil {
+		return Waiting, "review_remediation_unavailable"
 	}
 	// A closed issue with an open, unmerged pull request is source
 	// cancellation semantics; MergePrecedence is the one place that ordering
@@ -776,7 +1016,7 @@ func (s *runState) conditions() (Disposition, string) {
 	// run-1b876b78f20d83195e6b503831fcc9c7 is the proof: 4 checkpoints, 3
 	// distinct continuation bindings, terminated while still productive.
 	if s.continuationCeilingReached() {
-		return Failed, "execution_continuations_exhausted"
+		return Failed, ReasonContinuationsExhausted
 	}
 	// The RUN TOTAL of provider invocations, across every binding. This is the
 	// bound a plan's remaining aggregate headroom becomes: continuation depth
@@ -784,7 +1024,7 @@ func (s *runState) conditions() (Disposition, string) {
 	// retries within one, but neither of them bounds the sum, and a plan
 	// ceiling is a sum.
 	if s.providerInvocationCeilingReached() {
-		return Failed, "run_provider_invocations_exhausted"
+		return Failed, ReasonProviderInvocationsExhausted
 	}
 	if r := s.projection.Reassessment; r != nil && r.RequestedPrivilegeCount > 0 {
 		return Waiting, "requested_privilege_expansion"
@@ -797,6 +1037,9 @@ func (s *runState) conditions() (Disposition, string) {
 		if disposition, reason, outstanding := AuthorityDisposition(decision.Status); outstanding {
 			return disposition, reason
 		}
+	}
+	if reviewDelivered {
+		return Waiting, ReasonGoalStateReached
 	}
 	return Active, ""
 }
@@ -827,10 +1070,13 @@ var operationSpecs = []operationSpec{
 	{OpGitHubObserve, bindGitHubObserve},
 	{OpContractCompile, bindContractCompile},
 	{OpCandidateCreate, bindCandidateCreate},
+	{OpIntegrationCompose, bindIntegrationCompose},
 	{OpExecutionInvoke, bindExecutionInvoke},
 	{OpRemediationGofmt, bindRemediationGofmt},
 	{OpCandidateCommit, bindCandidateCommit},
+	{OpHandoffRepair, bindHandoffRepair},
 	{OpAssuranceGo, bindAssuranceGo},
+	{OpIntegrationHandoffAdmit, bindIntegrationHandoffAdmit},
 	{OpAssuranceSemantic, bindAssuranceSemantic},
 	{OpBaseIntegrate, bindBaseIntegrate},
 	{OpAuthorityEvaluate, bindAuthorityEvaluate},
@@ -855,52 +1101,87 @@ func (s *runState) plan() (desiredOperation, bool) {
 	return desiredOperation{}, false
 }
 
-// budgets is the bound THIS run is judged by: the operator's configuration,
-// narrowed by whatever the run persisted at creation. A plan stage run persists
-// its stage budget - already narrowed by the assigned profile's constraints -
-// so a profile that tightens wall time or attempts tightens the actual work
-// rather than only the document describing it.
-func (s *runState) budgets() RunBudgets {
-	budgets := s.rt.deps.Budgets.defaults()
-	if s.run.Budgets == nil {
-		return budgets
+// runBudgetSpent is the one definition of an exhausted run active-work budget,
+// shared by conditions() and grantReviewContinuation so they cannot disagree
+// at the boundary. ZERO remaining is spent: no successor may start with no
+// authority (#328).
+func runBudgetSpent(limit, elapsed time.Duration) bool { return limit > 0 && elapsed >= limit }
+
+// activeWorkRemaining is the run's remaining CUMULATIVE active-work authority,
+// from the existing journal-derived counter (#83). Once a review continuation
+// has been granted the run budget is already spent and the grant is the
+// enclosing envelope, so it is what remains.
+func (s *runState) activeWorkRemaining(now time.Time) time.Duration {
+	if _, granted := s.reviewContinuationGrant(); granted {
+		return s.reviewContinuationRemaining(now)
 	}
-	if wall := s.run.Budgets.WallLimit; wall > 0 && wall < budgets.WallLimit {
-		budgets.WallLimit = wall
-	}
-	if attempts := s.run.Budgets.MaxExecutionAttempts; attempts > 0 && attempts < budgets.MaxExecutionAttempts {
-		budgets.MaxExecutionAttempts = attempts
-	}
-	return budgets
+	return max(s.budgets().WallLimit-s.executionElapsed(now), 0)
 }
 
+// attemptLimit is the authority ONE physical attempt starting now receives:
+// min(frozen attempt limit, remaining run active work). When the run has less
+// left than a full attempt, the attempt is truncated and the bound is the RUN's
+// - a stop there is run exhaustion, not an attempt-wall stop. A run frozen
+// before the attempt limit existed gets nil: the legacy rule, unchanged.
+func (s *runState) attemptLimit(now time.Time) *AttemptLimit {
+	limit := s.budgets().AttemptWallLimit
+	if limit <= 0 {
+		return nil
+	}
+	if remaining := s.activeWorkRemaining(now); remaining <= limit {
+		return &AttemptLimit{Within: remaining, Bound: BoundRunActiveWork}
+	}
+	return &AttemptLimit{Within: limit, Bound: BoundAttemptWall}
+}
+
+// attemptsFor is the attempt ceiling a newly planned operation freezes, read
+// from the run's frozen budgets for every kind that has one.
 func (s *runState) attemptsFor(kind string) int {
-	if kind == OpExecutionInvoke {
-		return s.budgets().MaxExecutionAttempts
-	}
-	return s.rt.attemptsFor(kind)
-}
-
-func (r *EngineeringRuntime) attemptsFor(kind string) int {
 	switch kind {
 	case OpExecutionInvoke:
-		return r.deps.Budgets.MaxExecutionAttempts
+		return s.budgets().MaxExecutionAttempts
 	case OpRemediationGofmt:
-		return r.deps.Budgets.MaxRemediationAttempts
+		return s.budgets().MaxRemediationAttempts
 	case OpAssuranceGo, OpAssuranceSemantic:
-		return r.deps.Budgets.MaxAssuranceAttempts
+		return s.budgets().MaxAssuranceAttempts
+	case OpHandoffRepair:
+		// NOT the repair budget, which is one started operation
+		// (startedRepair). The second attempt exists only for a crash between
+		// the scheduler starting the row and operation.before being
+		// journalled: no provider was reached, and failing the run for it
+		// would be worse than the invocation it never made.
+		return 2
 	default:
 		return 3
 	}
 }
 
-func bindSourceObserve(s *runState) (string, bool) { return s.epochKey(), true }
+// A retry disposition with finite attempt authority changes status, not the
+// observation being retried. Keep its binding so status events cannot mint a
+// fresh attempt budget, through to the last attempt.
+func observationBinding(s *runState, kind string) string {
+	var latest *RunOperation
+	for _, op := range s.snapshot.Operations {
+		if op.Kind == kind && (latest == nil || op.CreatedAt.After(latest.CreatedAt) || (op.CreatedAt.Equal(latest.CreatedAt) && op.ID > latest.ID)) {
+			copy := op
+			latest = &copy
+		}
+	}
+	if latest != nil && latest.State == OperationFailed && retryDispositions[latest.RetryDisposition].FiniteAttemptAuthority {
+		return bindingOf(*latest)
+	}
+	return s.epochKey()
+}
+
+func bindSourceObserve(s *runState) (string, bool) {
+	return observationBinding(s, OpSourceObserve), true
+}
 
 func bindGitHubObserve(s *runState) (string, bool) {
 	if !s.published() {
 		return "", false
 	}
-	return s.epochKey(), true
+	return observationBinding(s, OpGitHubObserve), true
 }
 
 func bindContractCompile(s *runState) (string, bool) {
@@ -917,7 +1198,49 @@ func bindCandidateCreate(s *runState) (string, bool) {
 	return s.pinnedBase(), true
 }
 
+// bindIntegrationCompose is the deterministic composition gate for a
+// WorkGraph integration unit (#475): the run's own origin names a unit whose
+// execution kind is orchestration.ExecutionKindIntegrationCompose -
+// explicitly, and only the WorkGraph author/compiler decided that, never
+// inferred from Role, purpose, issue title or provider prose. Role identifies
+// who is qualified to perform a unit; ExecutionKind identifies which
+// algorithm its run uses, and the two are independent: a RoleIntegrator unit
+// with no ExecutionKind set is an ordinary provider-executed unit.
+//
+// Its binding is the exact consumed input set's digest, the same digest the
+// WorkGraph itself activated this unit against (orchestration.WorkUnitBatchID
+// already binds the run to it). A restarted or retried attempt therefore
+// replans the identical operation; an input set that changed would be a
+// different run entirely; one that is activated against inputs since
+// superseded is not this binding's question - the WorkGraph's own
+// exact-subject invalidation already governs that, before any run is reused.
+func bindIntegrationCompose(s *runState) (string, bool) {
+	if s.origin == nil || s.origin.ExecutionKind != orchestration.ExecutionKindIntegrationCompose {
+		return "", false
+	}
+	if key, wanted := bindCandidateCreate(s); !wanted || !s.satisfied(OpCandidateCreate, key) {
+		return "", false
+	}
+	digest, err := s.origin.Inputs.Digest()
+	if err != nil {
+		return "", false
+	}
+	return digest, true
+}
+
 func bindExecutionInvoke(s *runState) (string, bool) {
+	// A WORK GRAPH UNIT EXPLICITLY MARKED integration_compose (#475) never
+	// receives a free-form engineering invocation: its whole producer stage
+	// is the deterministic composition bindIntegrationCompose performs
+	// instead. The guard is explicit and structural - the unit's own
+	// execution kind, decided once by the WorkGraph author/compiler at
+	// adoption and frozen the moment it was activated - never inferred from
+	// Role, this issue's purpose, or anything a provider wrote. An ordinary
+	// RoleIntegrator unit (ExecutionKind absent or "provider") falls through
+	// unchanged below: Role alone never suppresses a provider invocation.
+	if s.origin != nil && s.origin.ExecutionKind == orchestration.ExecutionKindIntegrationCompose {
+		return "", false
+	}
 	if s.projection.Contract == (Ref{}) {
 		return "", false
 	}
@@ -926,7 +1249,18 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 	}
 	// Initial implementation: no candidate commit exists yet.
 	if s.projection.CandidateRevision == "" {
-		return "initial|" + s.contractRevision() + "|" + s.pinnedBase(), true
+		initial := "initial|" + s.contractRevision() + "|" + s.pinnedBase()
+		if !s.satisfied(OpExecutionInvoke, initial) {
+			return initial, true
+		}
+		// The initial invocation already ran and produced no candidate work -
+		// the one shape #508 P4b exists for: a decision asked and (so far)
+		// answered with nothing else for this run to plan. See
+		// unresumedDecisionResumeBinding.
+		if binding, ok := s.unresumedDecisionResumeBinding(); ok {
+			return binding, true
+		}
+		return "", false
 	}
 	// Continuation: the head is a runtime-owned checkpoint, so the producer was
 	// interrupted rather than finished. One continuation per checkpoint commit,
@@ -953,141 +1287,40 @@ func bindExecutionInvoke(s *runState) (string, bool) {
 	// rather than a retry of this one. That is what makes "the same comment is
 	// never sent to the worker twice" a property of the planner rather than of
 	// a cursor someone has to remember to advance.
+	//
+	// An EXISTING unresolved delivery for this head is checked FIRST and takes
+	// priority over deriving a fresh binding from newly pending items (#376).
+	// pendingFeedbackKeys() empties the instant delivery is journalled - before
+	// the attempt that delivered it even succeeds or fails - so re-deriving a
+	// binding purely from what is still pending would stop proposing THIS
+	// operation again the moment it failed with feedback_unresolved: plan()
+	// would find nothing wanted, the run would settle, and the operation would
+	// sit failed-but-retryable forever with its feedback still outstanding.
+	// Re-finding the EXACT key that existing non-succeeded operation already
+	// used keeps it eligible for the scheduler's own bounded retry instead.
+	if binding, ok := s.unresolvedFeedbackBinding(s.projection.CandidateRevision); ok {
+		return binding, true
+	}
 	if pending := s.pendingFeedbackKeys(); len(pending) > 0 {
 		return "feedback|" + s.projection.CandidateRevision + "|" + digestOfKeys(pending), true
 	}
+	// #474: an admitted independent-review BLOCK, at the same priority as
+	// GitHub feedback and for the same reason. conditions() has already
+	// turned a store read failure into a visible wait before this is ever
+	// reached, so a bare read error here is simply "nothing new to plan".
+	if binding, ok := s.unresolvedReviewRemediationBinding(s.projection.CandidateRevision); ok {
+		return binding, true
+	}
+	if pending, err := s.pendingReviewRemediationKeys(); err == nil && len(pending) > 0 {
+		return reviewRemediationBindingPrefix + s.projection.CandidateRevision + "|" + digestOfKeys(pending), true
+	}
+	// The same #508 P4b fallback as above, for a run whose candidate IS
+	// complete but still has a resolved question of its own with nothing
+	// else left to plan.
+	if binding, ok := s.unresumedDecisionResumeBinding(); ok {
+		return binding, true
+	}
 	return "", false
-}
-
-// pendingFeedbackKeys is the admitted, applicable, undelivered feedback for the
-// current head, in stable order.
-func (s *runState) pendingFeedbackKeys() []string {
-	var keys []string
-	for _, decision := range s.feedbackState().Pending(s.projection.Head()) {
-		keys = append(keys, decision.Key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-// digestOfKeys is a stable identity for a SET of feedback items. The keys
-// themselves would make an unbounded idempotency key; their digest is fixed
-// width and just as exact.
-func digestOfKeys(keys []string) string {
-	sum := sha256.Sum256([]byte(strings.Join(keys, "\n")))
-	return hex.EncodeToString(sum[:])[:32]
-}
-
-// invocationContinuationPrefix marks an execution binding as continuing
-// interrupted work on an exact checkpoint commit. It is part of the durable
-// operation identity, which is what makes continuation depth replayable.
-const invocationContinuationPrefix = "continuation|"
-
-// startedContinuationBindings is the set of DISTINCT continuation execution
-// bindings durable state shows this run has already started.
-//
-// It reads operations, not events, because an operation IS the binding: every
-// retry of continuation|A reuses one operation with one idempotency key, so
-// counting operations counts bindings and counting attempts does not. Nothing
-// here looks at checkpoints, commits, provider invocations or reassessments.
-func (s *runState) startedContinuationBindings() map[string]bool {
-	started := map[string]bool{}
-	for _, op := range s.snapshot.Operations {
-		if op.Kind != OpExecutionInvoke {
-			continue
-		}
-		if binding := bindingOf(op); strings.HasPrefix(binding, invocationContinuationPrefix) {
-			started[binding] = true
-		}
-	}
-	return started
-}
-
-// providerInvocationCeilingReached reports that this run has spent every
-// provider invocation it was created with.
-//
-// It counts ATTEMPTS - one per execution invocation actually begun - because
-// that is what a provider account is charged for. The count comes from the
-// projection of durable events, so a restart resumes at the same total rather
-// than at zero.
-func (s *runState) providerInvocationCeilingReached() bool {
-	limit := s.providerInvocationLimit()
-	if limit <= 0 {
-		return false
-	}
-	// A ceiling refuses the NEXT invocation; it does not retroactively fail a
-	// run that spent its last one productively. Without this, a run whose final
-	// permitted invocation completed the candidate read as failed the moment it
-	// finished - the continuation ceiling has the same exemption, for the same
-	// reason.
-	if _, wanted := bindExecutionInvoke(s); !wanted {
-		return false
-	}
-	return s.projection.Attempts[OpExecutionInvoke] >= limit
-}
-
-// providerInvocationLimit is the run's total, taken from what the run
-// persisted. Absent means unbounded, exactly as it does for every run created
-// before this bound existed: a run is judged by the budgets it was created
-// with, never by whatever is configured now.
-func (s *runState) providerInvocationLimit() int {
-	if budgets := s.run.Budgets; budgets != nil {
-		return budgets.MaxProviderInvocations
-	}
-	return 0
-}
-
-// continuationLimit is the run's continuation bound, taken from durable state.
-//
-// A run created after #54 persisted an explicit positive budget and is judged
-// by it forever, whatever the operator configures later. A run created BEFORE
-// #54 persisted nothing, and its absence is not "use the new default": it means
-// the run was bounded by the execution-attempt budget, so replaying it has to
-// reproduce that. The oldest runs persisted no budgets at all, and for those
-// the attempt budget is the configured one, exactly as it was when they ran.
-func (s *runState) continuationLimit() int {
-	if budgets := s.run.Budgets; budgets != nil {
-		if limit := budgets.MaxExecutionContinuations; limit > 0 {
-			return limit
-		}
-		if legacy := budgets.MaxExecutionAttempts; legacy > 0 {
-			return legacy
-		}
-	}
-	return s.rt.deps.Budgets.MaxExecutionAttempts
-}
-
-// continuationCeilingReached answers the only question the ceiling is about:
-// may this run START one more distinct continuation binding?
-//
-// It asks the planner what binding it wants rather than predicting anything.
-// That matters because whether an invocation mutates, completes, or does
-// neither is not knowable before it runs - which is exactly why counting
-// checkpoints in advance could never express this rule.
-//
-// Consequences, all of them deliberate:
-//
-//   - retries of an already-started binding are not refused here at all; they
-//     are bounded by that binding's own MaxExecutionAttempts;
-//   - a candidate that COMPLETES is never retroactively failed, because a
-//     complete head asks for no continuation binding;
-//   - the last permitted continuation may finish and go on to assurance;
-//   - only a genuinely NEW binding beyond the ceiling is refused, and the
-//     checkpoint that asked for it is preserved by not being touched.
-func (s *runState) continuationCeilingReached() bool {
-	limit := s.continuationLimit()
-	if limit <= 0 {
-		return false
-	}
-	binding, wanted := bindExecutionInvoke(s)
-	if !wanted || !strings.HasPrefix(binding, invocationContinuationPrefix) {
-		return false
-	}
-	started := s.startedContinuationBindings()
-	if started[binding] {
-		return false
-	}
-	return len(started) >= limit
 }
 
 func bindRemediationGofmt(s *runState) (string, bool) {
@@ -1138,7 +1371,53 @@ func bindAssuranceGo(s *runState) (string, bool) {
 	if !s.projection.CandidateComplete {
 		return "", false
 	}
-	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree + "|" + s.contractRevision(), true
+	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree + "|" + s.contractRevision() + s.fileSizeBindingSuffix() + s.browserBindingSuffix() + s.featureBindingSuffix(), true
+}
+
+// bindIntegrationHandoffAdmit is the deferred handoff-report step for a
+// WorkGraph integration_compose unit (#475 review B2): composeIntegration's
+// own commit never reports a handoff, because a successful Git composition
+// is not acceptance. This operation becomes wanted only once the composed
+// head's OWN fresh assurance has actually PASSED - never merely "ran" (an
+// assurance verdict that is not a passing candidate verdict settles the run
+// through its own existing route; this never fires for it). Only then does
+// handoffCommitOf/admitOrchestratedHandoff have anything to consider
+// admissible. This is strictly additional to whatever an ordinary unit's own
+// handoff timing already is; it changes nothing about that generic path.
+func bindIntegrationHandoffAdmit(s *runState) (string, bool) {
+	if s.origin == nil || s.origin.ExecutionKind != orchestration.ExecutionKindIntegrationCompose {
+		return "", false
+	}
+	if s.projection.CandidateRevision == "" {
+		return "", false
+	}
+	a := s.projection.Assurance
+	if a == nil || a.Stale || !a.Passed {
+		return "", false
+	}
+	// #475 review N3: fresh-evidence-before-handoff applies to the WHOLE
+	// required assurance set for this exact contract, not only the
+	// automated verifier - an integration unit is never exempt. Mirrors
+	// bindAssuranceSemantic's own "is semantic evidence required at all"
+	// test exactly, so a contract with no semantic claim (or no configured
+	// producer) is unaffected, and this never invents a second verification
+	// engine: it only waits for the SAME semantic pass every other unit's
+	// handoff already implicitly waits for by settling goal_state_reached
+	// only once bindAssuranceSemantic itself has nothing left to plan.
+	// A contract that cannot be rebuilt is not a contract that requires no
+	// semantic evidence, and it is not one that a recorded verdict can vouch
+	// for either: only a successful empty answer waives it, and only a fresh
+	// passing verdict satisfies a non-empty one.
+	if s.rt.deps.SemanticAssurance != nil {
+		claims, err := s.semanticClaims()
+		if err != nil {
+			return "", false
+		}
+		if semantic := s.projection.SemanticAssurance; len(claims) > 0 && (semantic == nil || semantic.Stale || !semantic.Passed) {
+			return "", false
+		}
+	}
+	return s.projection.CandidateRevision + "|" + s.projection.CandidateTree, true
 }
 
 // bindAssuranceSemantic plans an INDEPENDENT semantic assurance invocation when
@@ -1163,7 +1442,9 @@ func bindAssuranceSemantic(s *runState) (string, bool) {
 	if s.rt.deps.SemanticAssurance == nil {
 		return "", false
 	}
-	if len(s.semanticClaims()) == 0 {
+	// Fail closed: a rebuild error plans the operation, whose own execution
+	// reports it, rather than waiving semantic evidence nobody could check.
+	if claims, err := s.semanticClaims(); err == nil && len(claims) == 0 {
 		return "", false
 	}
 	return key, true
@@ -1172,11 +1453,17 @@ func bindAssuranceSemantic(s *runState) (string, bool) {
 // semanticClaims are the contract's required claims of the semantic class, with
 // the material obligations each one discharges. It is the whole question the
 // semantic verifier is asked, derived from the exact contract.
-func (s *runState) semanticClaims() []SemanticClaimRequest {
+func (s *runState) semanticClaims() ([]SemanticClaimRequest, error) {
 	contract, err := s.rt.contractFor(s)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("rebuild the contract for its semantic claims: %w", err)
 	}
+	return semanticClaimsOf(contract), nil
+}
+
+// semanticClaimsOf is the pure derivation, so a caller that already holds the
+// contract it just built does not rebuild it (and fail separately) to ask.
+func semanticClaimsOf(contract domain.EngineeringWorkContract) []SemanticClaimRequest {
 	var requests []SemanticClaimRequest
 	for claimID, claim := range contract.RequiredClaims {
 		if claim.EvidenceClass != SemanticEvidenceClass {
@@ -1233,6 +1520,9 @@ func bindBaseIntegrate(s *runState) (string, bool) {
 // revision, so without it a satisfied authority.evaluate would never be
 // re-planned and an approved run would wait forever.
 func bindAuthorityEvaluate(s *runState) (string, bool) {
+	if s.publicationDeferred {
+		return "", false
+	}
 	key, wanted := bindBaseIntegrate(s)
 	if !wanted || !s.satisfied(OpBaseIntegrate, key) {
 		return "", false
@@ -1346,13 +1636,17 @@ func (s *runState) validate(desired desiredOperation, live Disposition) error {
 	if terminalDisposition(live) {
 		return &OperationRefusedError{desired.kind, "run reached a terminal condition"}
 	}
-	if live == Waiting && !observationKinds[desired.kind] {
+	// Observation-class operations only READ external state, so they are the
+	// only ones a waiting run may perform: it must still notice that its pull
+	// request was merged, but it must not execute, mutate, verify, authorize
+	// or publish anything while it waits.
+	if live == Waiting && OperationCapacityClass(desired.kind) != CapacityObservation {
 		return &OperationRefusedError{desired.kind, "a waiting run performs observation only"}
 	}
 	if s.projection.SourceIntentChanged && desired.kind == OpContractCompile {
 		return &OperationRefusedError{desired.kind, "the pinned source moved; new intent is never silently compiled"}
 	}
-	if s.projection.ObservedExternalHead != "" && !observationKinds[desired.kind] {
+	if s.projection.ObservedExternalHead != "" && OperationCapacityClass(desired.kind) != CapacityObservation {
 		return &OperationRefusedError{desired.kind, "an unexpected external head is never overwritten"}
 	}
 	if publicationKinds[desired.kind] && !s.authorizedForPublication() {
@@ -1413,26 +1707,76 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 		if err := r.reconcileStoreLag(state); err != nil {
 			return Outcome{}, err
 		}
+		// A PAUSED run is returned unchanged (#86): nothing is planned,
+		// settled or journalled, and the Outcome carries the run's own
+		// disposition and reason - a pause is never one. This exit is only the
+		// no-journal guarantee; the gate is AcquireOperation, which refuses a
+		// paused run's lease whatever this pass read.
+		if state.snapshot.Paused != nil {
+			return Outcome{RunID: runID, Disposition: state.run.Disposition, Reason: state.run.Reason}, nil
+		}
+		// Another live driver is operating this run. The store would refuse
+		// every acquisition anyway (a run holds at most one active operation),
+		// so this pass journals NOTHING - no planned operation, no run.waiting
+		// over a run someone else is driving. The reason is not journalled; it
+		// tells the caller why this pass did nothing.
+		if elsewhere, err := r.drivenElsewhere(runID); err != nil || elsewhere {
+			return Outcome{RunID: runID, Disposition: state.run.Disposition, Reason: ReasonDrivenElsewhere}, err
+		}
 		if err := state.invariants(); err != nil {
 			return r.settle(state, Failed, "invariant_violation")
 		}
+		if err := r.grantReviewContinuation(state); err != nil {
+			return Outcome{}, err
+		}
 		live, reason := state.conditions()
-		if terminalDisposition(live) {
+		if terminalDisposition(live) || reason == ReasonReviewBudgetExhausted {
 			return r.settle(state, live, reason)
 		}
 		desired, wanted := state.plan()
+		// #508 (review P4a, D4/R2-E): a run that has itself asked a live
+		// decision - a #473 decision_request this build has not yet admitted a
+		// DecisionResolution for - performs no new provider-facing or mutating
+		// work (decisionWaitPermits decides the narrow exceptions). Checked on
+		// EVERY pass, regardless of wanted, so a run with nothing else to plan
+		// this exact pass does not read as goal_state_reached while its own
+		// question stands open; the earlier shape of this check ran only
+		// inside "if wanted", which left exactly that case unprotected and
+		// depended on an unrelated binding (bindSourceObserve's epoch key)
+		// happening to be wanted to ever run at all. #473's own OpenDecisions
+		// already makes the question visible; this is the ONLY place the wait
+		// is enforced, so it holds for every caller of Reconcile, under every
+		// driver, the same way.
+		//
+		// An unreadable decision store never authorizes dispatch: unknown is
+		// not permission (R2-E), so the pass ends in error here, before
+		// anything is validated or run.
+		open, err := r.deps.Store.OpenDecisionRequestsForRun(runID)
+		if err != nil {
+			return Outcome{}, err
+		}
+		if len(open) > 0 && !decisionWaitPermits(wanted, desired.kind) {
+			return r.settle(state, Waiting, ReasonDecisionPending)
+		}
 		// No progress means PRODUCING the same failure again, not looking at it
 		// again. An observation pass changes nothing and must not spend the
 		// budget bounded remediation needs: a current-head CI or review finding
 		// is recorded BY an observation, which then makes the next two passes
 		// re-observe at the new epoch, so counting them would exhaust the
 		// budget before the producer could ever be planned.
-		if !wanted || !observationKinds[desired.kind] {
+		if !wanted || OperationCapacityClass(desired.kind) != CapacityObservation {
 			if fingerprint, failing := state.failureFingerprint(); failing && !progress.Allow(fingerprint) {
 				return r.settle(state, Failed, "no_progress")
 			}
 		}
 		if !wanted {
+			if class, failing := state.currentHeadFailure(); failing && RouteFailure(class) == RouteProviderRemediation {
+				return r.settle(state, Failed, "no_progress")
+			}
+			// A judged failure that waits for an operator is not a goal reached.
+			if class, failing := state.currentHeadFailure(); failing && RouteFailure(class) == RouteHold {
+				return r.settle(state, waitingOr(live, Waiting), ReasonFeatureAcceptanceFailed)
+			}
 			return r.settle(state, waitingOr(live, Waiting), waitingReason(reason, ReasonGoalStateReached))
 		}
 		if err := state.validate(desired, live); err != nil {
@@ -1460,6 +1804,45 @@ func (r *EngineeringRuntime) Reconcile(ctx context.Context, runID string) (Outco
 	return r.settle(state, Waiting, "reconcile_pass_limit")
 }
 
+// ReasonDrivenElsewhere is the Outcome reason of a Reconcile pass that found
+// another live driver operating the run. It is never journalled.
+const ReasonDrivenElsewhere = "driven_elsewhere"
+
+// drivenElsewhere reports whether a DIFFERENT owner holds a lease on one of the
+// run's operations that this driver may not take over: the owner is alive, or
+// its lease has not expired. The driver's own leftover lease is not
+// "elsewhere"; it is recovered by the ordinary takeover in Scheduler.Next.
+func (r *EngineeringRuntime) drivenElsewhere(runID string) (bool, error) {
+	s := r.scheduler.defaults()
+	operations, err := s.Store.Operations(runID)
+	if err != nil {
+		return false, err
+	}
+	now := s.Clock.Now()
+	for _, op := range operations {
+		if op.Lease == nil || (op.State != Leased && op.State != Running) || op.Lease.Owner == s.Owner {
+			continue
+		}
+		if !CanAcquire(op, now, s.Liveness.Alive(op.Lease.Owner)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// decisionWaitPermits answers, for #508's decision-pending wait, whether the
+// one desired operation this pass computed may still run while a decision
+// this run itself asked stands open. Only observation (reads external state,
+// invokes no provider, mutates nothing governed - the same exemption
+// `validate` already grants every other Waiting disposition) and
+// candidate.commit for an already-succeeded, already-proven checkpoint are
+// permitted (#508 review P4a, R2-B): refusing to durably finalize work the
+// run has already produced would strand that work, not protect anything.
+// Nothing is permitted when nothing was wanted in the first place.
+func decisionWaitPermits(wanted bool, kind string) bool {
+	return wanted && (OperationCapacityClass(kind) == CapacityObservation || kind == OpCandidateCommit)
+}
+
 func waitingOr(live, fallback Disposition) Disposition {
 	if live == Waiting {
 		return Waiting
@@ -1479,25 +1862,45 @@ func waitingReason(conditionReason, fallback string) string {
 // scheduler write did not would stay leased forever and no later pass could
 // acquire anything.
 func (r *EngineeringRuntime) reconcileStoreLag(state *runState) error {
-	for _, journalled := range state.snapshot.Operations {
-		if journalled.State != Succeeded && journalled.State != OperationFailed && journalled.State != OperationCancelled {
+	active, err := r.deps.Store.ActiveOperations(state.run.ID)
+	if err != nil {
+		return err
+	}
+	for _, stored := range active {
+		journalled, ok := state.snapshot.Operations[stored.ID]
+		if !ok || (journalled.State != Succeeded && journalled.State != OperationFailed && journalled.State != OperationCancelled) {
 			continue
 		}
-		stored, _, ok, err := r.deps.Store.Operation(journalled.ID)
-		if err != nil {
-			return err
+		// The attempt ended when its after record was journalled; the
+		// controller's downtime since then is not execution. Only an after
+		// record of the SAME attempt the store holds says when that ended.
+		var ended time.Time
+		if journalled.Attempt == stored.Attempt {
+			for _, event := range state.events {
+				if event.Type == EventOperationAfter && event.OperationID == stored.ID {
+					ended = event.OccurredAt
+				}
+			}
 		}
-		if !ok || stored.State == journalled.State {
-			continue
-		}
-		if stored.State != Leased && stored.State != Running {
-			continue
-		}
-		if _, err := r.scheduler.Finish(journalled.ID, journalled.State); err != nil {
+		if _, err := r.scheduler.finishAt(journalled.ID, journalled.State, journalled.RetryNotBefore, journalled.RetryDisposition, ended); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// cancelStaleLeasedOperation makes the journal authoritative before the scheduler
+// row is terminal. A cancelled row is not reacquired, so reversing this order can
+// strand a permanent cancelled-row/failed-journal disagreement after a crash.
+func (r *EngineeringRuntime) cancelStaleLeasedOperation(state *runState, leased RunOperation) error {
+	cancelled := leased
+	cancelled.State = OperationCancelled
+	cancelled.Lease = nil
+	if err := r.append(state, EventOperationAfter, cancelled.ID, cancelled, nil); err != nil {
+		return err
+	}
+	_, err := r.scheduler.Finish(leased.ID, OperationCancelled)
+	return err
 }
 
 // runOperation acquires exactly one operation through the scheduler, records
@@ -1512,13 +1915,24 @@ func (r *EngineeringRuntime) reconcileStoreLag(state *runState) error {
 //	events
 //	after   -> (crash here: journal is authoritative, store is reconciled)
 func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, desired desiredOperation, live Disposition) (bool, Outcome, error) {
+	// An exhausted assurance allowance refuses further assurance before any
+	// operation is planned. It fails the run with the real reason and keeps the
+	// held candidate; it never satisfies assurance (#640).
+	if remaining, bounded := state.assuranceRemaining(r.deps.Clock.Now()); bounded && remaining <= 0 && isAssuranceKind(desired.kind) {
+		outcome, err := r.settle(state, Failed, ReasonAssuranceBudgetExhausted)
+		return false, outcome, err
+	}
 	planned, created, err := r.scheduler.Plan(RunOperation{
 		RunID:            state.run.ID,
 		Kind:             desired.kind,
 		IdempotencyKey:   operationKey(desired.kind, desired.key),
 		MaxAttempts:      desired.maxAttempts,
 		InputStateSHA256: state.snapshot.StateSHA256,
-		WallBudget:       r.deps.Budgets.WallLimit,
+		// The RUN's effective budget, not the raw operator default. A plan
+		// stage that tightened its run's wall budget was previously ignored
+		// here, so the operation was planned against a ceiling the run itself
+		// had already narrowed.
+		WallBudget: state.operationWallBudget(desired.kind),
 	})
 	if err != nil {
 		return false, Outcome{}, err
@@ -1529,22 +1943,71 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		}
 	}
 	if planned.Attempt >= planned.MaxAttempts {
-		outcome, err := r.settle(state, Failed, desired.kind+"_attempts_exhausted")
+		outcome, err := r.settle(state, Failed, desired.kind+attemptsExhaustedSuffix)
+		return false, outcome, err
+	}
+	if r.deps.Clock.Now().Before(planned.RetryNotBefore) {
+		// The timestamp only says "not yet"; the journalled record says why.
+		outcome, err := r.settle(state, Waiting, waitReasonOf(state.snapshot.Operations[planned.ID]))
 		return false, outcome, err
 	}
 	leased, err := r.scheduler.Next(state.run.ID)
 	if err != nil {
 		return false, Outcome{}, err
 	}
+	if leased != nil {
+		// THE DRIVER OWNS THIS LEASE UNTIL IT RETURNS, and no longer (#485).
+		// Every exit below - finished, settled, refused, or a store error
+		// between any two of its writes - ends here, and a lease still on the
+		// row then is a claim that this live process is driving work it has
+		// stopped driving. Relinquish removes that claim and only that claim;
+		// if its own write fails, the next scan in this process recovers it.
+		//
+		// A PANIC is not one of those exits. Nothing in the driving path
+		// recovers one, so it ends the process, and a crashed process cleans
+		// nothing up: its lease is recovered by the dead-owner rule, from
+		// durable state, exactly as for any other crash. The panic is
+		// re-raised unchanged rather than written through.
+		granted := *leased.Lease
+		defer func() {
+			if crashed := recover(); crashed != nil {
+				panic(crashed)
+			}
+			_ = r.scheduler.Relinquish(leased.ID, granted)
+		}()
+	}
 	if leased == nil {
-		outcome, err := r.settle(state, waitingOr(live, Waiting), "operation_unavailable")
+		// A pause that committed after this pass's check is why the store
+		// refused (#86). The run is left as it is rather than settled on the
+		// stale view, so nothing is journalled after run.paused.
+		if paused, err := r.deps.Store.RunPaused(state.run.ID); err != nil || paused {
+			return false, Outcome{RunID: state.run.ID, Disposition: state.run.Disposition, Reason: state.run.Reason}, err
+		}
+		reason := "operation_unavailable"
+		pending, err := r.scheduler.VerificationCleanupPending(state.run.ID)
+		if err != nil {
+			return false, Outcome{}, err
+		}
+		if pending {
+			reason = ReasonVerificationCleanup
+		}
+		if !pending {
+			capacity, err := r.scheduler.CapacityBlocked(planned)
+			if err != nil {
+				return false, Outcome{}, err
+			}
+			if capacity != nil {
+				state.capacityWait, reason = capacity, capacity.reason()
+			}
+		}
+		outcome, err := r.settle(state, waitingOr(live, Waiting), reason)
 		return false, outcome, err
 	}
 	if leased.ID != planned.ID {
 		// The scheduler handed back a different eligible operation. It is only
 		// legitimate if the current state still wants exactly that binding.
 		if err := state.validate(desiredOperation{kind: leased.Kind, key: bindingOf(*leased)}, live); err != nil {
-			if _, err := r.scheduler.Finish(leased.ID, OperationCancelled); err != nil {
+			if err := r.cancelStaleLeasedOperation(state, *leased); err != nil {
 				return false, Outcome{}, err
 			}
 			return true, Outcome{}, nil
@@ -1582,6 +2045,26 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 	// account state, so asking it again is the only honest re-derivation; the
 	// attempt that only re-observes the wait is given back by RestoreAttempt,
 	// which is what keeps repeated passes from spending the run's budget.
+	// A REVIEWER PROTOCOL FAILURE gets exactly ONE corrective re-invocation
+	// (#374), never a budget's worth. RouteFailure(FailureReviewerProtocolIncomplete)
+	// is RouteRetry - a malformed or missing result is a correctable mistake,
+	// not a verdict on the candidate - so without this check the ordinary rule
+	// below would keep re-dispatching the SAME reviewer for as many attempts as
+	// the operator's execution-attempt budget happens to allow, which answers a
+	// question #374 does not ask: how many tries does this invocation get, not
+	// how many corrections does a reviewer that keeps failing the protocol
+	// deserve. One correction is the whole grant. A reviewer handed its own
+	// exact refusal reason (lastReviewRefusal, consulted in invokeExecution)
+	// and still failing to cross the protocol a second time in a row has shown
+	// the correction was not taken up, and no further authority accrues to
+	// this operation from retrying it again - whatever budget remains.
+	if state.reviewerProtocolCorrectionExhausted(leased.ID) {
+		if _, err := r.scheduler.Finish(leased.ID, OperationFailed); err != nil {
+			return false, Outcome{}, err
+		}
+		outcome, err := r.settle(state, Failed, leased.Kind+"_reviewer_protocol_correction_exhausted")
+		return false, outcome, err
+	}
 	if class, recorded := state.lastFailure(leased.ID); recorded && !reattemptable(RouteFailure(class)) {
 		// The journal already records this operation as failed; releasing the
 		// lease keeps the scheduler row saying the same thing.
@@ -1591,7 +2074,17 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		outcome, err := r.settle(state, Failed, leased.Kind+"_failure_not_retryable")
 		return false, outcome, err
 	}
-	started, err := r.scheduler.Start(leased.ID)
+	if identical, err := r.identicalDeterministicFailure(state, *leased); err != nil || identical {
+		if err != nil {
+			return false, Outcome{}, err
+		}
+		if _, err := r.scheduler.Finish(leased.ID, OperationFailed); err != nil {
+			return false, Outcome{}, err
+		}
+		outcome, err := r.settle(state, Waiting, ReasonDeterministicFailureUnchanged)
+		return false, outcome, err
+	}
+	started, err := r.scheduler.StartWithin(leased.ID, state.operationLimit(leased.Kind, r.deps.Clock.Now()))
 	if err != nil {
 		return false, Outcome{}, err
 	}
@@ -1599,13 +2092,24 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		return false, Outcome{}, err
 	}
 	produced := r.handle(ctx, state, started)
+	// Only the provider-backed handlers set interrupted - invokeExecution and
+	// repairHandoff (#492): a running provider is the one started attempt a
+	// stop reaches (#213); every other kind is unchanged.
+	interrupted := produced.interrupted
 	for _, entry := range produced.events {
 		if err := r.append(state, entry.Type, started.ID, entry.Payload, entry.Artifacts); err != nil {
 			return false, Outcome{}, err
 		}
 	}
+	// An interrupted execution ends OperationCancelled - the state the stop
+	// itself writes to the scheduler row - so journal and store agree, and the
+	// handler's run_cancelled diagnostic is the terminal record.
 	finished := started
+	finished.RetryNotBefore, finished.RetryDisposition = time.Time{}, ""
 	finished.State = produced.state
+	if interrupted {
+		finished.State = OperationCancelled
+	}
 	finished.Lease = nil
 	if produced.result != nil {
 		raw, err := marshalPayloadJSON(produced.result)
@@ -1614,12 +2118,43 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		}
 		finished.Result = raw
 	}
+	// Even a failure to observe retry inputs must not lose the attempt's
+	// outcome or a commit it already made. Persist it before reporting that
+	// observation error; missing input identity never proves equality.
+	bindingErr := r.recordDeterministicFailure(state, &finished, produced.failure)
+	// The disposition is recorded from the class; the wait and its timing only
+	// while a successor attempt exists, so the last attempt stops truthfully.
+	if finished.State == OperationFailed {
+		finished.RetryDisposition = retryDispositionFor(failureClassOf(finished.Result))
+	}
+	disposition, awaiting := awaitsRetry(finished)
+	if awaiting && disposition.Delay != nil {
+		finished.RetryNotBefore = r.deps.Clock.Now().Add(disposition.Delay(started.Attempt))
+	}
 	// The journal is written first and is the authority for reconciliation.
 	if err := r.append(state, EventOperationAfter, started.ID, finished, nil); err != nil {
 		return false, Outcome{}, err
 	}
-	if _, err := r.scheduler.Finish(started.ID, produced.state); err != nil {
-		return false, Outcome{}, err
+	if _, err := r.scheduler.finishAt(started.ID, finished.State, finished.RetryNotBefore, finished.RetryDisposition, time.Time{}); err != nil {
+		// The stop may already have finished the row. That is accepted only for
+		// an interrupted execution and only when the row durably reads
+		// OperationCancelled - the one state CancelRun writes. Every other
+		// Finish failure is reported as it always was.
+		if !interrupted {
+			return false, Outcome{}, err
+		}
+		stored, _, found, readErr := r.deps.Store.Operation(started.ID)
+		if readErr != nil || !found || stored.State != OperationCancelled {
+			return false, Outcome{}, err
+		}
+	}
+	if bindingErr != nil {
+		return false, Outcome{}, bindingErr
+	}
+	// The next pass reloads, finds run.cancelled in replay and settles the run
+	// cancelled through the ordinary terminal path.
+	if interrupted {
+		return true, Outcome{}, nil
 	}
 	// A wait-routed failure settles the RUN, not just the operation: the
 	// external world refused, nothing here can change that, and the pass must
@@ -1637,47 +2172,48 @@ func (r *EngineeringRuntime) runOperation(ctx context.Context, state *runState, 
 		outcome, err := r.settle(state, Waiting, "execution_checkpointed")
 		return false, outcome, err
 	}
+	// AN UNRESOLVED CONTINUATION ALSO ENDS THE PASS (#379), for the same
+	// reason a checkpoint does: the checkpoint it inherited is unresolved work,
+	// not a flake worth hammering same-call like an ordinary retryable
+	// failure. feedback_unresolved and reviewer-protocol failures are
+	// deliberately NOT given this treatment - they retry within the same pass,
+	// spending their whole attempt budget at once, because that failure is
+	// about a candidate already known to exist and already being iterated on.
+	// A checkpoint continuation is different: it is the one invocation that
+	// may have just spent real wall-clock time deferring to work it never
+	// finished, and retrying it immediately, in the same call, is exactly how
+	// the fourth dogfood's checkpoint got hammered through its whole budget
+	// and promoted on the attempt that happened to return clean. Ending the
+	// pass here means each continuation attempt is observed at a durable
+	// point - the checkpoint stays exactly where it was, the attempt it spent
+	// is not given back, and a later reconciliation (not this same call)
+	// decides whether to spend the next one.
+	if failureClassOf(finished.Result) == FailureCheckpointContinuationUnresolved {
+		outcome, err := r.settle(state, Waiting, "execution_continuation_unresolved")
+		return false, outcome, err
+	}
+	if awaiting {
+		if !disposition.SpendsAttempt {
+			if _, err := r.scheduler.RestoreAttempt(started.ID, !providerExecuted(finished.Result)); err != nil {
+				return false, Outcome{}, err
+			}
+		}
+		outcome, err := r.settle(state, Waiting, waitReasonOf(finished))
+		return false, outcome, err
+	}
 	if class, waiting := waitRoutedFailure(finished.Result); waiting {
-		if _, err := r.scheduler.RestoreAttempt(started.ID); err != nil {
+		// The ATTEMPT is always given back - observing an external refusal is
+		// not work. The execution TIME is given back only when no execution
+		// happened: a provider that reasoned for twenty minutes and only then
+		// met a rate limit did that work, and refunding it would let a run
+		// exceed a budget the operator set by repeatedly hitting the same wall.
+		if _, err := r.scheduler.RestoreAttempt(started.ID, !providerExecuted(finished.Result)); err != nil {
 			return false, Outcome{}, err
 		}
 		outcome, err := r.settle(state, Waiting, waitReason(class))
 		return false, outcome, err
 	}
 	return true, Outcome{}, nil
-}
-
-// journalled reports whether an effect appended one particular event type.
-func journalled(entries []journalEntry, eventType string) bool {
-	for _, entry := range entries {
-		if entry.Type == eventType {
-			return true
-		}
-	}
-	return false
-}
-
-// reattemptable reports whether a route leaves the SAME operation eligible to
-// run again. Retry means run it again now; wait means run it again once the
-// external condition it named has been corrected. Every other route names a
-// different operation, or none.
-func reattemptable(route FailureRoute) bool {
-	return route == RouteRetry || route == RouteWait
-}
-
-// waitRoutedFailure reads the class an operation result recorded and reports it
-// only when it routes to a wait. It reads the same one shared field lastFailure
-// does, so this is not an execution.invoke special case: any handler that
-// records a wait-routed class settles the run into that wait.
-func waitRoutedFailure(raw json.RawMessage) (FailureClass, bool) {
-	var result mutationResult
-	if len(raw) == 0 || decodeJSON(raw, &result) != nil || result.FailureClass == "" {
-		return "", false
-	}
-	if RouteFailure(result.FailureClass) != RouteWait {
-		return "", false
-	}
-	return result.FailureClass, true
 }
 
 // waitReasons names the durable run reason each wait-routed class settles into.
@@ -1691,10 +2227,19 @@ var waitReasons = map[FailureClass]string{
 	// action differs: a quota comes back on the provider's own schedule, while
 	// repeated rate limiting means the configured concurrency is above what
 	// that account tolerates.
-	FailureProviderQuota:         "execution_provider_quota",
-	FailureProviderRateLimited:   "execution_provider_rate_limited",
+	FailureProviderQuota:       "execution_provider_quota",
+	FailureProviderRateLimited: "execution_provider_rate_limited",
+	// The host cannot REACH the provider. It is reported separately from the
+	// two capacity waits and from the account prerequisite because the
+	// operator action is different again: nothing is spent, nothing is
+	// revoked, and what has to change is connectivity.
+	FailureProviderUnavailable:   "execution_provider_unavailable",
 	FailureStateStorageExhausted: "state_storage_exhausted",
-	FailureControllerShutdown:    "controller_shutdown",
+	// The controller cannot install its own candidate-Git boundary. An
+	// operator repairs the installation; nothing about the work is wrong.
+	FailureCandidateGuardUnavailable: "candidate_guard_unavailable",
+	FailureCandidateWriterAlive:      "candidate_writer_alive",
+	FailureControllerShutdown:        "controller_shutdown",
 }
 
 func waitReason(class FailureClass) string {
@@ -1743,47 +2288,3 @@ func (r *EngineeringRuntime) append(state *runState, eventType, operationID stri
 // function of the run and the events it is handed, and an id is recorded once
 // and then only ever read back. Replay never re-mints one.
 func newEventID(runID string) string { return runID + "-" + rand.Text() }
-
-// recordDisposition persists the run's disposition. The event is appended only
-// when the disposition or its reason actually changes, so a repeated wait does
-// not grow the journal; the run document is always refreshed, so a later
-// resume sees the current identity bindings without replaying.
-func (r *EngineeringRuntime) recordDisposition(state *runState, disposition Disposition, reason string) error {
-	if state.snapshot.Disposition != disposition || state.snapshot.Reason != reason {
-		eventType, ok := dispositionEvents[disposition]
-		if !ok {
-			return fmt.Errorf("no journal event for disposition %q", disposition)
-		}
-		payload := struct {
-			Reason string `json:"reason,omitempty"`
-		}{reason}
-		if err := r.append(state, eventType, "", payload, nil); err != nil {
-			return err
-		}
-		state.snapshot.Disposition, state.snapshot.Reason = disposition, reason
-	}
-	run := state.run
-	run.Phase = state.phase()
-	run.Disposition = disposition
-	run.Reason = reason
-	run.Base = Ref{ID: r.deps.Repository.DefaultBranch, Revision: state.baseRevision()}
-	run.Candidate = Candidate{Branch: candidateBranch(run.ID), Revision: state.projection.CandidateRevision, Tree: state.projection.CandidateTree}
-	run.Contract = state.projection.Contract
-	run.UpdatedAt = r.deps.Clock.Now()
-	state.run = run
-	return r.deps.Store.PutRun(run)
-}
-
-var dispositionEvents = map[Disposition]string{
-	Waiting:   EventRunWaiting,
-	Completed: EventRunCompleted,
-	Failed:    EventRunFailed,
-	Cancelled: EventRunCancelled,
-}
-
-func (r *EngineeringRuntime) settle(state *runState, disposition Disposition, reason string) (Outcome, error) {
-	if err := r.recordDisposition(state, disposition, reason); err != nil {
-		return Outcome{}, err
-	}
-	return Outcome{RunID: state.run.ID, Disposition: disposition, Reason: reason}, nil
-}

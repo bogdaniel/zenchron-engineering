@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -37,10 +38,13 @@ import (
 const autonomyUsage = "usage: zenchron-engineering autonomy {agents [--text]|" +
 	"plan {issue <number>|show|approve|reject|revise|status <plan>|list} [--template <id>] [--deterministic] [--note <text>]|" +
 	"run issue <number> [--agent <id>] [--new-generation]|run issues <n> <n>... [--assign N=agent]|" +
+	"orchestrate {objective <issue> [--template <id>] [--agent <id>]|issues <n> <n>... --agent <id>|status <batch>} [--text]|" +
+	"workgraph {adopt <proposal.json> --agent <id>|status <graph>} [--text]|" +
+	"review {pr <number> --agent <id> [--publish]|status <number>} [--text]|" +
 	"status [<run>] [--text]|logs <run> [--follow]|events <run> [--follow]|resume <run>|refresh <run>|" +
 	"agent set <run> --agent <id> --reason <text>|" +
 	"authorize <run> <request-id> --approve|--reject [--note <text>]|" +
-	"stop <run>|stop-all [--reason <text>]|drain|shutdown|watch|doctor [--text]|gc [--dry-run]} " +
+	"stop <run>|pause <run> [--reason <text>]|unpause <run>|stop-all [--reason <text>]|drain|shutdown|watch|doctor [--text]|gc [--dry-run]} " +
 	"[--repo owner/name] [--config <path>]"
 
 // Exit statuses this CLI adds to the run-mode exits in runtime.go. They are
@@ -85,7 +89,7 @@ func exitFor(err error, fallback int) int {
 		return runtime.ExitInvalid
 	}
 	var config *runtime.ConfigError
-	if errors.As(err, &config) {
+	if errors.As(err, &config) || runtime.IsRunTerminal(err) {
 		return runtime.ExitInvalid
 	}
 	return fallback
@@ -131,9 +135,14 @@ type watchController interface {
 // every field nil and the real components are built from configuration; a nil
 // field is never a silent fallback to something weaker.
 type autonomyOverrides struct {
-	GitHub    runtime.GitHubAdapter
-	Provider  runtime.ExecutionProvider
-	Assurance runtime.AssuranceProvider
+	GitHub runtime.GitHubAdapter
+	// Governance is the read-only governance observer. It is its own field
+	// rather than a capability discovered on GitHub, because the whole point
+	// of the seam is that the publication adapter is not the thing that
+	// answers governance questions.
+	Governance runtime.ForgeGovernance
+	Provider   runtime.ExecutionProvider
+	Assurance  runtime.AssuranceProvider
 	// SemanticAssurance replaces the independent semantic producer, so a test
 	// can model a configuration with or without one.
 	SemanticAssurance runtime.AssuranceProvider
@@ -152,6 +161,10 @@ type autonomyOverrides struct {
 	// real timer; a test supplies its own so the schedule is asserted instead
 	// of slept through.
 	WatchWait func(ctx context.Context, until time.Time)
+	// CloneRemote replaces where the supervisor's engines fetch a repository
+	// from, so an offline test can serve its own local origin instead of
+	// github.com. Production leaves it nil.
+	CloneRemote func(runtime.GitHubRepo) string
 }
 
 // autonomyFlags is the whole flag surface. It is one struct rather than one
@@ -180,6 +193,11 @@ type autonomyFlags struct {
 	// Agent selects the named execution agent. Empty resolves the operator's
 	// configured default, which is what makes `run issue N` work unchanged.
 	Agent string
+	// ReviewerAgent, on `serve`, names the agent #474's automatic
+	// independent-review trigger uses. Empty disables the trigger entirely -
+	// an operator who names no reviewer gets exactly `serve`'s pre-#474
+	// behavior, never a silently-chosen default reviewer.
+	ReviewerAgent string
 	// Assign binds issues to agents for a batch, as issue -> agent id.
 	Assign map[int]string
 	// PermissionBypass explicitly requests the provider's unsafe permission
@@ -192,6 +210,17 @@ type autonomyFlags struct {
 	// Template names the operator's reusable EngineeringPlanTemplate for a plan
 	// proposal. Empty means the planner compiles from policy and intent alone.
 	Template string
+	// Profile is the operator's default profile preference for agent stages.
+	Profile string
+	// ProductID is the product the operator selected at objective intake. Empty
+	// means no product was chosen; the objective's compiled WorkGraph is then
+	// never associated with one. It is never recorded on the plan itself -
+	// only used to associate the compiled WorkGraph, through the existing #476
+	// store boundary.
+	ProductID string
+	// AcceptanceFeature is the operator's declared final-integration feature
+	// acceptance; see ControlRequest.AcceptanceFeature.
+	AcceptanceFeature string
 	// Revision and Digest name the EXACT plan revision a decision is about.
 	// They are what an operator read: without them the CLI would decide
 	// whatever the highest revision happened to be at decide time, which can
@@ -219,6 +248,15 @@ type autonomyFlags struct {
 	// Detached submits work to a running supervisor instead of driving it in
 	// this terminal. It is implied when a supervisor owns the state directory.
 	Detached bool
+	// SuccessorOf starts serve as the INERT SUCCESSOR of the named transition:
+	// it takes no role, opens no service and writes nothing until the
+	// predecessor that spawned it says the role has been released. It is not
+	// an operator flag - a person running it by hand gets a process waiting on
+	// a handshake nobody will perform - and it is the contract the predecessor
+	// starts the next generation through.
+	SuccessorOf string
+	// Publish separately authorizes GitHub publication of a review (#233).
+	Publish bool
 }
 
 func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int, error) {
@@ -264,6 +302,15 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		// `run issue N` starts one governed run, `plan issue N` proposes the
 		// decomposition that several of them would execute.
 		return autonomyPlan(context.Background(), rest, overrides, stdout)
+	case "orchestrate":
+		return autonomyOrchestrate(rest, overrides, stdout)
+	case "workgraph":
+		// One altitude above `orchestrate`: the same explicit issues, with the
+		// dependencies between them stated, so a unit waits for its upstream
+		// handoff instead of the operator watching for it.
+		return autonomyWorkGraph(rest, stdout)
+	case "review": // first-class independent PR review (#233)
+		return autonomyReview(context.Background(), rest, overrides, stdout)
 	}
 
 	// Everything else names exactly one subject: an issue number for `run`, a
@@ -345,7 +392,7 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 			return autonomyFleet(flags, overrides, stdout)
 		}
 		runID, rest = rest[0], rest[1:]
-	case "events", "resume", "refresh", "stop":
+	case "events", "resume", "refresh", "stop", "pause", "unpause":
 		if len(rest) < 1 || strings.TrimSpace(rest[0]) == "" {
 			return runtime.ExitInvalid, errors.New(autonomyUsage)
 		}
@@ -368,6 +415,9 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 	}
 	if command == "stop" {
 		return autonomyStop(flags, overrides, runID, stdout)
+	}
+	if command == "pause" || command == "unpause" {
+		return autonomyPause(flags, overrides, command, runID, stdout)
 	}
 
 	engine, built, release := overrides.Runtime, (*composition)(nil), func() {}
@@ -404,6 +454,19 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		if built != nil && runtime.SupervisorRunning(built.config.StateDir) {
 			return submitToSupervisor(built, flags, issue, stdout)
 		}
+		// This process is about to create the run itself, through built.agent -
+		// the operator's default when --agent named nothing. newComposition only
+		// probed an EXPLICIT --agent, on purpose, because it is shared by
+		// status/resume/watch and those must keep working over an uninstalled
+		// default. This is not one of those: it is the boundary that creates
+		// work, so the configured selection - default or explicit - is checked
+		// here the same way submitToSupervisor's target is.
+		if built != nil {
+			prober := runtime.AgentProberFor(built.agent, built.artifacts, operatorHome())
+			if err := runtime.RefuseUnlessInvocable(ctx, built.agent, prober); err != nil {
+				return runtime.ExitInvalid, err
+			}
+		}
 		outcome, err := engine.StartIssueRun(ctx, issue, mode)
 		if err != nil {
 			return exitFor(err, runtime.ExitFailed), err
@@ -413,7 +476,7 @@ func autonomy(args []string, overrides autonomyOverrides, stdout io.Writer) (int
 		} else {
 			fmt.Fprintf(stdout, "created generation %s\n", outcome.RunID)
 		}
-		return reconcile(ctx, engine, outcome.RunID, stdout)
+		return reconcile(ctx, engine, built, outcome.RunID, stdout)
 	case "resume":
 		return autonomyResume(ctx, engine, built, runID, stdout)
 	case "refresh":
@@ -509,7 +572,16 @@ func observeFeedback(ctx context.Context, engine engineeringRuntime, runID strin
 	_, _ = observer.ObserveFeedback(ctx, runID)
 }
 
-func reconcile(ctx context.Context, engine engineeringRuntime, runID string, stdout io.Writer) (int, error) {
+// reconcile drives one run in THIS process. A local drive enforces the
+// effective supervisor policy through its scheduler like any driver, so a
+// composed one records its policy generation first (ADR-0003 B4); an injected
+// test runtime has no composition and nothing to record.
+func reconcile(ctx context.Context, engine engineeringRuntime, built *composition, runID string, stdout io.Writer) (int, error) {
+	if built != nil {
+		if _, err := built.recordPolicyGeneration(); err != nil {
+			return runtime.ExitInvalid, err
+		}
+	}
 	observeFeedback(ctx, engine, runID)
 	outcome, err := engine.Reconcile(ctx, runID)
 	if err != nil {
@@ -540,9 +612,14 @@ func writeJSON(stdout io.Writer, value any) error {
 // construction with a different repository target, rather than two wirings that
 // can drift apart.
 type composition struct {
-	config      runtime.Config
-	store       *runtime.SQLiteOperationStore
-	owner       string
+	planInvocationsMu sync.Mutex
+	planInvocations   map[string]struct{}
+	config            runtime.Config
+	store             *runtime.SQLiteOperationStore
+	owner             string
+	// drivers is the one record of leases this process's drivers hold
+	// (#485), shared by every engine the composition builds.
+	drivers     *runtime.DriverLeases
 	model       domain.ProjectModel
 	policy      domain.EngineeringPolicy
 	artifacts   runtime.ArtifactStore
@@ -552,19 +629,33 @@ type composition struct {
 	assurance   runtime.AssuranceProvider
 	semantic    runtime.AssuranceProvider
 	build       runtime.ControllerBuild
+	// role is this process's controller-role capability when it is serving. It
+	// is held rather than queried: the snapshot answers "do I own the role" by
+	// exercising it, because there is deliberately no way to ask.
+	role *runtime.ControllerRoleLease
 	// agents is the operator's registry, and agent is the one this invocation
 	// resolved. Both are here because the two are different questions: which
 	// workers exist, and which one this command is driving.
 	agents   runtime.AgentRegistry
 	agent    runtime.ResolvedAgent
 	feedback runtime.FeedbackPolicy
-	// planning is the operator's customization registry. It is loaded ONCE
-	// here and handed to every engine, because a run executing a plan stage
-	// resolves its frozen instruction packs through it: an engine built
+	// planning is the operator's customization registry. It is loaded once at
+	// construction and handed to every engine, because a run executing a plan
+	// stage resolves its frozen instruction packs through it: an engine built
 	// without it would refuse work the operator approved, on the grounds that
 	// a pack it was never given is "no longer installed".
-	planning planning.Registry
-	storage  runtime.StateStorage
+	//
+	// planningMu guards a later governed reload (ADR-0008): LoadRegistry
+	// always builds a brand-new value with brand-new maps, so a reload swaps
+	// the whole value under the lock rather than mutating it in place. This
+	// is safe for work already approved or in flight: frozenInstructions
+	// (runtime/operations.go) resolves a pinned pack by id and refuses if its
+	// digest has moved, exactly as it already does across an ordinary
+	// restart. planning_dir itself, per ADR-0003, never changes without a
+	// cold re-adopt; only its content can be reloaded here.
+	planningMu sync.RWMutex
+	planning   planning.Registry
+	storage    runtime.StateStorage
 	// sandbox and permissionBypass are kept so an engine can be built for an
 	// agent other than the one this invocation resolved. providerInjected
 	// marks the test seam: an injected provider is used for every agent,
@@ -572,7 +663,11 @@ type composition struct {
 	sandbox          runtime.DockerSandbox
 	permissionBypass bool
 	providerInjected bool
-	release          func()
+	cloneRemote      func(runtime.GitHubRepo) string
+	// reviewerAgent is #474 B3's opt-in: empty disables the automatic
+	// independent-review trigger entirely. See autonomyFlags.ReviewerAgent.
+	reviewerAgent string
+	release       func()
 }
 
 // newComposition is the wiring. Every failure here is a configuration or usage
@@ -608,6 +703,12 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		return nil, err
 	}
 	release := func() { _ = store.Close() }
+	// The configuration identity this process binds as is decided against
+	// the governing authority before anything uses it (ADR-0003 B4).
+	if config, err = runtime.ResolveConfigIdentity(store, config); err != nil {
+		release()
+		return nil, err
+	}
 
 	// The owner identity and the OS ownership lock must be the same string:
 	// the lock is the crash-safe evidence NewLockOwnerLiveness reads to decide
@@ -615,7 +716,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 	// also refuses a second invocation that would share this identity, and
 	// releasing it on shutdown is how a watcher gives ownership back.
 	owner := runtime.NewRuntimeOwner()
-	lock, err := runtime.AcquireOwnershipLock(config.StateDir, owner)
+	lock, err := runtime.AcquireControllerInstanceLock(config.StateDir, owner)
 	if err != nil {
 		release()
 		return nil, fmt.Errorf("cannot take exclusive ownership of state dir %s; another zenchron-engineering process may already be running against it: %w", config.StateDir, err)
@@ -640,7 +741,7 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		StateDir: filepath.Join(config.StateDir, "artifacts", "docker-operations"),
 	}
 
-	credentials := githubCredentials(config.GitHub.CredentialMode, config.GitHub.TokenPath)
+	credentials := githubCredentials(config.GitHub)
 	forge := overrides.GitHub
 	if forge == nil {
 		forge = runtime.GitHubRESTAdapter{
@@ -659,6 +760,17 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 	if err != nil {
 		release()
 		return nil, err
+	}
+	// Only an EXPLICIT --agent is checked here. The operator's default is left
+	// alone: a command that names no agent (status, resume, watch...) must keep
+	// working even when the default happens to be uninstalled, exactly as it
+	// does today.
+	if strings.TrimSpace(flags.Agent) != "" {
+		prober := runtime.AgentProberFor(agent, artifacts, operatorHome())
+		if err := runtime.RefuseUnlessInvocable(context.Background(), agent, prober); err != nil {
+			release()
+			return nil, err
+		}
 	}
 	feedback, err := config.FeedbackPolicy()
 	if err != nil {
@@ -689,13 +801,15 @@ func newComposition(flags autonomyFlags, overrides autonomyOverrides) (*composit
 		semantic = semanticAssuranceProvider(config, artifacts)
 	}
 	return &composition{
-		config: config, store: store, owner: owner, model: model, policy: policy,
+		config: config, store: store, owner: owner, drivers: runtime.NewDriverLeases(), model: model, policy: policy,
 		artifacts: artifacts, credentials: credentials, build: build,
 		forge: forge, provider: provider, assurance: assurance, semantic: semantic,
 		agents: registry, agent: agent, feedback: feedback, planning: customization,
 		sandbox: sandbox, permissionBypass: flags.PermissionBypass, providerInjected: providerInjected,
-		storage: runtime.StateStorage{Dir: config.StateDir, CeilingBytes: config.Storage.MaxStateBytes},
-		release: release,
+		reviewerAgent: flags.ReviewerAgent,
+		cloneRemote:   overrides.CloneRemote,
+		storage:       runtime.StateStorage{Dir: config.StateDir, CeilingBytes: config.Storage.MaxStateBytes},
+		release:       release,
 	}, nil
 }
 
@@ -724,11 +838,23 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 	if !c.providerInjected {
 		provider = executionProvider(c.config, agent, c.artifacts, c.sandbox, c.permissionBypass)
 	}
+	ceiling, err := c.maxConcurrentRuns()
+	if err != nil {
+		return nil, err
+	}
+	observations, err := c.maxConcurrentObservations()
+	if err != nil {
+		return nil, err
+	}
+	verifications, err := c.maxConcurrentVerifications()
+	if err != nil {
+		return nil, err
+	}
 	return runtime.NewEngineeringRuntime(runtime.Dependencies{
 		Store:             c.store,
 		Agent:             agent,
 		Agents:            c.agents,
-		Planning:          c.planning,
+		Planning:          c.currentPlanning(),
 		Feedback:          feedback,
 		Storage:           c.storage,
 		Toolchain:         c.config.Toolchain,
@@ -746,12 +872,53 @@ func (c *composition) engineFor(target runtime.RepositoryTarget, agent runtime.R
 		Repository:        target,
 		Remote:            remote,
 		Credentials:       c.credentials,
-		ControllerID:      "zenchron-engineering/" + version,
+		ControllerID:      controllerIdentity(),
 		ControllerBuild:   c.build,
 		ConfigDigest:      c.config.Digest,
 		Budgets:           c.config.RunBudgets(),
+		// The scheduler is the one place the ceilings are ENFORCED: its
+		// acquisition counts, per capacity class (#85), every other run holding
+		// an operation of that class across the whole durable store, which is
+		// what makes the bounds hold between processes as well as inside one.
+		// Everything else that knows the numbers - the supervisor's turn
+		// envelope, the fleet view - reports or bounds goroutines; nothing in
+		// front of the scheduler decides capacity.
+		//
+		// Which is why leaving this unset was not a missing second enforcer but
+		// a missing number: the supervisor admitted two runs against the
+		// configured ceiling while the scheduler refused the second against the
+		// default of one, and the operator saw "Workers: 2 / 2 active" over
+		// work that was serialising. It comes from maxConcurrentRuns() for the
+		// same reason the supervisor and the fleet view do - one resolution of
+		// the operator's configuration, so advertised and enforced cannot be
+		// different numbers.
+		OperatorMaxConcurrentRuns:  ceiling,
+		MaxConcurrentObservations:  observations,
+		MaxConcurrentVerifications: verifications,
+		DriverLeases:               c.drivers,
 	})
 }
+
+// controllerIdentity is WHICH PROGRAM this is, and deliberately not which
+// build of it.
+//
+// It used to be "zenchron-engineering/" + version, which folded the build into
+// the identity - and the build is already a field of its own beside this one,
+// carrying the kind, the version, the source revision, the tree and the
+// measured binary. Saying it twice would be merely redundant if the two were
+// read the same way, and they are not: succession requires the controller
+// identity to be UNCHANGED between predecessor and successor, precisely so
+// that a new build of the same program can continue a run while a different
+// program cannot. An identity that moved with every build made that condition
+// unsatisfiable - every automated upgrade would have been refused with "the
+// controller identity changed", for the only kind of upgrade #234 exists to
+// perform.
+//
+// The cost is stated rather than hidden: this changes the ControllerSHA256 of
+// runs created by earlier builds, so runs live across this change park on
+// controller_changed exactly as they do across any other manual upgrade. From
+// here on they do not have to.
+func controllerIdentity() string { return "zenchron-engineering" }
 
 // feedbackPolicyFor adds the identity this runtime's own credential acts as in
 // THIS repository to the self-loop set.
@@ -839,17 +1006,52 @@ func operatorHome() string {
 	return os.Getenv("HOME")
 }
 
-func githubCredentials(mode string, tokenPath string) runtime.CredentialProvider {
-	switch mode {
+func githubCredentials(config runtime.GitHubConfig) runtime.CredentialProvider {
+	switch config.CredentialMode {
 	case runtime.GitHubCredentialCLI:
 		return runtime.GitHubCLICredential{}
 	case runtime.GitHubCredentialToken:
 		// A publication identity of the runtime's own, so the operator stays a
 		// distinct actor whose review is admissible feedback.
-		return runtime.GitHubTokenFileCredential{Path: tokenPath}
+		return runtime.GitHubTokenFileCredential{Path: config.TokenPath}
+	case runtime.GitHubCredentialApp:
+		// The same separation, from a machine identity rather than a second
+		// account: the installation token is minted here and re-minted before
+		// it expires, and the private key never leaves this process.
+		return &runtime.GitHubAppCredential{
+			AppID:          config.AppID,
+			InstallationID: config.InstallationID,
+			PrivateKeyPath: config.PrivateKeyPath,
+			HTTP:           &http.Client{Timeout: 30 * time.Second},
+			Endpoint:       config.Endpoint,
+		}
 	}
 	// Nil is the documented "github_auth_required" state, not anonymous access.
 	return nil
+}
+
+// githubGovernanceCredential selects the identity that READS governance facts.
+//
+// It is a separate selector from githubCredentials, reading a separate
+// configuration member, and its return type is not a CredentialProvider. That
+// is what makes the two roles unmixable here rather than merely unmixed: the
+// publication path cannot be handed what this returns, and the governance path
+// cannot be handed what githubCredentials returns, and neither mistake compiles.
+//
+// An unconfigured governance mode is a refusal, not a fallback to the
+// publication credential. The publication credential's silence about a
+// ruleset's bypass actors is the absence of an observation, and treating it as
+// the observation "there are none" is exactly the failure #219 exists to
+// prevent.
+func githubGovernanceCredential(config runtime.GitHubConfig) (runtime.GovernanceCredential, error) {
+	switch strings.TrimSpace(config.GovernanceCredentialMode) {
+	case runtime.GitHubCredentialCLI:
+		return runtime.GitHubCLIGovernanceCredential(), nil
+	}
+	return nil, fmt.Errorf("no governance credential is authorized, so the adoption trust root cannot be observed: "+
+		"set github.governance_credential_mode to %q. The publication credential is not used for this: "+
+		"GitHub does not disclose a ruleset's bypass actors to a GitHub App installation token, and an undisclosed "+
+		"bypass is not the same as no bypass", runtime.GitHubCredentialCLI)
 }
 
 // semanticAssuranceProvider builds the INDEPENDENT semantic acceptance
@@ -932,6 +1134,23 @@ func executionProvider(config runtime.Config, agent runtime.ResolvedAgent, artif
 			// resolve offline exactly what the verifier resolves.
 			Toolchain:          config.Toolchain,
 			DependencyCacheDir: config.Assurance.DependencyCacheDir,
+			// THE BROKERED GIT BOUNDARY of #241. The state root is where the
+			// guard is materialized; the broker argv is this controller's own
+			// executable, so the binary that enforces the boundary is the
+			// binary the operator is running and not whatever a search path
+			// resolved. A controller that cannot name its own executable
+			// prepares no guard and says so in provenance rather than
+			// pretending to one.
+			StateDir:           config.StateDir,
+			GitBroker:          gitBrokerCommand(),
+			VerificationBroker: verificationBrokerCommand(),
+			// AND IT IS REQUIRED HERE. This is the production composition: it
+			// always intends the boundary, so a broker it could not resolve is
+			// a controller that cannot enforce #241 rather than a composition
+			// that chose not to. Requiring it converts that into a typed
+			// pre-dispatch refusal instead of an unguarded worker, which is
+			// the difference between an honest absence and a silent one.
+			RequireGitGuard: true,
 		}
 	}
 	return candidateBoundProvider{base: runtime.OpenAIProvider{
@@ -950,49 +1169,6 @@ func executionProvider(config runtime.Config, agent runtime.ResolvedAgent, artif
 		},
 		Timeout: 10 * time.Minute,
 	}}
-}
-
-// candidateBoundProvider binds the tool broker to the candidate workspace named
-// by each request. OpenAIProvider refuses a broker bound to any other tree, and
-// the tree only exists once a run has been created, so the binding cannot be
-// made when the provider is constructed.
-type candidateBoundProvider struct{ base runtime.OpenAIProvider }
-
-func (p candidateBoundProvider) Isolation() runtime.ProviderIsolation { return p.base.Isolation() }
-
-// Execute binds the two things the broker cannot supply itself: WHICH workspace
-// this invocation may touch, and WHICH runtime operation owns the Docker
-// lifecycle of anything it brokers.
-//
-// Both are refused when absent rather than defaulted. A brokered command with
-// no owning operation has no durable record a crashed controller could
-// reconcile against, and the alternatives - a fixed global id, the process id,
-// a random or model-supplied string - would each let recovery target a
-// container this operation does not own.
-func (p candidateBoundProvider) Execute(ctx context.Context, request runtime.ExecutionRequest) (runtime.ExecutionResult, error) {
-	bound, err := p.bind(request)
-	if err != nil {
-		return runtime.ExecutionResult{}, err
-	}
-	return bound.Execute(ctx, request)
-}
-
-// bind is the binding itself, separated so a test can assert what the provider
-// would have been given without contacting a model or a daemon.
-func (p candidateBoundProvider) bind(request runtime.ExecutionRequest) (runtime.OpenAIProvider, error) {
-	if strings.TrimSpace(request.CandidateDir) == "" {
-		return runtime.OpenAIProvider{}, fmt.Errorf("brokered execution requires the runtime-owned candidate workspace")
-	}
-	if strings.TrimSpace(request.OperationID) == "" {
-		return runtime.OpenAIProvider{}, fmt.Errorf("brokered execution requires the runtime operation that authorized it; without it a brokered container has no exact identity to reconcile")
-	}
-	if strings.TrimSpace(p.base.Broker.Sandbox.StateDir) == "" {
-		return runtime.OpenAIProvider{}, fmt.Errorf("brokered execution requires a runtime-owned state directory for its Docker operation record")
-	}
-	bound := p.base
-	bound.Broker.CandidateDir = request.CandidateDir
-	bound.Broker.Sandbox.OperationID = request.OperationID
-	return bound, nil
 }
 
 func parseAutonomyFlags(args []string) (autonomyFlags, error) {
@@ -1020,6 +1196,9 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			continue
 		case "--dry-run":
 			flags.DryRun, args = true, args[1:]
+			continue
+		case "--publish":
+			flags.Publish, args = true, args[1:]
 			continue
 		case "--deterministic":
 			// Compile the plan with NO model invocation. It is the honest
@@ -1050,16 +1229,22 @@ func parseAutonomyFlags(args []string) (autonomyFlags, error) {
 			flags.Note = args[1]
 		case "--agent":
 			flags.Agent = args[1]
+		case "--reviewer-agent":
+			flags.ReviewerAgent = args[1]
 		case "--reason":
 			flags.Reason = args[1]
 		case "--template":
 			flags.Template = args[1]
+		case "--acceptance-feature":
+			flags.AcceptanceFeature = args[1]
 		case "--substitute-human":
 			flags.SubstituteHuman = args[1]
 		case "--digest":
 			flags.Digest = args[1]
 		case "--assignments":
 			flags.Assignments = args[1]
+		case successorFlag:
+			flags.SuccessorOf = args[1]
 		case "--revision":
 			revision, err := strconv.Atoi(args[1])
 			if err != nil || revision < 1 {
@@ -1111,6 +1296,11 @@ func autonomyWatch(parent context.Context, flags autonomyFlags, overrides autono
 
 	settings, err := built.watchSettings()
 	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	// A standalone watcher drives runs under the moved S policy exactly as
+	// `serve` does, so it records its policy generation before it polls.
+	if _, err := built.recordPolicyGeneration(); err != nil {
 		return runtime.ExitInvalid, err
 	}
 	controller := overrides.Watch
@@ -1259,6 +1449,71 @@ func autonomyStop(flags autonomyFlags, overrides autonomyOverrides, runID string
 	return runtime.ExitCancelled, nil
 }
 
+// autonomyPause records an operator's durable pause or unpause of one run
+// (#86). It cancels nothing and changes no disposition; see runtime/pause.go.
+//
+// Routing is plan approve's, not stop's: a running supervisor applies it under
+// its controller role, an endpoint that exists but cannot be reached is a
+// refusal rather than a local write beside a live supervisor, and with no
+// supervisor it is written here. The recorded operator is this terminal's
+// resolved identity - provenance, never authority.
+func autonomyPause(flags autonomyFlags, overrides autonomyOverrides, verb, runID string, stdout io.Writer) (int, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	config, err := runtime.LoadConfig(flags.Config, cwd)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	operator, err := config.ResolveOperator()
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	store, err := runtime.OpenSQLiteOperationStore(config.StateDir)
+	if err != nil {
+		return runtime.ExitInvalid, err
+	}
+	defer store.Close()
+	run, found, err := store.Run(runID)
+	if err != nil {
+		return runtime.ExitFailed, err
+	}
+	if !found {
+		return exitRunNotFound, &runNotFoundError{RunID: runID}
+	}
+	// Advisory, so both routes refuse a terminal run with the same exit. The
+	// binding refusal is made by the append itself.
+	if run.Disposition == runtime.Completed || run.Disposition == runtime.Failed || run.Disposition == runtime.Cancelled {
+		return runtime.ExitInvalid, &runtime.RunTerminalError{RunID: runID, Disposition: run.Disposition, Reason: run.Reason, Verb: verb}
+	}
+	request := runtime.ControlRequest{Command: runtime.ControlPause, RunID: runID, Reason: flags.Reason, Operator: operator.ID}
+	if verb == "unpause" {
+		request = runtime.ControlRequest{Command: runtime.ControlUnpause, RunID: runID, Operator: operator.ID}
+	}
+	if delegated, code, err := delegate(config.StateDir, request, stdout); delegated {
+		return code, err
+	}
+	view, err := applyPause(store, request)
+	if err != nil {
+		return exitFor(err, runtime.ExitFailed), err
+	}
+	if err := writeJSON(stdout, view); err != nil {
+		return runtime.ExitFailed, err
+	}
+	return runtime.ExitCompleted, nil
+}
+
+// applyPause is the one place a pause request becomes a journal write, for the
+// local path and for the supervisor's endpoint alike.
+func applyPause(store *runtime.SQLiteOperationStore, request runtime.ControlRequest) (runtime.PauseView, error) {
+	now := time.Now().UTC()
+	if request.Command == runtime.ControlUnpause {
+		return runtime.UnpauseRun(store, now, request.RunID, request.Operator)
+	}
+	return runtime.PauseRun(store, now, request.RunID, request.Reason, request.Operator)
+}
+
 // cancelRun records durable operator cancellation intent for one run. The
 // mechanism lives in the runtime, because `stop RUN` and the supervisor's
 // explicit stop-all action must be one cancellation path rather than two
@@ -1267,6 +1522,6 @@ func cancelRun(built *composition, runID, reason string) (runtime.Outcome, error
 	if _, err := requireRun(built, runID); err != nil {
 		return runtime.Outcome{}, err
 	}
-	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner}
+	scheduler := runtime.Scheduler{Store: built.store, Clock: runtime.RealClock{}, Owner: built.owner, Liveness: runtime.NewLockOwnerLiveness(built.config.StateDir)}
 	return runtime.CancelRun(built.store, scheduler, time.Now().UTC(), runID, reason)
 }

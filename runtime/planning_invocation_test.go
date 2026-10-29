@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/execution"
 	"time"
 )
 
@@ -64,6 +65,14 @@ func TestPlanningInvocationUsesTheProvidersOwnReadOnlyMode(t *testing.T) {
 			// never had - while the argv beside it said read-only.
 			if result.Invocation.SandboxMode != tc.sandbox {
 				t.Fatalf("provenance recorded sandbox %q, want %q: the planning invocation ran under %q", result.Invocation.SandboxMode, tc.sandbox, strings.Join(tc.expected, " "))
+			}
+			// The observation the planner persists (#391's closed name set
+			// included) passes the durable bound the plan journal holds it to.
+			if len(result.Invocation.ProviderEnvironment) == 0 {
+				t.Fatal("the planning invocation recorded no provider environment")
+			}
+			if err := validateInvocationObservation(result.Invocation.InvocationObservation); err != nil {
+				t.Fatalf("the planning observation is refused: %v", err)
 			}
 		})
 	}
@@ -181,6 +190,41 @@ func TestPlanningEnvelopeTellsTheWorkerItMayChangeNothing(t *testing.T) {
 	}
 }
 
+// THE VERIFICATION BOUNDARY IS STATED TO THE REVIEWER, AND ONLY TO THE
+// REVIEWER (#374 dogfood evidence: a reviewer denied Bash for go test/go vet
+// while asked to judge obligations those commands would verify, recording ten
+// denied calls in one invocation).
+//
+// A reviewer's permission grant is independent of this runtime's own
+// assurance pipeline, which observes build and test evidence on its own
+// authority. Without this sentence, a reviewer that reads "use ACCEPT only
+// when every obligation is satisfied by evidence you actually observed" has
+// no way to know that observing is bounded by what it was GRANTED, not by
+// what it can talk its way into running - so it either repeatedly tries a
+// denied command, or treats the denial itself as a defect. This is an
+// implementer's prompt, never a reviewer's, so the boundary must appear only
+// where ReviewerResultPath is set.
+func TestReviewerPromptStatesTheVerificationBoundaryAndAProducerPromptDoesNot(t *testing.T) {
+	_, request, _ := agentFixture(t, AgentKindClaudeCode)
+	request.Mode = domain.InvocationModeMutating
+
+	producerPrompt := agentPrompt(request)
+	if strings.Contains(producerPrompt, "VERIFICATION BOUNDARY") {
+		t.Fatalf("a producer invocation (no reviewer result path) was told the reviewer's verification boundary: %s", producerPrompt)
+	}
+
+	request.ReviewerResultPath = "/state/attempt-1.reviewer-result.json"
+	reviewerPrompt := agentPrompt(request)
+	if !strings.Contains(reviewerPrompt, "VERIFICATION BOUNDARY") {
+		t.Fatalf("a reviewer invocation did not state the verification boundary: %s", reviewerPrompt)
+	}
+	for _, want := range []string{"may not include running the commands", "do not repeatedly attempt a command you have already been denied", "do not treat a denial itself as a finding"} {
+		if !strings.Contains(reviewerPrompt, want) {
+			t.Fatalf("the verification boundary dropped %q: %s", want, reviewerPrompt)
+		}
+	}
+}
+
 // A short choice token must be advertised as a WORD, not as a substring.
 //
 // The qwen read-only probe required "plan" anywhere in `--help`, which
@@ -271,7 +315,7 @@ func TestAWallExpiryIsNotRecordedAsAControllerShutdown(t *testing.T) {
 	if err == nil {
 		t.Fatal("an invocation past its wall bound returned success")
 	}
-	if result.Outcome != OperationFailed {
+	if result.Outcome != execution.Failed {
 		t.Fatalf("outcome = %q, want %q: nothing cancelled this", result.Outcome, OperationFailed)
 	}
 	if result.Failure == nil || result.Failure.Classification != FailureExecutionIncomplete {
@@ -285,7 +329,7 @@ func TestAWallExpiryIsNotRecordedAsAControllerShutdown(t *testing.T) {
 	stopped, cancel := context.WithCancel(context.Background())
 	cancel()
 	shutdown, _ := provider.Execute(stopped, request)
-	if shutdown.Outcome != OperationCancelled {
+	if shutdown.Outcome != execution.Cancelled {
 		t.Fatalf("a cancelled controller produced outcome %q", shutdown.Outcome)
 	}
 	if shutdown.Failure == nil || shutdown.Failure.Classification != FailureControllerShutdown {

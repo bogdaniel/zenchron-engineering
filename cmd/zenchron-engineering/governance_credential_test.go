@@ -1,0 +1,105 @@
+package main
+
+// The composition root is where a role confusion would actually happen: two
+// credentials are built here from one configuration, and picking the wrong one
+// is a wiring mistake rather than a logic one. These tests assert the two
+// selectors stay independent, and that the governance selector fails closed.
+
+import (
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/bogdaniel/zenchron-engineering/runtime"
+)
+
+func TestGovernanceCredentialFailsClosedWhenUnauthorized(t *testing.T) {
+	// An App-mode configuration with no governance member is exactly the
+	// operator configuration #219 was filed against. It must refuse, and the
+	// refusal must say what to add - it must NOT quietly reuse the App.
+	_, err := githubGovernanceCredential(runtime.GitHubConfig{
+		CredentialMode: runtime.GitHubCredentialApp,
+		AppID:          4952506,
+		InstallationID: 161898047,
+	})
+	if err == nil {
+		t.Fatal("an unconfigured governance mode produced a credential; the publication credential cannot see bypass_actors and must never stand in")
+	}
+	if !strings.Contains(err.Error(), "governance_credential_mode") {
+		t.Fatalf("the refusal does not tell the operator what to authorize: %v", err)
+	}
+}
+
+func TestGovernanceCredentialIsNotThePublicationCredential(t *testing.T) {
+	config := runtime.GitHubConfig{
+		CredentialMode:           runtime.GitHubCredentialApp,
+		AppID:                    4952506,
+		InstallationID:           161898047,
+		PrivateKeyPath:           "/dev/null",
+		GovernanceCredentialMode: runtime.GitHubCredentialCLI,
+	}
+	governance, err := githubGovernanceCredential(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role := governance.Provenance().Role; role != runtime.CredentialRoleGovernance {
+		t.Fatalf("the governance credential reports role %q", role)
+	}
+	// It cannot be wired into anything that publishes. The assertion is the
+	// runtime-visible form of what the compiler already refuses.
+	if _, ok := any(governance).(runtime.CredentialProvider); ok {
+		t.Fatal("the governance credential satisfies CredentialProvider and could be selected as the publication identity")
+	}
+
+	// And the publication selector is unmoved by the governance member: the
+	// App stays the publication identity, which is what #82 and #156 require.
+	publication := githubCredentials(config)
+	if _, ok := publication.(*runtime.GitHubAppCredential); !ok {
+		t.Fatalf("the publication credential is %T, not the GitHub App", publication)
+	}
+	if _, ok := any(publication).(runtime.GovernanceCredential); ok {
+		t.Fatal("the publication credential satisfies GovernanceCredential and could be selected as the governance observer")
+	}
+}
+
+// TestGovernanceObserverIsBuiltWithARedirectSafeTransport asserts the wiring,
+// not just the component. net/http strips Authorization only when a redirect
+// leaves the host, so a bare client would carry the operator's governance
+// credential across a same-host https -> http redirect. The composition root
+// must pick the transport that refuses that, and "must" here means tested.
+func TestGovernanceObserverIsBuiltWithARedirectSafeTransport(t *testing.T) {
+	built, err := governanceObserver(runtime.GitHubConfig{
+		CredentialMode:           runtime.GitHubCredentialApp,
+		GovernanceCredentialMode: runtime.GitHubCredentialCLI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer, ok := built.(runtime.GitHubGovernanceObserver)
+	if !ok {
+		t.Fatalf("the composition root built %T", built)
+	}
+	client, ok := observer.HTTP.(*http.Client)
+	if !ok {
+		t.Fatalf("the governance transport is %T, not an *http.Client whose redirect policy can be inspected", observer.HTTP)
+	}
+	if client.CheckRedirect == nil {
+		t.Fatal("the governance transport uses net/http's default redirect policy, which forwards Authorization across a same-host scheme downgrade")
+	}
+	// Exercised rather than merely present: a policy that is non-nil and
+	// permissive would pass a nil check and fail the operator.
+	downgrade, err := http.NewRequest(http.MethodGet, "http://api.github.com/landed", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	via, err := http.NewRequest(http.MethodGet, "https://api.github.com/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.CheckRedirect(downgrade, []*http.Request{via}) == nil {
+		t.Fatal("the governance transport would follow a redirect out of TLS")
+	}
+	if client.CheckRedirect(via, []*http.Request{via}) != nil {
+		t.Fatal("the governance transport refuses a legitimate https redirect")
+	}
+}

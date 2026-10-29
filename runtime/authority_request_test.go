@@ -293,7 +293,10 @@ func TestAuthorityRequestIdDigestsEveryBinding(t *testing.T) {
 		"decision":       func(a AuthorityRequest) AuthorityRequest { a.Decision.Revision += "x"; return a },
 		"status":         func(a AuthorityRequest) AuthorityRequest { a.Status = domain.AuthorityIncomplete; return a },
 		"requirement":    func(a AuthorityRequest) AuthorityRequest { a.Requires = []string{"other"}; return a },
-		"evidence":       func(a AuthorityRequest) AuthorityRequest { a.Evidence = append(a.Evidence, Ref{"e", "1"}); return a },
+		"evidence": func(a AuthorityRequest) AuthorityRequest {
+			a.Evidence = append(a.Evidence, Ref{ID: "e", Revision: "1"})
+			return a
+		},
 	} {
 		moved, err := mutate(request).identify()
 		if err != nil {
@@ -403,6 +406,16 @@ func TestAuthorizeRecordsEvidenceAndNeverAssignsAuthority(t *testing.T) {
 	}
 	if status.PublicationAuthority == nil || status.PublicationAuthority.Status != domain.AuthorityAwaitingAuthority {
 		t.Fatalf("the journalled #7 decision was rewritten by authorize: %+v", status.PublicationAuthority)
+	}
+	// The dashboard reads through a runtime that has no repository. It must
+	// report the same recorded decision, not "none recorded".
+	readOnly := &EngineeringRuntime{deps: Dependencies{Store: fixture.store, Clock: fixture.runtime.deps.Clock}}
+	readStatus, err := readOnly.Status(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readStatus.PublicationAuthority == nil || readStatus.PublicationAuthority.Status != status.PublicationAuthority.Status {
+		t.Fatalf("the repository-less read path lost the recorded decision: %+v", readStatus.PublicationAuthority)
 	}
 }
 

@@ -97,12 +97,15 @@ requires protected execution" - see the known limitations in `ROADMAP.md`.
 | [`docs/getting-started.md`](docs/getting-started.md) | install, configure, first run |
 | [`docs/running-work.md`](docs/running-work.md) | one issue end to end |
 | [`docs/running-multiple-tasks.md`](docs/running-multiple-tasks.md) | several at once, and what happens when one merges first |
+| [`docs/orchestration.md`](docs/orchestration.md) | an explicit issue batch with mandatory typed handoffs - not a planner or a scheduler |
 | [`docs/github-feedback.md`](docs/github-feedback.md) | the review loop, and who is allowed to direct a worker |
+| [`docs/review.md`](docs/review.md) | first-class independent PR review: context packet, decision, publication |
 | [`docs/agents.md`](docs/agents.md) | the workers, trust modes, provenance |
 | [`docs/planning.md`](docs/planning.md) | agent profiles, plan templates, and the approval boundary |
 | [`docs/supervisor.md`](docs/supervisor.md) | `serve`, its control endpoint, drain/shutdown/stop-all |
 | [`docs/configuration.md`](docs/configuration.md) | every configuration member and which layer owns it |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | symptom, cause, fix |
+| [`docs/design/README.md`](docs/design/README.md) | accepted design, React implementation, actual controller evidence and migration inventory |
 | [`ROADMAP.md`](ROADMAP.md) | where this sits, and what comes next |
 | [`docs/product-architecture.md`](docs/product-architecture.md) | the running system |
 | [`docs/architecture.md`](docs/architecture.md) | the Authorization Kernel |
@@ -139,10 +142,12 @@ engineering intent
 
 ## Status
 
-The Authorization Kernel and the local Engineering Runtime are implemented. The
-current milestone makes that runtime a persistent, multi-agent, operator-usable
-control plane; the Engineering Planner above it is a later layer and is not
-built. See [`ROADMAP.md`](ROADMAP.md).
+The Authorization Kernel, persistent multi-agent Engineering Runtime and
+Engineering Planner are implemented. The browser workspace extends their local
+Control Plane with governed objective intake, exact plan approval and human
+decision controls. See [`ROADMAP.md`](ROADMAP.md) and
+[`docs/control-plane.md`](docs/control-plane.md) for the current surface and
+acceptance boundaries.
 
 ## Technology decisions
 
@@ -266,7 +271,7 @@ identity is durable and caller-owned while sequence, chain links, and state
 digests are allocated inside the append transaction, so a watch controller
 holding a run's lease and an operator command holding none can write the same
 journal concurrently without colliding and without a gap. Owner liveness is
-the OS advisory ownership lock, held for a runtime instance's whole lifetime
+the OS advisory controller-instance lock, held for a runtime instance's whole lifetime
 and released by the kernel on death; a lock file is never liveness evidence,
 and a platform that cannot decide reports the owner alive so takeover is
 blocked rather than guessed.
@@ -375,6 +380,25 @@ re-checked by every client, with no TCP listener and no stored credential beside
 it. Drain, shutdown and stop-all are three different operations, and only the
 last one cancels runs.
 
+Trusted main is not the tip of `main` (ADR-0007). `main_head` is wherever
+`main` is; `trusted_main` is the newest commit on `main`'s first-parent chain
+whose own full-suite (T2) run passed, as observed against exactly that commit.
+A merge moves `main_head` immediately. Adoption only ever stands on
+`trusted_main`, so code whose full assurance is still running, or red, is
+never adopted.
+
+A serving controller REPLACES ITSELF when trusted main moves. It builds the
+successor through the same governed adopted build an operator would run,
+prepares the transition, starts that successor inert, stops taking on new work,
+waits for the work it already started to finish, and only then asks the
+successor whether it can continue every live run - because "can you read this
+journal" is a question only the code that would read it can answer. Currency is
+proven last, immediately before the role changes hands. A successor that
+refuses costs an update; the controller keeps serving. Nothing in that sequence
+is a deployment command, and an operator who wants none of it gets it: a
+controller with no governance credential, no published generation of its own or
+no adopted lineage says so on its startup banner and upgrades nothing.
+
 `autonomy agents` reports each configured worker: found, capabilities
 advertised, version, and the authentication state actually observed. It spends
 nothing, and an unobserved authentication mode is reported as `unknown` rather
@@ -414,7 +438,9 @@ ROADMAP.md                      Where the project is and what comes next
 docs/getting-started.md         Install, configure, first run
 docs/running-work.md            One issue end to end
 docs/running-multiple-tasks.md  Several at once, and base drift between them
+docs/orchestration.md           An explicit issue batch, its handoffs and aggregate status
 docs/github-feedback.md         The review loop and its admission gate
+docs/review.md                  First-class independent PR review: packet, decision, publication
 docs/agents.md                  Execution agents, trust modes, provenance
 docs/supervisor.md              serve, its control endpoint and lifecycle
 docs/configuration.md           Every configuration member and its layer
@@ -442,7 +468,7 @@ cmd/zenchron-engineering/       CLI entry point and composition root
 
 ## Non-goals
 
-Do not prematurely build a dashboard, Kubernetes orchestration, a visual workflow designer, a generic multi-agent framework, a vector database, a custom CI system, a marketplace, or enterprise RBAC.
+Do not prematurely build a dashboard, Kubernetes orchestration, a visual workflow designer, a generic multi-agent framework, a vector database, a custom CI system, a marketplace, or enterprise RBAC. The local operational console authorized by [ADR-0004](docs/adr/0004-local-operational-control-plane.md) is not an exception carved into this non-goal: it is a narrow, read-mostly projection over the already-implemented runtime's own store and journal, bounded to one operator on one machine, and it is not the later organization [`Control Plane`](ROADMAP.md) at M6 (#72).
 
 Nor, at this milestone: an AI agent router, a raw-LLM coding harness, a hosted
 control plane, remote worker federation, autonomous merge, or the engineering
@@ -496,21 +522,21 @@ and working tree remain unchanged. The durable handoff records the successful
 model, authentication-mode class, and attempt count, never credentials.
 
 Go-backed bootstrap operations resolve one runtime before repository mutation:
-a compatible local Go installation is preferred, with automatic toolchain
-downloads disabled. Otherwise Docker is used only when its daemon is reachable
-and the repository-derived `golang:<line>` image already exists locally, where
-`<line>` is the compatibility line (major.minor) of the `go.mod` go directive
-rather than its literal text. Rewriting `go 1.25` to `go 1.25.0` is therefore
-a formatting change and does not change the operator precondition. An exact
-toolchain requirement, should one ever be introduced, is represented
-separately from the compatibility line. Bootstrap never pulls that image
-implicitly; at execution the resolved image is pinned to its immutable image
-identity, and that exact identity is what provenance records. Docker Go
-commands use an unprivileged container with only the repository mounted. The
-container has outbound network access so Go can resolve the non-vendored
-modules pinned by `go.mod` and `go.sum`; no host credentials or environment
-are forwarded. Go's home, module, and build caches live in an isolated
-writable tmpfs that is discarded after each command.
+Docker is required, even when compatible local Go is installed. Candidate
+code never runs directly on the operator host. The daemon must be reachable
+and the repository-derived `golang:<line>` image must already exist locally,
+where `<line>` is the major.minor compatibility line from `go.mod`.
+Bootstrap never pulls images implicitly; execution and provenance use the
+resolved immutable image identity.
+
+Prepare that image with the dependencies pinned by the trusted base's
+`go.mod` and `go.sum` in `/go/pkg/mod` before running selfhost. Dependency
+changes require explicitly preparing an updated image. Missing dependencies
+fail verification: candidate execution cannot download modules or toolchains.
+Go commands run with networking disabled, a read-only root filesystem and
+repository mount, dropped capabilities, and no host credential or environment
+forwarding. HOME and build state use an ephemeral writable tmpfs; the prepared
+module cache stays read-only in the image.
 
 Before either `selfhost issue` executes Codex or `selfhost resume` publishes an
 interrupted candidate, selfhost writes a preflight diagnostic identifying the

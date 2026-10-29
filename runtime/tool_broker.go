@@ -15,6 +15,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -361,6 +362,17 @@ func (b ToolBroker) RunCommand(ctx context.Context, command []string) (CommandOu
 	// off, so these turn a confusing network error into an honest refusal.
 	args = append(args, envArgs(sandboxGoEnv...)...)
 	args = append(args, "--workdir", "/candidate", b.Sandbox.Image)
+	if v, ok := verificationExecutionFrom(ctx); ok {
+		binding := &VerificationSandbox{Image: b.Sandbox.Image, StateDir: b.Sandbox.StateDir, Endpoint: b.Sandbox.Endpoint}
+		p, lock, err := v.begin(ctx, binding)
+		if err != nil {
+			return CommandOutput{}, err
+		}
+		b.Sandbox.OperationID = p.ID
+		ctx = context.WithValue(ctx, verificationOwnerFileKey{}, lock.file)
+		out, runErr := b.Sandbox.run(ctx, append(args, command...))
+		return out, errors.Join(runErr, v.finish(p, lock, &b.Sandbox))
+	}
 	return b.Sandbox.run(ctx, append(args, command...))
 }
 

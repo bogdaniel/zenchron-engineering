@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "run"
+      ],
+      "properties": {
+        "type": {
+          "const": "snapshot"
+        },
+        "run": {
+          "$ref": "control-plane-run.schema.json"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "event"
+      ],
+      "properties": {
+        "type": {
+          "const": "event"
+        },
+        "event": {
+          "$ref": "control-plane-run-events.schema.json#/$defs/event"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "heartbeat"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "reason"
+      ],
+      "properties": {
+        "type": {
+          "const": "stale"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "read_failed"
+          ]
+        }
+      }
+    }
+  ]
+}

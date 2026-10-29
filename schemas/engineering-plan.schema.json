@@ -208,6 +208,17 @@
         },
         "substitutes_role": {
           "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/role"
+        },
+        "execution_kind": {
+          "type": "string",
+          "enum": [
+            "provider",
+            "integration_compose"
+          ]
+        },
+        "acceptance_feature": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,47}$"
         }
       }
     },
@@ -414,6 +425,9 @@
         },
         "workspace_unchanged": {
           "type": "boolean"
+        },
+        "invocation": {
+          "$ref": "https://zenchron.engineering/schemas/v0.1/planning-vocabulary.schema.json#/$defs/invocation_observation"
         }
       }
     },

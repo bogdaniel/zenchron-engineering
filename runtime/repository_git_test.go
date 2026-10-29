@@ -451,6 +451,10 @@ func (c *fixedCredential) Credential(identity RemoteIdentity) (string, string, e
 // involved, and the secret must never appear in argv, the child environment,
 // or the resulting repository.
 func TestRemoteCredentialSeamAuthenticatesWithoutLeaking(t *testing.T) {
+	// The leak check below scans os.TempDir(). A PRIVATE one makes it answer
+	// for this test's seam alone, not for every process sharing the host's
+	// temporary directory (#331).
+	t.Setenv("TMPDIR", t.TempDir())
 	root := t.TempDir()
 	origin := filepath.Join(root, "origin")
 	initFixtureRepo(t, origin, "README.md", "real\n")
@@ -545,6 +549,61 @@ func requireExecutableTemp(t *testing.T) {
 	}
 }
 
+// execCapableTempDir returns a directory this environment will actually run a
+// program from, for a test that gets to CHOOSE where its program lives.
+//
+// It is deliberately not requireExecutableTemp, because they answer different
+// questions. requireExecutableTemp asks whether os.TempDir() itself will
+// execute, and it has to: the runtime writes its askpass program there, so a
+// test of that seam has no say in the location and can only skip. A test that
+// picks its own directory - the Git guard writes its shim wherever the runtime
+// state directory is - can instead be GIVEN one that works.
+//
+// Both go through assertTempExecutable, which is the same probe the runtime
+// makes before it relies on execution, so there is one predicate and not three
+// opinions about what "executable" means.
+//
+// A SKIP IS THE LAST ANSWER, NOT THE FIRST. The assurance sandbox mounts /tmp
+// noexec on purpose - nothing should execute out of a scratch area a candidate
+// can write to - so `t.TempDir()` there is a directory whose x bits are set and
+// which `access(X_OK)` still refuses. That is what made the #241 Git-shim tests
+// fail by construction inside the verifier: `exec.LookPath` skipped the shim
+// and answered /usr/bin/git, and a shell asked to run it met the sentinel
+// instead. See #247.
+//
+// But that same sandbox DOES publish an exec-capable location, because `go
+// test` cannot link and run a test binary without one: GOTMPDIR names a tmpfs
+// mounted exec, and ExecCapableScratchBase already reads it. So the boundary
+// that broke these tests also carries their repair, and the honest order is to
+// use it rather than to stop asking: a skipped guard test proves nothing about
+// the guard in the one environment whose answer matters.
+//
+// Only when NEITHER location will execute is the mechanism untestable here, and
+// then the condition is named rather than reported as a defect in the guard.
+func execCapableTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := assertTempExecutable(dir); err == nil {
+		return dir
+	}
+	// The runtime's OWN exec-capable base, read from the environment the
+	// sandbox set - never from a candidate, which cannot reach it.
+	base := ExecCapableScratchBase("")
+	if base != os.TempDir() {
+		published, err := os.MkdirTemp(base, "zenchron-exec-")
+		if err == nil {
+			t.Cleanup(func() { _ = os.RemoveAll(published) })
+			if err = assertTempExecutable(published); err == nil {
+				return published
+			}
+		}
+		t.Skipf("neither the temp filesystem nor the published exec-capable base %s will run a program: %v", base, err)
+	}
+	t.Skipf("this environment does not permit executing a program from the temp filesystem: %v",
+		assertTempExecutable(dir))
+	return ""
+}
+
 func TestAskpassProgramIsPrivateAndAnswersOnlyGit(t *testing.T) {
 	requireExecutableTemp(t)
 	dir := t.TempDir()
@@ -593,8 +652,8 @@ func TestRepositoryGitEnvironmentIsBuiltFromScratch(t *testing.T) {
 		"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": "/dev/null",
 		"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1",
 		"GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "PAGER": "cat",
-		"GIT_OPTIONAL_LOCKS": "0", "GIT_LITERAL_PATHSPECS": "1",
-		"GIT_TEMPLATE_DIR": "/template",
+		"GIT_OPTIONAL_LOCKS": "0", "GIT_LITERAL_PATHSPECS": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+		"GIT_GRAFT_FILE": os.DevNull, "GIT_TEMPLATE_DIR": "/template",
 	} {
 		if names[key] != want {
 			t.Fatalf("%s = %q, want %q", key, names[key], want)

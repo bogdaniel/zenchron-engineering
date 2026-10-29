@@ -1,0 +1,152 @@
+{
+  "reading_date": "2026-09-25",
+  "source_issue": 317,
+  "mode": "zenchron_explicit",
+  "harvest_status": "blocked_missing_accessible_primary_records",
+  "scope": "Available candidate workspace only; no network or external runtime state access.",
+  "base_revision_from_task_context": "4b27cdb54b0bfd8ad0bb1288b0bc64d4d8d5e2d8",
+  "direct_agent": "unmeasured",
+  "leverage_ratio": "unmeasured",
+  "operator_attention": "unavailable",
+  "observations": [],
+  "candidate_classifications": [
+    {
+      "candidate": "issue-217",
+      "claimed_category": "concurrent cohort",
+      "classification": "excluded",
+      "provenance": "Issue #317 candidate list only; not independently verified",
+      "reason": "Run identity, timestamped lifecycle and controller binding unavailable; overlap with #221 cannot be established.",
+      "supported_measurements": []
+    },
+    {
+      "candidate": "issue-221",
+      "claimed_category": "concurrent cohort",
+      "classification": "excluded",
+      "provenance": "Issue #317 candidate list only; not independently verified",
+      "reason": "Run identity, timestamped lifecycle and controller binding unavailable; overlap with #217 cannot be established.",
+      "supported_measurements": []
+    },
+    {
+      "candidate": "pr-299",
+      "claimed_category": "review-feedback correction",
+      "classification": "excluded",
+      "provenance": "Issue #317 candidate list only; not independently verified",
+      "reason": "PR review history, feedback events, attempts and accepted revision unavailable; correction cannot be verified.",
+      "supported_measurements": []
+    },
+    {
+      "candidate": "issue-307",
+      "claimed_category": "provider/lifecycle failure",
+      "classification": "excluded",
+      "provenance": "Issue #317 candidate list only; not independently verified",
+      "reason": "Run journal and provider outcome unavailable; failure attribution cannot be verified.",
+      "supported_measurements": []
+    },
+    {
+      "candidate": "pr-313",
+      "claimed_category": "failed first issue-66 attempt",
+      "classification": "excluded",
+      "provenance": "Issue #317 candidate list only; not independently verified",
+      "reason": "Attempt journal and PR history unavailable; failure, provider identity and terminal outcome cannot be verified.",
+      "supported_measurements": []
+    },
+    {
+      "candidate": "pr-309",
+      "claimed_category": "normal behavioral work",
+      "classification": "excluded",
+      "provenance": "Issue #317 candidate list only; not independently verified",
+      "reason": "Run-to-PR binding, agent/provider/model, acceptance evidence and terminal state unavailable.",
+      "supported_measurements": []
+    },
+    {
+      "candidate": "pr-311",
+      "claimed_category": "normal behavioral work",
+      "classification": "excluded",
+      "provenance": "Issue #317 candidate list only; not independently verified",
+      "reason": "Run-to-PR binding, agent/provider/model, acceptance evidence and terminal state unavailable.",
+      "supported_measurements": []
+    },
+    {
+      "candidate": "pr-294",
+      "claimed_category": "build/tooling work",
+      "classification": "excluded",
+      "provenance": "Issue #317 candidate list only; not independently verified",
+      "reason": "Run-to-PR binding, agent/provider/model, acceptance evidence and terminal state unavailable.",
+      "supported_measurements": []
+    },
+    {
+      "candidate": "pr-263",
+      "claimed_category": "build/tooling work",
+      "classification": "excluded",
+      "provenance": "Issue #317 candidate list only; not independently verified",
+      "reason": "Run-to-PR binding, agent/provider/model, acceptance evidence and terminal state unavailable.",
+      "supported_measurements": []
+    },
+    {
+      "candidate": "automatic-controller-successions",
+      "claimed_category": "succession without deployment relay",
+      "classification": "excluded",
+      "provenance": "Issue #317 candidate list only; not independently verified",
+      "reason": "No specific succession IDs, controller transitions or operator activity record supplied; absence of manual relay cannot be established.",
+      "supported_measurements": []
+    }
+  ],
+  "sources": [
+    {
+      "path": "benchmarks/README.md",
+      "sha256": "e94cec19ab8f88d8c5521f41f279995de6b2f291c65aadd9ac39b9dd81237779",
+      "kind": "repository_documentation",
+      "supported_fact": "States that direct_agent and zenchron_explicit baselines are not implemented here; this is a repository statement, not proof about external state."
+    },
+    {
+      "path": "runtime/journal.go",
+      "sha256": "d6a4e5f14127d90e575977c079b1b128def4f7b5076411e724da77a22ecf0978",
+      "kind": "implementation",
+      "supported_fact": "Defines durable runs and hash-chained events in runtime.db; source code does not establish that any candidate run occurred."
+    },
+    {
+      "path": "runtime/sqlite_store.go",
+      "sha256": "400f464a9966e2c2a48b49777c1ba570a8f98cf15d4d0abf812286647d22995e",
+      "kind": "implementation",
+      "supported_fact": "Defines runs, events and run_operations tables; table definitions are not harvested rows."
+    },
+    {
+      "path": "docs/acceptance/m2-dogfood.md",
+      "sha256": "0e60a790e0937ff17634f194078cb126bf8019e46c2cdd4de8d5a8ecc3969c47",
+      "kind": "acceptance_narrative",
+      "supported_fact": "Describes a planning exercise and operator interventions; outside the requested explicit-mode cohort and not used as measured evidence."
+    }
+  ],
+  "access_findings": [
+    {
+      "source": "workspace file inventory",
+      "result": "No runtime.db, SQLite database, JSONL journal or candidate-specific run export found; fixtures and tests are not product observations."
+    },
+    {
+      "source": "git log -18 --format=%H %s",
+      "result": "Failed: runtime Git guard reports not a git repository. No history obtained; no guard bypass attempted."
+    },
+    {
+      "source": "external runtime state and GitHub",
+      "result": "Not accessed: outside authorized workspace / network prohibited."
+    }
+  ],
+  "unavailable_metrics": [
+    "run timestamps and elapsed durations",
+    "agent/provider/model identities for candidates",
+    "controller identities and successions",
+    "attempt and feedback counts",
+    "verified terminal outcomes and PR bindings",
+    "overlap/concurrency",
+    "accepted work count and success rate",
+    "provider usage and cost",
+    "operator-attention minutes",
+    "direct-agent baseline",
+    "leverage ratio"
+  ],
+  "boundary_assessment": {
+    "authorization.boundary_modified": false,
+    "sensitive_data.boundary_modified": false,
+    "basis": "Only report/evidence documentation added; no production, policy, permissions, credential handling or data-access implementation changed."
+  }
+}

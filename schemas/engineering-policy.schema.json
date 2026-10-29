@@ -102,6 +102,10 @@
         "statement": {
           "$ref": "#/$defs/non_empty_string"
         },
+        "material": {
+          "type": "boolean",
+          "default": false
+        },
         "required_claims": {
           "type": "array",
           "items": {

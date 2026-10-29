@@ -1,0 +1,18 @@
+{
+  "source": "Isolated test data, actual controller/socket/role/journal; no production fleet measurements",
+  "phase": "reject-lost-reply",
+  "checks": [
+    "390px exact subject, visible actions, collapsed binding; unsupported approval disabled",
+    "Response discarded after actual journal write; unknown outcome disables action; failed read stays closed; reconciliation never resends",
+    "Fresh review reads; exact digest/controller POST; real governed rejection; durable receipt; focus retained; one submission",
+    "Stop response lost after actual journal write; failed reconciliation stays closed; durable read recovers without resend",
+    "Actual socket-governed stop, exact run/controller confirmation, durable cancellation and no second submission"
+  ],
+  "captures": [
+    "confirmation-390-expanded.png",
+    "unknown-outcome-390.png",
+    "receipt-390-dark.png",
+    "stop-confirmation-390.png",
+    "cancelled-run-390.png"
+  ]
+}

@@ -1,0 +1,10 @@
+{{define "title"}}Plans{{end}}
+{{define "content"}}
+<section class="panel" id="plans-live" data-live>
+<p class="eyebrow">Bounded engineering</p><h1>Plans</h1>
+<p class="muted">Inspect proposed stages and exact assignments before authorizing execution.</p>
+<p><a href="/objectives">Start an objective →</a></p>
+<div class="graph-map">{{range .Plans}}<article class="stat"><a href="/plans/{{.ID}}"><strong>Engineering plan · revision {{.Revision}}</strong></a><span data-state="{{.State}}">{{.State}}</span><span class="muted">Approved revision: {{.ApprovedRevision}}</span><details><summary>Technical details</summary><span class="mono">{{.ID}}</span>{{range $state, $n := .Stages}}<div>{{$state}}: {{$n}}</div>{{end}}</details></article>{{else}}<p class="empty">No plans yet. Start with an existing engineering issue.</p>{{end}}</div>
+<nav class="pager">{{if .PrevLink}}<a href="{{.PrevLink}}">← Previous</a>{{end}}{{if .NextLink}}<a href="{{.NextLink}}">Next →</a>{{end}}</nav>
+</section>
+{{end}}
