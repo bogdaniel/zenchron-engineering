@@ -38,7 +38,12 @@ func TestEvaluateDecisionStates(t *testing.T) {
 		{
 			name: "stale evidence", contract: "security-sensitive.engineering-work-contract.json",
 			action: domain.Action{Type: "git.merge", Target: "main"}, capability: domain.CapabilityAvailable,
-			bundles: []string{"stale-evidence.evidence-bundle.json"}, want: domain.AuthorityStale,
+			bundles: []string{"matching-stale-evidence.evidence-bundle.json"}, want: domain.AuthorityStale,
+		},
+		{
+			name: "inapplicable stale evidence is missing", contract: "security-sensitive.engineering-work-contract.json",
+			action: domain.Action{Type: "git.merge", Target: "main"}, capability: domain.CapabilityAvailable,
+			bundles: []string{"stale-evidence.evidence-bundle.json"}, want: domain.AuthorityIncomplete,
 		},
 		{
 			name: "awaiting human approval", contract: "security-sensitive.engineering-work-contract.json",
@@ -358,4 +363,218 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestEvaluateNonMatchingEvidenceIsMissing(t *testing.T) {
+	for _, binding := range []string{"subject", "contract", "policy"} {
+		for _, lifecycle := range []domain.EvidenceLifecycleStatus{domain.EvidenceValid, domain.EvidenceStale, domain.EvidenceInvalid, domain.EvidenceIncomplete} {
+			t.Run(binding+"/"+string(lifecycle), func(t *testing.T) {
+				input := inputFor(t, "security-sensitive.engineering-work-contract.json", domain.Action{Type: "git.merge", Target: "main"}, domain.CapabilityAvailable, "security-sensitive.evidence-bundle.json")
+				for id, bundle := range input.EvidenceBundles {
+					switch binding {
+					case "subject":
+						bundle.Subject.Revision = "other"
+					case "contract":
+						bundle.Contract.Revision = "other"
+					case "policy":
+						bundle.Policy.Revision = "other"
+					}
+					for itemID, item := range bundle.Evidence {
+						item.Lifecycle.Status = lifecycle
+						reason := "Regression test lifecycle"
+						item.Lifecycle.Reason = &reason
+						bundle.Evidence[itemID] = item
+					}
+					input.EvidenceBundles[id] = bundle
+				}
+				decision := evaluate(t, input)
+				if decision.Status != domain.AuthorityIncomplete || len(decision.Stale) != 0 || !contains(decision.Missing, "claim-auth-regression-tests") || !contains(decision.Missing, "claim-security-review") {
+					t.Fatalf("decision = %#v, want missing technical evidence without stale claims", decision)
+				}
+			})
+		}
+	}
+}
+
+// nonMatchingClone is a copy of bundle bound to another subject revision, so the
+// evaluator must treat every item in it as absent whatever the item says.
+func nonMatchingClone(bundle domain.EvidenceBundle, id string, edit func(domain.EvidenceItem) domain.EvidenceItem) domain.EvidenceBundle {
+	clone := bundle
+	clone.ID = id
+	clone.Subject.Revision = "other"
+	clone.Evidence = make(map[string]domain.EvidenceItem, len(bundle.Evidence))
+	for itemID, item := range bundle.Evidence {
+		clone.Evidence[itemID] = edit(item)
+	}
+	return clone
+}
+
+func mergeInput(t *testing.T, bundles ...domain.EvidenceBundle) authority.Input {
+	t.Helper()
+	input := inputFor(t, "security-sensitive.engineering-work-contract.json", domain.Action{Type: "git.merge", Target: "main"}, domain.CapabilityAvailable)
+	for _, bundle := range bundles {
+		input.EvidenceBundles[bundle.ID] = bundle
+	}
+	return input
+}
+
+func TestEvaluateNonMatchingFailureDoesNotBlockMatchingEvidence(t *testing.T) {
+	matching := evidenceFixture(t, "security-sensitive.evidence-bundle.json")
+	failing := nonMatchingClone(matching, "evidence-other-failing", func(item domain.EvidenceItem) domain.EvidenceItem {
+		item.Result.Status = domain.EvidenceFailed
+		return item
+	})
+	alone, together := evaluate(t, mergeInput(t, matching)), evaluate(t, mergeInput(t, matching, failing))
+	if together.Status != alone.Status || len(together.Blocking) != 0 || len(together.Stale) != 0 {
+		t.Fatalf("with a non-matching failing bundle: %#v; matching alone: %#v", together, alone)
+	}
+}
+
+func TestEvaluateNonMatchingPassCannotSatisfyOrUnblockAClaim(t *testing.T) {
+	passing := evidenceFixture(t, "security-sensitive.evidence-bundle.json")
+	other := nonMatchingClone(passing, "evidence-other-passing", func(item domain.EvidenceItem) domain.EvidenceItem { return item })
+
+	failedHere := passing
+	failedHere.Evidence = map[string]domain.EvidenceItem{}
+	for id, item := range passing.Evidence {
+		if item.ClaimID == "claim-auth-regression-tests" {
+			item.Result.Status = domain.EvidenceFailed
+		}
+		failedHere.Evidence[id] = item
+	}
+	blocked := evaluate(t, mergeInput(t, failedHere, other))
+	if blocked.Status != domain.AuthorityBlocked || !contains(blocked.Blocking, "claim-auth-regression-tests") {
+		t.Fatalf("a matching failure must still block despite a non-matching pass: %#v", blocked)
+	}
+
+	stale := evaluate(t, mergeInput(t, evidenceFixture(t, "matching-stale-evidence.evidence-bundle.json"), other))
+	if stale.Status != domain.AuthorityStale || !contains(stale.Stale, "claim-auth-regression-tests") {
+		t.Fatalf("matching stale evidence must stay stale and not be satisfied by a non-matching pass: %#v", stale)
+	}
+}
+
+func TestEvaluateNonMatchingHumanApprovalIsStillAwaitingAuthority(t *testing.T) {
+	matching := evidenceFixture(t, "security-sensitive.evidence-bundle.json")
+	approval := nonMatchingClone(matching, "evidence-other-approval", func(domain.EvidenceItem) domain.EvidenceItem { return humanApproval("approver") })
+	decision := evaluate(t, mergeInput(t, matching, approval))
+	if decision.Status != domain.AuthorityAwaitingAuthority || !contains(decision.Missing, "claim-security-owner-approval") {
+		t.Fatalf("an approval bound to another subject must not count: %#v", decision)
+	}
+}
+
+// oldClaimState is the classification before a non-matching bundle was ignored:
+// such a bundle's items set stale and were never read for pass or fail. It is
+// the oracle for TestEvaluateReclassificationNeverChangesWhatIsAuthorized.
+func oldClaimState(bundles []domain.EvidenceBundle, contract domain.EngineeringWorkContract, claimID string, claim domain.RequiredClaim, producer domain.EvidenceProducer) string {
+	var hasStale, hasPassing, hasFailed bool
+	for _, bundle := range bundles {
+		for _, item := range bundle.Evidence {
+			if item.ClaimID != claimID || item.EvidenceClass != claim.EvidenceClass {
+				continue
+			}
+			if claim.EvidenceClass == "human_approval" && item.Producer.Type != domain.ProducerHuman {
+				continue
+			}
+			matches := bundle.Subject == contract.Subject &&
+				bundle.Contract == (domain.ObjectRevision{ID: contract.ID, Revision: contract.Revision}) &&
+				bundle.Policy == contract.Provenance.Policy
+			if !matches || item.Lifecycle.Status == domain.EvidenceStale {
+				hasStale = true
+				continue
+			}
+			if item.Lifecycle.Status != domain.EvidenceValid {
+				continue
+			}
+			if item.Result.Status == domain.EvidenceFailed {
+				hasFailed = true
+			}
+			if item.Result.Status == domain.EvidencePassed && (!claim.IndependentFromChangeProducer || item.Producer.ID != producer.ID) {
+				hasPassing = true
+			}
+		}
+	}
+	switch {
+	case hasFailed:
+		return "blocked"
+	case hasPassing:
+		return "satisfied"
+	case hasStale:
+		return "stale"
+	}
+	return "missing"
+}
+
+// Ignoring a non-matching bundle moves a claim only from stale to missing. Whether
+// it is satisfied or blocked, and so whether any action is authorized, is the same
+// for every combination of a matching and a non-matching item.
+func TestEvaluateReclassificationNeverChangesWhatIsAuthorized(t *testing.T) {
+	const claimID = "claim-auth-regression-tests"
+	contract := contractFixture(t, "security-sensitive.engineering-work-contract.json")
+	claim := contract.RequiredClaims[claimID]
+	base := evidenceFixture(t, "security-sensitive.evidence-bundle.json")
+	template := base.Evidence["evidence-auth-tests-passed"]
+	itemWith := func(lifecycle domain.EvidenceLifecycleStatus, result domain.EvidenceResultStatus) domain.EvidenceItem {
+		item := template
+		item.Lifecycle = domain.EvidenceLifecycle{Status: lifecycle}
+		if lifecycle != domain.EvidenceValid {
+			reason := "regression"
+			item.Lifecycle.Reason = &reason
+		}
+		item.Result.Status = result
+		return item
+	}
+	states := map[string]*domain.EvidenceItem{"absent": nil}
+	for _, lifecycle := range []domain.EvidenceLifecycleStatus{domain.EvidenceValid, domain.EvidenceStale, domain.EvidenceInvalid, domain.EvidenceIncomplete} {
+		for _, result := range []domain.EvidenceResultStatus{domain.EvidencePassed, domain.EvidenceFailed} {
+			item := itemWith(lifecycle, result)
+			states[string(lifecycle)+"/"+string(result)] = &item
+		}
+	}
+	build := func(id string, matching bool, item *domain.EvidenceItem) (domain.EvidenceBundle, bool) {
+		if item == nil {
+			return domain.EvidenceBundle{}, false
+		}
+		bundle := base
+		bundle.ID = id
+		if !matching {
+			bundle.Subject.Revision = "other"
+		}
+		bundle.Evidence = map[string]domain.EvidenceItem{"item-" + id: *item}
+		return bundle, true
+	}
+	for matchName, matchItem := range states {
+		for otherName, otherItem := range states {
+			t.Run(matchName+" + non-matching "+otherName, func(t *testing.T) {
+				var bundles []domain.EvidenceBundle
+				if bundle, ok := build("matching", true, matchItem); ok {
+					bundles = append(bundles, bundle)
+				}
+				if bundle, ok := build("other", false, otherItem); ok {
+					bundles = append(bundles, bundle)
+				}
+				input := inputFor(t, "security-sensitive.engineering-work-contract.json", domain.Action{Type: "git.merge", Target: "main"}, domain.CapabilityAvailable)
+				input.EvidenceBundles = map[string]domain.EvidenceBundle{}
+				for _, bundle := range bundles {
+					input.EvidenceBundles[bundle.ID] = bundle
+				}
+				decision := evaluate(t, input)
+				got := "satisfied"
+				switch {
+				case contains(decision.Blocking, claimID):
+					got = "blocked"
+				case contains(decision.Stale, claimID):
+					got = "stale"
+				case contains(decision.Missing, claimID):
+					got = "missing"
+				}
+				want := oldClaimState(bundles, contract, claimID, claim, changeProducer())
+				if got != want && !(want == "stale" && got == "missing") {
+					t.Fatalf("claim state %s, previously %s: only stale to missing may change", got, want)
+				}
+				if (got == "satisfied") != (want == "satisfied") || (got == "blocked") != (want == "blocked") {
+					t.Fatalf("authorization-relevant state changed: %s, previously %s", got, want)
+				}
+			})
+		}
+	}
 }
