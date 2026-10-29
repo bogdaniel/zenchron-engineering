@@ -302,6 +302,19 @@ Waiting reasons, in the vocabulary `status` prints:
 | `execution_checkpointed` | productive work was preserved when a runtime bound was reached | `resume` continues it |
 | `merged` | terminal success | nothing |
 
+**Evidence from another binding is missing, not stale.** The authority evaluator
+ignores every item in a bundle whose subject, contract or policy does not match the
+run's contract. Only evidence from a matching bundle can be `stale`, so the missing
+and stale lists of a run's authority request, and the waiting reason, change in one case: after a candidate
+or contract moves, evidence that kept its old binding used to be reported as stale
+(`fresh_evidence_required`) and is now reported as missing (`evidence_required`).
+Both leave the run active and neither authorizes anything; what is satisfied or
+blocked is unchanged. One consequence is visible: if the only outstanding
+claims are human approvals, an approval bound to the previous candidate no longer
+shows as stale, so the run is `awaiting_authority` and asks for a new approval
+bound to the current candidate. Decisions and requests recorded before this change
+are read as recorded and are not rewritten.
+
 Failures stop rather than wait, because retrying cannot change the answer:
 
 | Class | Why it stops |
