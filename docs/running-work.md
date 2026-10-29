@@ -304,8 +304,8 @@ Waiting reasons, in the vocabulary `status` prints:
 
 **Evidence from another binding is missing, not stale.** The authority evaluator
 ignores every item in a bundle whose subject, contract or policy does not match the
-run's contract. Only evidence from a matching bundle can be `stale`, so the lists
-in `autonomy authority` and the waiting reason change in one case: after a candidate
+run's contract. Only evidence from a matching bundle can be `stale`, so the missing
+and stale lists of a run's authority request, and the waiting reason, change in one case: after a candidate
 or contract moves, evidence that kept its old binding used to be reported as stale
 (`fresh_evidence_required`) and is now reported as missing (`evidence_required`).
 Both leave the run active and neither authorizes anything; what is satisfied or
