@@ -196,8 +196,9 @@ at the exact submitted head; a focused probe is never that qualification.
 
 - Run the focused tests for the behaviour you changed, `ci/static.sh`'s checks
   (`gofmt -l .`, `go vet ./...`, the Windows build and vet), and
-  `go run ./ci/evidence -plan` to see what T1 will select. Add `-race` locally only
-  when the change touches a `race: true` domain.
+  `go run ./ci/evidence -plan` to see what T1 will select. Add `-race` locally
+  whenever the change touches concurrency, as AGENTS.md requires, whether or not the
+  registry marks the domain `race: true`; that flag only decides what CI escalates.
 - Do not run the whole `go test ./...` before every pull request, and do not rerun
   a passing suite without a source change or a specific diagnostic reason. Run it
   to investigate a failure or to validate a broad interaction. GitHub's run is the

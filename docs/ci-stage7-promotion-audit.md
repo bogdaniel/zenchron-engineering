@@ -21,7 +21,7 @@ Observed 2026-10-28, `main` = `a1ea63ec5a31845735da09a953c48d9a82da45b2`
 | At least two weeks of T0/T1 shadow | **Met**: 21 days (#520 merged 2026-10-07T22:29:53Z; observed to 2026-10-28) |
 | At least 30 merged PRs | **Met**: 98 merged after #520 |
 | Representative high-risk and multi-domain changes | **Met**: see Coverage |
-| Every T1-PASS / `go`-FAIL case explained | **Met, with stated limits**: 10 observations, none a selector miss: 1 cancellation, 2 package-alarm timeouts, 3 failures of tests that passed in the T1 whole-`runtime` run on the same head, and 4 suspected flakes. No same-head rerun of `go` exists for any of them (see the classification) |
+| Every T1-PASS / `go`-not-PASS case explained | **Met, with stated limits**: 10 observations (9 `go` failures and 1 cancellation). None shows a selector miss in the current replay, which cannot rule out one under an older registry (Findings). They are 2 package-alarm timeouts, 3 failures of tests that passed in the T1 whole-`runtime` run on the same head, 4 suspected flakes and the cancellation. No rerun of `go` produced a different result on any of the nine failures |
 | Flaky failures separated from selector misses | **Done**: 2 of 98 merge commits had a red T2, both flaky/infra |
 | Controller runs the Stage 5 policy | **Met**: see Controller |
 
@@ -43,12 +43,17 @@ counts are an approximation; the historical T1 job results above are exact):
 
 ## T1 versus the full suite
 
-Per completed pull-request run (485, 484 distinct head SHAs):
+Per completed pull-request workflow run that has the T1 jobs (485 runs, 484 distinct
+head SHAs, one row per run at its latest attempt). The 50 earlier runs of the same
+window (2026-10-07T10:38Z to 2026-10-08T06:17Z) predate the `evidence` jobs and are
+excluded; all 535 runs counted `go` (see Durations). A failed or cancelled T1 job
+makes T1 non-PASS; cancellation is kept apart from failure:
 
-| | `go` PASS | `go` FAIL / cancelled |
-|-|-----------|------------------------|
-| **T1 PASS** (evidence + race aggregate) | 367 expected | **10 miss candidates** |
-| **T1 FAIL** | 15 conservative blocks | 93 expected |
+| | `go` PASS | `go` FAIL | `go` cancelled |
+|-|-----------|-----------|----------------|
+| **T1 PASS** (evidence + race aggregate) | 367 expected | **9 miss candidates** | 1 |
+| **T1 FAIL** | 14 conservative blocks | 86 expected | 0 |
+| **T1 cancelled** (no failed T1 job) | 1 | 0 | 7 |
 
 For the 98 **merged** PRs at the head that merged (the merge commit's second
 parent): all 98 had `go` PASS; 95 also had T1 PASS and 3 had T1 FAIL. The three
@@ -62,10 +67,11 @@ commits have a green push-time T2 and 2 have a red one (below); every PR in the
 window therefore has its own `go` result at the merged head and its T2 result on
 the merge commit in the CSV.
 
-### The 10 T1-PASS / `go`-FAIL observations
+### The 10 T1-PASS / `go`-not-PASS observations
 
-No case has a second attempt of the `go` job on the same head; none was retried.
-"Directly evidenced" below means the failing test **passed in a different job on
+Nine are first attempts that failed and were never rerun on the same head, so no
+retry outcome exists for them. The tenth (run 39157842462) is itself attempt 2 and
+was cancelled. "Directly evidenced" below means the failing test **passed in a different job on
 the same commit** (the T1 whole-`runtime` run), not that `go` was rerun.
 
 | Run | Head | `go` failure | T1 evidence on that head | Class | Explanation |
@@ -89,7 +95,8 @@ unrelated PRs and both red T2 runs, and one PR changed only images, but nothing
 shows those tests passing on those exact heads. The recurring timing tests
 (`TestALongTool…`, `TestNestedVerification…`) are the common cause; #689
 (`6556a03`, `2f87b41`) hardened two of those timing assumptions after the second red
-T2. No selector or registry correction was needed.
+T2. The current replay shows no selector miss; it cannot show that none occurred
+under an older registry (Findings).
 
 ### The two red post-merge T2 runs
 
@@ -101,10 +108,11 @@ T2. No selector or registry correction was needed.
 Neither reached adoption: the resolver holds trust back at the previous accepted
 revision, which is the behaviour ADR-0007 section 5 prescribes.
 
-### Conservative blocks (T1 FAIL / `go` PASS): 15
+### Conservative blocks (T1 FAIL / `go` PASS): 14
 
-11 race-aggregate failures and 1 race cancellation on heads where the plain
-suite passed, and 3 `evidence` failures. They are reported, not gated: blocking
+11 race-aggregate failures and 3 `evidence` failures on heads where the plain
+suite passed (one further run, with a cancelled race aggregate, is counted
+separately above). They are reported, not gated: blocking
 too much is the safe failure. Race-only failures are the evidence that
 `evidence-race` finds something the non-race suite does not.
 
@@ -128,8 +136,9 @@ Merged PRs at the merged head (n = 98; seconds):
   critical path of 1227 s; the other 77 have 195 s. The long tail is the
   hotspot fallback (`runtime/operations.go`, #495), not the mechanism.
 
-Redundant whole-suite executions: 535 completed pull-request `go` runs (all PRs,
-including unmerged ones) for 98 merged PRs, plus one push-time T2 run per merge.
+Redundant whole-suite executions: 535 completed pull-request `go` runs (the 485
+runs above plus the 50 that predate the `evidence` jobs; all PRs, including
+unmerged ones) for 98 merged PRs, plus one push-time T2 run per merge.
 After Stage 7 the PR-time executions are zero and the push-time one remains.
 
 ## Controller
@@ -150,15 +159,35 @@ ruleset cannot stop adoption.
    (most recently `TestSameGenerationWithoutTheLeaseHasNoAuthority`, 2026-10-28).
    Stage 7 does not make them more likely; it makes a red T2 matter at merge
    rather than at the PR. Hardening them is separate work.
-2. The replay uses today's registry. A selector miss under an older registry
-   would show as a T1-PASS/`go`-FAIL row; none appears.
-3. The conservative-block rate (15 of 485, 3.1%) is the price of failing safe.
+2. Coverage and domain counts replay each merged PR's files through today's
+   `ci/evidence/registry.json`; the registry changed during the window. The
+   historical T1 job results are exact, but whether an older registry would have
+   selected enough evidence for a PR is **not established**. A selector miss would
+   have appeared as a T1-PASS / `go`-FAIL row, and none of the nine failures is
+   attributable to one, but that is an observation, not a proof of historical
+   selector correctness. Replaying each PR with the registry at its merge commit
+   would close this.
+3. The conservative-block rate (14 of 485, 2.9%; 3.1% counting the cancelled
+   race aggregate) is the price of failing safe.
 
 ## Method
 
-`gh api repos/bogdaniel/zenchron-engineering/actions/workflows/ci.yml/runs?event=pull_request&created=>=2026-10-07`
-for the runs, `…/actions/runs/{id}/jobs` for each job's conclusion and
-`started_at`/`completed_at`, `gh pr list --state merged --search "merged:>=2026-10-07"`
-for the merged PRs, `…/actions/workflows/ci.yml/runs?branch=main&event=push` for
-T2, and `ci/evidence`'s `PlanEvidence` over each PR's files for coverage.
+All commands quote their URLs (an unquoted `>=` is a shell redirect) and paginate.
+
+```sh
+gh api --paginate \
+  'repos/bogdaniel/zenchron-engineering/actions/workflows/ci.yml/runs?event=pull_request&created=>=2026-10-07&per_page=100' \
+  --jq '.workflow_runs[]'
+gh api --paginate \
+  'repos/bogdaniel/zenchron-engineering/actions/runs/RUN_ID/jobs?filter=all&per_page=100' --jq '.jobs[]'
+gh pr list --state merged --limit 1000 --search 'merged:>=2026-10-07' \
+  --json number,mergeCommit,mergedAt
+gh api --paginate \
+  'repos/bogdaniel/zenchron-engineering/actions/workflows/ci.yml/runs?branch=main&event=push&per_page=100' \
+  --jq '.workflow_runs[]'
+```
+
+The jobs give each check's conclusion and `started_at`/`completed_at`; the merged
+head is the merge commit's second parent, because `headRefOid` can be stale for a
+merged PR. Coverage replays each PR's files through `ci/evidence`'s `PlanEvidence`.
 Durations are job wall time, not queue time.
