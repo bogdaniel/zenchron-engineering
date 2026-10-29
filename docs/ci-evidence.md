@@ -10,34 +10,34 @@ disappearing.
 | T0 | `gofmt`, `go vet`, Windows build and vet | every PR | `ci/static.sh` |
 | T1 | every package except `runtime` whole, plus the `runtime` tests the impact registry selects | every PR | `go run ./ci/evidence` |
 | T1 race | the same selected high-risk (`race: true`) test names partitioned across four isolated runners; every part must pass | every PR | `go run ./ci/evidence -race -race-shard 1/4` (and 2/4–4/4) |
-| T2 | `go test -json -timeout 45m ./...` | today: every PR and every push to `main` (the required `go` check); after Stage 7: every push to `main` only | `.github/workflows/ci.yml` |
+| T2 | `go test -json -timeout 45m ./...` | every push to `main` only (the `go` job); not run on pull requests | `.github/workflows/ci.yml` |
 | T3 | `go test -race ./...` | nightly, on request | `.github/workflows/assurance.yml` |
 
 ## Status
 
-**Stage 7 is prepared, not active.** The promotion audit
-([ci-stage7-promotion-audit.md](ci-stage7-promotion-audit.md)) finds the ADR-0007
-gates met, the ruleset payloads and the ordered, reversible migration are in
-[ci-stage7-migration.md](ci-stage7-migration.md), and
-`ci/evidence/workflow_test.go` holds the parts of `ci.yml` the ruleset and the
-trusted-revision resolver depend on. The live ruleset still requires `go` on
-every pull request until an operator applies it. The remainder of this section
-describes the state before that.
+**Stage 7 is active** (#516, [ADR-0007](adr/0007-trusted-main-from-revision-evidence.md)).
+A pull request is gated by T0, T1 and the risk-selected race shards: the
+`trusted-main-adoption` ruleset requires `evidence` and `evidence-race`, strictly,
+from GitHub Actions. The full suite runs once per merge, as the `go` job on the
+push to `main`, and is not a pull-request check. Stages 0–3 and the T3 sweep are
+in place.
 
+Merging and trusting are separate. A green pull request is eligibility to merge.
+A revision becomes `trusted_main` only with an accepted, exact-SHA, push-event T2
+(`go`) result for that commit, and controller adoption follows `trusted_main`. A
+red or pending T2 holds trust at the previous accepted revision and never blocks
+the next independent pull request.
 
-Stages 0–3 and the T3 sweep are in place. T0 and T1 run as the `evidence` and
-`evidence-race` jobs beside the required `go` check. They are **not yet a merge gate**, and the full
-suite has **not** moved post-merge.
+The ruleset no longer carries the trust proof. ADR-0007 separated `main_head` from
+`trusted_main`, so `VerifyTrustRoot` (`runtime/trust_root.go`) requires no status
+check and renaming or replacing a pull-request job cannot break adoption; the
+exact-revision resolver (`runtime/trusted_revision.go`) accepts one producer, the
+`go` job from `ci.yml` on a push to `main`. That identity, its command and its
+trigger are held by `ci/evidence/workflow_test.go`.
 
-That cannot happen in CI configuration alone. Adoption today treats the tip of
-`main` as trusted because the `trusted-main-adoption` ruleset requires the
-full-suite `go` check, strictly, on every merge (`DefaultTrustPolicy` in
-`runtime/trust_root.go`). If that check stops being required, `VerifyTrustRoot`
-refuses the ruleset and adoption fails closed. That is correct behaviour, but it
-would stop adoption. Separating `main_head` from `trusted_main`, and letting
-adoption consume `trusted_main`, changes the frozen M1-B trust root. It needs an
-ADR before the PR gate can drop the full suite (stages 4, 5 and 7). That ADR is
-ADR-0007, proposed in #528.
+The evidence behind the promotion is [ci-stage7-promotion-audit.md](ci-stage7-promotion-audit.md).
+The ordered, reversible activation and rollback procedure is
+[ci-stage7-migration.md](ci-stage7-migration.md).
 
 ## Baseline (stage 0)
 
