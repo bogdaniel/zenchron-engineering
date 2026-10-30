@@ -18,15 +18,17 @@ func TestReadStoreAndBoundedEventsPage(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for n := 1; n <= total; n++ {
-		// Interleave another stream so global_sequence cannot masquerade as sequence.
-		for _, id := range []string{"r", "other"} {
-			if _, err := store.AppendEvent(changesSinceEvent(id, n)); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
 	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Two interleaved streams, so global_sequence cannot masquerade as sequence.
+	// The journal is seeded rather than built by 2,400 AppendEvent calls, each of
+	// which replays its whole stream: that fixture cost over ten minutes under
+	// -race and none of it was the read path. The seed is the AppendEvent journal
+	// row for row (TestSeededJournalIsRowForRowTheAppendEventJournal).
+	seedDB := rawJournalDB(t, dir)
+	seedInterleavedRuns(t, seedDB, []string{"r", "other"}, total, changesSinceEvent)
+	if err := seedDB.Close(); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "runtime.db")
