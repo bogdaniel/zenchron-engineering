@@ -17,13 +17,14 @@ import (
 // run blocks until the test lets it go, so a build can be held exactly between
 // `docker create` and `docker start`.
 type lockstepDocker struct {
-	mu      sync.Mutex
-	created map[string]bool
-	creates int
-	starts  int
-	removed []string
-	started chan struct{} // closed when the first start is reached
-	gate    chan struct{} // the first start waits for this
+	mu           sync.Mutex
+	created      map[string]bool
+	creates      int
+	firstCreated string // the name of the first container the daemon created
+	starts       int
+	removed      []string
+	started      chan struct{} // closed when the first start is reached
+	gate         chan struct{} // the first start waits for this
 }
 
 func newLockstepDocker() *lockstepDocker {
@@ -47,6 +48,9 @@ func (f *lockstepDocker) Run(_ context.Context, _ string, args []string, _ strin
 			return CommandOutput{Stderr: []byte(createNameConflict)}, errors.New("exit status 1")
 		}
 		f.created[name] = true
+		if f.creates == 0 {
+			f.firstCreated = name
+		}
 		f.creates++
 	case "start":
 		f.starts++
