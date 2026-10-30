@@ -218,7 +218,7 @@ per-run observation of every listed test is kept in `costs.observations.json`, s
 a consistently slow test can be told from one spike.
 Refresh when the slowest shard drifts well away from the mean.
 
-## #516 acceptance: evidence and the one open policy decision
+## #516 acceptance: evidence and the accepted strict-invalidation policy
 
 Measured 2026-10-30 on hosted runners, after Stage 7 and the sharded gate.
 
@@ -236,7 +236,7 @@ Measured 2026-10-30 on hosted runners, after Stage 7 and the sharded gate.
 | Windows and non-Unix coverage stays in T0 | satisfied | `TestStaticEvidenceKeepsCompilingAndVettingForANonUnixTarget` |
 | No second trust database | satisfied | ADR-0007 section 1: `VerifyTrustRoot` requires no status check |
 | T2 and T3 still exist | satisfied | `go` on every push to `main`; `assurance.yml` nightly |
-| Unrelated PRs merge without repeatedly invalidating each other's evidence | **conservative, not met in the strong sense** | see below |
+| Unrelated PRs merge without repeatedly invalidating each other's evidence | **not met in the strong sense; conservative policy accepted by the owner** | see below |
 
 ### Strict up-to-date, and why a base move still reruns
 
@@ -256,15 +256,17 @@ overlapped or fell back. So domain-aware reuse as section 6 describes it could
 have skipped about 15% of updates. A rerun costs a narrow gate (66-171 s); the
 cost that remains is the update-and-wait step itself.
 
-The criterion's strong form needs a policy decision, not more CI code. Smallest
-safe options, none of which this repository applies by itself:
+The criterion's strong form (unrelated pull requests do not invalidate each
+other's evidence) is **not met**, and this document does not report it as met.
+Domain-aware evidence reuse is **not implemented**. The owner decided to keep
+strict up-to-date as an explicitly accepted conservative policy. The cost is the
+measured rerun above: a base move forces an update and a new narrow gate.
 
-1. **Keep strict (current).** Invalidation is explicit and bounded by a narrow gate.
-2. **GitHub merge queue.** The required checks run on the exact merge-group commit,
-   so evidence is exact for what lands and nobody updates branches by hand; it
-   needs a ruleset rule and a `merge_group` trigger on the evidence jobs.
-3. **Relax strictness** and accept integration risk until T2 catches it, which
-   ADR-0007 reserves for after domain-aware reuse exists.
+Rejected for now: relaxing the ruleset, which ADR-0007 reserves for after
+domain-aware reuse exists, and a custom merge queue. GitHub's merge queue is not
+available for this personal-account-owned repository; if the repository moves to
+an organization, revisit it, since it would make the required checks run on the
+exact merge-group commit and needs a ruleset rule and a `merge_group` trigger.
 
 ## Developing against these tiers
 
