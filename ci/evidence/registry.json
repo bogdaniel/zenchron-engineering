@@ -401,7 +401,6 @@
         "runtime/assurance_evidence.go",
         "runtime/file_size_*.go",
         "file-size-baseline.tsv",
-        "file-size-exceptions.tsv",
         "assurance-image/**",
         "browser-acceptance-tests.txt",
         "runtime/browser_acceptance*.go",

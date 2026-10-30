@@ -132,7 +132,7 @@ func TestActiveOperatorSurfacesSelectBoundaryEvidenceNotInert(t *testing.T) {
 // build fell back to the whole runtime package (four of the last 150 merges).
 func TestDataFilesOnlyVerificationReadsSelectVerificationNotTheWholePackage(t *testing.T) {
 	reg, repo, _ := loadReal(t)
-	for _, path := range []string{"file-size-baseline.tsv", "file-size-exceptions.tsv", "assurance-image/Dockerfile", "assurance-image/build.sh", "browser-acceptance-tests.txt"} {
+	for _, path := range []string{"file-size-baseline.tsv", "assurance-image/Dockerfile", "assurance-image/build.sh", "browser-acceptance-tests.txt"} {
 		got := PlanEvidence(reg, repo, []string{path})
 		if got.Whole {
 			t.Errorf("%s still falls back to the whole runtime package: %v", path, got.Reasons)
