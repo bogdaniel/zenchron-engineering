@@ -348,9 +348,14 @@ func TestReadStoreRefusesMissingAndOldDatabase(t *testing.T) {
 // replays each stream through the production reducer, which refuses a bad
 // sequence, chain or hash and whose final state digest must be the one recorded.
 //
-// It handles events whose reduction leaves the state digest unchanged (the
-// state digest excludes the cursor, so a payload-free candidate.changed keeps
-// the empty run's digest). The final replay refuses anything else.
+// It is a fixture for payload-free candidate.changed events, not a general
+// journal writer or validator. For those events the state digest is the same
+// before and after every event (it excludes the cursor), so every recorded
+// intermediate digest is the empty run's. The final replay checks the sequence,
+// the chain, every event hash and that the last recorded digest equals the
+// replayed one; it does not check each intermediate digest, so an event type
+// whose state changes and later returns to its start would pass it. Use it for
+// other event types only after extending the equivalence test below to them.
 func seedInterleavedRuns(t *testing.T, db *sql.DB, runIDs []string, total int, event func(runID string, n int) EngineeringEvent) {
 	t.Helper()
 	runs := map[string]EngineeringRun{}
