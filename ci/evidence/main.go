@@ -62,6 +62,10 @@ func (o options) validate() error {
 		return fmt.Errorf("-race-shard requires -race")
 	case o.race && (o.shard != "" || o.packages), o.shard != "" && o.packages:
 		return fmt.Errorf("-race, -shard and -packages each select a different slice of the evidence; pass one")
+	// -plan prints and exits before any test runs, so beside a slice it would
+	// make that slice's job green having run nothing.
+	case o.planOnly && (o.race || o.shard != "" || o.packages):
+		return fmt.Errorf("-plan only prints the plan and cannot be combined with -race, -shard or -packages")
 	}
 	return nil
 }

@@ -170,10 +170,19 @@ func aggregateCommand(parts []string) string {
 // shardedJobs are the matrix jobs whose shards must be exactly 1..N of the N the
 // command partitions by. A matrix that drops a shard, or a command whose N
 // outgrows the matrix, silently stops running part of the selected evidence.
-var shardedJobs = []struct{ job, flag string }{
+// flags is the whole of what selects the slice: -race-shard alone would end in
+// "-shard" and must not stand in for the plain runtime slice.
+var shardedJobs = []struct{ job, flags string }{
 	{"evidence-runtime", "-shard"},
-	{"evidence-race-parts", "-race-shard"},
+	{"evidence-race-parts", "-race -race-shard"},
 }
+
+// Every evidence command is one exact line. A substring check accepts -plan,
+// which makes the runner print the plan and exit green without running a test.
+const (
+	staticCommand   = "ci/static.sh"
+	packagesCommand = `go run ./ci/evidence -packages -base "$BASE_REF"`
+)
 
 // checkTriggers: the workflow runs on a push to main (the T2 event) and on every
 // pull request, and on nothing else. The branch filter belongs to its own event.
@@ -257,39 +266,33 @@ func checkEvidenceJobs(w workflowFile) error {
 			errs = append(errs, fmt.Errorf("the %s aggregate must run exactly %q, got %v", aggregate.check, want, job.Runs))
 		}
 	}
-	if static, found := w.Jobs["evidence-static"]; found && !contains(static.Runs, "ci/static.sh") {
-		errs = append(errs, errors.New("the pull request static job dropped T0"))
-	}
-	if packages, found := w.Jobs["evidence-packages"]; found && !slices.ContainsFunc(packages.Runs, func(run string) bool { return strings.Contains(run, "go run ./ci/evidence -packages ") }) {
-		errs = append(errs, errors.New("the pull request packages job no longer runs the non-runtime packages"))
+	for name, command := range map[string]string{"evidence-static": staticCommand, "evidence-packages": packagesCommand} {
+		if job, found := w.Jobs[name]; found && !slices.Equal(job.Runs, []string{command}) {
+			errs = append(errs, fmt.Errorf("job %q must run exactly %q, got %v", name, command, job.Runs))
+		}
 	}
 	for _, sharded := range shardedJobs {
 		if job, found := w.Jobs[sharded.job]; found {
-			errs = append(errs, checkShards(sharded.job, sharded.flag, job))
+			errs = append(errs, checkShards(sharded.job, sharded.flags, job))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// checkShards: the job's matrix is exactly 1..N and its one evidence command
-// partitions by the same N, so the shards are the whole selection.
-func checkShards(name, flag string, job *workflowJob) error {
-	pattern := regexp.MustCompile(regexp.QuoteMeta(flag+` "${{ matrix.shard }}/`) + `(\d+)"`)
-	var counts []string
-	for _, run := range job.Runs {
-		if match := pattern.FindStringSubmatch(run); match != nil {
-			counts = append(counts, match[1])
-		}
-	}
-	if len(counts) != 1 {
-		return fmt.Errorf("job %q must partition by `%s \"${{ matrix.shard }}/N\"` exactly once, found %d", name, flag, len(counts))
+// checkShards: the job runs exactly one evidence command, of exactly the shape
+// `go run ./ci/evidence <flags> "${{ matrix.shard }}/N" -base "$BASE_REF"`, and
+// its matrix is exactly 1..N, so the shards are the whole selection.
+func checkShards(name, flags string, job *workflowJob) error {
+	shape := regexp.MustCompile(`^go run \./ci/evidence ` + regexp.QuoteMeta(flags+` "${{ matrix.shard }}/`) + `(\d+)" -base "\$BASE_REF"$`)
+	if len(job.Runs) != 1 || !shape.MatchString(job.Runs[0]) {
+		return fmt.Errorf("job %q must run exactly `go run ./ci/evidence %s \"${{ matrix.shard }}/N\" -base \"$BASE_REF\"`, got %v", name, flags, job.Runs)
 	}
 	var want []string
-	for shard := 1; shard <= atoi(counts[0]); shard++ {
+	for shard := 1; shard <= atoi(shape.FindStringSubmatch(job.Runs[0])[1]); shard++ {
 		want = append(want, fmt.Sprint(shard))
 	}
 	if !slices.Equal(job.Matrix, want) {
-		return fmt.Errorf("job %q partitions by %s but its matrix is %v, not %v: part of the selected evidence would not run", name, counts[0], job.Matrix, want)
+		return fmt.Errorf("job %q partitions by %d but its matrix is %v, not %v: part of the selected evidence would not run", name, len(want), job.Matrix, want)
 	}
 	return nil
 }
@@ -355,6 +358,13 @@ func TestTheWorkflowChecksRejectTheirNegativeMutations(t *testing.T) {
 		"evidence aggregate is skipped when a part fails":     withJobCondition(text, "evidence", "github.event_name == 'pull_request'"),
 		"static evidence dropped":                             strings.Replace(text, "run: ci/static.sh\n\n  evidence-packages", "run: echo skipped\n\n  evidence-packages", 1),
 		"the packages are no longer run":                      strings.Replace(text, "-packages -base", "-plan -base", 1),
+		"the packages job only prints its plan":               strings.Replace(text, "-packages -base", "-packages -plan -base", 1),
+		"a runtime shard only prints its plan":                strings.Replace(text, `-shard "${{ matrix.shard }}/4" -base`, `-shard "${{ matrix.shard }}/4" -plan -base`, 1),
+		"a race shard only prints its plan":                   strings.Replace(text, `-race-shard "${{ matrix.shard }}/8" -base`, `-race-shard "${{ matrix.shard }}/8" -plan -base`, 1),
+		"the race shard stands in for the plain slice":        strings.Replace(text, `-shard "${{ matrix.shard }}/4"`, `-race -race-shard "${{ matrix.shard }}/4"`, 1),
+		"the plain slice stands in for the race slice":        strings.Replace(text, `-race -race-shard "${{ matrix.shard }}/8"`, `-shard "${{ matrix.shard }}/8"`, 1),
+		"the race flag is dropped from the race shards":       strings.Replace(text, `-race -race-shard`, `-race-shard`, 1),
+		"the static job only echoes":                          strings.Replace(text, "run: ci/static.sh", "run: ci/static.sh || true", 1),
 		"a runtime shard is dropped from the matrix":          strings.Replace(text, "shard: [1, 2, 3, 4]\n    steps:\n      - name: Checkout\n        uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n\n      - name: Set up Go\n        uses: actions/setup-go@v5\n        with:\n          go-version-file: go.mod\n          cache: true\n\n      - name: Selected runtime", "shard: [1, 2, 3]\n    steps:\n      - name: Checkout\n        uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n\n      - name: Set up Go\n        uses: actions/setup-go@v5\n        with:\n          go-version-file: go.mod\n          cache: true\n\n      - name: Selected runtime", 1),
 		"a race shard is dropped from the matrix":             strings.Replace(text, "shard: [1, 2, 3, 4, 5, 6, 7, 8]", "shard: [1, 2, 3, 4, 5, 6, 7]", 1),
 		"the runtime partition outgrows its matrix":           strings.Replace(text, `-shard "${{ matrix.shard }}/4"`, `-shard "${{ matrix.shard }}/5"`, 1),

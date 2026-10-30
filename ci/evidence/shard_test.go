@@ -175,12 +175,16 @@ func TestOptionsRefuseSlicesThatWouldBeConfused(t *testing.T) {
 		"race and shard":          {race: true, shard: "1/4"},
 		"race and packages":       {race: true, packages: true},
 		"shard and packages":      {shard: "1/4", packages: true},
+		"plan and packages":       {planOnly: true, packages: true},
+		"plan and shard":          {planOnly: true, shard: "1/4"},
+		"plan and race":           {planOnly: true, race: true},
+		"plan and race shard":     {planOnly: true, race: true, raceShard: "1/8"},
 	} {
 		if opts.validate() == nil {
 			t.Errorf("%s was accepted", name)
 		}
 	}
-	for _, ok := range []options{{}, {race: true, raceShard: "1/8"}, {shard: "2/4"}, {packages: true}} {
+	for _, ok := range []options{{}, {planOnly: true}, {race: true, raceShard: "1/8"}, {shard: "2/4"}, {packages: true}} {
 		if err := ok.validate(); err != nil {
 			t.Errorf("%+v: %v", ok, err)
 		}
