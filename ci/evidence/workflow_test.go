@@ -13,6 +13,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,7 @@ import (
 type workflowJob struct {
 	If     string
 	Needs  string
+	Matrix []string
 	Runs   []string
 	onPush bool
 	onPull bool
@@ -88,6 +90,11 @@ func parseWorkflow(text string) (workflowFile, error) {
 			if job.Needs == "" {
 				return file, fmt.Errorf("a block-style needs list is not a shape this test reads: %q", trimmed)
 			}
+		case section == "jobs" && job != nil && strings.HasPrefix(trimmed, "shard:"):
+			list := strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "shard:")), "[]")
+			for _, shard := range strings.Split(list, ",") {
+				job.Matrix = append(job.Matrix, strings.TrimSpace(shard))
+			}
 		case section == "jobs" && job != nil && strings.Contains(trimmed, "run:"):
 			command := strings.TrimSpace(trimmed[strings.Index(trimmed, "run:")+len("run:"):])
 			if command == "|" || command == ">" {
@@ -129,10 +136,44 @@ func loadWorkflow(t *testing.T) workflowFile {
 func (j *workflowJob) runsOnPullRequest() bool { return j.onPull }
 func (j *workflowJob) runsOnPush() bool        { return j.onPush }
 
-const (
-	fullSuiteCommand = "go test -json -timeout 45m ./..."
-	aggregateCommand = `test "${{ needs.evidence-race-parts.result }}" = success`
-)
+const fullSuiteCommand = "go test -json -timeout 45m ./..."
+
+// needList reads `needs: a` and `needs: [a, b]`.
+func (j *workflowJob) needList() []string {
+	var needs []string
+	for _, need := range strings.Split(strings.Trim(j.Needs, "[]"), ",") {
+		needs = append(needs, strings.TrimSpace(need))
+	}
+	return needs
+}
+
+// evidenceAggregates maps each check a ruleset requires to the jobs whose
+// results it aggregates, in the order its command tests them.
+var evidenceAggregates = []struct {
+	check string
+	parts []string
+}{
+	{"evidence", []string{"evidence-static", "evidence-packages", "evidence-runtime"}},
+	{"evidence-race", []string{"evidence-race-parts"}},
+}
+
+// aggregateCommand is the only command an aggregate may run: every part must
+// have succeeded, so a failed, cancelled or skipped part fails the check.
+func aggregateCommand(parts []string) string {
+	tests := make([]string, len(parts))
+	for i, part := range parts {
+		tests[i] = `test "${{ needs.` + part + `.result }}" = success`
+	}
+	return strings.Join(tests, " && ")
+}
+
+// shardedJobs are the matrix jobs whose shards must be exactly 1..N of the N the
+// command partitions by. A matrix that drops a shard, or a command whose N
+// outgrows the matrix, silently stops running part of the selected evidence.
+var shardedJobs = []struct{ job, flag string }{
+	{"evidence-runtime", "-shard"},
+	{"evidence-race-parts", "-race-shard"},
+}
 
 // checkTriggers: the workflow runs on a push to main (the T2 event) and on every
 // pull request, and on nothing else. The branch filter belongs to its own event.
@@ -187,33 +228,75 @@ func checkFullSuiteIdentity(w workflowFile) error {
 // must be exactly the comparison, so a trailing `|| true` cannot absorb a failure.
 func checkEvidenceJobs(w workflowFile) error {
 	var errs []error
-	for _, name := range []string{"evidence", "evidence-race-parts", "evidence-race"} {
+	require := func(name string) *workflowJob {
 		job, found := w.Jobs[name]
 		if !found {
 			errs = append(errs, fmt.Errorf("job %q is missing", name))
-			continue
+			return nil
 		}
 		if !job.runsOnPullRequest() || job.runsOnPush() {
 			errs = append(errs, fmt.Errorf("job %q must run on pull requests only (if: %q)", name, job.If))
 		}
+		return job
 	}
-	aggregate, found := w.Jobs["evidence-race"]
-	if !found {
-		return errors.Join(errs...)
+	for _, aggregate := range evidenceAggregates {
+		job := require(aggregate.check)
+		for _, part := range aggregate.parts {
+			require(part)
+		}
+		if job == nil {
+			continue
+		}
+		if !slices.Equal(job.needList(), aggregate.parts) {
+			errs = append(errs, fmt.Errorf("the %s aggregate needs %v, not its parts %v", aggregate.check, job.needList(), aggregate.parts))
+		}
+		if !strings.HasPrefix(job.If, "always()") {
+			errs = append(errs, fmt.Errorf("the %s aggregate is skipped when a part fails (if: %q), and a skipped required check reads as passed", aggregate.check, job.If))
+		}
+		if want := aggregateCommand(aggregate.parts); !slices.Equal(job.Runs, []string{want}) {
+			errs = append(errs, fmt.Errorf("the %s aggregate must run exactly %q, got %v", aggregate.check, want, job.Runs))
+		}
 	}
-	if aggregate.Needs != "evidence-race-parts" {
-		errs = append(errs, fmt.Errorf("the race aggregate needs %q, not its parts", aggregate.Needs))
+	if static, found := w.Jobs["evidence-static"]; found && !contains(static.Runs, "ci/static.sh") {
+		errs = append(errs, errors.New("the pull request static job dropped T0"))
 	}
-	if !strings.HasPrefix(aggregate.If, "always()") {
-		errs = append(errs, fmt.Errorf("the race aggregate is skipped when a part fails (if: %q), and a skipped required check reads as passed", aggregate.If))
+	if packages, found := w.Jobs["evidence-packages"]; found && !slices.ContainsFunc(packages.Runs, func(run string) bool { return strings.Contains(run, "go run ./ci/evidence -packages ") }) {
+		errs = append(errs, errors.New("the pull request packages job no longer runs the non-runtime packages"))
 	}
-	if !slices.Equal(aggregate.Runs, []string{aggregateCommand}) {
-		errs = append(errs, fmt.Errorf("the race aggregate must run exactly %q, got %v", aggregateCommand, aggregate.Runs))
-	}
-	if evidence, found := w.Jobs["evidence"]; found && !contains(evidence.Runs, "ci/static.sh") {
-		errs = append(errs, errors.New("the pull request evidence job dropped T0"))
+	for _, sharded := range shardedJobs {
+		if job, found := w.Jobs[sharded.job]; found {
+			errs = append(errs, checkShards(sharded.job, sharded.flag, job))
+		}
 	}
 	return errors.Join(errs...)
+}
+
+// checkShards: the job's matrix is exactly 1..N and its one evidence command
+// partitions by the same N, so the shards are the whole selection.
+func checkShards(name, flag string, job *workflowJob) error {
+	pattern := regexp.MustCompile(regexp.QuoteMeta(flag+` "${{ matrix.shard }}/`) + `(\d+)"`)
+	var counts []string
+	for _, run := range job.Runs {
+		if match := pattern.FindStringSubmatch(run); match != nil {
+			counts = append(counts, match[1])
+		}
+	}
+	if len(counts) != 1 {
+		return fmt.Errorf("job %q must partition by `%s \"${{ matrix.shard }}/N\"` exactly once, found %d", name, flag, len(counts))
+	}
+	var want []string
+	for shard := 1; shard <= atoi(counts[0]); shard++ {
+		want = append(want, fmt.Sprint(shard))
+	}
+	if !slices.Equal(job.Matrix, want) {
+		return fmt.Errorf("job %q partitions by %s but its matrix is %v, not %v: part of the selected evidence would not run", name, counts[0], job.Matrix, want)
+	}
+	return nil
+}
+
+func atoi(text string) int {
+	n, _ := strconv.Atoi(text)
+	return n
 }
 
 func TestTheWorkflowTriggersAreTheEventsTheEvidenceModelNeeds(t *testing.T) {
@@ -265,8 +348,16 @@ func TestTheWorkflowChecksRejectTheirNegativeMutations(t *testing.T) {
 		"evidence runs everywhere except a pull request":      withJobCondition(text, "evidence", "github.event_name != 'pull_request'"),
 		"push filtered to dev, pull_request filtered to main": strings.Replace(strings.Replace(text, "branches: [main]", "branches: [dev]", 1), "\n  pull_request:\n", "\n  pull_request:\n    branches: [main]\n", 1),
 		"no pull_request trigger":                             strings.Replace(text, "\n  pull_request:\n", "\n", 1),
-		"race aggregate ignores failure":                      strings.Replace(text, aggregateCommand, aggregateCommand+" || true", 1),
+		"race aggregate ignores failure":                      strings.Replace(text, aggregateCommand([]string{"evidence-race-parts"}), aggregateCommand([]string{"evidence-race-parts"})+" || true", 1),
 		"race aggregate continues on error":                   strings.Replace(text, "\n  evidence-race:\n", "\n  evidence-race:\n    continue-on-error: true\n", 1),
+		"evidence aggregate ignores a part":                   strings.Replace(text, ` && test "${{ needs.evidence-runtime.result }}" = success`, "", 1),
+		"evidence aggregate does not wait for the runtime":    strings.Replace(text, "needs: [evidence-static, evidence-packages, evidence-runtime]", "needs: [evidence-static, evidence-packages]", 1),
+		"evidence aggregate is skipped when a part fails":     withJobCondition(text, "evidence", "github.event_name == 'pull_request'"),
+		"static evidence dropped":                             strings.Replace(text, "run: ci/static.sh\n\n  evidence-packages", "run: echo skipped\n\n  evidence-packages", 1),
+		"the packages are no longer run":                      strings.Replace(text, "-packages -base", "-plan -base", 1),
+		"a runtime shard is dropped from the matrix":          strings.Replace(text, "shard: [1, 2, 3, 4]\n    steps:\n      - name: Checkout\n        uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n\n      - name: Set up Go\n        uses: actions/setup-go@v5\n        with:\n          go-version-file: go.mod\n          cache: true\n\n      - name: Selected runtime", "shard: [1, 2, 3]\n    steps:\n      - name: Checkout\n        uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n\n      - name: Set up Go\n        uses: actions/setup-go@v5\n        with:\n          go-version-file: go.mod\n          cache: true\n\n      - name: Selected runtime", 1),
+		"a race shard is dropped from the matrix":             strings.Replace(text, "shard: [1, 2, 3, 4, 5, 6, 7, 8]", "shard: [1, 2, 3, 4, 5, 6, 7]", 1),
+		"the runtime partition outgrows its matrix":           strings.Replace(text, `-shard "${{ matrix.shard }}/4"`, `-shard "${{ matrix.shard }}/5"`, 1),
 		"full suite waits on a block-style dependency":        strings.Replace(text, "\n  go:\n", "\n  go:\n    needs:\n      - evidence\n", 1),
 		"full suite step skipped":                             strings.Replace(text, "      - name: Test\n", "      - name: Test\n        if: false\n", 1),
 	}
