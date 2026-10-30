@@ -397,7 +397,10 @@ func (s DockerSandbox) operationRecord(ctx context.Context) (dockerOperationReco
 	if err != nil {
 		return dockerOperationRecord{}, "", err
 	}
-	nameDigest := sha256.Sum256([]byte("zenchron-container\x00" + s.OperationID + "\x00" + s.Image + "\x00" + endpoint + "\x00" + daemonID))
+	// The state directory is the controller's own namespace: two controllers on
+	// one daemon share operation, image, endpoint and daemon, and must still never
+	// share a container (#708). It is cleaned so one directory has one spelling.
+	nameDigest := sha256.Sum256([]byte("zenchron-container\x00" + s.OperationID + "\x00" + s.Image + "\x00" + endpoint + "\x00" + daemonID + "\x00" + filepath.Clean(s.StateDir)))
 	return dockerOperationRecord{OperationID: s.OperationID, ContainerName: "zenchron-" + hex.EncodeToString(nameDigest[:12]), Image: s.Image, Endpoint: endpoint, DaemonID: daemonID, Phase: "planned"}, path, nil
 }
 
