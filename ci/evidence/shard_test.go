@@ -212,7 +212,10 @@ func TestTheCostTableNamesRealTestsAndIsValid(t *testing.T) {
 	}
 	for name, broken := range map[string]string{
 		"not json":               `{`,
-		"old schema":             `{"schema":"zenchron-evidence-costs/1","plain":` + profile + `,"race":` + profile + `}`,
+		"old schema":             `{"schema":"zenchron-evidence-costs/1","unit":"seconds","plain":` + profile + `,"race":` + profile + `}`,
+		"wrong unit":             `{"schema":"zenchron-evidence-costs/2","unit":"milliseconds","plain":` + profile + `,"race":` + profile + `}`,
+		"no unit":                `{"schema":"zenchron-evidence-costs/2","plain":` + profile + `,"race":` + profile + `}`,
+		"no aggregation":         `{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `,"race":{` + noAggregation + `,"default":1}}`,
 		"no race profile":        `{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `}`,
 		"no provenance":          `{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `,"race":{"default":1}}`,
 		"zero default":           `{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `,"race":{` + source + `,"default":0}}`,
