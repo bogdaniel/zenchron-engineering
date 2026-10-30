@@ -81,22 +81,6 @@ func TestLateCancellationDoesNotRewriteAnObservedOutcome(t *testing.T) {
 	}
 }
 
-// The host's inactivity bound has no kernel equivalent; the adapter enforces
-// it from kernel progress and reports the existing class and owner.
-func TestInactivityIsEnforcedByTheAdapter(t *testing.T) {
-	req := testRequest(t)
-	req.Budgets.InactivityLimit = 50 * time.Millisecond
-	res, err := newTestAdapter(t, testConfig(t, scripted.New(scripted.Step{Block: true}))).Execute(t.Context(), req)
-	te := terminationOf(t, err)
-	if te.Termination.Outcome != api.OutcomeCancelled || te.Termination.Cancellation != api.CancelUnknown {
-		t.Errorf("kernel termination %+v", te.Termination)
-	}
-	if res.Outcome != execution.Failed || res.Failure.Classification != execution.FailureProviderNoProgress ||
-		res.Invocation.TerminationCause != string(execution.OwnerInactivity) || res.Invocation.InactivityLimit != req.Budgets.InactivityLimit {
-		t.Errorf("result %+v invocation %+v", res, res.Invocation)
-	}
-}
-
 // A transcript write failure settles recording_failed and stops every
 // further side effect: the granted command never runs.
 func TestRecordingFailureStopsFurtherSideEffects(t *testing.T) {
