@@ -91,25 +91,43 @@ func TestAPartitionDependsOnlyOnTheNamesAndTheCosts(t *testing.T) {
 	}
 }
 
+// loads returns the summed cost of each shard.
+func loads(shards [][]string, costs Costs) (loads []float64, largest float64) {
+	for _, shard := range shards {
+		load := 0.0
+		for _, test := range shard {
+			load += costs.of(test)
+			largest = max(largest, costs.of(test))
+		}
+		loads = append(loads, load)
+	}
+	return loads, largest
+}
+
+// The race shards used to be dealt round robin over the name-sorted selection.
 func TestShardsAreBalancedByCostNotByCount(t *testing.T) {
 	costs := realCosts(t)
-	all := selections(t)["hotspot plain"]
-	for _, count := range []int{4, 8} {
-		shards := Partition(all, costs, count)
-		var total, heaviest, largest float64
-		for _, shard := range shards {
-			load := 0.0
-			for _, test := range shard {
-				load += costs.of(test)
-				largest = max(largest, costs.of(test))
+	for name, all := range map[string][]string{"plain": selections(t)["hotspot plain"], "race": selections(t)["hotspot race"]} {
+		for _, count := range []int{4, 8} {
+			byName := make([][]string, count)
+			for i, test := range all {
+				byName[i%count] = append(byName[i%count], test)
 			}
-			total += load
-			heaviest = max(heaviest, load)
-		}
-		// Longest-processing-time dealing leaves the heaviest shard within one
-		// test of the mean; a split by count (the previous round robin) does not.
-		if mean := total / float64(count); heaviest > mean+largest {
-			t.Errorf("%d shards: heaviest %.0fs against a mean of %.0fs and a largest test of %.0fs", count, heaviest, mean, largest)
+			before, _ := loads(byName, costs)
+			after, largest := loads(Partition(all, costs, count), costs)
+			total := 0.0
+			for _, load := range after {
+				total += load
+			}
+			// Longest-processing-time dealing leaves the heaviest shard within
+			// one test of the mean, and no worse than the split it replaced.
+			if mean := total / float64(count); slices.Max(after) > mean+largest {
+				t.Errorf("%s into %d: heaviest %.0fs against a mean of %.0fs and a largest test of %.0fs", name, count, slices.Max(after), mean, largest)
+			}
+			if slices.Max(after) > slices.Max(before) {
+				t.Errorf("%s into %d: the heaviest shard is %.0fs, worse than the %.0fs of dealing by name", name, count, slices.Max(after), slices.Max(before))
+			}
+			t.Logf("%s into %d: heaviest shard %.0fs (mean %.0fs); dealing by name gave %.0fs", name, count, slices.Max(after), total/float64(count), slices.Max(before))
 		}
 	}
 }
