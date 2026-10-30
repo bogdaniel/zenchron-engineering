@@ -84,10 +84,9 @@ func PublishReview(ctx context.Context, deps ReviewPublicationDeps, repo GitHubR
 	// before this call would otherwise submit (#233 P1 follow-up): a
 	// confirmed loss refuses early rather than racing a POST this caller can
 	// no longer durably account for.
-	renewalStop := make(chan struct{})
 	var claimLost atomic.Bool
-	go renewReviewClaimWhile(deps.Store, claimKey, token, deps.Clock, renewalStop, &claimLost)
-	defer close(renewalStop)
+	stopRenewal := startReviewClaimRenewal(deps.Store, claimKey, token, deps.Clock, &claimLost)
+	defer stopRenewal()
 
 	if existing, found, err := deps.Store.ReviewPublication(decision.ID); err != nil {
 		return review.Publication{}, err

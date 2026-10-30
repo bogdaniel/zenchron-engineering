@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -91,6 +92,25 @@ func renewReviewClaimWhile(store *SQLiteOperationStore, claimKey, token string, 
 		case <-stop:
 			return
 		}
+	}
+}
+
+// startReviewClaimRenewal runs renewReviewClaimWhile and returns the function
+// that ends it. The function does not return until the goroutine has exited, so
+// nothing the renewal reads (the store, the clock, the test hook) is touched
+// after the claimed section it served has returned. Calling it again is a no-op.
+func startReviewClaimRenewal(store *SQLiteOperationStore, claimKey, token string, clock Clock, lost *atomic.Bool) (stop func()) {
+	stopped, exited := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(exited)
+		renewReviewClaimWhile(store, claimKey, token, clock, stopped, lost)
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(stopped)
+			<-exited
+		})
 	}
 }
 
@@ -313,16 +333,15 @@ func RunIndependentReview(ctx context.Context, in RunIndependentReviewInput) (Ru
 	// itself proof another owner already holds the key) - checked below
 	// before anything is admitted, so a lease lost mid-invocation is
 	// discovered rather than silently treated as still held.
-	renewalStop := make(chan struct{})
 	var claimLost atomic.Bool
-	go renewReviewClaimWhile(in.Store, reviewID, token, in.Clock, renewalStop, &claimLost)
+	stopRenewal := startReviewClaimRenewal(in.Store, reviewID, token, in.Clock, &claimLost)
 	invocation, err := InvokeReviewer(ctx, ReviewInvocationInput{
 		ReviewID: reviewID, Packet: packet, Workspace: workspace,
 		Agent: in.Reviewer, Provider: in.Provider, Artifacts: ArtifactStore{Root: filepath.Join(in.StateDir, "artifacts")},
 		StateDir: in.StateDir, ControllerID: in.ControllerID, Model: in.Model,
 		Instructions: in.Instructions, Budgets: in.Budgets,
 	})
-	close(renewalStop)
+	stopRenewal()
 	if err != nil {
 		return RunIndependentReviewOutput{}, err
 	}
