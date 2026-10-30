@@ -34,7 +34,9 @@ type ObservedChange struct {
 // NormalizeObservedChange validates and canonicalizes observed paths using
 // slash-based repository semantics. Paths are repository-relative; leading
 // "./" and redundant slash or dot segments are normalized, while traversal,
-// absolute, empty, dot-only, backslash, and NUL-containing paths are rejected.
+// absolute, empty, dot-only, backslash, and NUL-containing paths are rejected,
+// as is a final "**" segment, which a contract scope would read as recursive.
+// Glob characters elsewhere are literal filename characters and are kept.
 func NormalizeObservedChange(change ObservedChange) (ObservedChange, error) {
 	normalized := ObservedChange{PathsKnown: change.PathsKnown, Paths: make([]string, len(change.Paths))}
 	for i, raw := range change.Paths {
@@ -58,6 +60,9 @@ func NormalizeObservedChange(change ObservedChange) (ObservedChange, error) {
 		cleaned := path.Clean(raw)
 		if cleaned == "." || cleaned == "" {
 			return ObservedChange{}, fmt.Errorf("observed path %q is not a repository file", raw)
+		}
+		if pathpattern.IsAmbiguousLiteral(cleaned) {
+			return ObservedChange{}, fmt.Errorf("observed path %q ends in /** and cannot be told from a recursive pattern", raw)
 		}
 		normalized.Paths[i] = cleaned
 	}

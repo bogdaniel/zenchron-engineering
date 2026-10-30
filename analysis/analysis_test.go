@@ -108,6 +108,19 @@ func TestObservedPathsRejectUnsafeRepositorySpellings(t *testing.T) {
 	}
 }
 
+func TestNormalizeObservedChangeKeepsGlobCharactersAndRefusesRecursiveLookalikes(t *testing.T) {
+	kept := []string{"app/[id]/page.tsx", "a{b}.go", "a:b?.go", "dir/*", "dir/**x"}
+	normalized, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: kept, PathsKnown: true})
+	if err != nil || strings.Join(normalized.Paths, ",") != strings.Join(kept, ",") {
+		t.Fatalf("literal glob-character filenames altered: %#v %v", normalized.Paths, err)
+	}
+	for _, ambiguous := range []string{"dir/**", "**", "./dir/**", "a/b/../c/**"} {
+		if _, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: []string{ambiguous}, PathsKnown: true}); err == nil {
+			t.Errorf("%q must be refused: scope would read it as a recursive pattern", ambiguous)
+		}
+	}
+}
+
 func TestNormalizeObservedChangeCanonicalizesLeadingDotSlash(t *testing.T) {
 	normalized, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: []string{"./internal/auth/session.go"}, PathsKnown: true})
 	if err != nil {
