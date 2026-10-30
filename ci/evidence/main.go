@@ -116,7 +116,7 @@ func run(opts options) error {
 		if len(raceTests) == 0 {
 			return nil
 		}
-		return execute(root, [][]string{{"go", "test", "-race", "-timeout", raceTimeout, "-run", RunPattern(raceTests), "./" + reg.FocusedPackage}})
+		return execute(root, [][]string{{"go", "test", "-race", "-json", "-timeout", raceTimeout, "-run", RunPattern(raceTests), "./" + reg.FocusedPackage}})
 	case opts.packages:
 		return errors.Join(execute(root, packageCommands(reg.FocusedPackage, repo.PackageDirs)), verifyEveryTestIsSeen(root, reg.FocusedPackage, repo))
 	case opts.shard != "":
