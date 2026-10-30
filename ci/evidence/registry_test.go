@@ -126,3 +126,24 @@ func TestActiveOperatorSurfacesSelectBoundaryEvidenceNotInert(t *testing.T) {
 		t.Fatalf("cross-domain schema registry lost whole-package race escalation: %+v", got)
 	}
 }
+
+// Files that only the verification tests read are that domain's inputs, not an
+// unknown surface: before they were mapped, editing a size ceiling or the image
+// build fell back to the whole runtime package (four of the last 150 merges).
+func TestDataFilesOnlyVerificationReadsSelectVerificationNotTheWholePackage(t *testing.T) {
+	reg, repo, _ := loadReal(t)
+	for _, path := range []string{"file-size-baseline.tsv", "assurance-image/Dockerfile", "assurance-image/build.sh", "browser-acceptance-tests.txt"} {
+		got := PlanEvidence(reg, repo, []string{path})
+		if got.Whole {
+			t.Errorf("%s still falls back to the whole runtime package: %v", path, got.Reasons)
+			continue
+		}
+		if !slices.Contains(got.Run, "TestTheAssuranceImageBasesArePinnedByDigest") {
+			t.Errorf("%s did not select the verification domain (%d tests): %v", path, len(got.Run), got.Reasons)
+		}
+	}
+	// A new file next to them is not silently covered: it is unknown, so it falls back.
+	if got := PlanEvidence(reg, repo, []string{"assurance-notes.txt"}); !got.Whole {
+		t.Error("an unmapped top-level file must still fail safe to the whole package")
+	}
+}
