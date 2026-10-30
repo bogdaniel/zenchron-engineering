@@ -3893,3 +3893,5 @@ func (r *EngineeringRuntime) executionAuthorityRevoked(operation RunOperation) (
 func reachedWorker(result ExecutionResult, execErr error) bool {
 	return execErr == nil || result.Invocation != nil || result.Executed
 }
+
+// 516 measurement only: forces the whole-runtime fallback. Never merge.
