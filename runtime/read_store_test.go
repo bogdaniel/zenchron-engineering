@@ -57,6 +57,9 @@ func TestReadStoreAndBoundedEventsPage(t *testing.T) {
 			t.Fatal("unbounded page")
 		}
 		for _, e := range events {
+			if e.RunID != "r" {
+				t.Fatalf("event %s of run %q leaked into the page of run r", e.ID, e.RunID)
+			}
 			if e.Sequence != cursor+1 {
 				t.Fatalf("gap/duplicate at %d: %d", cursor, e.Sequence)
 			}
@@ -68,6 +71,10 @@ func TestReadStoreAndBoundedEventsPage(t *testing.T) {
 	}
 	if cursor != total {
 		t.Fatal(cursor)
+	}
+	// The other stream is complete and independent of the one just paged.
+	if latest, err := reader.LatestSequence("other"); err != nil || latest != total {
+		t.Fatalf("latest sequence of the interleaved stream: %d, %v; want %d", latest, err, total)
 	}
 	if _, err := reader.Fleet(time.Now()); err != nil {
 		t.Fatal(err)
