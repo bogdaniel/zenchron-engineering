@@ -423,3 +423,48 @@ func TestPublishReviewRecoversSafelyAfterAFinalizeFailureWithoutASecondSubmissio
 		t.Fatalf("expected the attempt marker to be cleared once recovery resolved it, outstanding=%v err=%v", outstanding, err)
 	}
 }
+
+// The renewal goroutine belongs to the claimed section that started it: when the
+// section ends, the goroutine has ended. Before it was joined it could still be
+// reading reviewClaimRenewedTestHook when a test reset it, a data race the
+// -race evidence found intermittently in CI.
+func TestReviewClaimRenewalHasExitedWhenItsSectionEnds(t *testing.T) {
+	store, _ := newReviewPublishFixture(t)
+	originalInterval := reviewClaimRenewalInterval
+	reviewClaimRenewalInterval = 2 * time.Millisecond
+	defer func() { reviewClaimRenewalInterval = originalInterval }()
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	reviewClaimRenewedTestHook = func() {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+	}
+	defer func() { reviewClaimRenewedTestHook = nil }()
+
+	var lost atomic.Bool
+	stop := startReviewClaimRenewal(store, "claim", "token", nil, &lost)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the renewal never ticked")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("stop returned while the renewal goroutine was still inside a tick")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop never returned after the renewal tick finished")
+	}
+	stop() // ending twice is harmless
+}
