@@ -7,6 +7,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -16,7 +17,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -29,24 +29,56 @@ const testTimeout = "30m"
 const raceTimeout = "60m"
 
 func main() {
-	base := flag.String("base", "origin/main", "revision the branch is compared against (merge base)")
-	planOnly := flag.Bool("plan", false, "print the evidence plan without running it")
+	var opts options
+	flag.StringVar(&opts.base, "base", "origin/main", "revision the branch is compared against (merge base)")
+	flag.BoolVar(&opts.planOnly, "plan", false, "print the evidence plan without running it")
 	// The race escalation is about four times slower than the plain run, so CI
-	// runs it as a parallel job instead of adding it to T1's latency.
-	race := flag.Bool("race", false, "run only the -race escalation of high-risk domains")
-	shard := flag.String("race-shard", "", "partition the same race selection as part/count, e.g. 1/4")
+	// runs it as parallel jobs instead of adding it to T1's latency.
+	flag.BoolVar(&opts.race, "race", false, "run only the -race escalation of high-risk domains")
+	flag.StringVar(&opts.raceShard, "race-shard", "", "partition the same race selection as part/count, e.g. 1/8")
+	flag.StringVar(&opts.shard, "shard", "", "run only part/count of the selected plain runtime tests, e.g. 1/4")
+	flag.BoolVar(&opts.packages, "packages", false, "run only the packages other than runtime, and check that sharding sees every runtime test")
 	flag.Parse()
-	if err := run(*base, *planOnly, *race, *shard); err != nil {
+	if err := run(opts); err != nil {
 		fmt.Fprintln(os.Stderr, "evidence:", err)
 		os.Exit(1)
 	}
 }
 
-func run(base string, planOnly, race bool, shard string) error {
-	if shard != "" && !race {
+// options select which slice of the T1 evidence one invocation runs. With none
+// of -race, -shard and -packages it runs all of it, as a developer does locally;
+// CI runs the same evidence as parallel invocations whose union is that run.
+type options struct {
+	base             string
+	planOnly         bool
+	race             bool
+	raceShard, shard string
+	packages         bool
+}
+
+func (o options) validate() error {
+	switch {
+	case o.raceShard != "" && !o.race:
 		return fmt.Errorf("-race-shard requires -race")
+	case o.race && (o.shard != "" || o.packages), o.shard != "" && o.packages:
+		return fmt.Errorf("-race, -shard and -packages each select a different slice of the evidence; pass one")
+	// -plan prints and exits before any test runs, so beside a slice it would
+	// make that slice's job green having run nothing.
+	case o.planOnly && (o.race || o.shard != "" || o.packages):
+		return fmt.Errorf("-plan only prints the plan and cannot be combined with -race, -shard or -packages")
+	}
+	return nil
+}
+
+func run(opts options) error {
+	if err := opts.validate(); err != nil {
+		return err
 	}
 	reg, err := LoadRegistry()
+	if err != nil {
+		return err
+	}
+	costs, err := LoadCosts()
 	if err != nil {
 		return err
 	}
@@ -58,65 +90,71 @@ func run(base string, planOnly, race bool, shard string) error {
 	if err != nil {
 		return err
 	}
-	diff, err := output(root, "git", "diff", "--name-only", "--no-renames", base+"...HEAD")
+	diff, err := output(root, "git", "diff", "--name-only", "--no-renames", opts.base+"...HEAD")
 	if err != nil {
 		return err
 	}
 	changed := strings.Fields(diff)
 	plan := PlanEvidence(reg, repo, changed)
-	fmt.Printf("T1 evidence for %d changed path(s) since %s:\n", len(changed), base)
+	fmt.Printf("T1 evidence for %d changed path(s) since %s:\n", len(changed), opts.base)
 	for _, reason := range plan.Reasons {
 		fmt.Println("  " + reason)
 	}
 	fmt.Printf("./%s: whole=%v, %d selected test(s), %d under -race\n", reg.FocusedPackage, plan.Whole, len(plan.Run), len(plan.Race))
-	raceTests, err := shardRaceTests(plan.Race, shard)
-	if err != nil {
-		return err
-	}
-	if shard != "" {
-		fmt.Printf("race shard %s: %d of %d selected tests; coverage is the union of all shards\n", shard, len(raceTests), len(plan.Race))
-	}
-	if planOnly {
+	if opts.planOnly {
 		return nil
 	}
-	if race {
+	switch {
+	case opts.race:
+		raceTests, err := ShardOf(plan.Race, costs, orWhole(opts.raceShard))
+		if err != nil {
+			return err
+		}
+		if opts.raceShard != "" {
+			fmt.Printf("race shard %s: %d of %d selected tests; coverage is the union of all shards\n", opts.raceShard, len(raceTests), len(plan.Race))
+		}
 		if len(raceTests) == 0 {
 			return nil
 		}
 		return execute(root, [][]string{{"go", "test", "-race", "-timeout", raceTimeout, "-run", RunPattern(raceTests), "./" + reg.FocusedPackage}})
+	case opts.packages:
+		return errors.Join(execute(root, packageCommands(reg.FocusedPackage, repo.PackageDirs)), verifyEveryTestIsSeen(root, reg.FocusedPackage, repo))
+	case opts.shard != "":
+		selected := plan.selected(repo)
+		tests, err := ShardOf(selected, costs, opts.shard)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("shard %s: %d of %d selected tests; coverage is the union of all shards\n", opts.shard, len(tests), len(selected))
+		if len(tests) == 0 {
+			return nil
+		}
+		return execute(root, [][]string{{"go", "test", "-timeout", testTimeout, "-run", RunPattern(tests), "./" + reg.FocusedPackage}})
 	}
 	return execute(root, t1Commands(reg.FocusedPackage, repo.PackageDirs, plan))
 }
 
-// Partition names, never domains: overlapping domains still run each selected
-// test exactly once, and whole-package fallback retains every high-risk name.
-func shardRaceTests(tests []string, shard string) ([]string, error) {
+// orWhole turns "no shard requested" into the one-shard partition.
+func orWhole(shard string) string {
 	if shard == "" {
-		return tests, nil
+		return "1/1"
 	}
-	partText, countText, ok := strings.Cut(shard, "/")
-	part, partErr := strconv.Atoi(partText)
-	count, countErr := strconv.Atoi(countText)
-	if !ok || partErr != nil || countErr != nil || part < 1 || count < 1 || part > count {
-		return nil, fmt.Errorf("invalid race shard %q: want part/count with 1 <= part <= count", shard)
-	}
-	selected := []string{}
-	for i, name := range tests {
-		if i%count == part-1 {
-			selected = append(selected, name)
-		}
-	}
-	return selected, nil
+	return shard
 }
 
-func t1Commands(focused string, packageDirs []string, plan Plan) [][]string {
+// packageCommands runs every package but the focused one whole.
+func packageCommands(focused string, packageDirs []string) [][]string {
 	var others []string
 	for _, dir := range packageDirs {
 		if dir != focused {
 			others = append(others, "./"+dir)
 		}
 	}
-	commands := [][]string{append([]string{"go", "test", "-timeout", testTimeout}, others...)}
+	return [][]string{append([]string{"go", "test", "-timeout", testTimeout}, others...)}
+}
+
+func t1Commands(focused string, packageDirs []string, plan Plan) [][]string {
+	commands := packageCommands(focused, packageDirs)
 	switch {
 	case plan.Whole:
 		commands = append(commands, []string{"go", "test", "-timeout", testTimeout, "./" + focused})

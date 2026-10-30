@@ -45,7 +45,29 @@ jobs:
   # ci/evidence/registry.json selects for what this pull request changed. With
   # the race aggregate below it is the pull-request merge gate; the full suite
   # above runs after the merge.
-  evidence:
+  #
+  # The evidence runs as parallel jobs whose union is what `go run ./ci/evidence`
+  # runs on one machine: T0, every package but runtime, and the selected runtime
+  # tests split by name across isolated runners. The `evidence` check a ruleset
+  # requires is the aggregate of all of them, so it cannot pass while a part is
+  # failed, cancelled or skipped.
+  evidence-static:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Static evidence (T0)
+        run: ci/static.sh
+
+  evidence-packages:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -60,17 +82,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Static evidence (T0)
-        run: ci/static.sh
-
-      - name: Impact-directed evidence (T1)
+      - name: Every package but runtime (T1)
         env:
           BASE_REF: origin/${{ github.base_ref }}
-        run: go run ./ci/evidence -base "$BASE_REF"
+        run: go run ./ci/evidence -packages -base "$BASE_REF"
 
-  # The -race escalation of high-risk domains the same plan selects. It is a
-  # separate job because it is about four times slower than the plain run.
-  evidence-race-parts:
+  evidence-runtime:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     strategy:
@@ -89,10 +106,45 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Selected runtime tests (T1)
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: go run ./ci/evidence -shard "${{ matrix.shard }}/4" -base "$BASE_REF"
+
+  # Preserve the check identity and fail on ANY failed/cancelled/skipped part.
+  evidence:
+    if: always() && github.event_name == 'pull_request'
+    needs: [evidence-static, evidence-packages, evidence-runtime]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All T0 and T1 evidence must pass
+        run: test "${{ needs.evidence-static.result }}" = success && test "${{ needs.evidence-packages.result }}" = success && test "${{ needs.evidence-runtime.result }}" = success
+
+  # The -race escalation of high-risk domains the same plan selects. It is a
+  # separate job because it is about four times slower than the plain run.
+  evidence-race-parts:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: High-risk race escalation (T1)
         env:
           BASE_REF: origin/${{ github.base_ref }}
-        run: go run ./ci/evidence -race -race-shard "${{ matrix.shard }}/4" -base "$BASE_REF"
+        run: go run ./ci/evidence -race -race-shard "${{ matrix.shard }}/8" -base "$BASE_REF"
 
   # Preserve the check identity and fail on ANY failed/cancelled/skipped part.
   # Independent runners bound aggregate serial cost without dropping tests or
