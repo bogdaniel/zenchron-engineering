@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/bogdaniel/zenchron-engineering/domain"
+	"github.com/bogdaniel/zenchron-engineering/internal/pathpattern"
 )
 
 const boundaryDetectorProducer = "critical-boundary-detector-v1"
@@ -33,7 +34,9 @@ type ObservedChange struct {
 // NormalizeObservedChange validates and canonicalizes observed paths using
 // slash-based repository semantics. Paths are repository-relative; leading
 // "./" and redundant slash or dot segments are normalized, while traversal,
-// absolute, empty, dot-only, backslash, and NUL-containing paths are rejected.
+// absolute, empty, dot-only, backslash, and NUL-containing paths are rejected,
+// as is a final "**" segment, which a contract scope would read as recursive.
+// Glob characters elsewhere are literal filename characters and are kept.
 func NormalizeObservedChange(change ObservedChange) (ObservedChange, error) {
 	normalized := ObservedChange{PathsKnown: change.PathsKnown, Paths: make([]string, len(change.Paths))}
 	for i, raw := range change.Paths {
@@ -57,6 +60,9 @@ func NormalizeObservedChange(change ObservedChange) (ObservedChange, error) {
 		cleaned := path.Clean(raw)
 		if cleaned == "." || cleaned == "" {
 			return ObservedChange{}, fmt.Errorf("observed path %q is not a repository file", raw)
+		}
+		if pathpattern.IsAmbiguousLiteral(cleaned) {
+			return ObservedChange{}, fmt.Errorf("observed path %q ends in /** and cannot be told from a recursive pattern", raw)
 		}
 		normalized.Paths[i] = cleaned
 	}
@@ -127,9 +133,13 @@ func (a Analyzer) Predict(model domain.ProjectModel, subject domain.Subject, int
 	if subject != model.Subject {
 		return nil, fmt.Errorf("predicted analysis subject %q@%q does not match ProjectModel subject %q@%q", subject.Repository, subject.Revision, model.Subject.Repository, model.Subject.Revision)
 	}
+	normalized, err := NormalizeObservedChange(ObservedChange{Paths: intent.AffectedPaths, PathsKnown: intent.PathsKnown})
+	if err != nil {
+		return nil, fmt.Errorf("predicted paths: %w", err)
+	}
 	return a.analyze(model, Input{
 		Subject: subject, Stage: domain.StagePredicted,
-		Paths: intent.AffectedPaths, PathsKnown: intent.PathsKnown,
+		Paths: normalized.Paths, PathsKnown: normalized.PathsKnown,
 	})
 }
 
@@ -183,6 +193,9 @@ func (CriticalBoundaryDetector) Detect(model domain.ProjectModel, input Input) (
 	if input.Stage != domain.StagePredicted && input.Stage != domain.StageObserved {
 		return nil, fmt.Errorf("critical boundary detector does not support stage %q", input.Stage)
 	}
+	if err := domain.ValidateBoundaryPatterns(model); err != nil {
+		return nil, err
+	}
 	pathsByType := make(map[string][]string)
 	if model.CriticalBoundaries != nil {
 		for _, boundary := range *model.CriticalBoundaries {
@@ -233,17 +246,9 @@ func factID(stage domain.Stage, key string) string {
 
 func intersects(changedPaths, patterns []string) bool {
 	for _, changed := range changedPaths {
-		changed = strings.TrimPrefix(changed, "./")
-		for _, pattern := range patterns {
-			pattern = strings.TrimPrefix(pattern, "./")
-			if pattern == changed || strings.HasSuffix(pattern, "/**") && pathWithin(changed, strings.TrimSuffix(pattern, "/**")) {
-				return true
-			}
+		if pathpattern.MatchesAny(changed, patterns) {
+			return true
 		}
 	}
 	return false
-}
-
-func pathWithin(candidate, directory string) bool {
-	return candidate == directory || strings.HasPrefix(candidate, strings.TrimSuffix(directory, "/")+"/")
 }

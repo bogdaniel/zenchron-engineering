@@ -1,6 +1,7 @@
 package analysis_test
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -107,6 +108,19 @@ func TestObservedPathsRejectUnsafeRepositorySpellings(t *testing.T) {
 	}
 }
 
+func TestNormalizeObservedChangeKeepsGlobCharactersAndRefusesRecursiveLookalikes(t *testing.T) {
+	kept := []string{"app/[id]/page.tsx", "a{b}.go", "a:b?.go", "dir/*", "dir/**x"}
+	normalized, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: kept, PathsKnown: true})
+	if err != nil || strings.Join(normalized.Paths, ",") != strings.Join(kept, ",") {
+		t.Fatalf("literal glob-character filenames altered: %#v %v", normalized.Paths, err)
+	}
+	for _, ambiguous := range []string{"dir/**", "**", "./dir/**", "a/b/../c/**"} {
+		if _, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: []string{ambiguous}, PathsKnown: true}); err == nil {
+			t.Errorf("%q must be refused: scope would read it as a recursive pattern", ambiguous)
+		}
+	}
+}
+
 func TestNormalizeObservedChangeCanonicalizesLeadingDotSlash(t *testing.T) {
 	normalized, err := analysis.NormalizeObservedChange(analysis.ObservedChange{Paths: []string{"./internal/auth/session.go"}, PathsKnown: true})
 	if err != nil {
@@ -192,5 +206,60 @@ func projectModel() domain.ProjectModel {
 		ID:            "project-acme-payments", Revision: "1",
 		Subject:            domain.Subject{Repository: "acme/payments", Revision: "rev-a"},
 		CriticalBoundaries: &boundaries,
+	}
+}
+
+func TestPredictedBoundaryPathsCanonicalized(t *testing.T) {
+	for _, boundaryType := range []string{"authorization", "sensitive_data"} {
+		model := projectModel()
+		boundaries := map[string]domain.CriticalBoundary{"security": {Type: boundaryType, Paths: []string{"internal/auth/**"}}}
+		model.CriticalBoundaries = &boundaries
+		for _, p := range []string{"internal//auth/x", "./internal/./auth/x", "internal/auth/x"} {
+			facts, err := analysis.NewAnalyzer().Predict(model, model.Subject, analysis.Intent{AffectedPaths: []string{p}, PathsKnown: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			fact := factByKey(t, facts, boundaryType+".boundary_modified")
+			if fact.Value != domain.FactTrue || fact.Confidence != domain.ConfidenceHigh {
+				t.Fatalf("%s: %#v", p, fact)
+			}
+		}
+	}
+}
+
+func TestPredictedPathsRejectUnsafeSpellings(t *testing.T) {
+	model := projectModel()
+	for _, p := range []string{"", ".", "./", "a/../internal/auth/x", "/internal/auth/x", "C:/x", "a\\b", "a\x00b"} {
+		for _, known := range []bool{true, false} {
+			if _, err := analysis.NewAnalyzer().Predict(model, model.Subject, analysis.Intent{AffectedPaths: []string{p}, PathsKnown: known}); err == nil {
+				t.Fatalf("accepted %q", p)
+			}
+		}
+	}
+}
+
+func TestUnsupportedBoundaryPatternsRejected(t *testing.T) {
+	for _, p := range []string{"internal/auth/*", "internal/auth/", "internal/**/x", "internal/auth/?", "internal/[ab]", "../auth/**", "/auth/**", "internal//auth/**", "internal/./auth/**"} {
+		model := projectModel()
+		boundaries := map[string]domain.CriticalBoundary{"security": {Type: "authorization", Paths: []string{p}}}
+		model.CriticalBoundaries = &boundaries
+		data, err := json.Marshal(model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := domain.Decode[domain.ProjectModel](data); err == nil {
+			t.Fatalf("decoded unsupported %q", p)
+		}
+		if _, err := domain.Encode(model); err == nil {
+			t.Fatalf("encoded unsupported %q", p)
+		}
+		for _, known := range []bool{true, false} {
+			if _, err := analysis.NewAnalyzer().Predict(model, model.Subject, analysis.Intent{PathsKnown: known}); err == nil {
+				t.Fatalf("predicted unsupported %q", p)
+			}
+			if _, err := analysis.NewAnalyzer().Observe(model, model.Subject, analysis.ObservedChange{PathsKnown: known}); err == nil {
+				t.Fatalf("observed unsupported %q", p)
+			}
+		}
 	}
 }

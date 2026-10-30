@@ -199,7 +199,7 @@ func TestAGoOnlyChangeIsNotHeldForBrowserEvidence(t *testing.T) {
 func TestAPredictedUnknownChangeBecomesABrowserObligationOnceTheInterfaceIsObserved(t *testing.T) {
 	model, activated := activationInputs(t)
 	flow := KernelFlow{}
-	state, err := flow.Compile(SourceSnapshot{ID: "src", Objective: "Change the dashboard.", AcceptanceIntent: []string{"Works."}, PredictedPaths: []string{predictedScopePlaceholder}}, model, activated, "contract-run-d", "1")
+	state, err := flow.Compile(SourceSnapshot{ID: "src", Objective: "Change the dashboard.", AcceptanceIntent: []string{"Works."}}, model, activated, "contract-run-d", "1")
 	if err != nil {
 		t.Fatal(err)
 	}

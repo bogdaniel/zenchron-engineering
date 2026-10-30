@@ -73,6 +73,84 @@ func runtimeGovernance() (domain.ProjectModel, domain.EngineeringPolicy) {
 	return model, domain.EngineeringPolicy{SchemaVersion: domain.SchemaVersion, ID: "policy", Revision: "1", Rules: map[string]domain.PolicyRule{"auth": {When: domain.PolicyCondition{Fact: "authentication.boundary_modified", Equals: domain.FactTrue}, Effect: domain.PolicyEffect{RequiredClaims: &claims, Obligations: &obligations, Permissions: &permissions, AuthorityConditions: &conditions, AcceptanceDischargeClaims: &acceptanceDischarge}}, "auth-observed": {When: domain.PolicyCondition{Fact: "authentication.boundary_modified", Equals: domain.FactTrue, Stage: &stage}, Effect: domain.PolicyEffect{RequiredClaims: &claims, Obligations: &obligations, Permissions: &permissions, AuthorityConditions: &conditions, AcceptanceDischargeClaims: &acceptanceDischarge}}}}
 }
 
+func TestKernelCompileCanonicalizesScopePreservingSource(t *testing.T) {
+	model, policy := runtimeGovernance()
+	source := SourceSnapshot{ID: "issue", Objective: "change", AcceptanceIntent: []string{"works"}, PredictedPaths: []string{"./internal//auth/./session.go"}, PathsKnown: true}
+	state, err := (KernelFlow{}).Compile(source, model, policy, "contract", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := state.Contract.Scope.AllowedPaths; len(got) != 1 || got[0] != "internal/auth/session.go" {
+		t.Fatalf("scope: %v", got)
+	}
+	if state.Source.PredictedPaths[0] != source.PredictedPaths[0] || source.PredictedPaths[0] != "./internal//auth/./session.go" {
+		t.Fatal("source mutated")
+	}
+	source.PredictedPaths = []string{"../escape"}
+	if _, err := (KernelFlow{}).Compile(source, model, policy, "contract", "1"); err == nil {
+		t.Fatal("accepted traversal")
+	}
+}
+
+func TestKernelCompileUnknownPathsUseScopeOnlyPlaceholder(t *testing.T) {
+	model, policy := runtimeGovernance()
+	state, err := (KernelFlow{}).Compile(SourceSnapshot{ID: "issue", Objective: "change", AcceptanceIntent: []string{"works"}}, model, policy, "contract", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Source.PredictedPaths) != 0 {
+		t.Fatal("fabricated predicted paths")
+	}
+	if got := state.Contract.Scope.AllowedPaths; len(got) != 1 || got[0] != predictedScopePlaceholder {
+		t.Fatalf("scope: %v", got)
+	}
+}
+
+// The boundary patterns a real ProjectModel file carries reach the contract
+// through decode and compile, exact and directory-prefix alike, and an
+// unsupported spelling never reaches compile at all.
+func TestKernelCompileUsesDecodedProjectModelBoundaryPatterns(t *testing.T) {
+	model, policy := runtimeGovernance()
+	decode := func(patterns ...string) (domain.ProjectModel, error) {
+		boundaries := map[string]domain.CriticalBoundary{"auth": {Type: "authentication", Paths: patterns}}
+		model.CriticalBoundaries = &boundaries
+		data, err := domain.Encode(model)
+		if err != nil {
+			return domain.ProjectModel{}, err
+		}
+		return domain.Decode[domain.ProjectModel](data)
+	}
+	for _, test := range []struct {
+		name, path string
+		wantRule   bool
+	}{
+		{"directory prefix inside", "internal/auth/session.go", true},
+		{"directory itself", "internal/auth", true},
+		{"exact path", "cmd/login/main.go", true},
+		{"sibling directory is outside", "internal/author/x.go", false},
+		{"unrelated path", "docs/readme.md", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			decoded, err := decode("./internal/auth/**", "cmd/login/main.go")
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := (KernelFlow{}).Compile(SourceSnapshot{ID: "issue", Objective: "change", AcceptanceIntent: []string{"works"}, PredictedPaths: []string{test.path}, PathsKnown: true}, decoded, policy, "contract", "1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, has := state.Contract.Obligations["approval"]; has != test.wantRule {
+				t.Fatalf("obligation present = %v, want %v for %q", has, test.wantRule, test.path)
+			}
+		})
+	}
+	for _, unsupported := range []string{"internal/auth/*", "internal/**/x", "internal//auth/**"} {
+		if _, err := decode(unsupported); err == nil {
+			t.Fatalf("decoded unsupported boundary pattern %q", unsupported)
+		}
+	}
+}
+
 // After a material reassessment the old evidence keeps its original binding. It
 // can no longer authorize, and it is reported as missing rather than stale; fresh
 // evidence bound to the new contract is what converges the run.

@@ -481,3 +481,57 @@ func fixture[T domain.Contract](t *testing.T, name string) T {
 	}
 	return value
 }
+
+func TestReassessLiteralGlobCharacterFilenamesMatchTheirExactScopeEntry(t *testing.T) {
+	const route = "frontend/src/routes/[id]/page.tsx"
+	model := projectModel()
+	policyFixture := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
+	current := trivialContract(t, model, policyFixture)
+	current.Scope.AllowedPaths = []string{route}
+	result := reassess(t, current, model, policyFixture, analysis.ObservedChange{Paths: []string{route}, PathsKnown: true})
+	if hasDeviation(result, "scope_expansion", route) {
+		t.Fatalf("exact allowed literal filename reported as scope expansion: %#v", result)
+	}
+
+	result = reassess(t, current, model, policyFixture, analysis.ObservedChange{Paths: []string{"frontend/src/routes/[x]/page.tsx"}, PathsKnown: true})
+	if !hasDeviation(result, "scope_expansion", "frontend/src/routes/[x]/page.tsx") {
+		t.Fatalf("a different bracketed file must still expand scope: %#v", result)
+	}
+
+	current.Scope.AllowedPaths = []string{"README.md"}
+	current.Scope.ProhibitedPaths = []string{route}
+	result = reassess(t, current, model, policyFixture, analysis.ObservedChange{Paths: []string{route}, PathsKnown: true})
+	if !hasDeviation(result, "prohibited_path", route) || matches(result.Contract.Scope.AllowedPaths, route) {
+		t.Fatalf("exact prohibited literal filename not enforced: %#v", result)
+	}
+}
+
+func TestReassessUnknownPathSentinelAndRecursiveScopeFailClosed(t *testing.T) {
+	model := projectModel()
+	policyFixture := fixture[domain.EngineeringPolicy](t, "security-sensitive.engineering-policy.json")
+	current := trivialContract(t, model, policyFixture)
+	current.Scope.AllowedPaths = []string{"."}
+	result := reassess(t, current, model, policyFixture, analysis.ObservedChange{Paths: []string{"README.md"}, PathsKnown: true})
+	if !hasDeviation(result, "scope_expansion", "README.md") {
+		t.Fatalf("the unknown-path sentinel granted scope: %#v", result)
+	}
+
+	current.Scope.AllowedPaths = []string{"docs/**"}
+	result = reassess(t, current, model, policyFixture, analysis.ObservedChange{Paths: []string{"docs/a/[id].md"}, PathsKnown: true})
+	if hasDeviation(result, "scope_expansion", "docs/a/[id].md") {
+		t.Fatalf("recursive scope must cover a bracketed file below it: %#v", result)
+	}
+
+	_, err := reassessment.Reassess(reassessment.Input{
+		CurrentContract: current,
+		Compile: policy.CompileInput{
+			ContractID: current.ID, ContractRevision: "2", Objective: current.Objective,
+			AcceptanceIntent: current.AcceptanceIntent, Subject: current.Subject,
+			ProjectModel: model, Policy: policyFixture,
+		},
+		ObservedChange: analysis.ObservedChange{Paths: []string{"other/**"}, PathsKnown: true},
+	})
+	if err == nil || !strings.Contains(err.Error(), "recursive pattern") {
+		t.Fatalf("a file literally named ** must be refused, got %v", err)
+	}
+}

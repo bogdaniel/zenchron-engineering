@@ -228,7 +228,7 @@ func TestTheDeclarationFactReachesTheContractOnlyForTheDeclaredRun(t *testing.T)
 		if feature != "" {
 			flow = KernelFlow{Analyzer: analysis.NewAnalyzerWithDetectors(analysis.CriticalBoundaryDetector{}, declaredFeatureDetector{feature: feature})}
 		}
-		state, err := flow.Compile(SourceSnapshot{ID: "src", Objective: "Integrate.", AcceptanceIntent: []string{"Works."}, PredictedPaths: []string{predictedScopePlaceholder}}, model, withRule, "contract-run-d", "1")
+		state, err := flow.Compile(SourceSnapshot{ID: "src", Objective: "Integrate.", AcceptanceIntent: []string{"Works."}}, model, withRule, "contract-run-d", "1")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -251,7 +251,7 @@ func TestTheDeclarationFactReachesTheContractOnlyForTheDeclaredRun(t *testing.T)
 		}
 	}
 	// An undeclared run compiles byte-for-byte as it did before the rule existed.
-	oldPredicted, err := KernelFlow{}.Compile(SourceSnapshot{ID: "src", Objective: "Integrate.", AcceptanceIntent: []string{"Works."}, PredictedPaths: []string{predictedScopePlaceholder}}, model, base, "contract-run-d", "1")
+	oldPredicted, err := KernelFlow{}.Compile(SourceSnapshot{ID: "src", Objective: "Integrate.", AcceptanceIntent: []string{"Works."}}, model, base, "contract-run-d", "1")
 	if err != nil {
 		t.Fatal(err)
 	}
