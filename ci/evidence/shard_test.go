@@ -204,15 +204,19 @@ func TestTheCostTableNamesRealTestsAndIsValid(t *testing.T) {
 			}
 		}
 	}
-	const source = `"source":{"commit":"c","runs":["1"],"configuration":"x","observed":"2026-10-30","samples":1}`
+	const source = `"source":{"commit":"c","runs":["1"],"configuration":"x","observed":"2026-10-30","samples":1,"aggregation":"median"}`
 	profile := `{` + source + `,"default":1,"tests":{}}`
+	noAggregation := strings.Replace(source, `,"aggregation":"median"`, "", 1)
+	if noAggregation == source {
+		t.Fatal("the aggregation-less variant did not change the provenance")
+	}
 	for name, broken := range map[string]string{
 		"not json":               `{`,
 		"old schema":             `{"schema":"zenchron-evidence-costs/1","plain":` + profile + `,"race":` + profile + `}`,
-		"no race profile":        `{"schema":"zenchron-evidence-costs/2","plain":` + profile + `}`,
-		"no provenance":          `{"schema":"zenchron-evidence-costs/2","plain":` + profile + `,"race":{"default":1}}`,
-		"zero default":           `{"schema":"zenchron-evidence-costs/2","plain":` + profile + `,"race":{` + source + `,"default":0}}`,
-		"negative measured cost": `{"schema":"zenchron-evidence-costs/2","plain":` + profile + `,"race":{` + source + `,"default":1,"tests":{"TestA":-1}}}`,
+		"no race profile":        `{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `}`,
+		"no provenance":          `{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `,"race":{"default":1}}`,
+		"zero default":           `{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `,"race":{` + source + `,"default":0}}`,
+		"negative measured cost": `{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `,"race":{` + source + `,"default":1,"tests":{"TestA":-1}}}`,
 	} {
 		saved := costsJSON
 		costsJSON = []byte(broken)
@@ -222,7 +226,7 @@ func TestTheCostTableNamesRealTestsAndIsValid(t *testing.T) {
 			t.Errorf("accepted the cost table (%s): %s", name, broken)
 		}
 	}
-	costsJSON = []byte(`{"schema":"zenchron-evidence-costs/2","plain":` + profile + `,"race":` + profile + `}`)
+	costsJSON = []byte(`{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `,"race":` + profile + `}`)
 	_, err := LoadCosts()
 	costsJSON = realCostsJSON
 	if err != nil {

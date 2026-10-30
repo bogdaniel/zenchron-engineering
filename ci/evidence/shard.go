@@ -64,14 +64,17 @@ func LoadCosts() (CostTable, error) {
 	if table.Schema != costsSchema {
 		errs = append(errs, fmt.Errorf("shard cost table schema %q, want %q", table.Schema, costsSchema))
 	}
+	if table.Unit != "seconds" {
+		errs = append(errs, fmt.Errorf("shard cost table unit %q, want \"seconds\"", table.Unit))
+	}
 	errs = append(errs, table.Plain.validate("plain"), table.Race.validate("race"))
 	return table, errors.Join(errs...)
 }
 
 func (p CostProfile) validate(name string) error {
 	var errs []error
-	if src := p.Source; src.Commit == "" || len(src.Runs) == 0 || src.Configuration == "" || src.Observed == "" || src.Samples < 1 {
-		errs = append(errs, fmt.Errorf("the %s cost profile needs its provenance: commit, runs, configuration, observation date and sample count", name))
+	if src := p.Source; src.Commit == "" || len(src.Runs) == 0 || src.Configuration == "" || src.Observed == "" || src.Samples < 1 || src.Aggregation == "" {
+		errs = append(errs, fmt.Errorf("the %s cost profile needs its provenance: commit, runs, configuration, observation date, sample count and aggregation", name))
 	}
 	if p.Default <= 0 {
 		errs = append(errs, fmt.Errorf("the %s cost profile needs a positive default for unlisted tests", name))
