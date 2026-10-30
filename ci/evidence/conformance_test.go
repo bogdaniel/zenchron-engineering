@@ -19,9 +19,16 @@ func TestTheRulesetInvalidatesPullRequestEvidenceWhenMainMoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	var payload struct {
+		Target       string `json:"target"`
 		Enforcement  string `json:"enforcement"`
 		BypassActors []any  `json:"bypass_actors"`
-		Rules        []struct {
+		Conditions   struct {
+			RefName struct {
+				Include []string `json:"include"`
+				Exclude []string `json:"exclude"`
+			} `json:"ref_name"`
+		} `json:"conditions"`
+		Rules []struct {
 			Type       string `json:"type"`
 			Parameters struct {
 				Strict bool `json:"strict_required_status_checks_policy"`
@@ -37,6 +44,10 @@ func TestTheRulesetInvalidatesPullRequestEvidenceWhenMainMoves(t *testing.T) {
 	}
 	if payload.Enforcement != "active" || len(payload.BypassActors) != 0 {
 		t.Errorf("the ruleset must be active with no bypass actors: %q, %d", payload.Enforcement, len(payload.BypassActors))
+	}
+	ref := payload.Conditions.RefName
+	if payload.Target != "branch" || !slices.Contains(ref.Include, "refs/heads/main") || slices.Contains(ref.Exclude, "refs/heads/main") {
+		t.Errorf("the ruleset must target the branch refs/heads/main: target %q, include %v, exclude %v", payload.Target, ref.Include, ref.Exclude)
 	}
 	var contexts []string
 	strict := false
@@ -69,6 +80,9 @@ func TestStaticEvidenceKeepsCompilingAndVettingForANonUnixTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !strings.Contains(string(raw), "\nset -euo pipefail\n") {
+		t.Error("ci/static.sh must fail on the first failing command (set -euo pipefail)")
+	}
 	for _, command := range []string{
 		"GOOS=windows GOARCH=amd64 go build ./...",
 		"GOOS=windows GOARCH=amd64 go vet ./...",
@@ -79,6 +93,9 @@ func TestStaticEvidenceKeepsCompilingAndVettingForANonUnixTarget(t *testing.T) {
 		for _, line := range strings.Split(string(raw), "\n") {
 			if strings.HasPrefix(strings.TrimSpace(line), command) || strings.Contains(line, "$("+command) {
 				lines++
+				if strings.Contains(line, "||") || strings.Contains(line, ";") {
+					t.Errorf("ci/static.sh suppresses or chains the failure of %q: %s", command, line)
+				}
 			}
 		}
 		if lines != 1 {
