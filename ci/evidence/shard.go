@@ -20,45 +20,75 @@ import (
 //go:embed costs.json
 var costsJSON []byte
 
-const costsSchema = "zenchron-evidence-costs/1"
+const costsSchema = "zenchron-evidence-costs/2"
 
-// Costs is the measured plain-run duration of the expensive focused tests.
-// ponytail: a checked-in table refreshed by hand from a push-event T2 log; a
-// stale or missing entry costs balance, never coverage. Regenerate it when shard
-// times drift apart (docs/ci-evidence.md, "Shard balance").
-type Costs struct {
-	Schema  string             `json:"schema"`
-	Unit    string             `json:"unit"`
-	Source  string             `json:"source"`
+// CostTable holds one measured profile per kind of run. A -race test is not a
+// constant multiple of its plain cost (measured ratios run from 1x to 19x), so
+// the race shards are balanced by race measurements and the plain shards by
+// plain ones.
+// ponytail: a checked-in table refreshed by hand from hosted CI logs; a stale or
+// missing entry costs balance, never coverage. Regenerate it when shard times
+// drift apart (docs/ci-evidence.md, "Shard balance").
+type CostTable struct {
+	Schema string      `json:"schema"`
+	Unit   string      `json:"unit"`
+	Plain  CostProfile `json:"plain"`
+	Race   CostProfile `json:"race"`
+}
+
+// CostProfile is where the numbers came from and the numbers. Tests lists the
+// expensive tests only; Default stands for every other test.
+type CostProfile struct {
+	Source  CostSource         `json:"source"`
 	Default float64            `json:"default"`
 	Tests   map[string]float64 `json:"tests"`
 }
 
-func LoadCosts() (Costs, error) {
-	var costs Costs
-	if err := json.Unmarshal(costsJSON, &costs); err != nil {
-		return costs, fmt.Errorf("the shard cost table is not valid JSON: %w", err)
-	}
-	var errs []error
-	if costs.Schema != costsSchema {
-		errs = append(errs, fmt.Errorf("shard cost table schema %q, want %q", costs.Schema, costsSchema))
-	}
-	if costs.Default <= 0 {
-		errs = append(errs, errors.New("the shard cost table needs a positive default for unlisted tests"))
-	}
-	for name, seconds := range costs.Tests {
-		if seconds <= 0 {
-			errs = append(errs, fmt.Errorf("shard cost of %q must be positive, got %v", name, seconds))
-		}
-	}
-	return costs, errors.Join(errs...)
+// CostSource is the provenance of a profile: the exact revision measured, the
+// hosted runs and configuration that produced the durations, and when.
+type CostSource struct {
+	Commit        string   `json:"commit"`
+	Runs          []string `json:"runs"`
+	Configuration string   `json:"configuration"`
+	Observed      string   `json:"observed"`
+	Samples       int      `json:"samples"`
+	Aggregation   string   `json:"aggregation"`
 }
 
-func (c Costs) of(test string) float64 {
-	if seconds, listed := c.Tests[test]; listed {
+func LoadCosts() (CostTable, error) {
+	var table CostTable
+	if err := json.Unmarshal(costsJSON, &table); err != nil {
+		return table, fmt.Errorf("the shard cost table is not valid JSON: %w", err)
+	}
+	var errs []error
+	if table.Schema != costsSchema {
+		errs = append(errs, fmt.Errorf("shard cost table schema %q, want %q", table.Schema, costsSchema))
+	}
+	errs = append(errs, table.Plain.validate("plain"), table.Race.validate("race"))
+	return table, errors.Join(errs...)
+}
+
+func (p CostProfile) validate(name string) error {
+	var errs []error
+	if src := p.Source; src.Commit == "" || len(src.Runs) == 0 || src.Configuration == "" || src.Observed == "" || src.Samples < 1 {
+		errs = append(errs, fmt.Errorf("the %s cost profile needs its provenance: commit, runs, configuration, observation date and sample count", name))
+	}
+	if p.Default <= 0 {
+		errs = append(errs, fmt.Errorf("the %s cost profile needs a positive default for unlisted tests", name))
+	}
+	for test, seconds := range p.Tests {
+		if seconds <= 0 {
+			errs = append(errs, fmt.Errorf("%s cost of %q must be positive, got %v", name, test, seconds))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (p CostProfile) of(test string) float64 {
+	if seconds, listed := p.Tests[test]; listed {
 		return seconds
 	}
-	return c.Default
+	return p.Default
 }
 
 // ParseShard reads "part/count" with 1 <= part <= count.
@@ -75,7 +105,7 @@ func ParseShard(text string) (part, count int, err error) {
 // Partition deals the tests into count shards, heaviest first onto the lightest
 // shard (ties to the lowest index), so the result depends only on the names and
 // the cost table. Duplicate names are one test.
-func Partition(tests []string, costs Costs, count int) [][]string {
+func Partition(tests []string, costs CostProfile, count int) [][]string {
 	ordered := slices.Clone(tests)
 	sort.Strings(ordered)
 	ordered = slices.Compact(ordered)
@@ -98,7 +128,7 @@ func Partition(tests []string, costs Costs, count int) [][]string {
 }
 
 // ShardOf is the tests of one shard of a selection.
-func ShardOf(tests []string, costs Costs, shard string) ([]string, error) {
+func ShardOf(tests []string, costs CostProfile, shard string) ([]string, error) {
 	part, count, err := ParseShard(shard)
 	if err != nil {
 		return nil, err

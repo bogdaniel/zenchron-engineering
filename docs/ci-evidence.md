@@ -8,8 +8,8 @@ disappearing.
 | Tier | What | When | Where |
 |------|------|------|-------|
 | T0 | `gofmt`, `go vet`, Windows build and vet | every PR | `ci/static.sh` |
-| T1 | every package except `runtime` whole, plus the `runtime` tests the impact registry selects | every PR | `go run ./ci/evidence` |
-| T1 race | the same selected high-risk (`race: true`) test names partitioned across four isolated runners; every part must pass | every PR | `go run ./ci/evidence -race -race-shard 1/4` (and 2/4–4/4) |
+| T1 | every package except `runtime` whole, plus the `runtime` tests the impact registry selects, run as `evidence-static`, `evidence-packages` and four `evidence-runtime` shards that the required `evidence` check aggregates | every PR | `go run ./ci/evidence` (all of it), `-packages`, `-shard 1/4`–`4/4` |
+| T1 race | the same selected high-risk (`race: true`) test names partitioned across eight isolated runners by measured `-race` cost; every part must pass | every PR | `go run ./ci/evidence -race -race-shard 1/8` (and 2/8–8/8) |
 | T2 | `go test -json -timeout 45m ./...` | every push to `main` only (the `go` job); not run on pull requests | `.github/workflows/ci.yml` |
 | T3 | `go test -race ./...` | nightly, on request | `.github/workflows/assurance.yml` |
 
@@ -176,8 +176,8 @@ fail safe to the whole runtime; no timeout, gate or guard is weakened.
 The reviewed head exhausted its existing 60-minute package bound after selecting
 1285 race tests; the active test had run only three seconds. Exact trusted main
 also shows substantial serial cost (80.6 minutes for its successful full T3).
-T1 race now partitions the **same sorted selected names** by position across four
-isolated runners. Overlapping domains do not duplicate tests. Conformance tests
+T1 race partitions the **same sorted selected names** across eight
+isolated runners (it was four, dealt by position; see "Shard balance"). Overlapping domains do not duplicate tests. Conformance tests
 prove the partition union equals the entire narrow or whole-fallback selection,
 with every name occurring exactly once. No selection or test assertion is cut.
 
@@ -191,6 +191,32 @@ and [matrix failure handling](https://docs.github.com/en/actions/how-tos/write-w
 contracts. The strict required `go` job, exact push-to-main T2, trust policy and
 unpartitioned whole-module T3 remain unchanged. CI still must prove every part
 at the exact submitted head; a focused probe is never that qualification.
+
+### Shard balance
+
+Plain runtime and race selections are both split by name across isolated runners
+(`-shard part/count`, `-race-shard part/count`). A shard is only a set of names:
+the shards of a selection are a partition of it, and every runner derives the same
+partition from the same checkout. Balance is a speed concern and nothing else; a
+wrong, missing or stale cost can make a shard slow, and can never add, drop or
+duplicate a test (`TestMissingAndStaleMeasurementsNeverChangeWhichTestsRun`).
+
+The names are dealt heaviest first onto the lightest shard, by the cost in
+`ci/evidence/costs.json`. A `-race` test is not a constant multiple of its plain
+cost (measured ratios run from 1x to 19x), so the file holds two profiles, `plain`
+and `race`, each with its provenance (exact commit, hosted runs, configuration,
+observation date, number of samples and how they were aggregated). A test the
+profile does not list costs the profile's `default`.
+
+To refresh a profile, collect the job logs of hosted runs that ran the shards with
+`go test -json`, one directory per run, and run
+`python3 scripts/evidence_costs.py 1.0 DIR...`. Per-test cost is the median of the
+top-level test's `Elapsed` across the runs, so a parent test is never added to its
+own subtests and package setup or runner overhead is not charged to any test. A
+test that failed in a run is reported and its duration is not used. The raw
+per-run observation of every listed test is kept in `costs.observations.json`, so
+a consistently slow test can be told from one spike.
+Refresh when the slowest shard drifts well away from the mean.
 
 ## Developing against these tiers
 

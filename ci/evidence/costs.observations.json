@@ -1,0 +1,1488 @@
+{
+ "schema": "zenchron-evidence-observations/1",
+ "note": "raw top-level -race durations in seconds, one entry per sample in the order of source.runs; null is a missing or failed observation",
+ "profile": "race",
+ "samples": 3,
+ "observations": {
+  "TestACheckpointWhoseContinuationIsNotAdmissibleIsHeld": [
+   3.89,
+   3.45,
+   3.48
+  ],
+  "TestACheckpointedDecisionIsAdmittedOnceItsCommitLands": [
+   1.05,
+   1.2,
+   1.33
+  ],
+  "TestAConfigurationChangeDoesNotReEnrolSettledSources": [
+   0.69,
+   1.07,
+   1.06
+  ],
+  "TestAContinuationThatMutatesBindsItsOwnNewerCommit": [
+   15.46,
+   9.72,
+   11.38
+  ],
+  "TestAControllerLostBetweenStartAndBeforeStillRepairsOnce": [
+   13.97,
+   13.88,
+   13.68
+  ],
+  "TestAControllerLostMidRepairNeverRepairsAgain": [
+   11.48,
+   19.78,
+   20.56
+  ],
+  "TestACorruptStoredAdmissionRefusesDispatchRatherThanReopeningSubstitution": [
+   18.97,
+   18.39,
+   15.69
+  ],
+  "TestADeadlineKillFollowedByAStopKeepsItsBound": [
+   0.74,
+   1.05,
+   1.08
+  ],
+  "TestADecisionDeliveredByAnOrdinaryContinuationIsNeverResumedTwice": [
+   7.6,
+   8.04,
+   10.22
+  ],
+  "TestADecisionResumedUnitKeepsItsAdmittedProductContext": [
+   16.83,
+   17.54,
+   17.57
+  ],
+  "TestADecisionResumptionSurvivesRestartWithoutDuplicating": [
+   19.15,
+   20.29,
+   20.14
+  ],
+  "TestADecisionWaitsForAuthorityAndAnUpdateSettlesNothing": [
+   21.24,
+   22.02,
+   22.16
+  ],
+  "TestADetachedDescendantDoesNotBlockTheDeadline": [
+   3.4,
+   3.4,
+   3.4
+  ],
+  "TestADrainDoesNotInterruptARunningExecution": [
+   1.36,
+   1.39,
+   1.37
+  ],
+  "TestADynamicTeamRunsOneGovernedJourneyWithIsolatedProductContextAndADurableHumanDecision": [
+   71.07,
+   70.26,
+   69.37
+  ],
+  "TestAFailedAfterDeliveryDecisionResumptionRetriesTheSameOperation": [
+   18.32,
+   18.29,
+   11.07
+  ],
+  "TestAFailedRestoreKeepsTheQuarantineJournalledAndStops": [
+   1.12,
+   1.21,
+   1.14
+  ],
+  "TestAFailedRevalidationReleasesTheRealRoleWithoutDeadlocking": [
+   9.58,
+   9.57,
+   9.51
+  ],
+  "TestAFailedStartReturnsItsLeaseAtOnce": [
+   9.87,
+   9.54,
+   9.42
+  ],
+  "TestAFindingIsRoutedToItsOwnerAndGoesStale": [
+   19.81,
+   20.94,
+   20.89
+  ],
+  "TestAForeignHeadIsNeverTheCandidatesAncestor": [
+   4.92,
+   5.18,
+   5.15
+  ],
+  "TestAHandoffRestatingTheCheckpointSHAIsNotAdmitted": [
+   13.45,
+   13.46,
+   13.35
+  ],
+  "TestAHandoffWithNoCommitAndNoCheckpointStaysUnbindable": [
+   0.88,
+   1.37,
+   1.45
+  ],
+  "TestAHeldRecordSurvivesALaterReSettle": [
+   1.59,
+   1.61,
+   1.62
+  ],
+  "TestAHostileProvenanceRecordStillAppendsBeforeOperationAfter": [
+   6.18,
+   10.64,
+   11.03
+  ],
+  "TestAJournalledAdoptionDecisionRefusesTheWholeBoundary": [
+   5.59,
+   5.45,
+   7.07
+  ],
+  "TestAJournalledEffectIsNotRepeatedAfterAFailedFinish": [
+   9.15,
+   9.57,
+   9.72
+  ],
+  "TestALateResultFromAStoppedRunGainsNoAuthority": [
+   1.13,
+   1.11,
+   0.97
+  ],
+  "TestALegacyRunIsAdoptedRatherThanRefused": [
+   9.55,
+   9.42,
+   8.15
+  ],
+  "TestALifecycleDeadlineExpiresIndependentlyOfActiveWork": [
+   9.74,
+   6.31,
+   7.95
+  ],
+  "TestALiveWriterIsAWaitBeforeTheCandidateIsJudged": [
+   1.2,
+   1.19,
+   1.16
+  ],
+  "TestAMessageCannotForgeItsPromptFrame": [
+   20.33,
+   21.38,
+   21.52
+  ],
+  "TestAMultiDayReviewWaitSeparatesTheThreeClocks": [
+   20.5,
+   20.46,
+   13.18
+  ],
+  "TestAPauseLetsTheInFlightAttemptFinish": [
+   1.48,
+   1.48,
+   1.45
+  ],
+  "TestAPostCommitFailureDurablyRecordsTheRuntimeCommit": [
+   2.64,
+   2.59,
+   3.49
+  ],
+  "TestAPostDeadlineSuccessCannotProduceACandidate": [
+   1.29,
+   1.27,
+   1.25
+  ],
+  "TestAPreDispatchRefusalRecordsNoProvenance": [
+   1.11,
+   1.09,
+   1.06
+  ],
+  "TestAProductiveAttemptWallStopContinuesRatherThanRetries": [
+   2.12,
+   2.28,
+   2.59
+  ],
+  "TestAProviderForgedRuntimeCommitIsNeverAdopted": [
+   0.93,
+   1.52,
+   1.58
+  ],
+  "TestAProviderRetryGetsItsOwnTranscriptIdentity": [
+   10.97,
+   10.96,
+   7.76
+  ],
+  "TestAReadoptionRefusesWhatItCannotSanction": [
+   2.94,
+   2.04,
+   2.29
+  ],
+  "TestARefusalReachesStatusWithoutBecomingAFailure": [
+   9.65,
+   9.78,
+   9.86
+  ],
+  "TestARefusedCommitIsStillUncommitted": [
+   1.6,
+   1.58,
+   1.54
+  ],
+  "TestARepairCannotMutateTheCandidate": [
+   6.6,
+   11.37,
+   11.8
+  ],
+  "TestARepairSpendsTheRunsProviderInvocations": [
+   13.33,
+   8.06,
+   9.87
+  ],
+  "TestARestartAfterAnUnjournalledCommitHoldsItAsUnproven": [
+   1.71,
+   1.73,
+   1.73
+  ],
+  "TestARestartBetweenAttemptsComputesTheSameNextIdentity": [
+   10.82,
+   10.73,
+   9.96
+  ],
+  "TestARestartRecreatesNothingAndRecoversWhatDidNotLand": [
+   117.9,
+   119.12,
+   100.89
+  ],
+  "TestARestartRenewsNeitherTheAttemptNorTheRunBudget": [
+   1.39,
+   1.4,
+   1.39
+  ],
+  "TestARetriedExecutionIsNotRefusedByItsOwnRunsClaim": [
+   1.67,
+   1.06,
+   1.17
+  ],
+  "TestARetryObservesTheRecordedCommitInsteadOfRecommitting": [
+   10.22,
+   10.21,
+   10.06
+  ],
+  "TestAReviewerUnitInheritsNothingPrivateFromItsProducer": [
+   14.55,
+   25.65,
+   26.43
+  ],
+  "TestASecondInvalidHandoffEndsTheRepair": [
+   14.77,
+   9.19,
+   10.53
+  ],
+  "TestASelectedOptionDecisionRequestEndToEndLifecycle": [
+   16.27,
+   10.08,
+   11.36
+  ],
+  "TestASelectedOptionDecisionRequestWithoutPermittedOptionsNeverOpens": [
+   13.32,
+   13.37,
+   8
+  ],
+  "TestAStaleSettleNeverOverwritesAStopInFlight": [
+   19.33,
+   20.12,
+   20.14
+  ],
+  "TestAStaleWaitNeverUnStopsARun": [
+   9.54,
+   9.98,
+   10.01
+  ],
+  "TestAStopAfterAProviderSucceededDoesNotRewriteIt": [
+   1.98,
+   2.03,
+   2
+  ],
+  "TestAStopBeforeTheRepairDispatchesInvokesNothing": [
+   2.3,
+   2.35,
+   1.49
+  ],
+  "TestAStopDoesNotReachOtherOperationKinds": [
+   12.71,
+   12.9,
+   8.1
+  ],
+  "TestAStopDuringTheRepairInterruptsIt": [
+   1.48,
+   2.46,
+   2.58
+  ],
+  "TestAStopDuringTheToolProbeIsNotAToolchainFailure": [
+   1.09,
+   1.1,
+   1.09
+  ],
+  "TestAStopInterruptsARunningExecution": [
+   1.15,
+   1.13,
+   1.1
+  ],
+  "TestAStopRightAfterAProviderFailureKeepsItsClass": [
+   1.02,
+   0.99,
+   1.09
+  ],
+  "TestAStopThatLostTheRaceKeepsTheProvidersEnding": [
+   2.41,
+   1.55,
+   1.73
+  ],
+  "TestAStrandedLeaseGivesItsCapacityBack": [
+   9.24,
+   6,
+   6.49
+  ],
+  "TestAStrandedLeaseIsRecoveredByTheSameLiveProcess": [
+   9.84,
+   9.56,
+   9.47
+  ],
+  "TestAStubbornProcessGroupIsTerminatedAtTheDeadline": [
+   3.4,
+   3.4,
+   3.41
+  ],
+  "TestASupersededCheckpointIsRefused": [
+   11.6,
+   7.06,
+   8.05
+  ],
+  "TestATruncatedAttemptIsRunExhaustionAndAdvertisesNoSuccessor": [
+   2.83,
+   2.79,
+   3.21
+  ],
+  "TestAValidHandoffIsBoundToWhatTheRuntimeObserved": [
+   11.98,
+   11.68,
+   9.83
+  ],
+  "TestAValidHandoffIsNeverRepaired": [
+   7.11,
+   7.18,
+   9.67
+  ],
+  "TestAVerifiedCandidateIsHeldWhenTheBudgetEndsTheRun": [
+   3.09,
+   3.06,
+   3.02
+  ],
+  "TestAWaitSurvivesThePollsTakenDuringIt": [
+   11.69,
+   11.52,
+   7.03
+  ],
+  "TestAWaitingRunReprobesWithoutSettling": [
+   3.46,
+   3.47,
+   3.45
+  ],
+  "TestAWorkerEmittedDecisionRequestParksItsRunWithZeroCapacity": [
+   13.68,
+   24.2,
+   25.03
+  ],
+  "TestAWorstCasePlannerRefusalStaysUnderTheCeiling": [
+   1.22,
+   1.22,
+   1.22
+  ],
+  "TestAZeroDeltaAttemptWallStopRetriesTheSameBinding": [
+   15,
+   14.71,
+   14.47
+  ],
+  "TestAZeroDeltaContinuationBindsTheCheckpointItCompleted": [
+   13.81,
+   13.68,
+   12.59
+  ],
+  "TestAcquireControllerInstanceLockRefusesADoubleClaim": [
+   1.19,
+   1.19,
+   1.15
+  ],
+  "TestActivationRequiresTheExactTransitionItWasAuthorizedFor": [
+   1.17,
+   1.16,
+   1.16
+  ],
+  "TestAdmitIntegratedHandoffLosesToSupersededInputBeforeInsert": [
+   19.95,
+   12.25,
+   13.97
+  ],
+  "TestAdmitIntegratedHandoffRefusesAMissingReferencedHandoff": [
+   11.67,
+   11.74,
+   7.28
+  ],
+  "TestAdmitIntegratedHandoffRefusesASameOperationRetryNotYetAdmitted": [
+   20.49,
+   20.59,
+   12.32
+  ],
+  "TestAdmitIntegratedHandoffRefusesASameTimestampReplacement": [
+   11.89,
+   11.52,
+   10.83
+  ],
+  "TestAdmitIntegratedHandoffRefusesWhenLatestEventIsARefusal": [
+   11.8,
+   20.62,
+   21.2
+  ],
+  "TestAdoptingALiveGenerationWithAnotherAgentIsRefused": [
+   10.17,
+   9.96,
+   6.6
+  ],
+  "TestAnAdmittedSuccessorResumesWithoutRepeatingSatisfiedWork": [
+   8.87,
+   15.73,
+   16.19
+  ],
+  "TestAnAdmittedUnitKeepsItsContextAcrossNewerConfigurationRestartAndReplay": [
+   12.1,
+   12.13,
+   7.69
+  ],
+  "TestAnAppPublishedRuntimeRefusesItselfAndAdmitsTheOperator": [
+   6.14,
+   6.5,
+   8.75
+  ],
+  "TestAnEarlyCleanupPendingExitStillJournalsDeliveryExactlyOnce": [
+   20.15,
+   20.2,
+   12.08
+  ],
+  "TestAnExhaustedContinuationBudgetIsNotAdvertised": [
+   3.45,
+   3.45,
+   2.26
+  ],
+  "TestAnExhaustedRetryBudgetIsNotAdvertised": [
+   1.36,
+   1.67,
+   1.73
+  ],
+  "TestAnIdentityIsReservedBeforeDispatchSoACrashCannotReuseIt": [
+   2.09,
+   1.48,
+   1.53
+  ],
+  "TestAnInterruptedFinishToleratesOnlyACancelledRow": [
+   2.82,
+   1.82,
+   2.53
+  ],
+  "TestAnOperatorStoppedAttemptKeepsItsMaterialInPlace": [
+   1.08,
+   1.1,
+   1.02
+  ],
+  "TestAnOrphanedQuarantineIsAdoptedAfterACrash": [
+   5.78,
+   5.86,
+   8.74
+  ],
+  "TestAnOversizedOwnDecisionSetRefusesBeforeAnyProviderStart": [
+   2.75,
+   1.88,
+   1.99
+  ],
+  "TestAnUnobservedStopDoesNotHideARealFailure": [
+   0.95,
+   0.98,
+   0.97
+  ],
+  "TestAnUnreadableDecisionStoreNeverAuthorizesDispatch": [
+   9.82,
+   9.96,
+   9.95
+  ],
+  "TestAnUnrelatedQuarantineIsNotAdopted": [
+   5.24,
+   9.07,
+   9.35
+  ],
+  "TestAnUnrepairableRefusalNeverReachesAModel": [
+   17.66,
+   10.86,
+   12.63
+  ],
+  "TestApprovalCannotBeRecordedAgainstATerminalRun": [
+   5.53,
+   5.5,
+   3.47
+  ],
+  "TestApprovalCannotGrantARequestedPrivilegeExpansion": [
+   5.71,
+   5.84,
+   5.72
+  ],
+  "TestApprovalCannotOverrideAWorkspaceIntegrityFailure": [
+   5.41,
+   3.41,
+   3.95
+  ],
+  "TestApprovalIsNotRetargetedAtANewCandidate": [
+   5.84,
+   5.81,
+   5.8
+  ],
+  "TestAssociatedGraphsPaginatesWithoutSilentTruncation": [
+   1.09,
+   1.06,
+   1.2
+  ],
+  "TestAttemptHardFuseDefaultIsThreeHoursAndRunBounded": [
+   1.11,
+   1.2,
+   1.56
+  ],
+  "TestAttemptProvenanceFitsTheCanonicalPayloadCeiling": [
+   1.15,
+   1.16,
+   0.65
+  ],
+  "TestAttemptProvenanceSurvivesARestartWithoutTheArtifactStore": [
+   1.18,
+   1.2,
+   1.19
+  ],
+  "TestAuthorityRequestIdDigestsEveryBinding": [
+   5.4,
+   5.24,
+   5.54
+  ],
+  "TestAuthorityRequestProjectsTheRunsOwnAuthorityEvaluation": [
+   3.83,
+   3.9,
+   4.58
+  ],
+  "TestAuthorizeRecordsEvidenceAndNeverAssignsAuthority": [
+   5.89,
+   5.78,
+   5.18
+  ],
+  "TestAuthorizeRefusesAnUnresolvedOperatorIdentity": [
+   5.22,
+   5.3,
+   5.23
+  ],
+  "TestAuthorizeRefusesAnUnsupportedAdoptionAction": [
+   5.19,
+   3.26,
+   3.75
+  ],
+  "TestBaseContainmentReadsTheSubjectStore": [
+   10.77,
+   10.48,
+   14.22
+  ],
+  "TestBaseDriftRebasesAndReverifiesBeforePublication": [
+   20.84,
+   22.15,
+   21.79
+  ],
+  "TestBaseIntegrateSucceedsWithoutDriftOrRebase": [
+   5.45,
+   9.67,
+   9.98
+  ],
+  "TestBaseIntegrationConflictIsTypedAndBounded": [
+   5.23,
+   5.2,
+   5.16
+  ],
+  "TestBoundedEventReadCostAtAJournalScale": [
+   13.59,
+   13.6,
+   8.04
+  ],
+  "TestBudgetRoutingReplaysDeterministically": [
+   3.3,
+   3.31,
+   2.04
+  ],
+  "TestCancelledRunStaysCancelled": [
+   9.81,
+   9.79,
+   9.94
+  ],
+  "TestCandidateOnlyFailureDoesNotRetryAfterPolicyOrModelChanges": [
+   10.93,
+   11.02,
+   6.88
+  ],
+  "TestCapacityWaitSupersededByMatchingOperationAcrossRestart": [
+   2.3,
+   2.3,
+   2.18
+  ],
+  "TestChangesSinceStaysBoundedOnALargeJournal": [
+   22.15,
+   22.13,
+   41.73
+  ],
+  "TestCheckpointHandoffAdmissionIsIdempotentAcrossRestart": [
+   8.23,
+   8.29,
+   10.66
+  ],
+  "TestCheckpointHandoffAllowsNonMovingEventsBeforeInsert": [
+   22.75,
+   13.76,
+   16.46
+  ],
+  "TestCheckpointHandoffLosesToCandidateMovementBeforeInsert": [
+   35.74,
+   37.45,
+   37.44
+  ],
+  "TestCheckpointSurvivesAZeroDeltaContinuation": [
+   3.39,
+   3.56,
+   3.5
+  ],
+  "TestClaudeAutomaticDetachmentQuarantinesBeforeAdmission": [
+   1.39,
+   0.88,
+   0.99
+  ],
+  "TestClosedIssueWithOpenPullRequestIsSourceCancellation": [
+   7.05,
+   12.35,
+   12.67
+  ],
+  "TestClosedUnmergedPullRequestWaitsWithoutReopening": [
+   13.24,
+   13.01,
+   12.37
+  ],
+  "TestCompletedWithUnresolvedIsRepairedOnceIntoPartial": [
+   13.03,
+   13.83,
+   13.67
+  ],
+  "TestConsentWithdrawalDoesNotDependOnUnrelatedHistory": [
+   11.09,
+   11.55,
+   11.55
+  ],
+  "TestConsumedFeedbackIsCarriedIntoTheTransition": [
+   15.96,
+   16.15,
+   16.03
+  ],
+  "TestContinuationCanCompleteAfterFurtherMutation": [
+   10.25,
+   10.49,
+   14.24
+  ],
+  "TestCrashA_ValidatedButNotAppendedRetriesSafely": [
+   3.3,
+   5.55,
+   5.77
+  ],
+  "TestCrashAtEveryHandoffBoundary": [
+   0.95,
+   1.45,
+   1.48
+  ],
+  "TestCrashB_AppendedButUnreportedRetryAdoptsTheEvidence": [
+   5.82,
+   5.7,
+   6.04
+  ],
+  "TestCrashC_ConcurrentAuthorizationsProduceOneEvidenceRecord": [
+   3.58,
+   3.82,
+   5.83
+  ],
+  "TestCrashD_AuthorizationAndObservationBothSurvive": [
+   3.32,
+   5.67,
+   5.83
+  ],
+  "TestCrashMatrixB_BeforePushIsRetryEligible": [
+   6.04,
+   6.34,
+   7.77
+  ],
+  "TestCrashMatrixC_PushSucceededBeforeAfterRecord": [
+   9.73,
+   10.12,
+   10.11
+  ],
+  "TestCrashMatrixD_MultipleMatchesFailClosed": [
+   21.18,
+   21.7,
+   21.74
+  ],
+  "TestCrashMatrixD_PullRequestCreatedBeforeAfterRecord": [
+   22.03,
+   21.39,
+   19.64
+  ],
+  "TestCrashMatrixE_SatisfiedPublicationIsNotRepeated": [
+   11.18,
+   11.13,
+   11.28
+  ],
+  "TestCrashMatrixF_RemediationPushReconcilesByExactRemoteSHA": [
+   25.02,
+   25.32,
+   24.75
+  ],
+  "TestDeterministicBindingFailureExecutesExactlyOnce": [
+   1.09,
+   1.11,
+   1.06
+  ],
+  "TestDeterministicPolicyConflictPreservesCheckpointWithoutRetryStorm": [
+   1.75,
+   1.73,
+   1.92
+  ],
+  "TestDeterministicWaitClosesAtRetryAndStaysClosedAcrossRestart": [
+   2.35,
+   2.41,
+   2.42
+  ],
+  "TestDismissedFindingGrantsNoEpochOrAuthorization": [
+   32.7,
+   57.79,
+   58.07
+  ],
+  "TestDurableStateExplainsEveryTranscript": [
+   1.48,
+   2.46,
+   2.55
+  ],
+  "TestEarlyProviderRefusalIsDiagnosableAfterRestart": [
+   1.09,
+   1.08,
+   1.09
+  ],
+  "TestEngineAWaitingRunObservesWhileAnotherHoldsTheOnlyWorkSlot": [
+   48.74,
+   49.09,
+   48.62
+  ],
+  "TestEveryExecutionRequestProducerSuppliesTheSchedulerAttempt": [
+   2.33,
+   2.27,
+   2.21
+  ],
+  "TestEveryProviderAttemptJournalsItsInvocationProvenance": [
+   11.06,
+   11.03,
+   10.93
+  ],
+  "TestExecutionDiagnosticIsProjectedFromTheJournalAlone": [
+   1.07,
+   1.07,
+   1.09
+  ],
+  "TestExecutionDiagnosticSurvivesRestartAndReachesStatus": [
+   1.16,
+   1.14,
+   1.1
+  ],
+  "TestExecutionRequestCarriesItsOperationAndVerificationGuidance": [
+   6.73,
+   7.15,
+   7.61
+  ],
+  "TestExecutionSubjectMustBeTheSubjectTheInvocationClaims": [
+   9.45,
+   9.3,
+   10.31
+  ],
+  "TestExhaustionWithNoMaterialHoldsNothing": [
+   1.74,
+   1.73,
+   1.73
+  ],
+  "TestExternalReplacementAfterRemediationNeverAutoReintegrates": [
+   71.71,
+   71.13,
+   95.63
+  ],
+  "TestFailedGitOperationLeavesNoNewBaseline": [
+   9.41,
+   9.47,
+   9.38
+  ],
+  "TestFeedbackObservedPayloadValidatesReviewState": [
+   1.75,
+   1.15,
+   1.33
+  ],
+  "TestFulfillableContractStillCompiles": [
+   9.58,
+   9.37,
+   7.67
+  ],
+  "TestG_AuthorizingAWrongActionIsRefused": [
+   5.85,
+   5.97,
+   5.88
+  ],
+  "TestGenerationModesAcrossDispositions": [
+   0.97,
+   0.96,
+   0.94
+  ],
+  "TestGoValidationLeavesOnlySourceInCandidate": [
+   7.79,
+   7.71,
+   6.3
+  ],
+  "TestGovernedEpochAuthorizationNeverResumesTheOriginalRun": [
+   64.09,
+   39.84,
+   45.27
+  ],
+  "TestGovernedPushRefusesForceAndUngovernedTargets": [
+   9.53,
+   9.41,
+   7.76
+  ],
+  "TestGovernedRemoteMismatchStopsInsteadOfBurningAttempts": [
+   9.41,
+   5.96,
+   6.58
+  ],
+  "TestHTTPExchangeFailuresRecordSafeProviderFacts": [
+   2.13,
+   2.15,
+   1.43
+  ],
+  "TestH_AFabricatedRequestIdentityIsRefused": [
+   5.8,
+   5.79,
+   5.77
+  ],
+  "TestHandoffNeverLowersTheTrustARunWasGovernedUnder": [
+   9.85,
+   9.97,
+   9.96
+  ],
+  "TestHandoffRefusalCarriesTheWholeTransition": [
+   10.17,
+   10,
+   10.32
+  ],
+  "TestHarnessAttributesADeadHolderToItselfNotToProduction": [
+   7.01,
+   4.59,
+   5.45
+  ],
+  "TestHealthyInvocationBeyond25MinutesUsesExactHardFuse": [
+   9.41,
+   6.31,
+   6.73
+  ],
+  "TestHeldMaterialSurvivesRestartAndRenewsNoAuthority": [
+   1.58,
+   1,
+   1.12
+  ],
+  "TestHumanAuthorityPayloadRefusesEvidenceThatIsNotABinding": [
+   4.2,
+   4.23,
+   3.01
+  ],
+  "TestIdenticalDeterministicCommitFailureSpendsOneAttempt": [
+   2.05,
+   1.94,
+   1.94
+  ],
+  "TestIncompleteAuthorityNeverReachesGoalState": [
+   46.81,
+   29.76,
+   34.57
+  ],
+  "TestIndexFlagFailureRequiresFlagChange": [
+   6.6,
+   6.71,
+   9.95
+  ],
+  "TestInitialExecutionBindsTheObservedWorkspaceSubject": [
+   0.67,
+   1.09,
+   1.13
+  ],
+  "TestInitialZeroDeltaBudgetStopRetriesWithinTheExecutionBudget": [
+   14.05,
+   14.72,
+   14.84
+  ],
+  "TestInitialZeroDeltaBudgetStopTerminatesPreciselyAtTheCeiling": [
+   1.6,
+   1.69,
+   1.63
+  ],
+  "TestJournalRefusesBrokenChain": [
+   1.6,
+   1.59,
+   1.44
+  ],
+  "TestJournalRefusesPayloadThatDoesNotMatchItsEventType": [
+   2.45,
+   2.47,
+   2.45
+  ],
+  "TestLegacyUnassociatedGraphExecutesWithoutProductContext": [
+   7.33,
+   7.52,
+   9.54
+  ],
+  "TestM_RestartPreservesTheExactEvidenceAndItsReason": [
+   8.91,
+   8.61,
+   7.32
+  ],
+  "TestMalformedJSONGetsOneRepair": [
+   13.4,
+   13.46,
+   8.25
+  ],
+  "TestMergeWinsOverIssueCloseAndControllerChange": [
+   6.86,
+   12.1,
+   12.48
+  ],
+  "TestMessagesSurviveRestartAndReplayIsIdempotent": [
+   20.75,
+   12.69,
+   14.82
+  ],
+  "TestMissingOrInconsistentProductContextRefusesBeforeAnyModelInvocation": [
+   5.18,
+   3.34,
+   3.76
+  ],
+  "TestNewGenerationNeverAdoptsAndNeverDisturbs": [
+   5.86,
+   5.95,
+   7.4
+  ],
+  "TestNoAuthorityRequestWhenNoHumanApprovalIsRequired": [
+   5.87,
+   6.26,
+   8.48
+  ],
+  "TestNoForgedOrInvalidDocumentBecomesAMessage": [
+   17.49,
+   31.22,
+   32.17
+  ],
+  "TestNoProductionCodeReadsStateDigestsAsAuthority": [
+   1.18,
+   1.16,
+   1.12
+  ],
+  "TestNoProgressIsBoundedByTheDeterministicFingerprint": [
+   3.05,
+   5.28,
+   5.32
+  ],
+  "TestNormalCompletionWithNoDeltaNeedsNoFakeCommit": [
+   15.67,
+   15.59,
+   15.34
+  ],
+  "TestOnlyCurrentHeadFindingsDriveRemediation": [
+   5.34,
+   5.41,
+   3.37
+  ],
+  "TestOverlappingProductsStayIsolatedAtExecution": [
+   22.11,
+   22.33,
+   13.87
+  ],
+  "TestOwnerDeathStopsTheProviderWritingIntoTheCandidate": [
+   2.65,
+   2.57,
+   2.66
+  ],
+  "TestPIDReuseProvesNeitherDeathNorLife": [
+   1.19,
+   1.19,
+   1.15
+  ],
+  "TestParkedObservationStatusSurvivesRestart": [
+   12.01,
+   11.84,
+   11.48
+  ],
+  "TestPhase10ExitProof_ApprovedRunResumesUnderTheSamePermissions": [
+   7.66,
+   13.46,
+   13.83
+  ],
+  "TestPhase8PayloadListBounds": [
+   0.99,
+   0.99,
+   0.69
+  ],
+  "TestPhase8PayloadSchemas": [
+   15.03,
+   14.86,
+   14.8
+  ],
+  "TestPlannerIsSideEffectFree": [
+   5.47,
+   9.43,
+   9.97
+  ],
+  "TestPrePushDiagnosisReadsTheSubjectStore": [
+   6.7,
+   4.35,
+   4.71
+  ],
+  "TestProductAssociatedUnitExecutesWithItsProductContext": [
+   12.05,
+   12.12,
+   12.18
+  ],
+  "TestProductConfigurationNeverChangesWhatTheWorkerMayDo": [
+   13.24,
+   13.95,
+   18.34
+  ],
+  "TestProductWorkspaceCombinesProductWorkGraphReviewAndDecision": [
+   37.51,
+   36.96,
+   22.59
+  ],
+  "TestProviderAdmissionRefusesCredentialFilesBeforeInference": [
+   1.01,
+   1.01,
+   1
+  ],
+  "TestProviderAdmissionRefusesCredentialMaterialBeforeInference": [
+   3.23,
+   5.1,
+   5.27
+  ],
+  "TestProviderFailureDuringRepairRerunsNothing": [
+   11.61,
+   11.6,
+   11.54
+  ],
+  "TestProviderSuccessWithoutAValidHandoffIsNotCompletion": [
+   40.22,
+   24.1,
+   28.87
+  ],
+  "TestPublicationIsAuthorityGatedAndCarriesDurableProvenance": [
+   9.18,
+   9.58,
+   9.5
+  ],
+  "TestPublicationPushesFromTheSubjectStore": [
+   9.76,
+   6.27,
+   7.32
+  ],
+  "TestQuarantineSurvivesARestart": [
+   1.31,
+   1.29,
+   1.3
+  ],
+  "TestRawArtifactPublicationIsRefusedBeforeTheAdapter": [
+   9.15,
+   9.69,
+   9.51
+  ],
+  "TestReadStoreAndBoundedEventsPage": [
+   710.87,
+   712.29,
+   716.69
+  ],
+  "TestReconcileNeverBranchesOnPhase": [
+   9.63,
+   9.63,
+   9.46
+  ],
+  "TestReconcileRenewsSupersededCapacityWait": [
+   1.01,
+   1,
+   0.69
+  ],
+  "TestRecordDispositionPreReadGuardSkipsAnAlreadyCancelledRun": [
+   19.12,
+   12.26,
+   13.48
+  ],
+  "TestRecordedEvidenceCanStillBeBlockedByPolicy": [
+   5.51,
+   5.55,
+   5.52
+  ],
+  "TestRecordedRejectionIsFailedEvidenceAndBlocks": [
+   5.56,
+   5.6,
+   5.66
+  ],
+  "TestRecordedRejectionSettlesBlockedAndTerminates": [
+   8.49,
+   8.41,
+   8.33
+  ],
+  "TestRecoveryAdoptsOnlyTheRecordedRuntimeCommit": [
+   14.47,
+   14.2,
+   13.86
+  ],
+  "TestRecoveryReadsTheSubjectStore": [
+   1.41,
+   1.4,
+   1.31
+  ],
+  "TestRefusedMaterialIsNotAdmittedByALaterNoChangeSuccess": [
+   1.05,
+   1.78,
+   1.81
+  ],
+  "TestRefusedMaterialIsNotAttributedToALaterSuccessThatCreatesB": [
+   11.06,
+   10.82,
+   9.22
+  ],
+  "TestRejectedEpochAuthorizationGrantsNoEpochOrAuthorization": [
+   36.51,
+   34.73,
+   47.69
+  ],
+  "TestReleaseEndsAuthorityOnAStillOpenConnection": [
+   2.05,
+   2.06,
+   2.05
+  ],
+  "TestRelevantCandidateChangeEnablesAnotherDeterministicAttempt": [
+   6.26,
+   10.57,
+   11.01
+  ],
+  "TestRelevantModelChangeEnablesCheckpointRecovery": [
+   2.04,
+   1.29,
+   1.59
+  ],
+  "TestRelevantPolicyChangeEnablesCheckpointRecovery": [
+   2.04,
+   2.01,
+   2.25
+  ],
+  "TestRemediationEpochRecoversFromARealConflictThroughGovernedReintegration": [
+   63.95,
+   68.17,
+   67.1
+  ],
+  "TestReplayAndStatusExplainTheInheritedContext": [
+   1.01,
+   1.65,
+   1.73
+  ],
+  "TestRepositorySourceIsNotItselfCredentialMaterial": [
+   24.81,
+   46.13,
+   46.71
+  ],
+  "TestResidueFailureRequiresResidueRepair": [
+   10.56,
+   6.45,
+   7.33
+  ],
+  "TestRestartBetweenDeterministicFailureAndReconciliationDoesNotRepeat": [
+   1.65,
+   1.67,
+   1.67
+  ],
+  "TestRestartResumesTheSameLogicalRun": [
+   10.06,
+   10.01,
+   10.12
+  ],
+  "TestResumedContextCarriesTheResolvedDecisionNotTheOpenOne": [
+   11.22,
+   11.7,
+   11.77
+  ],
+  "TestRetryBudgetStillCapsRetryableFailures": [
+   1.1,
+   1.04,
+   1.25
+  ],
+  "TestReviewRemediationEndToEndH1BlockH2Approve": [
+   38.98,
+   39.18,
+   23.66
+  ],
+  "TestReviewTriggerErrorIsReportedSeparatelyFromDriveFailure": [
+   9.21,
+   5.76,
+   7.13
+  ],
+  "TestReviewTriggerRunsOncePerTickPerRun": [
+   10.9,
+   10.94,
+   6.78
+  ],
+  "TestReviewTriggerSurvivesSupervisorRestart": [
+   11.25,
+   11.2,
+   10.98
+  ],
+  "TestRunIsBoundToItsAgentInTheJournal": [
+   6.94,
+   6.5,
+   8.6
+  ],
+  "TestSQLiteAcquisitionMatchesTerminalDisposition": [
+   0.96,
+   0.93,
+   1.11
+  ],
+  "TestSQLiteGlobalRunCeilingIsAtomicAcrossHandles": [
+   9.38,
+   9.33,
+   9.35
+  ],
+  "TestSQLiteReclaimingNeverHandsOneOperationToTwoDrivers": [
+   77.46,
+   76.7,
+   75.9
+  ],
+  "TestSameHeadReviewSupersessionBlocksProviderDispatch": [
+   13.79,
+   9,
+   9.65
+  ],
+  "TestSecondCandidateHeadJournalsTheContractItWasEvaluatedUnder": [
+   22.55,
+   23.33,
+   30.68
+  ],
+  "TestSecurityReviewerStageCompletesFromItsTypedVerdict": [
+   20.69,
+   20.87,
+   20.35
+  ],
+  "TestSourceIntentChangeWaitsAndNeverRecompiles": [
+   12.68,
+   12.81,
+   7.77
+  ],
+  "TestStagedCredentialFailureIgnoresChangesOutsideItsSubject": [
+   10.94,
+   11.01,
+   10.88
+  ],
+  "TestStalenessA_ExecutionProviderCreatesANewCandidate": [
+   5.79,
+   5.69,
+   5.75
+  ],
+  "TestStalenessB_DeterministicRemediationCreatesANewCandidate": [
+   3.31,
+   5.62,
+   5.82
+  ],
+  "TestStalenessC_BaseIntegrationChangesTheCandidate": [
+   3.42,
+   3.87,
+   5.25
+  ],
+  "TestStalenessD_ReassessmentCreatesANewContractRevision": [
+   5.51,
+   5.63,
+   5.54
+  ],
+  "TestStalenessE_ControllerChanges": [
+   3.27,
+   5.36,
+   5.58
+  ],
+  "TestStalenessF_SourceIsRefreshed": [
+   5.51,
+   5.6,
+   5.51
+  ],
+  "TestStalenessG_TheAuthorityRequirementItselfChanges": [
+   5.45,
+   5.66,
+   5.53
+  ],
+  "TestStatusDistinguishesInactivityAttemptWallAndRunExhaustion": [
+   14.85,
+   14.43,
+   13.14
+  ],
+  "TestStatusReportIsSerializableAndComplete": [
+   9.24,
+   9.75,
+   9.7
+  ],
+  "TestSupersededRetryBindingNeverInvokesTheProviderWithNoFindings": [
+   17.15,
+   17.13,
+   10.62
+  ],
+  "TestTenContendedDriversNeverStrandALease": [
+   97.01,
+   95.3,
+   59.76
+  ],
+  "TestTheAPIProviderIsBoundedByTheOperationDeadlineNotItsOwnDefault": [
+   1.05,
+   1.12,
+   1.1
+  ],
+  "TestTheExecutionWatcherActsOnlyOnAnObservedStop": [
+   1.06,
+   1.07,
+   1.07
+  ],
+  "TestTheExecutorCommitsTheFirstDecisiveTerminalEvent": [
+   7.26,
+   7.38,
+   7.39
+  ],
+  "TestTheRealControllerBinaryRefusesADestructiveProviderCommand": [
+   25.83,
+   1.21,
+   1.23
+  ],
+  "TestTheReconcilerCreatesAReviewerStageRunWithTheProductPin": [
+   7.6,
+   4.85,
+   5.36
+  ],
+  "TestTheRepairBudgetSurvivesRestart": [
+   12.73,
+   12.95,
+   18.64
+  ],
+  "TestTheRepairDecisionIsAFunctionOfTheJournal": [
+   13.85,
+   13.52,
+   11.16
+  ],
+  "TestTheRuntimeHandsTheProviderItsRealSchedulerAttempt": [
+   1.59,
+   1.61,
+   1.06
+  ],
+  "TestTransientProviderFailureIsRetried": [
+   6.91,
+   6.72,
+   8.33
+  ],
+  "TestTrustedMetadataBaselineSurvivesARestart": [
+   0.95,
+   1.02,
+   1.17
+  ],
+  "TestTwoDecisionsResolvedBeforeAnyResumptionBecomeOneOperation": [
+   14.15,
+   13.9,
+   14.34
+  ],
+  "TestTwoPhysicalAttemptsKeepTwoProvenanceRecords": [
+   7.15,
+   10.95,
+   11.14
+  ],
+  "TestTwoProductsSharingARepositoryStayIsolatedThroughTheObjectiveJourney": [
+   37.77,
+   36.95,
+   33.05
+  ],
+  "TestTwoRuntimesNeverCrossUseGitCredentials": [
+   6.75,
+   6.63,
+   11.39
+  ],
+  "TestTwoUnitsExchangeACollaborationRequestWithoutRelay": [
+   21.65,
+   20.17,
+   24.42
+  ],
+  "TestUnclassifiedFailureIsNotGuessedDeterministic": [
+   1.91,
+   1.28,
+   1.55
+  ],
+  "TestUnclassifiedRecoveryInfrastructureFailureIsNotGuessedDeterministic": [
+   1.99,
+   1.96,
+   3.01
+  ],
+  "TestUnexpectedExternalHeadIsRecordedAndNeverOverwritten": [
+   4,
+   6.84,
+   7.06
+  ],
+  "TestUnitsReceiveOnlyKnowledgeAudiencedToThemselves": [
+   12.51,
+   12.89,
+   17.22
+  ],
+  "TestUnknownFailureFailsClosed": [
+   1.08,
+   1.09,
+   1.06
+  ],
+  "TestUnknownProviderFailuresStayUnknown": [
+   3.54,
+   3.53,
+   4.5
+  ],
+  "TestUnrelatedDependencyReplacementAfterRemediationNeverAutoReintegrates": [
+   65.34,
+   117.21,
+   118.61
+  ],
+  "TestUnresolvedReviewRemediationReturnFailsTheOperationAndStaysActionable": [
+   17.91,
+   17.82,
+   11.11
+  ],
+  "TestUntrustedSourceTextIsNeverPromotedToInstructions": [
+   9.37,
+   9.48,
+   5.84
+  ],
+  "TestUnversionedDeterministicScopeCannotRenewAttemptOnRestart": [
+   1.16,
+   1.21,
+   1.49
+  ],
+  "TestVerifiedUnpublishedRequiresExactHeadAndPassingSemantic": [
+   3.22,
+   3.22,
+   3.21
+  ],
+  "TestWaitingOnAuthorityNeverInvokesTheProvider": [
+   11.53,
+   12.08,
+   11.98
+  ],
+  "TestZeroDeltaContinuationAtTheCeilingKeepsItsCheckpoint": [
+   2.03,
+   2.15,
+   2.83
+  ]
+ }
+}
