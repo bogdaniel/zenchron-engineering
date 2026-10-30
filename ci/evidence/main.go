@@ -106,7 +106,7 @@ func run(opts options) error {
 	}
 	switch {
 	case opts.race:
-		raceTests, err := ShardOf(plan.Race, costs, orWhole(opts.raceShard))
+		raceTests, err := ShardOf(plan.Race, costs.Race, orWhole(opts.raceShard))
 		if err != nil {
 			return err
 		}
@@ -121,7 +121,7 @@ func run(opts options) error {
 		return errors.Join(execute(root, packageCommands(reg.FocusedPackage, repo.PackageDirs)), verifyEveryTestIsSeen(root, reg.FocusedPackage, repo))
 	case opts.shard != "":
 		selected := plan.selected(repo)
-		tests, err := ShardOf(selected, costs, opts.shard)
+		tests, err := ShardOf(selected, costs.Plain, opts.shard)
 		if err != nil {
 			return err
 		}

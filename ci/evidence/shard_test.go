@@ -4,16 +4,28 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 )
 
-func realCosts(t *testing.T) Costs {
+var realCostsJSON = costsJSON
+
+func realCosts(t *testing.T) CostTable {
 	t.Helper()
 	costs, err := LoadCosts()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return costs
+}
+
+// profileFor is the cost profile the evidence tool balances a selection by: the
+// race selections by race measurements, the plain ones by plain measurements.
+func profileFor(selection string, table CostTable) CostProfile {
+	if strings.HasSuffix(selection, " race") {
+		return table.Race
+	}
+	return table.Plain
 }
 
 // selections are the test sets CI shards: a narrow change, and the two kinds of
@@ -43,7 +55,7 @@ func TestShardsCoverEverySelectedTestExactlyOnce(t *testing.T) {
 		for _, count := range []int{1, 4, 8} {
 			seen := map[string]int{}
 			for part := 1; part <= count; part++ {
-				names, err := ShardOf(all, costs, fmt.Sprintf("%d/%d", part, count))
+				names, err := ShardOf(all, profileFor(name, costs), fmt.Sprintf("%d/%d", part, count))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -82,17 +94,19 @@ func TestAWholePackageFallbackShardsTheUnshardedRunsTests(t *testing.T) {
 
 func TestAPartitionDependsOnlyOnTheNamesAndTheCosts(t *testing.T) {
 	costs := realCosts(t)
-	all := selections(t)["hotspot plain"]
-	want := Partition(all, costs, 8)
-	shuffled := slices.Clone(all)
-	sort.Sort(sort.Reverse(sort.StringSlice(shuffled)))
-	if got := Partition(append(shuffled, shuffled[0]), costs, 8); !equalShards(got, want) {
-		t.Fatal("input order or a duplicate changed the partition; independent runners would disagree")
+	for name, all := range selections(t) {
+		profile := profileFor(name, costs)
+		want := Partition(all, profile, 8)
+		shuffled := slices.Clone(all)
+		sort.Sort(sort.Reverse(sort.StringSlice(shuffled)))
+		if got := Partition(append(shuffled, shuffled[0]), profile, 8); !equalShards(got, want) {
+			t.Errorf("%s: input order or a duplicate changed the partition; independent runners would disagree", name)
+		}
 	}
 }
 
 // loads returns the summed cost of each shard.
-func loads(shards [][]string, costs Costs) (loads []float64, largest float64) {
+func loads(shards [][]string, costs CostProfile) (loads []float64, largest float64) {
 	for _, shard := range shards {
 		load := 0.0
 		for _, test := range shard {
@@ -104,17 +118,26 @@ func loads(shards [][]string, costs Costs) (loads []float64, largest float64) {
 	return loads, largest
 }
 
-// The race shards used to be dealt round robin over the name-sorted selection.
-func TestShardsAreBalancedByCostNotByCount(t *testing.T) {
+// Balance is judged against what each profile replaced: the plain shards
+// against dealing by name, the race shards against the same partition balanced
+// by plain costs (what the race shards used before the race profile), both
+// evaluated under the profile of the run that is being balanced.
+func TestShardsAreBalancedByTheirOwnMeasuredCosts(t *testing.T) {
 	costs := realCosts(t)
-	for name, all := range map[string][]string{"plain": selections(t)["hotspot plain"], "race": selections(t)["hotspot race"]} {
+	for _, name := range []string{"hotspot plain", "hotspot race", "fallback race"} {
+		all := selections(t)[name]
+		profile := profileFor(name, costs)
 		for _, count := range []int{4, 8} {
-			byName := make([][]string, count)
-			for i, test := range all {
-				byName[i%count] = append(byName[i%count], test)
+			previous := make([][]string, count)
+			if strings.HasSuffix(name, " race") {
+				previous = Partition(all, costs.Plain, count)
+			} else {
+				for i, test := range all {
+					previous[i%count] = append(previous[i%count], test)
+				}
 			}
-			before, _ := loads(byName, costs)
-			after, largest := loads(Partition(all, costs, count), costs)
+			before, _ := loads(previous, profile)
+			after, largest := loads(Partition(all, profile, count), profile)
 			total := 0.0
 			for _, load := range after {
 				total += load
@@ -125,15 +148,45 @@ func TestShardsAreBalancedByCostNotByCount(t *testing.T) {
 				t.Errorf("%s into %d: heaviest %.0fs against a mean of %.0fs and a largest test of %.0fs", name, count, slices.Max(after), mean, largest)
 			}
 			if slices.Max(after) > slices.Max(before) {
-				t.Errorf("%s into %d: the heaviest shard is %.0fs, worse than the %.0fs of dealing by name", name, count, slices.Max(after), slices.Max(before))
+				t.Errorf("%s into %d: the heaviest shard is %.0fs, worse than the %.0fs it replaced", name, count, slices.Max(after), slices.Max(before))
 			}
-			t.Logf("%s into %d: heaviest shard %.0fs (mean %.0fs); dealing by name gave %.0fs", name, count, slices.Max(after), total/float64(count), slices.Max(before))
+			t.Logf("%s into %d: heaviest shard %.0fs (mean %.0fs); the previous split gave %.0fs", name, count, slices.Max(after), total/float64(count), slices.Max(before))
+		}
+	}
+}
+
+// Measurements decide balance and nothing else. Whatever the profile holds,
+// every selected test is in exactly one shard.
+func TestMissingAndStaleMeasurementsNeverChangeWhichTestsRun(t *testing.T) {
+	all := selections(t)["hotspot race"]
+	stale := map[string]float64{"TestThatWasDeleted": 900, "TestAlsoGone": 800}
+	for _, test := range all[:50] {
+		stale[test] = 0.001
+	}
+	for name, profile := range map[string]CostProfile{
+		"no measurements":           {Default: 1},
+		"stale and partial entries": {Default: 1, Tests: stale},
+		"one absurd measurement":    {Default: 1, Tests: map[string]float64{all[0]: 1e9}},
+	} {
+		seen := map[string]int{}
+		for _, shard := range Partition(all, profile, 8) {
+			for _, test := range shard {
+				seen[test]++
+			}
+		}
+		if len(seen) != len(all) {
+			t.Errorf("%s: %d tests ran of %d selected (stale names must not be added either)", name, len(seen), len(all))
+		}
+		for _, test := range all {
+			if seen[test] != 1 {
+				t.Errorf("%s: %s ran %d times", name, test, seen[test])
+			}
 		}
 	}
 }
 
 func TestTheCostTableNamesRealTestsAndIsValid(t *testing.T) {
-	costs := realCosts(t)
+	table := realCosts(t)
 	_, repo, _ := loadReal(t)
 	known := map[string]bool{}
 	for _, tests := range repo.TestsInFile {
@@ -141,24 +194,51 @@ func TestTheCostTableNamesRealTestsAndIsValid(t *testing.T) {
 			known[test] = true
 		}
 	}
-	for test := range costs.Tests {
-		if !known[test] {
-			t.Errorf("the cost table lists %q, which is not a runtime test; refresh the table", test)
+	for name, profile := range map[string]CostProfile{"plain": table.Plain, "race": table.Race} {
+		if len(profile.Tests) == 0 {
+			t.Errorf("the %s profile lists no measured test", name)
+		}
+		for test := range profile.Tests {
+			if !known[test] {
+				t.Errorf("the %s profile lists %q, which is not a runtime test; refresh the table", name, test)
+			}
 		}
 	}
-	for _, broken := range []string{`{`, `{"schema":"x","default":1}`, `{"schema":"zenchron-evidence-costs/1","default":0}`, `{"schema":"zenchron-evidence-costs/1","default":1,"tests":{"TestA":-1}}`} {
+	const source = `"source":{"commit":"c","runs":["1"],"configuration":"x","observed":"2026-10-30","samples":1,"aggregation":"median"}`
+	profile := `{` + source + `,"default":1,"tests":{}}`
+	noAggregation := strings.Replace(source, `,"aggregation":"median"`, "", 1)
+	if noAggregation == source {
+		t.Fatal("the aggregation-less variant did not change the provenance")
+	}
+	for name, broken := range map[string]string{
+		"not json":               `{`,
+		"old schema":             `{"schema":"zenchron-evidence-costs/1","unit":"seconds","plain":` + profile + `,"race":` + profile + `}`,
+		"wrong unit":             `{"schema":"zenchron-evidence-costs/2","unit":"milliseconds","plain":` + profile + `,"race":` + profile + `}`,
+		"no unit":                `{"schema":"zenchron-evidence-costs/2","plain":` + profile + `,"race":` + profile + `}`,
+		"no aggregation":         `{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `,"race":{` + noAggregation + `,"default":1}}`,
+		"no race profile":        `{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `}`,
+		"no provenance":          `{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `,"race":{"default":1}}`,
+		"zero default":           `{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `,"race":{` + source + `,"default":0}}`,
+		"negative measured cost": `{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `,"race":{` + source + `,"default":1,"tests":{"TestA":-1}}}`,
+	} {
 		saved := costsJSON
 		costsJSON = []byte(broken)
 		_, err := LoadCosts()
 		costsJSON = saved
 		if err == nil {
-			t.Errorf("accepted the cost table %s", broken)
+			t.Errorf("accepted the cost table (%s): %s", name, broken)
 		}
+	}
+	costsJSON = []byte(`{"schema":"zenchron-evidence-costs/2","unit":"seconds","plain":` + profile + `,"race":` + profile + `}`)
+	_, err := LoadCosts()
+	costsJSON = realCostsJSON
+	if err != nil {
+		t.Errorf("rejected a minimal valid table: %v", err)
 	}
 }
 
 func TestShardSelectorsAreValidatedAndEmptyEvidenceStaysEmpty(t *testing.T) {
-	costs := realCosts(t)
+	costs := CostProfile{Default: 1}
 	for _, invalid := range []string{"0/4", "5/4", "1/0", "1/-1", "1", "1/2/3", "bad", "9999999999999999999999/4"} {
 		if _, err := ShardOf([]string{"TestOne"}, costs, invalid); err == nil {
 			t.Fatalf("accepted invalid shard %q", invalid)
