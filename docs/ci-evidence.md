@@ -218,6 +218,54 @@ per-run observation of every listed test is kept in `costs.observations.json`, s
 a consistently slow test can be told from one spike.
 Refresh when the slowest shard drifts well away from the mean.
 
+## #516 acceptance: evidence and the one open policy decision
+
+Measured 2026-10-30 on hosted runners, after Stage 7 and the sharded gate.
+
+| Criterion | State | Evidence |
+|---|---|---|
+| No `go test ./...` as a PR gate | satisfied | `go` is push-only (`workflow_test.go`); required contexts are `evidence` and `evidence-race` (`conformance_test.go`) |
+| Ordinary narrow PRs inside 2-5 min | satisfied | seven hosted gates of 66-171 s, 3-4 s from creation to first job: inert 66-73 s, test-only 102 s, one runtime file 118 s, store and operator-surface tests 165-171 s |
+| CI explains what was selected | satisfied | the job log prints the plan with a reason per domain (`-plan` prints it alone) |
+| Unknown changes fail safe; high-risk escalates | satisfied | `plan_test.go` (`TestUnclassifiedChangesFailSafeToTheWholePackage`, `TestAWholeFallbackEscalatesEveryHighRiskDomain`) |
+| A broken invariant triggers its mapped T1 test | demonstrated | breaking the repairability guard in `runtime/handoff_repair.go` selected the `handoff` domain (67 tests) and failed `TestAnUnrepairableRefusalNeverReachesAModel` and `TestProviderSuccessWithoutAValidHandoffIsNotCompletion`; a `runtime/controller_succession.go` change selects `controller` with 219 race tests |
+| Removing a registry rule is caught | satisfied | `TestEveryFocusedSourceIsClassified`, `TestNoRegistryRuleIsDead`, `TestDataFilesOnlyVerificationReadsSelectVerificationNotTheWholePackage` |
+| Green T2 advances `trusted_main`; failed T2 does not; the previous one stays identifiable | satisfied | `runtime/trusted_revision_test.go`; observed live on every merge of this series (a failing T2 is covered by fault injection, never induced on `main`) |
+| Evidence is bound to an exact subject | satisfied | `TestT2EvidenceIsExactSubjectAndPinnedProducer`; a check is bound to its head SHA |
+| `main_head` and `trusted_main` are distinct | satisfied | `TestAdoptionStandsOnTrustedMainNotMainHead` |
+| Windows and non-Unix coverage stays in T0 | satisfied | `TestStaticEvidenceKeepsCompilingAndVettingForANonUnixTarget` |
+| No second trust database | satisfied | ADR-0007 section 1: `VerifyTrustRoot` requires no status check |
+| T2 and T3 still exist | satisfied | `go` on every push to `main`; `assurance.yml` nightly |
+| Unrelated PRs merge without repeatedly invalidating each other's evidence | **conservative, not met in the strong sense** | see below |
+
+### Strict up-to-date, and why a base move still reruns
+
+The ruleset requires strict status checks (`strict_required_status_checks_policy`,
+pinned by `TestTheRulesetInvalidatesPullRequestEvidenceWhenMainMoves`). A pull
+request can merge only if its head contains the current `main`, so any other
+merge forces a branch update, a new head and a new `evidence` and `evidence-race`
+run. This is ADR-0007 section 6's explicit, conservative invalidation: evidence
+for an older base never authorizes a newer head.
+
+Measured over the last 60 merged PRs: 34 of them (57%) needed at least one
+update, 55 updates in all (0.9 per PR, at most 3). Classifying what `main` moved
+in those 55: 4 touched only inert paths, 4 touched only runtime domains disjoint
+from the pull request's own, 42 touched a Go package outside `runtime` (T1 runs
+every one of those whole, so the pull request's evidence depends on it), and 5
+overlapped or fell back. So domain-aware reuse as section 6 describes it could
+have skipped about 15% of updates. A rerun costs a narrow gate (66-171 s); the
+cost that remains is the update-and-wait step itself.
+
+The criterion's strong form needs a policy decision, not more CI code. Smallest
+safe options, none of which this repository applies by itself:
+
+1. **Keep strict (current).** Invalidation is explicit and bounded by a narrow gate.
+2. **GitHub merge queue.** The required checks run on the exact merge-group commit,
+   so evidence is exact for what lands and nobody updates branches by hand; it
+   needs a ruleset rule and a `merge_group` trigger on the evidence jobs.
+3. **Relax strictness** and accept integration risk until T2 catches it, which
+   ADR-0007 reserves for after domain-aware reuse exists.
+
 ## Developing against these tiers
 
 - Run the focused tests for the behaviour you changed, `ci/static.sh`'s checks
