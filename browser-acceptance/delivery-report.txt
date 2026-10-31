@@ -1,0 +1,6 @@
+# The Go tests that discharge claim-feature-acceptance for the delivery-report
+# feature (#693), run on the final integrated candidate of an objective that
+# declares acceptance_feature "delivery-report". One test name per line. The
+# verifier reads this file from the BASE revision of the plan, never from the
+# candidate. See docs/feature-acceptance.md.
+TestDeliveryReportAcceptance

@@ -137,10 +137,18 @@ func writeFakeAgentCLI(t *testing.T, dir, name string) string {
 	return path
 }
 
-func TestOperatorRehearsal(t *testing.T) {
-	if os.Getenv("ZENCHRON_OPERATOR_REHEARSAL") != "1" {
-		t.Skip("opt-in: ZENCHRON_OPERATOR_REHEARSAL=1 with Chrome and Playwright")
-	}
+// rehearsalFixture is the isolated controller both rehearsal-shaped browser
+// tests drive: the real composition, store, supervisor and reconciler, with only
+// the providers, the forge and the agent CLIs' help output faked.
+type rehearsalFixture struct {
+	root, gates string
+	built       *composition
+	driver      *runtime.Supervisor
+	worker      *rehearsalWorker
+}
+
+func newRehearsalFixture(t *testing.T) rehearsalFixture {
+	t.Helper()
 	root, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -253,12 +261,19 @@ func TestOperatorRehearsal(t *testing.T) {
 		}
 	}()
 	t.Cleanup(func() { stop(); <-done })
+	return rehearsalFixture{root: root, gates: gates, built: built, driver: driver, worker: worker}
+}
 
-	runBrowserFixtureWithScript(t, root, built, driver, "operator_rehearsal.mjs", []string{
-		"ZENCHRON_E2E_REACT=1", "ZENCHRON_REHEARSAL_GATES=" + gates,
+func TestOperatorRehearsal(t *testing.T) {
+	if os.Getenv("ZENCHRON_OPERATOR_REHEARSAL") != "1" {
+		t.Skip("opt-in: ZENCHRON_OPERATOR_REHEARSAL=1 with Chrome and Playwright")
+	}
+	f := newRehearsalFixture(t)
+	runBrowserFixtureWithScript(t, f.root, f.built, f.driver, "operator_rehearsal.mjs", []string{
+		"ZENCHRON_E2E_REACT=1", "ZENCHRON_REHEARSAL_GATES=" + f.gates,
 	})
-	logRehearsalRuns(t, built.store)
-	t.Logf("provider invocations: %v", worker.invoked)
+	logRehearsalRuns(t, f.built.store)
+	t.Logf("provider invocations: %v", f.worker.invoked)
 }
 
 // logRehearsalTransitions logs each new (run, disposition, reason) once, so the
