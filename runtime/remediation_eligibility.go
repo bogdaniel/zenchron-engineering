@@ -58,7 +58,7 @@ func reconcileRemediationEligibility(store *SQLiteOperationStore, stateDir strin
 		if err := admitEpochAuthorizationRequests(store, stateDir, batch, graphID, unitID, unitName, messages, now); err != nil {
 			problems = append(problems, boundedDetail(fmt.Sprintf("%s epoch authorization request: %v", batch.ID, err)))
 		}
-		if err := admitApprovedRemediationAuthorizations(store, graphID, unitID, messages, now); err != nil {
+		if err := admitApprovedRemediationAuthorizations(store, graphID, unitID, batch.Items[0].RunID, messages, now); err != nil {
 			problems = append(problems, boundedDetail(fmt.Sprintf("%s remediation authorization: %v", batch.ID, err)))
 		}
 	}
@@ -173,7 +173,7 @@ func epochAuthorizationDocumentDigest(id, findingID string) string {
 // leaves the Finding live for a fresh request later, and dismiss's effect
 // is entirely read-time (RemediationState, remediation_facts.go) - never a
 // row in this table, which exists only for grants.
-func admitApprovedRemediationAuthorizations(store *SQLiteOperationStore, graphID, unitID string,
+func admitApprovedRemediationAuthorizations(store *SQLiteOperationStore, graphID, unitID, epoch1RunID string,
 	messages []orchestration.EngineeringMessage, now time.Time) error {
 	epochs, err := store.WorkUnitRemediationEpochs(graphID, unitID)
 	if err != nil {
@@ -200,6 +200,18 @@ func admitApprovedRemediationAuthorizations(store *SQLiteOperationStore, graphID
 			return err
 		} else if found {
 			continue // already granted on an earlier pass
+		}
+		if message.Subject == nil {
+			// A failed-run request has no handoff subject to go stale, so its
+			// staleness is checked here: it may authorize only the epoch it was
+			// raised for, for the run that is still the unit's current one.
+			currentRunID, _, err := currentEpochRunID(store, graphID, unitID, epoch1RunID)
+			if err != nil {
+				return err
+			}
+			if !failedRunRequestIsCurrent(message, graphID, unitID, currentRunID, nextEpoch) {
+				continue
+			}
 		}
 		var raisesCeilingTo *int
 		if nextEpoch > ceiling {

@@ -58,3 +58,16 @@ func admitFailedRunEpochRequest(store *SQLiteOperationStore, scope, graphID, uni
 	}
 	return store.AdmitMessages([]orchestration.EngineeringMessage{request})
 }
+
+// failedRunRequestIsCurrent reports whether an approved failed-run request still
+// describes the unit: it was raised about the unit's CURRENT run, and its
+// deterministic identity is the one for the epoch that would follow now. An
+// approval that arrives after the unit has moved on is a decision about work
+// that has since been superseded, and confers nothing.
+func failedRunRequestIsCurrent(request orchestration.EngineeringMessage, graphID, unitID, currentRunID string, nextEpoch int) bool {
+	if request.Source.RunID != currentRunID {
+		return false
+	}
+	id, err := orchestration.EpochAuthorizationRequestID(graphID, unitID, request.Body, nextEpoch)
+	return err == nil && id == request.ID
+}

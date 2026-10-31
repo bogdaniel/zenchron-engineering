@@ -49,6 +49,13 @@ func TestAChargedEpochReopensAFailedStageAndOnlyAFailedOne(t *testing.T) {
 	if got := stageState(); got.State != PlanStageRunning || got.RunID != "run-epoch-2" || got.Reason != "" {
 		t.Fatalf("an authorized epoch's charge did not reopen the failed stage: %+v", got)
 	}
+	snapshot, err := fixture.store.ReplayPlan(fixture.plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.ChildRuns(); len(got) < 2 || got[len(got)-1] != original || len(snapshot.RetiredRuns) != 1 || snapshot.RetiredRuns[0] != original {
+		t.Fatalf("the displaced failed run is not kept as history: runs %v retired %v", got, snapshot.RetiredRuns)
+	}
 	// Replaying the same charge is not a second reopening.
 	record(EventPlanBudgetConsumed, charge)
 	if got := stageState(); got.RunID != "run-epoch-2" {
