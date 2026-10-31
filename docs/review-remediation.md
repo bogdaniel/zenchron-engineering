@@ -906,6 +906,41 @@ separate code path to test: `ProjectWorkGraph` and `WorkGraphStatus` hold no
 state between reads, so every call in the test already is the fresh,
 independent computation a restart would also produce.
 
+## A producer that failed before any handoff (#693)
+
+An epoch needs a reason the operator can answer. A Finding about an admitted
+handoff was the only one, so a producer whose run FAILED before it reported a
+handoff - the first real case was an assurance budget spent across a failed
+pass, a remediation and a second pass - was permanent: the unit stayed failed,
+its dependents stayed blocked, and an objective graph with started work refuses
+a plan revision, so the plan could not route around it either.
+
+The same `epoch_authorization` decision is now raised for that case, and only
+that case: the unit's current run is terminally failed, finished winding down,
+and holds no admitted handoff. Everything after the question is the existing
+path and unchanged:
+
+- The request names the failed run and, when it held one, the candidate revision
+  and tree it ended on. That is evidence about what failed. The request is
+  bound to no handoff subject, because none exists and a subject-bound decision
+  is refused as stale when its owner has no current handoff.
+- Approval is an ordinary `RemediationAuthorization` that raises the unit's
+  ceiling to the next epoch. Reject and dismiss grant nothing.
+- The epoch is a new run, authorized and charged against the plan in one
+  transaction under the stage's REMAINING allowance, with fresh assurance on its
+  own exact candidate. It starts from the unit's inputs, not from the failed
+  run's candidate: the held candidate stays preserved and unverified, is never
+  promoted, and is never mistaken for a handoff.
+- A plan stage that FAILED is terminal, so the epoch's child-run charge, which
+  is already a plan-journal event naming the stage, reopens a stage that is
+  currently `failed` and points it at the new run. The failure stays in the
+  journal. The new run's own settlement ends the stage again, and a completed
+  stage is never reopened by a charge.
+
+What this does not do: it does not renew the failed run's budget, raise the
+fixed per-run assurance ceiling, or revise the plan. Each epoch needs its own
+decision and spends the plan's child runs, invocations and wall time.
+
 ## Negative and recovery coverage
 
 Split across two files by concern (`runtime/review_remediation_test.go`:

@@ -595,6 +595,7 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 			stage.ProviderInvocations += payload.ProviderInvocations
 			stage.WallSeconds += payload.WallSeconds
 			s.StageConsumed[payload.StageID] = stage
+			s.reopenFailedStage(payload)
 		}
 		if payload.RunID != "" {
 			if s.RunConsumed == nil {
@@ -680,4 +681,21 @@ func (s *PlanSnapshot) stage(id string) PlanStageProjection {
 		return PlanStageProjection{StageID: id, State: PlanStagePending}
 	}
 	return stage
+}
+
+// reopenFailedStage lets a governed remediation epoch (#581) continue a stage
+// that failed. The epoch's child run is charged to the stage in this journal, so
+// that charge is the plan's own record that the stage has a new performing run;
+// without it a failed stage is terminal, nothing re-judges it from the epoch's
+// run, and everything below it stays blocked on a failure the operator has
+// already authorized a retry of. The failure stays in the journal: only a later
+// settlement of the NEW run ends the stage again. A completed stage is untouched
+// - an epoch of a completed producer is judged through its reviewer, not here.
+func (s *PlanSnapshot) reopenFailedStage(charge PlanBudgetConsumedPayload) {
+	stage, ok := s.Stages[charge.StageID]
+	if !ok || charge.ChildRuns == 0 || charge.RunID == "" || stage.State != PlanStageFailed || stage.RunID == charge.RunID {
+		return
+	}
+	stage.State, stage.RunID, stage.Reason = PlanStageRunning, charge.RunID, ""
+	s.Stages[charge.StageID] = stage
 }

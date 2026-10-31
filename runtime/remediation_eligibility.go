@@ -83,6 +83,9 @@ func admitEpochAuthorizationRequests(store *SQLiteOperationStore, stateDir strin
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	if item.State == orchestration.ItemFailed && !item.Executing && item.HandoffID == "" {
+		return admitFailedRunEpochRequest(store, batch.ID, graphID, unitID, unitName, currentRunID, latestAttemptEpoch(epochs)+1, now)
+	}
 	if item.State != orchestration.ItemCompleted || item.HandoffID == "" {
 		return nil // no admitted handoff to be live/current against yet
 	}
@@ -135,12 +138,17 @@ func buildEpochAuthorizationRequest(scope, unitName, sourceRunID, handoffID, fin
 			Unit: unitName, RunID: sourceRunID, OperationID: remediationEligibilityOperationID,
 			Attempt: 1, Index: 0, System: true,
 		},
-		Subject:             &orchestration.MessageSubject{Handoff: handoffID, Owner: unitName, Revision: subject},
 		Purpose:             orchestration.EpochAuthorizationPurpose,
 		ExpectedOutcomeKind: orchestration.DecisionSelectedOption,
 		PermittedOptions:    orchestration.EpochAuthorizationPermittedOptions,
 		Body:                findingID,
 		AdmittedAt:          now,
+	}
+	// A failed run has no handoff for the request to be about, and a request
+	// bound to a subject is refused as stale at resolution when its owner has no
+	// current handoff. Its evidence travels in Body instead.
+	if handoffID != "" {
+		message.Subject = &orchestration.MessageSubject{Handoff: handoffID, Owner: unitName, Revision: subject}
 	}
 	message.Route = orchestration.MessageRoute{Audience: orchestration.AudienceAuthority}
 	message.DocumentSHA256 = epochAuthorizationDocumentDigest(id, findingID)
