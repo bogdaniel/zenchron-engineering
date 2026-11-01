@@ -83,7 +83,10 @@ func admitEpochAuthorizationRequests(store *SQLiteOperationStore, stateDir strin
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	if item.State == orchestration.ItemFailed && !item.Executing && item.HandoffID == "" {
+	// Terminal failure dominates an earlier admitted worker handoff: assurance may
+	// fail after the worker reported completion. That old handoff is evidence,
+	// not a successful unit output or an epoch-authorization requirement.
+	if item.State == orchestration.ItemFailed && !item.Executing {
 		return admitFailedRunEpochRequest(store, batch.ID, graphID, unitID, unitName, currentRunID, latestAttemptEpoch(epochs)+1, now)
 	}
 	if item.State != orchestration.ItemCompleted || item.HandoffID == "" {
