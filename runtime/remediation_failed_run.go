@@ -1,11 +1,11 @@
 package runtime
 
-// A producer run that ends FAILED before any handoff is admitted (#693: its
-// assurance budget ran out) leaves a remediation epoch nothing to hang on: the
-// epoch_authorization request is raised for a live Finding about an admitted
-// handoff, and there is neither. The unit stayed failed, its dependents blocked
-// for good, and the plan could only be revised - which an objective graph with
-// started work refuses.
+// A producer run that ends FAILED after coding but before successful assurance
+// (#693: its assurance budget ran out) leaves a remediation epoch without a
+// current successful producer output. This is true whether the worker reported
+// no handoff or an earlier handoff was admitted: terminal failure dominates
+// that handoff, and it cannot satisfy downstream units. A Finding about a
+// completed producer's admitted handoff cannot repair this failed run.
 //
 // This raises the SAME governed request for that case, and nothing else. The
 // operator still answers it, an approval still becomes the ordinary
