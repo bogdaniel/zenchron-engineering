@@ -294,6 +294,7 @@
         "runtime/remediation_end_to_end_test.go",
         "runtime/remediation_failed_run_test.go",
         "runtime/remediation_failed_run_plan_test.go",
+        "runtime/remediation_failed_run_handoff_test.go",
         "runtime/plan_epoch_reopen_test.go",
         "runtime/remediation_decision_resumption_isolation_test.go"
       ]

@@ -1,11 +1,12 @@
 package runtime
 
-// A producer run that ends FAILED before any handoff is admitted (#693: its
-// assurance budget ran out) leaves a remediation epoch nothing to hang on: the
-// epoch_authorization request is raised for a live Finding about an admitted
-// handoff, and there is neither. The unit stayed failed, its dependents blocked
-// for good, and the plan could only be revised - which an objective graph with
-// started work refuses.
+// A producer run that ends FAILED (#693: its assurance budget ran out, after a
+// remediation attempt's handoff had been admitted) leaves a remediation epoch
+// nothing to hang on: the epoch_authorization request is raised for a live
+// Finding about a COMPLETED unit's admitted handoff, and a failed run has no
+// such Finding. The unit stayed failed, its dependents blocked for good, and
+// the plan could only be revised - which an objective graph with started work
+// refuses.
 //
 // This raises the SAME governed request for that case, and nothing else. The
 // operator still answers it, an approval still becomes the ordinary
@@ -21,6 +22,16 @@ import (
 
 	"github.com/bogdaniel/zenchron-engineering/orchestration"
 )
+
+// failedProducerNeedsEpochRequest is true for a unit whose run ended FAILED and
+// is not executing. Whether a handoff was admitted before it failed does not
+// matter: a remediation attempt's worker can report "completed", have that
+// handoff admitted, and still fail exact-candidate assurance (#693). That
+// handoff vouches for nothing the run did not verify, and a failed run
+// completes no unit, so the question is the same either way.
+func failedProducerNeedsEpochRequest(item OrchestrationItemView) bool {
+	return item.State == orchestration.ItemFailed && !item.Executing
+}
 
 // failedRunReference names the failed run, and the candidate it held when it
 // ended, for the operator deciding and for the authorization that records the
