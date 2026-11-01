@@ -275,9 +275,11 @@ attempt is bounded by the remaining assurance allowance (durable operation
 deadline, `deadline_bound: assurance_work`, applied to the verifier's context),
 so retries, `AssuranceRerun`, restarts and crashed workers can never reset it. The
 bound applies to both assurance operations through one shared path. The
-default allowance (3600s) leaves headroom over one long verification but does
-not promise a complete second pass. An
-exhausted allowance fails the run `run_assurance_budget_exhausted`, retains the
+default allowance for newly created runs is 10800s (3h), with an optional
+operator `budgets.assurance_wall_limit_seconds` positive bound (up to 86400s)
+and a repository tighten-only bound. No setting can reset the meter on an
+existing run or bypass an objective plan's aggregate ceiling. An exhausted
+allowance fails the run `run_assurance_budget_exhausted`, retains the
 held candidate, and never satisfies assurance, authority or publication. A run
 frozen without the member (pre-#640) reports `accounting_mode: legacy`:
 `execution_elapsed` is the authoritative legacy charge and `assurance_elapsed`
