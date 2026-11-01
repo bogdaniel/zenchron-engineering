@@ -764,3 +764,66 @@ func TestAPlanConcurrencyCeilingIsClampedToTheGlobalRunCeiling(t *testing.T) {
 		t.Fatalf("a plan ceiling below the global one was widened or narrowed to %d", got)
 	}
 }
+
+func TestAssuranceAllowanceDefaultsAndOperatorOverride(t *testing.T) {
+	dir := t.TempDir()
+	original := operatorConfigJSON(dir)
+	path := writeFile(t, filepath.Join(dir, "config.json"), original)
+	base, baseDigest, err := LoadOperatorConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.Budgets.AssuranceWallLimitSeconds != nil {
+		t.Fatal("absent assurance bound was materialized into the operator digest")
+	}
+	if got := (Config{OperatorConfig: base}).RunBudgets().defaults().AssuranceWallLimit; got != 3*time.Hour {
+		t.Fatalf("new-run default assurance = %s, want 3h", got)
+	}
+	override := strings.Replace(original, `"max_assurance_attempts": 2`, `"max_assurance_attempts": 2, "assurance_wall_limit_seconds": 14400`, 1)
+	path = writeFile(t, filepath.Join(dir, "config.json"), override)
+	withOverride, overrideDigest, err := LoadOperatorConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withOverride.Budgets.AssuranceWallLimitSeconds == nil || *withOverride.Budgets.AssuranceWallLimitSeconds != 14400 {
+		t.Fatalf("operator override not decoded: %+v", withOverride.Budgets)
+	}
+	if got := (Config{OperatorConfig: withOverride}).RunBudgets().defaults().AssuranceWallLimit; got != 4*time.Hour {
+		t.Fatalf("new-run assurance = %s, want 4h", got)
+	}
+	if baseDigest == overrideDigest {
+		t.Fatal("a stated operator authority increase did not change its digest")
+	}
+	path = writeFile(t, filepath.Join(dir, "config.json"), original)
+	_, again, err := LoadOperatorConfig(path)
+	if err != nil || again != baseDigest {
+		t.Fatalf("unstated budget changed configuration identity: %s -> %s (%v)", baseDigest, again, err)
+	}
+}
+
+func TestAssuranceAllowanceMustBeFiniteAndRepositoryCanOnlyTighten(t *testing.T) {
+	dir := t.TempDir()
+	original := operatorConfigJSON(dir)
+	for _, value := range []string{"0", "-1", "86401"} {
+		body := strings.Replace(original, `"max_assurance_attempts": 2`, `"max_assurance_attempts": 2, "assurance_wall_limit_seconds": `+value, 1)
+		path := writeFile(t, filepath.Join(dir, "config.json"), body)
+		err := requireConfigError(t, second(LoadOperatorConfig(path)))
+		if !strings.Contains(err.Detail, "assurance_wall_limit_seconds") {
+			t.Fatalf("value %s: unexpected error %s", value, err.Detail)
+		}
+	}
+	writeOperatorConfig(t, dir)
+	repository := filepath.Join(dir, RepositoryConfigFile)
+	writeFile(t, repository, `{"budgets":{"assurance_wall_limit_seconds":7200}}`)
+	effective, err := LoadConfig(filepath.Join(dir, "config.json"), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := effective.RunBudgets().defaults().AssuranceWallLimit; got != 2*time.Hour {
+		t.Fatalf("repository did not tighten assurance: %s", got)
+	}
+	writeFile(t, repository, `{"budgets":{"assurance_wall_limit_seconds":14400}}`)
+	if _, err := LoadConfig(filepath.Join(dir, "config.json"), dir); err == nil || !strings.Contains(err.Error(), "may only tighten budgets.assurance_wall_limit_seconds") {
+		t.Fatalf("repository raised assurance above absent operator default: %v", err)
+	}
+}

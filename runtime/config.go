@@ -429,6 +429,10 @@ type BudgetConfig struct {
 	MaxExecutionContinuations *int `json:"max_execution_continuations,omitempty"`
 	MaxRemediationAttempts    int  `json:"max_remediation_attempts"`
 	MaxAssuranceAttempts      int  `json:"max_assurance_attempts"`
+	// AssuranceWallLimitSeconds sets the cumulative allowance for verification,
+	// separate from coding. It is frozen at new-run creation and never reset on
+	// retry or restart. Absent uses the bounded default; 0 is not unbounded.
+	AssuranceWallLimitSeconds *int `json:"assurance_wall_limit_seconds,omitempty"`
 	// ProviderInactivitySeconds bounds how long ONE provider invocation may go
 	// without recognized provider progress (output bytes, or Claude's
 	// structured events; see claude_stream.go). A stated value must be at least
@@ -648,6 +652,8 @@ type RepositoryBudgets struct {
 	// operator's stated attempt limit, or min(DefaultAttemptWallLimit, run wall)
 	// when absent - the same rule used at new-run creation.
 	AttemptWallLimitSeconds *int `json:"attempt_wall_limit_seconds,omitempty"`
+	// A repository may shorten assurance but never enlarge operator authority.
+	AssuranceWallLimitSeconds *int `json:"assurance_wall_limit_seconds,omitempty"`
 }
 
 // RepositoryWatch is the only part of watch a repository may address, and both
@@ -701,6 +707,10 @@ type Config struct {
 
 // RunBudgets is the runtime-facing form of the effective budgets.
 func (c Config) RunBudgets() RunBudgets {
+	var assuranceWall time.Duration
+	if c.Budgets.AssuranceWallLimitSeconds != nil {
+		assuranceWall = time.Duration(*c.Budgets.AssuranceWallLimitSeconds) * time.Second
+	}
 	return RunBudgets{
 		WallLimit:                 time.Duration(c.Budgets.WallLimitSeconds) * time.Second,
 		LifecycleDeadline:         time.Duration(c.Budgets.LifecycleDeadlineSeconds) * time.Second,
@@ -710,6 +720,7 @@ func (c Config) RunBudgets() RunBudgets {
 		MaxAssuranceAttempts:      c.Budgets.MaxAssuranceAttempts,
 		ProviderInactivityLimit:   time.Duration(c.Budgets.ProviderInactivitySeconds) * time.Second,
 		AttemptWallLimit:          time.Duration(c.Budgets.AttemptWallLimitSeconds) * time.Second,
+		AssuranceWallLimit:        assuranceWall,
 	}
 }
 
@@ -870,6 +881,10 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 	// through it would silently retighten the configuration it came from.
 	continuations := tightened.Budgets.continuations()
 	attemptWall := tightened.Budgets.AttemptWallLimitSeconds
+	assuranceWall := int(DefaultAssuranceWallLimit / time.Second)
+	if tightened.Budgets.AssuranceWallLimitSeconds != nil {
+		assuranceWall = *tightened.Budgets.AssuranceWallLimitSeconds
+	}
 	if attemptWall <= 0 {
 		attemptWall = int((RunBudgets{
 			WallLimit: time.Duration(tightened.Budgets.WallLimitSeconds) * time.Second,
@@ -887,6 +902,7 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 		{"budgets.max_assurance_attempts", budgets.MaxAssuranceAttempts, &tightened.Budgets.MaxAssuranceAttempts},
 		{"budgets.provider_inactivity_seconds", budgets.ProviderInactivitySeconds, &tightened.Budgets.ProviderInactivitySeconds},
 		{"budgets.attempt_wall_limit_seconds", budgets.AttemptWallLimitSeconds, &attemptWall},
+		{"budgets.assurance_wall_limit_seconds", budgets.AssuranceWallLimitSeconds, &assuranceWall},
 	}
 	for _, proposal := range proposals {
 		if proposal.proposed == nil {
@@ -910,6 +926,9 @@ func (c OperatorConfig) Tighten(repository RepositoryConfig) (OperatorConfig, er
 	// stays absent and is derived at run creation like the operator's.
 	if budgets.AttemptWallLimitSeconds != nil {
 		tightened.Budgets.AttemptWallLimitSeconds = attemptWall
+	}
+	if budgets.AssuranceWallLimitSeconds != nil {
+		tightened.Budgets.AssuranceWallLimitSeconds = &assuranceWall
 	}
 	if err := tightened.tightenWatch(repository.Watch); err != nil {
 		return OperatorConfig{}, err
@@ -1233,6 +1252,11 @@ func (c OperatorConfig) validate(path string) error {
 	// the execution budget unreachable: an operator who writes that has said
 	// two things that cannot both be honoured, and guessing which they meant is
 	// how a run dies for a reason its configuration does not explain.
+	if stated := c.Budgets.AssuranceWallLimitSeconds; stated != nil {
+		if *stated < 1 || *stated > 86400 {
+			return refuse("budgets.assurance_wall_limit_seconds must be between 1 and 86400")
+		}
+	}
 	if c.Budgets.LifecycleDeadlineSeconds < 0 {
 		return refuse("budgets.lifecycle_deadline_seconds must not be negative")
 	}
