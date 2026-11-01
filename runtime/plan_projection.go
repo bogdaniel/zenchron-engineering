@@ -314,7 +314,8 @@ func (s PlanSnapshot) AwaitingDecision(revision int) bool {
 	return revision > 0 && s.Revision == revision && s.Approval.Status == domain.ApprovalPending
 }
 
-// ChildRuns lists the EngineeringRuns this plan created, in stage order.
+// ChildRuns lists the EngineeringRuns this plan created: the current run of each
+// stage in stage order, then the retired ones.
 func (s PlanSnapshot) ChildRuns() []string {
 	stages := make([]string, 0, len(s.Stages))
 	for id := range s.Stages {
@@ -327,6 +328,10 @@ func (s PlanSnapshot) ChildRuns() []string {
 			runs = append(runs, run)
 		}
 	}
+	// Retired runs were created by this plan too, and their spend and failure
+	// are real. They follow the current ones; retire() keeps each listed once and
+	// a stage never names a run it retired.
+	runs = append(runs, s.RetiredRuns...)
 	return runs
 }
 
@@ -595,6 +600,7 @@ func (s *PlanSnapshot) apply(e EngineeringEvent) error {
 			stage.ProviderInvocations += payload.ProviderInvocations
 			stage.WallSeconds += payload.WallSeconds
 			s.StageConsumed[payload.StageID] = stage
+			s.reopenFailedStage(payload)
 		}
 		if payload.RunID != "" {
 			if s.RunConsumed == nil {
@@ -680,4 +686,25 @@ func (s *PlanSnapshot) stage(id string) PlanStageProjection {
 		return PlanStageProjection{StageID: id, State: PlanStagePending}
 	}
 	return stage
+}
+
+// reopenFailedStage lets a governed remediation epoch (#581) continue a stage
+// that failed. The epoch's child run is charged to the stage in this journal, so
+// that charge is the plan's own record that the stage has a new performing run;
+// without it a failed stage is terminal, nothing re-judges it from the epoch's
+// run, and everything below it stays blocked on a failure the operator has
+// already authorized a retry of. The failed run is retired, not erased, and the
+// failure stays in the journal: only a later settlement of the NEW run ends the
+// stage again. A completed stage is untouched - an epoch of a completed producer
+// is judged through its reviewer, not here.
+func (s *PlanSnapshot) reopenFailedStage(charge PlanBudgetConsumedPayload) {
+	stage, ok := s.Stages[charge.StageID]
+	if !ok || charge.ChildRuns == 0 || charge.RunID == "" || stage.State != PlanStageFailed || stage.RunID == charge.RunID {
+		return
+	}
+	// The failed run is not forgotten: it was created, spent and failed, and it
+	// stays enumerable as history while the stage names the new run.
+	s.retire(stage.RunID)
+	stage.State, stage.RunID, stage.Reason = PlanStageRunning, charge.RunID, ""
+	s.Stages[charge.StageID] = stage
 }

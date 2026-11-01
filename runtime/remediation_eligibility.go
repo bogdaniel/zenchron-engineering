@@ -58,7 +58,7 @@ func reconcileRemediationEligibility(store *SQLiteOperationStore, stateDir strin
 		if err := admitEpochAuthorizationRequests(store, stateDir, batch, graphID, unitID, unitName, messages, now); err != nil {
 			problems = append(problems, boundedDetail(fmt.Sprintf("%s epoch authorization request: %v", batch.ID, err)))
 		}
-		if err := admitApprovedRemediationAuthorizations(store, graphID, unitID, messages, now); err != nil {
+		if err := admitApprovedRemediationAuthorizations(store, graphID, unitID, batch.Items[0].RunID, messages, now); err != nil {
 			problems = append(problems, boundedDetail(fmt.Sprintf("%s remediation authorization: %v", batch.ID, err)))
 		}
 	}
@@ -82,6 +82,9 @@ func admitEpochAuthorizationRequests(store *SQLiteOperationStore, stateDir strin
 	item := projectOrchestrationItem(tx, stateDir, orchestration.BatchItem{Issue: batch.Items[0].Issue, RunID: currentRunID}, now)
 	if err := tx.Commit(); err != nil {
 		return err
+	}
+	if item.State == orchestration.ItemFailed && !item.Executing && item.HandoffID == "" {
+		return admitFailedRunEpochRequest(store, batch.ID, graphID, unitID, unitName, currentRunID, latestAttemptEpoch(epochs)+1, now)
 	}
 	if item.State != orchestration.ItemCompleted || item.HandoffID == "" {
 		return nil // no admitted handoff to be live/current against yet
@@ -135,12 +138,17 @@ func buildEpochAuthorizationRequest(scope, unitName, sourceRunID, handoffID, fin
 			Unit: unitName, RunID: sourceRunID, OperationID: remediationEligibilityOperationID,
 			Attempt: 1, Index: 0, System: true,
 		},
-		Subject:             &orchestration.MessageSubject{Handoff: handoffID, Owner: unitName, Revision: subject},
 		Purpose:             orchestration.EpochAuthorizationPurpose,
 		ExpectedOutcomeKind: orchestration.DecisionSelectedOption,
 		PermittedOptions:    orchestration.EpochAuthorizationPermittedOptions,
 		Body:                findingID,
 		AdmittedAt:          now,
+	}
+	// A failed run has no handoff for the request to be about, and a request
+	// bound to a subject is refused as stale at resolution when its owner has no
+	// current handoff. Its evidence travels in Body instead.
+	if handoffID != "" {
+		message.Subject = &orchestration.MessageSubject{Handoff: handoffID, Owner: unitName, Revision: subject}
 	}
 	message.Route = orchestration.MessageRoute{Audience: orchestration.AudienceAuthority}
 	message.DocumentSHA256 = epochAuthorizationDocumentDigest(id, findingID)
@@ -165,7 +173,7 @@ func epochAuthorizationDocumentDigest(id, findingID string) string {
 // leaves the Finding live for a fresh request later, and dismiss's effect
 // is entirely read-time (RemediationState, remediation_facts.go) - never a
 // row in this table, which exists only for grants.
-func admitApprovedRemediationAuthorizations(store *SQLiteOperationStore, graphID, unitID string,
+func admitApprovedRemediationAuthorizations(store *SQLiteOperationStore, graphID, unitID, epoch1RunID string,
 	messages []orchestration.EngineeringMessage, now time.Time) error {
 	epochs, err := store.WorkUnitRemediationEpochs(graphID, unitID)
 	if err != nil {
@@ -192,6 +200,18 @@ func admitApprovedRemediationAuthorizations(store *SQLiteOperationStore, graphID
 			return err
 		} else if found {
 			continue // already granted on an earlier pass
+		}
+		if message.Subject == nil {
+			// A failed-run request has no handoff subject to go stale, so its
+			// staleness is checked here: it may authorize only the epoch it was
+			// raised for, for the run that is still the unit's current one.
+			currentRunID, _, err := currentEpochRunID(store, graphID, unitID, epoch1RunID)
+			if err != nil {
+				return err
+			}
+			if !failedRunRequestIsCurrent(message, graphID, unitID, currentRunID, nextEpoch) {
+				continue
+			}
 		}
 		var raisesCeilingTo *int
 		if nextEpoch > ceiling {

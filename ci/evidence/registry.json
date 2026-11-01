@@ -283,6 +283,7 @@
         "runtime/remediation_epoch_charge_store.go",
         "runtime/remediation_plan_admission.go",
         "runtime/remediation_eligibility.go",
+        "runtime/remediation_failed_run.go",
         "runtime/remediation_facts.go",
         "runtime/remediation_schema.go",
         "runtime/remediation_store.go",
@@ -291,6 +292,9 @@
       "tests": [
         "runtime/remediation_store_test.go",
         "runtime/remediation_end_to_end_test.go",
+        "runtime/remediation_failed_run_test.go",
+        "runtime/remediation_failed_run_plan_test.go",
+        "runtime/plan_epoch_reopen_test.go",
         "runtime/remediation_decision_resumption_isolation_test.go"
       ]
     },
