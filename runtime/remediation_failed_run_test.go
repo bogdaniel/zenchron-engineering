@@ -150,3 +150,95 @@ func TestAFailedRunReferenceNamesTheHeldCandidateOnlyWhenThereIsOne(t *testing.T
 		t.Fatalf("reference with a candidate = %q", got)
 	}
 }
+
+
+// The #693 production shape: the worker completed and its handoff was admitted,
+// but cumulative assurance exhausted the run's wall allowance afterwards.
+// A handoff does not override terminal failure or release downstream work.
+func TestAFailedAssuranceRunWithAnEarlierAdmittedHandoffRequestsRecovery(t *testing.T) {
+	fixture := newFleetFixture(t, 4)
+	// Keep the dependent from starting during the producer's initial success;
+	// after assurance fails it must remain blocked by the failed producer.
+	fixture.hold("d", "test:await-final-assurance", "do not consume an unverified producer")
+	supervisor := fixture.supervisor()
+	graph := fixture.adoptGraph(supervisor, "claude", 1, graphDiamond())
+	producerRunID := issueRunOf(t, fixture, graphUnitC)
+
+	var admittedID string
+	for range 80 {
+		if _, err := supervisor.Tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		fixture.clock.advance(61 * time.Second)
+		c := fixture.graph(graph.GraphID).unit(t, "c")
+		if c.State == orchestration.UnitState(orchestration.ItemCompleted) &&
+			c.Child != nil && c.Child.HandoffID != "" {
+			admittedID = c.Child.HandoffID
+			break
+		}
+	}
+	if admittedID == "" {
+		t.Fatal("producer never completed with its admitted worker handoff")
+	}
+	handoffs, err := fixture.store.RunHandoffs(producerRunID)
+	if err != nil || len(handoffs) != 1 || handoffs[0].ID != admittedID {
+		t.Fatalf("the initial handoff was not admitted: %+v (%v)", handoffs, err)
+	}
+
+	// Exercise the actual terminal lifecycle rather than inventing a new
+	// failure classification. The already-admitted handoff is not deleted.
+	lifecycleEvent(t, fixture.store, producerRunID, EventRunFailed,
+		dispositionRecord{Reason: "run_assurance_budget_exhausted"})
+	run, found, err := fixture.store.Run(producerRunID)
+	if err != nil || !found {
+		t.Fatalf("run lookup: found=%t err=%v", found, err)
+	}
+	run.Disposition, run.Reason = Failed, "run_assurance_budget_exhausted"
+	if err := fixture.store.PutRun(run); err != nil {
+		t.Fatal(err)
+	}
+	fixture.release("d")
+	c := fixture.graph(graph.GraphID).unit(t, "c")
+	d := fixture.graph(graph.GraphID).unit(t, "d")
+	if c.State != orchestration.UnitState(orchestration.ItemFailed) ||
+		c.Child == nil || c.Child.HandoffID != admittedID {
+		t.Fatalf("terminal failure did not dominate the old handoff: %+v", c)
+	}
+	if d.State != orchestration.UnitBlocked || d.RunID != "" {
+		t.Fatalf("dependent consumed a failed producer: %+v", d)
+	}
+
+	var request orchestration.EngineeringMessage
+	for range 15 {
+		if _, err := supervisor.Tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		fixture.clock.advance(61 * time.Second)
+		messages, err := fixture.store.ScopeMessages(run.Orchestration.BatchID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, message := range orchestration.Live(messages) {
+			if message.Kind == orchestration.KindDecisionRequest &&
+				message.Purpose == orchestration.EpochAuthorizationPurpose {
+				request = message
+			}
+		}
+		if request.ID != "" {
+			break
+		}
+	}
+	if request.ID == "" {
+		t.Fatal("terminal assurance failure after handoff did not request governed recovery")
+	}
+	if request.Subject != nil || request.Source.RunID != producerRunID ||
+		!strings.HasPrefix(request.Body, "failed-run:"+producerRunID) {
+		t.Fatalf("request must name the failed run, not authorize its old handoff: %+v", request)
+	}
+	if authorizations, err := fixture.store.RemediationAuthorizationsFor(graph.GraphID, "c"); err != nil || len(authorizations) != 0 {
+		t.Fatalf("request silently granted an epoch: %+v (%v)", authorizations, err)
+	}
+	if c := fixture.graph(graph.GraphID).unit(t, "c"); c.State != orchestration.UnitState(orchestration.ItemFailed) {
+		t.Fatalf("the request changed the failed producer without approval: %+v", c)
+	}
+}
