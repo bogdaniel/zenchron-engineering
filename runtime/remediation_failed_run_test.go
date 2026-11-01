@@ -151,7 +151,6 @@ func TestAFailedRunReferenceNamesTheHeldCandidateOnlyWhenThereIsOne(t *testing.T
 	}
 }
 
-
 // The #693 production shape: the worker completed and its handoff was admitted,
 // but cumulative assurance exhausted the run's wall allowance afterwards.
 // A handoff does not override terminal failure or release downstream work.
