@@ -199,15 +199,18 @@ an absent "none" as the run's value.
 ceiling and a different resource from `wall_limit_seconds`: time spent inside
 `assurance.go` and `assurance.semantic` is charged to it and NOT to the
 execution budget, so a successful 43 minute full-suite verification does not
-spend a 30 minute execution allowance. It is finite (every new run freezes 3600
-seconds; there is no operator configuration member for it yet, and no spelling
-that disables it),
-consumed across retries, `AssuranceRerun`, controller restarts and crashed
-workers, and never reset by them. Each assurance attempt is bounded by what
-remains of it. When it is spent the run fails `run_assurance_budget_exhausted`
-and the candidate is retained as held material. The 3600 second allowance gives
-headroom over one 43 minute full-suite verification; it does NOT fit two full
-43 minute passes, and a complete rerun is not promised. Exhaustion is reported
+spend a 30 minute execution allowance. It is finite: new runs default to 10800 seconds (3 hours). An operator may
+explicitly set `budgets.assurance_wall_limit_seconds` to a positive bound of
+1–86400 seconds; a repository may only tighten that operator ceiling, never
+raise it. Absent configuration members remain absent in legacy configuration
+digests, while the effective limit is frozen in each newly created run's policy.
+A 3-hour default covers the two long Go passes plus browser verification
+observed in #693; other workloads may require the operator to size this
+allowance deliberately. The limit is cumulative across retries,
+`AssuranceRerun`, controller restarts and crashed workers, and is never reset
+by them. Each assurance attempt is bounded by what remains. When it is spent
+the run fails `run_assurance_budget_exhausted` and holds its candidate rather
+than falsely satisfying assurance or publication. Exhaustion is reported
 (`run_assurance_budget_exhausted`), never absorbed. Exhausted, failed or timed-out
 assurance never satisfies assurance, authority or publication. Total active
 work is still reported: status shows `active consumed` (execution + assurance +
