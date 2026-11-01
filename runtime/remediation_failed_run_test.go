@@ -150,3 +150,25 @@ func TestAFailedRunReferenceNamesTheHeldCandidateOnlyWhenThereIsOne(t *testing.T
 		t.Fatalf("reference with a candidate = %q", got)
 	}
 }
+
+// #693: the projection producer's remediation attempt reported "completed", had
+// its handoff admitted, and then ran out of assurance budget. The run is failed
+// WITH a handoff, and the question still has to be raised.
+func TestAFailedProducerNeedsAnEpochRequestWhetherOrNotAHandoffWasAdmitted(t *testing.T) {
+	cases := []struct {
+		name string
+		item OrchestrationItemView
+		want bool
+	}{
+		{"failed, no handoff", OrchestrationItemView{State: orchestration.ItemFailed}, true},
+		{"failed after its handoff was admitted", OrchestrationItemView{State: orchestration.ItemFailed, HandoffID: "handoff-1"}, true},
+		{"failed but still executing", OrchestrationItemView{State: orchestration.ItemFailed, Executing: true}, false},
+		{"completed", OrchestrationItemView{State: orchestration.ItemCompleted, HandoffID: "handoff-1"}, false},
+		{"stopped", OrchestrationItemView{State: orchestration.ItemStopped}, false},
+	}
+	for _, c := range cases {
+		if got := failedProducerNeedsEpochRequest(c.item); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}

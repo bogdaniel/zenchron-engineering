@@ -83,7 +83,7 @@ func admitEpochAuthorizationRequests(store *SQLiteOperationStore, stateDir strin
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	if item.State == orchestration.ItemFailed && !item.Executing && item.HandoffID == "" {
+	if failedProducerNeedsEpochRequest(item) {
 		return admitFailedRunEpochRequest(store, batch.ID, graphID, unitID, unitName, currentRunID, latestAttemptEpoch(epochs)+1, now)
 	}
 	if item.State != orchestration.ItemCompleted || item.HandoffID == "" {
