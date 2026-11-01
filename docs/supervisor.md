@@ -178,12 +178,15 @@ attempt_wall_limit_seconds  bounds ONE physical provider attempt; its deadline
                             absent derives to min(3h, wall_limit_seconds) for new runs
 ```
 
-Assurance work (#640) is a separate cumulative meter, frozen per run (3600
-seconds for new runs; not yet an operator configuration member) and never reset
-by retry or restart. It leaves headroom over one long verification but not two
-full ones: exhaustion is reported as `run_assurance_budget_exhausted` and a
-complete rerun is not promised. It is charged apart from `wall_limit_seconds`, so a long
-successful verification does not spend the execution budget.
+Assurance work (#640) is a separate cumulative meter, frozen per run. New
+runs default to 10800 seconds (3 hours), or the operator's explicit
+`budgets.assurance_wall_limit_seconds` (1–86400 seconds), subject to any
+repository tighten-only bound. The larger default accommodates repeated full
+Go verification plus browser acceptance observed in #693; it is not an
+unbounded or automatically renewable allowance. Retry and restart never
+reset it; exhaustion is `run_assurance_budget_exhausted`. Assurance is charged
+apart from `wall_limit_seconds`, so successful long verification does not
+spend the execution budget, but plan aggregate active-work limits still apply.
 
 `wall_limit_seconds` is cumulative across every attempt; the attempt limit is
 per attempt. Status names which of the three per-attempt bounds ended an
