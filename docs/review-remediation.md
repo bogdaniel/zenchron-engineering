@@ -906,14 +906,15 @@ separate code path to test: `ProjectWorkGraph` and `WorkGraphStatus` hold no
 state between reads, so every call in the test already is the fresh,
 independent computation a restart would also produce.
 
-## A producer that failed before any handoff (#693)
+## A producer that failed assurance, with or without a handoff (#693)
 
 An epoch needs a reason the operator can answer. A Finding about an admitted
-handoff was the only one, so a producer whose run FAILED before it reported a
-handoff - the first real case was an assurance budget spent across a failed
-pass, a remediation and a second pass - was permanent: the unit stayed failed,
-its dependents stayed blocked, and an objective graph with started work refuses
-a plan revision, so the plan could not route around it either.
+handoff of a completed producer was originally the only one, so a producer
+whose run FAILED during assurance had no governed continuation. This is true
+even if its worker wrote and admitted a completed handoff before assurance
+exhausted the run budget: terminal failure dominates that earlier handoff.
+The dependent remains blocked, and an objective graph with started work
+refuses a plan revision.
 
 The same `epoch_authorization` decision is now raised for that case, and only
 that case: the unit's current run is terminally failed, finished winding down,
