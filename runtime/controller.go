@@ -496,9 +496,12 @@ func NewEngineeringRuntime(d Dependencies) (*EngineeringRuntime, error) {
 // provider inactivity window and cumulative run active-work budget (#497).
 const DefaultAttemptWallLimit = 3 * time.Hour
 
-// DefaultAssuranceWallLimit is the total assurance allowance of one new run
-// (#640), sized for a normal full-suite verification with room for one rerun.
-const DefaultAssuranceWallLimit = time.Hour
+// DefaultAssuranceWallLimit bounds cumulative verification of a NEW run.
+// The old one-hour default was smaller than two legitimate Go + browser passes
+// observed in #693. Three hours fits two full verification/remediation cycles
+// and leaves room for browser acceptance. It is still finite, frozen at run
+// creation, and subordinate to the plan's aggregate active-work envelope.
+const DefaultAssuranceWallLimit = 3 * time.Hour
 
 func (b RunBudgets) defaults() RunBudgets {
 	if b.WallLimit <= 0 {
